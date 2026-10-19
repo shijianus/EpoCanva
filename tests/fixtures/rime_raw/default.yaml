@@ -1,0 +1,26 @@
+# EpoCanva P1.3 test fixture -- default settings for the raw input-link probe.
+#
+# Deliberately minimal. It defines NO punctuator, NO key_binder, NO recognizer,
+# NO translator and NO dictionary. Nothing here is imported from an upstream
+# production preset, and this file is not a candidate for distribution.
+#
+# Consumed by: tools/rime_input_replay (deployed through the public C API slots
+# deploy_config_file("default.yaml", "config_version")).
+
+config_version: "0.0.0-p1.3-fixture"
+
+# The only schema a replay session may resolve to by default. Keep this list at
+# exactly one entry: Switcher::CreateSchema() picks from it when a session is
+# created on the synthetic ".default" schema
+# (src/rime/engine.cc:338-341, src/rime/switcher.cc:174-196), and a second entry
+# would make the initial schema of a new session depend on user.yaml history
+# (src/rime/switcher.cc:179-181) instead of being deterministic.
+schema_list:
+  - schema: epocanva_test_raw
+
+# Inherited by every schema through DefaultConfigPlugin's optional include of
+# default:/menu (src/rime/config/default_config_plugin.cc:22-28). A schema's own
+# menu keys override this section, so epocanva_test_raw.schema.yaml restates
+# page_size explicitly rather than relying on the merge.
+menu:
+  page_size: 5

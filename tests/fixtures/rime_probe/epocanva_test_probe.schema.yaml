@@ -1,0 +1,64 @@
+# EpoCanva P1.4 test fixture -- compiled-in component probe schema.
+#
+# schema_id: epocanva_test_probe
+#
+# WHAT THIS IS: tests/fixtures/rime_raw/epocanva_test_raw.schema.yaml with ONE
+# component added -- EpoCanva's own `epocanva_probe_processor`, which only exists
+# because EpoCanva sources were compiled into rime.dll. Everything else is carried
+# over unchanged and for the reasons given in tests/fixtures/rime_raw/README.md.
+#
+# WHAT THIS IS NOT: not an English predictor, completer, corrector or segmenter,
+# not a word list, not a minimal English MVP. The candidate text is byte-identical
+# to the keys the test injects. A pass here says one thing only: a project-owned
+# Processor inside the engine module received key events, released the letters
+# untouched, consumed the fixture's one designated test key, and was destroyed
+# with its engine.
+#
+# Component names below were read out of the pinned checkout (librime 1.17.0,
+# commit 33e78140250125871856cdc5b42ddc6a5fcd3cd4):
+#   speller, fluid_editor        -> src/rime/gear/gears_module.cc:46-57
+#   abc_segmentor, ...           -> src/rime/gear/gears_module.cc:60-66
+#   echo_translator              -> src/rime/gear/gears_module.cc:68-69
+#   epocanva_probe_processor     -> engine/rime_components/probe/probe_module.cc,
+#                                   registered under
+#                                   engine/rime_components/probe/probe_diagnostics.h's
+#                                   EPOCANVA_PROBE_PROCESSOR_NAME
+
+schema:
+  schema_id: epocanva_test_probe
+  # ASCII-only name: schema_id crosses the C ABI as UTF-8 bytes and the probe
+  # program asserts on it byte-for-byte.
+  name: EpoCanva compiled-in component probe
+  version: "0.0.0-p1.4-fixture"
+
+menu:
+  # Declared explicitly rather than inherited from default:/menu.
+  page_size: 5
+
+engine:
+  processors:
+    # FIRST, on purpose. ConcreteEngine::ProcessKey() walks processors_ in order
+    # and stops at the first kAccepted (src/rime/engine.cc:99-104), and
+    # InitializeComponents() puts this list after the inert Switcher
+    # (src/rime/engine.cc:337, 350). Being first is what makes "the letters a, b
+    # and c passed through EpoCanva's own component" an observable fact instead of
+    # an inference: the probe program reads keys_passed_through before and after
+    # each letter. It returns kNoop for every key except the bare test key, so the
+    # rest of the chain behaves exactly as the rime_raw fixture does.
+    - epocanva_probe_processor
+    - speller
+    - fluid_editor
+  segmentors:
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - echo_translator
+
+speller:
+  alphabet: "abcdefghijklmnopqrstuvwxyz"
+  delimiter: ""
+
+editor:
+  char_handler: noop
+  bindings:
+    space: noop

@@ -1,0 +1,541 @@
+{
+  "schema_version": 1,
+  "manifest_kind": "third-party source lock",
+  "generated_at_utc": "2026-10-17T15:40:00Z",
+  "generated_by_phase": "P1.1 upstream lock + dependency review; extended by P1.2 native build baseline; registration of project-owned build adaptation inputs added by P1.3; P1.4 adds the compiled-in component adaptation input and re-hashes the build entry point for its two-mode form; P1.4 re-verification pass (same day) rewrote P1_4_component_probe.artefact_identity to record that the component DLL hash is a per-link identity, not a reproducibility checksum; P2.1 registers the first real English capability, re-hashes the build entry point and the component hook for their three-mode / component-list forms, and records the two build-script defect fixes; P2.2 adds the English case-mapping source to the compiled-in component set, re-hashes the build entry point for the fifth expected component object, and records the P2.2 artefact identity; P2.3 adds the English token layer to the compiled-in core, re-hashes the build entry point for its sixth expected component object, and records the P2.3 artefact identity; P2.4 changes no build input at all -- it adds test data, an offline converter, a separate data manifest and two conditionally-registered CTest cases, so every package digest, the build entry point hash and the component object list in this file are still exactly the P2.3 values",
+  "network_policy_note": "Development-time read-only fetch of official sources (git tags/recorded submodule commits, one official Boost archive plus its checksum metadata). Nothing local was uploaded. No installer was run, no remote script executed, no software installed.",
+  "packages": [
+    {
+      "name": "librime",
+      "role": "engine base (planned rime-adapter dependency)",
+      "local_path": "third_party/librime",
+      "tracked_in_our_repository": false,
+      "ignore_rule": "/third_party/librime/",
+      "official_repository": "https://github.com/rime/librime",
+      "official_repo_clone_url": "https://github.com/rime/librime.git",
+      "release": {
+        "tag": "1.17.0",
+        "release_name": "librime 1.17.0",
+        "github_release_prerelease": false,
+        "github_release_draft": false,
+        "published_at_utc": "2026-06-06",
+        "release_evidence": [
+          "GET https://api.github.com/repos/rime/librime/releases -> tag 1.17.0, prerelease=false, draft=false",
+          "GET https://api.github.com/repos/rime/librime/tags -> 1.17.0 maps to commit 33e78140250125871856cdc5b42ddc6a5fcd3cd4",
+          "git ls-remote https://github.com/rime/librime.git refs/tags/1.17.0 refs/tags/1.17.0^{} -> a52a3400... (tag object) / 33e78140... (peeled commit)",
+          "CHANGELOG.md:1-2 in the checkout reads '## 1.17.0 (2026-06-05)'",
+          "tag annotation date: 2026-06-05T11:32:44Z (tagger offset +0800)"
+        ],
+        "rejected_candidates_and_reason": {
+          "latest": "GitHub release 'latest' is the floating Nightly Build, prerelease=true, target_commitish=master -> excluded by policy (nightly / prerelease / floating reference)",
+          "master": "floating branch head 7bc3fb0005a03aff1c086611e4d52bb7f6444fdd at fetch time -> excluded (not a release identity)",
+          "1.16.1": "older stable, not needed",
+          "nightly_build": "excluded, same object as 'latest'"
+        }
+      },
+      "pinned_commit": "33e78140250125871856cdc5b42ddc6a5fcd3cd4",
+      "pinned_commit_short": "33e7814",
+      "annotated_tag_object": "a52a3400f8b7679e839bc5fb8e6309a0fc4424da",
+      "tag_tagger_identity": {
+        "name": "居戎氏",
+        "email": "chen.sst@gmail.com",
+        "note": "Identity is only what the tag object claims. It was NOT verified against any key, and the tag carries no signature."
+      },
+      "verification": {
+        "commit_sha_matches_official_api": true,
+        "commit_sha_matches_git_protocol_ls_remote": true,
+        "tag_is_annotated": true,
+        "tag_signature": "none - `git tag -v 1.17.0` printed 'error: no signature found'",
+        "author_identity_verified": false,
+        "transparency_log_or_certificate_checked": false,
+        "archive_sha256": "not applicable - fetched by git, not by tarball",
+        "status": "IDENTITY FIXED, INTEGRITY UNVERIFIED. The pinned SHA is reproducible from the official remote, but no cryptographic author or signature verification was performed."
+      },
+      "acquisition": {
+        "method": "git clone --branch 1.17.0 --depth 1 https://github.com/rime/librime.git third_party/librime",
+        "checkout_state": "detached HEAD at the pinned commit (verified: `git rev-parse --abbrev-ref HEAD` -> HEAD)",
+        "shallow": true,
+        "recursively_fetched_submodules": false,
+        "upstream_source_modified": false,
+        "worktree_clean_at_record_time": true,
+        "worktree_clean_evidence": "`git status --porcelain | wc -l` -> 0",
+        "checkout_size": "about 11 MB including .git",
+        "prebuilt_binaries_in_tree": 0,
+        "fetched_at_utc": "2026-10-17T12:58:59Z"
+      },
+      "declared_submodules": [
+        {
+          "name": "glog",
+          "path": "deps/glog",
+          "declared_url": "https://github.com/google/glog.git",
+          "recorded_commit": "7b134a5c82c0c0b5698bb6bf7a835b230c5638e4",
+          "fetched_locally": false,
+          "purpose": "logging backend, used only when ENABLE_LOGGING=ON",
+          "upstream_version_at_commit": "0.7.1 (VERSION marker in its CMakeLists.txt)",
+          "license_evidence": {
+            "file_at_commit": "COPYING",
+            "url": "https://raw.githubusercontent.com/google/glog/7b134a5c82c0c0b5698bb6bf7a835b230c5638e4/COPYING",
+            "sha256": "136d48dea7a681413691f3db3098f6cf5ffaa3119d96d97bb83b8cff3ce38c4a",
+            "classification": "BSD-3-Clause (contains the non-endorsement clause)",
+            "verified_by": "fetched at the recorded SHA, clause text inspected"
+          },
+          "nested_submodules": "none at that SHA (raw .gitmodules -> HTTP 404)",
+          "nested_note": "glog can use gflags via find_package; librime's Windows script builds it with WITH_GFLAGS=OFF (build.bat:119)",
+          "status_in_p1_2": "not fetched or built: ENABLE_LOGGING=OFF removes find_package(Glog REQUIRED) (CMakeLists.txt:76-83)"
+        },
+        {
+          "name": "googletest",
+          "path": "deps/googletest",
+          "declared_url": "https://github.com/google/googletest.git",
+          "recorded_commit": "f8d7d77c06936315286eb55f8de22cd23c188571",
+          "fetched_locally": false,
+          "purpose": "unit tests only (needed when BUILD_TEST=ON)",
+          "upstream_version_at_commit": "1.14.0",
+          "license_evidence": {
+            "file_at_commit": "LICENSE",
+            "url": "https://raw.githubusercontent.com/google/googletest/f8d7d77c06936315286eb55f8de22cd23c188571/LICENSE",
+            "sha256": "9702de7e4117a8e2b20dafab11ffda58c198aede066406496bef670d40a22138",
+            "classification": "BSD-3-Clause",
+            "verified_by": "fetched at the recorded SHA"
+          },
+          "nested_submodules": "none at that SHA",
+          "status_in_p1_2": "not fetched or built: BUILD_TEST=OFF removes find_package(GTest REQUIRED) (CMakeLists.txt:118-119)"
+        },
+        {
+          "name": "leveldb",
+          "path": "deps/leveldb",
+          "declared_url": "https://github.com/google/leveldb.git",
+          "recorded_commit": "99b3c03b3284f5886f9ef9a4ef703d57373e61be",
+          "fetched_locally": true,
+          "fetched_at_utc": "2026-10-17T14:31:00Z",
+          "fetch_command": "git -C third_party/librime submodule update --init --depth 1 deps/yaml-cpp deps/leveldb deps/marisa-trie deps/opencc (all four in one invocation; no --remote)",
+          "verified_head": "git -C deps/leveldb rev-parse HEAD == 99b3c03b3284f5886f9ef9a4ef703d57373e61be; git -C deps/leveldb status --porcelain empty",
+          "built_in_phase": "P1.2 - static Release /MT with LEVELDB_BUILD_TESTS=OFF and LEVELDB_BUILD_BENCHMARKS=OFF, installed as leveldb.lib; its two nested submodules were therefore never needed and stay unfetched",
+          "purpose": "user dictionary store (rime dict module)",
+          "upstream_version_at_commit": "1.23.0",
+          "license_evidence": {
+            "file_at_commit": "LICENSE",
+            "url": "https://raw.githubusercontent.com/google/leveldb/99b3c03b3284f5886f9ef9a4ef703d57373e61be/LICENSE",
+            "sha256": "ccc19f1da0798ed666609b65a5b44dd8b3abe6fc08b9c0592eb76e82e174db19",
+            "classification": "BSD-3-Clause",
+            "verified_by": "fetched at the recorded SHA"
+          },
+          "nested_submodules": [
+            {
+              "path": "third_party/googletest",
+              "url": "https://github.com/google/googletest.git",
+              "needed": "no - LEVELDB_BUILD_TESTS=OFF (build.bat:129)"
+            },
+            {
+              "path": "third_party/benchmark",
+              "url": "https://github.com/google/benchmark",
+              "needed": "no - LEVELDB_BUILD_BENCHMARKS=OFF (build.bat:128)",
+              "note": "declared URL has no .git suffix in leveldb's own .gitmodules; irrelevant while not fetched"
+            }
+          ]
+        },
+        {
+          "name": "marisa-trie",
+          "path": "deps/marisa-trie",
+          "declared_url": "https://github.com/s-yata/marisa-trie.git",
+          "recorded_commit": "3e87d53b78e15f2f43783d5e376561a8c9722051",
+          "fetched_locally": true,
+          "purpose": "trie dictionary format (rime dict module)",
+          "upstream_version_at_commit": "0.3.1 (VERSION file at that SHA)",
+          "commit_exists_at_declared_url": true,
+          "commit_exists_evidence": "GET https://api.github.com/repos/s-yata/marisa-trie/commits/3e87d53b... -> HTTP 200, author Susumu Yata, date 2025-07-20T11:08:58Z",
+          "license_evidence": {
+            "file_at_commit": "COPYING.md",
+            "url": "https://raw.githubusercontent.com/s-yata/marisa-trie/3e87d53b78e15f2f43783d5e376561a8c9722051/COPYING.md",
+            "sha256": "edf58dab34c3dc239ba4ba2d5d3d844d8c5b442aa4dd1149fac81b2d8c6cb8d1",
+            "classification": "DUAL: BSD-2-Clause OR LGPL-2.1-or-later",
+            "decision_recorded": "EpoCanva takes the BSD-2-Clause branch. The file name is COPYING.md, which is why a LICENSE/COPYING probe returns 404.",
+            "verified_by": "fetched at the recorded SHA; dual grant text read directly"
+          },
+          "nested_submodules": "none at that SHA",
+          "risk": "If LGPL were chosen instead of BSD-2, dynamic linking and license-copy obligations would apply. Recorded here so the choice is explicit, not accidental.",
+          "fetch_command": "git -C third_party/librime submodule update --init --depth 1 deps/yaml-cpp deps/leveldb deps/marisa-trie deps/opencc (all four in one invocation; no --remote)",
+          "fetched_at_utc": "2026-10-17T14:31:00Z",
+          "verified_head": "git -C deps/marisa-trie rev-parse HEAD == 3e87d53b78e15f2f43783d5e376561a8c9722051; git -C deps/marisa-trie status --porcelain empty",
+          "built_in_phase": "P1.2 - static Release /MT with ENABLE_TOOLS=OFF and BUILD_TESTING=OFF, installed as marisa.lib"
+        },
+        {
+          "name": "opencc",
+          "path": "deps/opencc",
+          "declared_url": "https://github.com/BYVoid/OpenCC.git",
+          "recorded_commit": "556ed22496d650bd0b13b6c163be9814637970ae",
+          "fetched_locally": true,
+          "purpose": "simplified/traditional conversion (rime gears module)",
+          "upstream_version_at_commit": "1.1.9 (OPENCC_VERSION_MAJOR/MINOR/REVISION in its CMakeLists.txt lines 43-45)",
+          "license_evidence": {
+            "file_at_commit": "LICENSE",
+            "url": "https://raw.githubusercontent.com/BYVoid/OpenCC/556ed22496d650bd0b13b6c163be9814637970ae/LICENSE",
+            "sha256": "b534e465949558eec2597b04f5092b5e161236a68dfbfd04d547592ac3964308",
+            "classification": "Apache-2.0",
+            "notice_file_at_commit": "absent - probe of /NOTICE at that SHA returned HTTP 404, so there is no NOTICE content to carry",
+            "obligations": "Apache-2.0 still requires shipping the license text, retaining notices in the distributed source/binary form, and stating modifications",
+            "verified_by": "fetched at the recorded SHA"
+          },
+          "vendored_nested_dependencies_present_in_its_own_tree": [
+            {
+              "path": "deps/marisa-0.2.6",
+              "license_file": "deps/marisa-0.2.6/COPYING.md (present)",
+              "built_when": "USE_SYSTEM_MARISA=OFF (default) -> add_subdirectory(deps/marisa-0.2.6) at OpenCC CMakeLists.txt:211",
+              "conflict_risk": "a SECOND marisa version (0.2.6) next to librime's marisa 0.3.1"
+            },
+            {
+              "path": "deps/darts-clone-0.32",
+              "license_file": "absent in OpenCC's copy (single header darts.h)",
+              "same_project_license_verified_elsewhere": "librime ships include/COPYING.darts-clone -> BSD-3-Clause, Copyright (c) 2008-2013 Susumu Yata",
+              "built_when": "ENABLE_DARTS=ON (default)"
+            },
+            {
+              "path": "deps/rapidjson-1.1.0",
+              "license_file": "absent in OpenCC's copy",
+              "status": "LICENSE TEXT NOT VERIFIED IN THIS PHASE"
+            },
+            {
+              "path": "deps/tclap-1.2.5",
+              "license_file": "absent in OpenCC's copy",
+              "status": "LICENSE TEXT NOT VERIFIED IN THIS PHASE",
+              "used_by": "OpenCC command line tools, not the library itself (unverified - to confirm in P1.2)"
+            },
+            {
+              "path": "deps/googletest-1.15.0",
+              "license_file": "deps/googletest-1.15.0/LICENSE (present)",
+              "built_when": "ENABLE_GTEST=OFF default -> not built",
+              "conflict_risk": "yet another googletest version (1.15.0) vs librime's 1.14.0"
+            },
+            {
+              "path": "deps/pybind11-2.13.1",
+              "license_file": "deps/pybind11-2.13.1/LICENSE (present)",
+              "built_when": "BUILD_PYTHON=OFF default -> not built"
+            },
+            {
+              "path": "deps/google-benchmark",
+              "license_file": "deps/google-benchmark/LICENSE (present)",
+              "built_when": "ENABLE_BENCHMARK=OFF default -> not built"
+            }
+          ],
+          "nested_note": "OpenCC's nested deps are vendored as plain files inside its own tree, not submodules, so librime's pin does not make them reproducible by SHA. They are reproducible only through OpenCC's pinned commit.",
+          "fetch_command": "git -C third_party/librime submodule update --init --depth 1 deps/yaml-cpp deps/leveldb deps/marisa-trie deps/opencc (all four in one invocation; no --remote)",
+          "fetched_at_utc": "2026-10-17T14:31:00Z",
+          "verified_head": "git -C deps/opencc rev-parse HEAD == 556ed22496d650bd0b13b6c163be9814637970ae; git -C deps/opencc status --porcelain empty",
+          "built_in_phase": "P1.2 - static Release /MT, USE_SYSTEM_MARISA=ON so its vendored marisa-0.2.6 was NOT built, installed as opencc.lib plus the three CLI tools and the generated share/opencc dictionaries"
+        },
+        {
+          "name": "yaml-cpp",
+          "path": "deps/yaml-cpp",
+          "declared_url": "https://github.com/jbeder/yaml-cpp.git",
+          "recorded_commit": "2f86d13775d119edbb69af52e5f566fd65c6953b",
+          "fetched_locally": true,
+          "fetched_at_utc": "2026-10-17T14:31:00Z",
+          "fetch_command": "git -C third_party/librime submodule update --init --depth 1 deps/yaml-cpp deps/leveldb deps/marisa-trie deps/opencc (all four in one invocation; no --remote)",
+          "verified_head": "git -C deps/yaml-cpp rev-parse HEAD == 2f86d13775d119edbb69af52e5f566fd65c6953b; git -C deps/yaml-cpp status --porcelain empty",
+          "built_in_phase": "P1.2 - static Release /MT, installed to build/librime-baseline/prefix as yaml-cpp.lib",
+          "purpose": "config/schema parsing (always required)",
+          "upstream_version_at_commit": "0.8.0",
+          "license_evidence": {
+            "file_at_commit": "LICENSE",
+            "url": "https://raw.githubusercontent.com/jbeder/yaml-cpp/2f86d13775d119edbb69af52e5f566fd65c6953b/LICENSE",
+            "sha256": "aa6fcc27be034e41e21dd832f9175bfe694a48491d9e14ff0fa278e19ad14f1b",
+            "classification": "MIT",
+            "verified_by": "fetched at the recorded SHA"
+          },
+          "nested_submodules": "none at that SHA"
+        }
+      ],
+      "declared_submodule_source": ".gitmodules at the pinned commit (6 entries, all under deps/); recorded commits read from `git ls-tree HEAD deps/` mode 160000; uninitialized state read from `git submodule status` (all entries prefixed with '-')",
+      "other_required_inputs": [
+        {
+          "name": "boost",
+          "required": true,
+          "is_a_submodule": false,
+          "how_upstream_expects_it": "env.bat.template:6 sets BOOST_ROOT=%RIME_ROOT%\\deps\\boost-1.89.0 (comment on line 5 says REQUIRED); README-windows.md:9 says Boost>=1.83",
+          "version_constraint_conflict": "CMakeLists.txt:66 asks find_package(Boost 1.74.0 REQUIRED COMPONENTS regex) on Linux, CMakeLists.txt:68 asks find_package(Boost 1.77.0) with NO components elsewhere, README-windows.md:9 says >=1.83, env.bat.template defaults 1.89.0. Four different numbers.",
+          "usage_evidence": "boost/regex.hpp at src/rime/algo/calculus.h:12, src/rime/algo/encoder.h:11, src/rime/gear/recognizer.h:10, src/rime/gear/speller.h:10, src/rime/gear/translator_commons.h:10; boost/interprocess at src/rime/dict/mapped_file.cc:11-12",
+          "acquisition_script": "install-boost.bat downloads from https://archives.boost.io/release/1.89.0/source/boost_1_89_0.7z using aria2c + 7z, then runs bootstrap.bat and b2 headers",
+          "acquisition_script_risk": "NOT EXECUTED in this phase (reviewed as text only). It needs aria2c and 7z, does network download, and only builds headers - it does not build Boost.Regex.",
+          "fetched_in_this_phase": true,
+          "license_status": "VERIFIED in P1.2: LICENSE_1_0.txt, Boost Software License 1.0",
+          "acquisition": {
+            "method": "curl over HTTPS from the official archive, plus its official checksum metadata",
+            "url": "https://archives.boost.io/release/1.89.0/source/boost_1_89_0.7z",
+            "metadata_url": "https://archives.boost.io/release/1.89.0/source/boost_1_89_0.7z.json",
+            "bytes_downloaded": 123506971,
+            "sha256_expected_official": "d8b0c1d593d68fe359616aa2fae4b3e258ca1f90ed57eb46c5494c29cdd1d49d",
+            "sha256_computed": "d8b0c1d593d68fe359616aa2fae4b3e258ca1f90ed57eb46c5494c29cdd1d49d",
+            "sha256_computed_by": [
+              "sha256sum (GNU coreutils, git-bash)",
+              "certutil -hashfile ... SHA256 (Windows)"
+            ],
+            "match": "byte-for-byte equal to the official value",
+            "metadata_commit": "ef7fea34711a189472893b88205b1dd3c275677b",
+            "metadata_created_utc": "2025-08-06T18:44:03Z",
+            "extracted_to": "build/librime-baseline/dependencies/boost/boost_1_89_0 (git-ignored; never inside third_party/)",
+            "upstream_scripts_executed": "none - install-boost.bat / bootstrap.bat / b2 were NOT run"
+          },
+          "compiled_artifacts_needed": false,
+          "compiled_artifacts_evidence": {
+            "header_only_libs": "unordered, signals2, uuid, interprocess, algorithm, crc, range all have libs/<name>/src/*.cpp count = 0 at 1.89.0",
+            "regex": "libs/regex/src contains only posix_api.cpp and wide_posix_api.cpp, i.e. the C POSIX regcomp/regexec layer; libs/regex/CMakeLists.txt:11 declares add_library(boost_regex INTERFACE) and libs/regex/build/Jamfile.v2:152-162 exports BOOST_REGEX_NO_LIB=1 to consumers",
+            "auto_link": "the only #pragma comment(lib,...) among the used headers is in boost/regex/v5/cregex.hpp:29-30, and boost/regex.hpp does not include it",
+            "upstream_parity": "install-boost.bat:20 runs only `b2 headers`; .github/workflows/windows-build.yml:68-69 uses that same step on the pipeline that ships rime.dll",
+            "measured": "find_package(Boost 1.77.0) with the same variables librime sets returned Boost_FOUND=TRUE and an EMPTY Boost_LIBRARIES, and a program using all eight libraries compiled and linked under MSVC x64 /MT"
+          },
+          "license_evidence": {
+            "file_at_commit": "LICENSE_1_0.txt",
+            "sha256": "beb8e42e9d6b4284e03304d05a81a0755200a965fc8d0a5e0aea1e84cf805d6e",
+            "classification": "Boost Software License 1.0 (permissive, BSD-like; requires the notice text to be retained in distributions)",
+            "verified_by": "read from the extracted archive whose SHA-256 had already been compared with the official metadata"
+          },
+          "version_resolved_conflict": {
+            "chosen": "1.89.0",
+            "reason": "equals env.bat.template:6 and windows-build.yml:26, satisfies README-windows.md:9 (>=1.83) and both find_package minimums (1.74.0 / 1.77.0)"
+          }
+        }
+      ],
+      "in_tree_vendored_code": [
+        {
+          "path": "include/darts.h + include/COPYING.darts-clone",
+          "classification": "BSD-3-Clause, Copyright (c) 2008-2013 Susumu Yata",
+          "verified_by": "license text read from the checkout (COPYING.darts-clone contains a literal '<ORGANIZATION>' placeholder in the endorsement clause; cosmetic upstream defect, recorded for the compliance notice we will have to write)"
+        },
+        {
+          "path": "include/utf8.h + include/utf8/",
+          "classification": "MIT, Copyright 2006 Nemanja Trifunovic (utfcpp)",
+          "verified_by": "permission text read from include/utf8.h lines 1-3"
+        },
+        {
+          "path": "include/X11/keysym.h, include/X11/keysymdef.h",
+          "classification": "X11/MIT-style permission notice, Copyright 1987, 1998 The Open Group",
+          "verified_by": "header text read from include/X11/keysym.h lines 1-10",
+          "note": "header only; CMakeLists.txt:152 locates X11/keysym.h and this vendored copy satisfies it"
+        }
+      ],
+      "in_tree_data": {
+        "path": "data/ (about 5.2 MB)",
+        "contents_observed": "data/minimal/{cangjie5.dict.yaml, cangjie5.schema.yaml, default.yaml, essay.txt, luna_pinyin.dict.yaml, luna_pinyin.schema.yaml, symbols.yaml} and data/test/*.yaml",
+        "license_status": "NOT VERIFIED IN THIS PHASE - dictionary and corpus licensing is separate from the code license and must be settled before shipping any word list",
+        "policy": "This phase downloaded no production dictionary, language model or user data. The bundled minimal data was only listed, not used."
+      },
+      "plugins": {
+        "external_plugins_fetched": false,
+        "evidence": "plugins/ contains only CMakeLists.txt, plugin.cc, plugins_module.cc (mode 100644 blobs, not submodules). plugins/CMakeLists.txt:24-25 takes the plugin list from the environment variable RIME_PLUGINS; when unset, no plugin is built.",
+        "decision": "legacy, lua, predict, octagram, proto are not fetched, not built, not loaded in P1.1"
+      }
+    }
+  ],
+  "restore_instructions": "See third_party/README.md section '按 lock 恢复同一份源码（具体步骤）'. The commands are pinned by tag AND commit, and must be verified with git rev-parse before use. IMPORTANT: restoring the sources listed in this lock is necessary but NOT sufficient to reproduce the EpoCanva baseline build - it additionally requires the project-owned inputs registered under 'epocanva_build_adaptation_inputs' below. Do not describe this lock alone as a complete build recipe.",
+  "epocanva_build_adaptation_inputs": [
+    {
+      "path": "tools/cmake/opencc_external_marisa_includes.cmake",
+      "sha256": "8e18986658fc4e230b106b6d403ae356f87c5c3e2b31955c672fdcd39bb19a57",
+      "size_bytes": 1647,
+      "line_count": 36,
+      "tracked_in_our_repository": true,
+      "kind": "build-side adaptation input, not upstream code, not a patch",
+      "consumed_by": "tools/build_librime_baseline.ps1 -DUSE_SYSTEM_MARISA:BOOL=ON configure step, injected through CMake's documented CMAKE_PROJECT_opencc_INCLUDE hook (script lines 523, 544-545)",
+      "why_required": "OpenCC 1.1.9 at 556ed224 supports USE_SYSTEM_MARISA=ON at the option level but performs two steps only for its BUNDLED marisa: adding the include directory (deps/opencc/src/CMakeLists.txt:6-8, OFF branch only) and providing a link target for the bare name `marisa` (deps/opencc/src/CMakeLists.txt:118). With an external marisa and no adaptation, OpenCC fails to compile marisa.h.",
+      "why_upstream_shas_are_not_sufficient": "Every SHA in this lock identifies SOURCE content. None of them identifies this file, and none of them cause these two additions to happen. A machine that restored exactly the pinned sources and then configured OpenCC the way the lock describes would NOT reproduce the P1.2 baseline; it would fail with 'marisa.h: No such file or directory'. Reproducing the build therefore requires this file plus -DCMAKE_CXX_STANDARD:STRING=17 (marisa 0.3.1's public headers use std::string_view and nested namespace definitions, which OpenCC 1.1.9 requests no standard for on MSVC).",
+      "upstream_alternative_not_taken": "A minimal upstream patch (invert the src/CMakeLists.txt:6-8 condition, link ${LIBMARISA} at :118, set CMAKE_CXX_STANDARD 17 for MSVC) would remove the need for this file. It is described in docs/build/librime-windows-baseline.md section 10.1 and was deliberately NOT applied: third_party/patches/ still does not exist and no upstream byte was changed.",
+      "verification": {
+        "scoped_to_opencc_only": "CMAKE_PROJECT_<projectName>_INCLUDE fires only for the project named at 'project(opencc CXX)' (deps/opencc/CMakeLists.txt:21-22); the option is passed in exactly one configure step in this repository.",
+        "no_machine_absolute_paths": "The file reads only EPOCANVA_MARISA_ROOT, which the script derives from $RepoRoot (the parent of its own directory) joined to build/librime-baseline/prefix; nothing in it is machine-specific.",
+        "hard_fails_when_inputs_absent": "FATAL_ERROR unless <root>/include/marisa.h and <root>/lib/marisa.lib both exist.",
+        "upstream_left_byte_clean": "deps/opencc 'git status --porcelain' = 0 lines, re-verified in P1.3."
+      },
+      "registered_in_phase": "P1.3 (the file itself was added in P1.2 but was not registered anywhere as a reproduction input)"
+    },
+    {
+      "path": "tools/build_librime_baseline.ps1",
+      "sha256": "4718a2ecd18b8ca19952001b1a7f513d4f3350515fec17596bc31484e11ce761",
+      "size_bytes": 63210,
+      "line_count": 1219,
+      "tracked_in_our_repository": true,
+      "kind": "build entry point",
+      "role": "The only entry that turns the locked sources into the EpoCanva librime artefacts. Performs no network I/O and installs nothing. Its option set, dependency order and assertions are part of the reproducible recipe; recording the source SHAs without this script would not reproduce the same binaries. Modes: -Mode baseline (default, P1.2 behaviour), -Mode component-probe (P1.4), -Mode english-completion (P2.1). Both component modes reuse -Mode baseline's prefix read-only, refuse to rebuild the four dependencies, and assert that baseline's own rime CMakeCache contains no EPOCANVA_* entry. Each mode's ATTACHED assertion is label-specific, so one mode's configure log cannot certify another mode's build.",
+      "registered_in_phase": "P1.3; re-registered in P1.4 for the two-mode form; in P2.1 for the third mode and the two defect fixes below; in P2.2 and P2.3 because the english-completion mode's expected component-object list grew by english_case.obj and then by english_token.obj; re-registered again in P2.5 because that list grew to eight names (english_space_processor.obj, english_space_policy.obj) and a third DLL needle was added",
+      "previous_sha256_superseded": "37ec3129949769162480c639d865728dcd6069d8df476e11f0b0dde9e49e1270 (P2.3/P2.4, 1212 lines, six English component objects); before that d6446ee8704a42608528f9bd30f59e0ff61d0b070bbe4455b0a4970fd567f71a (P2.2, 1206 lines, five English objects), 279859fddc053623d218727836375c928a132257bf41d934f749830b036d132e (P2.1, 1203 lines, three modes with four English objects), c3d5297a5f37ff706d0968e3b478e0b118cfb962d28569bef1b87942283fd273 (P1.4, 1051 lines, two modes) and 339c857671fae1f4f4d3eff711d865549f1ca89110c9e0ef784a93f51c3e8566 (P1.3, 828 lines, baseline only)",
+      "p2_3_object_list_reason": "The english-completion mode names every component translation unit it expects to find an object for. When P2.3 added engine/languages/en/english_token.cc the list went from five names to six; leaving it at five would have meant the new layer was never asserted to be in the engine, which is the same class of defect P2.2 recorded in its section 8.2.",
+      "p2_5_object_list_reason": "P2.5 added two more translation units -- engine/languages/en/english_space_policy.cc (the rules) and engine/rime_components/english/english_space_processor.cc (the component that acts on them) -- so the list went from six names to eight and the expected object total from 119 to 121. A third DLL needle, 'epocanva_english_space', was added because that literal is the Processor's registration name: it is live code (english_module.cc passes it to Registry::Register), so its absence in the image means the engine has no space policy at all, and the schema listing it would silently fall back to 'no such processor' (src/rime/engine.cc:310-315 logs and skips).",
+      "p2_1_defect_fixes": {
+        "incremental_mt_false_failure": "The old rule 'if no /MT appears in the build log, throw' conflated two different causes: the static CRT not reaching cl (a real failure) and an up-to-date incremental build where MSBuild recompiled nothing and therefore printed no cl command line at all (not a failure - this is exactly the exit 1 that docs/reports/P1.4-component-probe.md section 8 had to record). The two are now separated by a log-independent observation: whether any .obj in the rime tree was written during this run (LastWriteTime >= run start). Objects rewritten but no /MT still throws; nothing rewritten resolves the CRT question from the per-artefact MT_StaticRelease directives that were already read from disk. /MD != 0 still throws unconditionally and every per-artefact ABI assertion is unchanged. Verified: -Mode english-completion without -Fresh and without -Verbose_Build now exits 0, printing 'objects written by this run: 0 of 117'. No forced full rebuild and no fabricated log.",
+        "skip_parameter_contract": "-Skip 'a,b,c' passed through 'powershell.exe -File' binds as ONE array element, because -File does not split arguments; the old code then matched no name and silently skipped nothing, rebuilding the whole chain (the P1.4 report recorded this accidental behaviour). The value is now re-split on commas, trimmed and lower-cased, and unknown names are refused with '-Skip accepts marisa, yaml-cpp, leveldb, opencc, rime; got: <x>' instead of being ignored. Verified: -Mode baseline -Skip 'marisa,yaml-cpp,leveldb,opencc,rime' exits 0 and prints all five 'skipping' lines."
+      },
+      "consumed_by": ""
+    },
+    {
+      "path": "tools/cmake/epocanva_rime_compiled_in_components.cmake",
+      "sha256": "80bad9e4de503777e9e4e08b9cd0f7720d549cae838082043ea3f19cd744e50c",
+      "size_bytes": 8692,
+      "line_count": 178,
+      "tracked_in_our_repository": true,
+      "kind": "build-side adaptation input, not upstream code, not a patch",
+      "consumed_by": "tools/build_librime_baseline.ps1 in -Mode component-probe and -Mode english-completion only, in the rime configure step, injected through CMake's documented CMAKE_PROJECT_rime_INCLUDE hook. Never passed in -Mode baseline; since P2.1 the build script itself asserts that baseline's rime CMakeCache holds no EPOCANVA_* and no CMAKE_PROJECT_rime_INCLUDE entry.",
+      "why_required": "Upstream's merged-plugin mechanism has no entry that accepts an out-of-tree source path: third_party/librime/plugins/CMakeLists.txt:29-30 strips every directory prefix off ENV{RIME_PLUGINS} and converts spaces to ';', :33-39 otherwise globs directories out of third_party/librime/plugins/, and sample/CMakeLists.txt:36 states the official instruction as 'link or copy the directory to plugins/'. Creating such a directory would make the pinned checkout dirty, which AGENTS.md section 7 forbids. Generalised in P2.1 to a component LIST (EPOCANVA_RIME_COMPONENT_ROOT + EPOCANVA_RIME_COMPONENT_NAMES + EPOCANVA_RIME_HOOK_LABEL) because the English component needs the language core compiled in beside it; a component that declares no object targets is a FATAL_ERROR rather than a silent omission. This file therefore adds each named EpoCanva component directory as an OBJECT library inside the rime project and attaches its objects to the rime target with target_sources($<TARGET_OBJECTS:...>) via cmake_language(DEFER CALL ...), which CMake documents as running 'as if written at the end of the current directory's CMakeLists.txt file' - i.e. after upstream's add_subdirectory(src) created the target. It is the same generator-expression mechanism upstream itself uses (plugins/CMakeLists.txt:20 feeding src/CMakeLists.txt:35).",
+      "why_upstream_shas_are_not_sufficient": "Without this file a machine holding exactly the pinned sources can only build the engine WITHOUT EpoCanva's components. The component and core sources (engine/rime_components/, engine/languages/en/) are project code, not upstream, and are covered by no SHA in this lock; the DLL identity is recorded per phase report instead (see P1_4_component_probe.artefact_identity and P2_1_english_completion.artefact_identity for why those hashes are per-link identities rather than reproducibility checksums).",
+      "upstream_alternative_not_taken": "Putting the component under third_party/librime/plugins/ (official mechanism, but dirties the checkout), or a minimal upstream patch to accept an out-of-tree plugin source directory, or enabling ENABLE_EXTERNAL_PLUGINS (which compiles in plugins_module.cc, a Boost.DLL loader that loads every *.dll in a rime-plugins directory - forbidden by the P1.4 brief). None was applied; third_party/patches/ still does not exist.",
+      "verification": {
+        "does_not_modify_upstream": "third_party/librime 'git status --porcelain' = 0 lines and 'git submodule status' unchanged, re-verified by the same build run that produced the component DLL.",
+        "no_artefacts_in_source_tree": "add_subdirectory is given an explicit binary directory under the build tree (${PROJECT_BINARY_DIR}/epocanva-rime-components/<component>); nothing is written to engine/ or third_party/.",
+        "fails_loudly": "FATAL_ERROR unless PROJECT_NAME is rime, EPOCANVA_RIME_COMPONENT_ROOT is a directory, BUILD_SHARED_LIBS and BUILD_MERGED_PLUGINS are ON, ENABLE_EXTERNAL_PLUGINS is OFF, and EPOCANVA_RIME_COMPONENT_NAMES / EPOCANVA_RIME_HOOK_LABEL are set; every named component must have a CMakeLists.txt and must export non-empty epocanva_rime_<name>_object_targets naming targets that still exist at attach time. The attach step prints 'EpoCanva <label> ATTACHED: <n> object library(ies) ... -> target rime', and the build script throws unless that line appears exactly once for THIS mode's label, so a silently unattached component cannot be reported as a component build and one mode's log cannot certify another mode's build.",
+        "cmake_minimum_feature": "cmake_language(DEFER) requires CMake >= 3.19; the pinned toolchain for this repository is 3.31.6-msvc6 (VS2022 Professional).",
+        "module_list_not_touched": "kDefaultModules is deliberately NOT modified; the front end names the module in RimeTraits.modules (docs/adr/0004-compiled-in-rime-components.md)."
+      },
+      "registered_in_phase": "P1.4; re-registered with this hash in P2.1 because the component-list generalisation changed the file",
+      "previous_sha256_superseded": "94d1760eb22fe2351bc7b1385627c9be754280c3c94b8772bb8698698831f5a0 (P1.4, 123 lines, single-component form)"
+    }
+  ],
+  "distribution_status": {
+    "build_tree": "build/ is entirely git-ignored and is NOT for external distribution. It contains upstream-copied word lists under the librime build directory whose licence is not cleared (see explicit_non_goals_of_this_lock).",
+    "installers_and_packaging": "Not produced. P1.3 makes no installer, no packaging system and no general licence-bundling machinery; distribution review is still an open, unassigned item.",
+    "recorded_in_phase": "P1.3"
+  },
+  "explicit_non_goals_of_this_lock": [
+    "no signature or publisher-certificate verification was performed on the librime tag",
+    "rapidjson-1.1.0 and tclap-1.2.5 licence texts are still NOT verified",
+    "the word lists under librime data/minimal are still NOT licence-cleared, and cangjie5.dict.yaml states \"License: GPL\" in its own header",
+    "the OpenCC data/dictionary/*.txt sources are covered only by OpenCC's repo-level Apache-2.0 statement; per-file provenance is not documented upstream",
+    "no artefact produced by P1.2 is cleared for external distribution",
+    "P2.4 adds a second open item: the English pilot word list is public-domain-with-attribution data under US law, and neither its redistribution in other jurisdictions nor the form an attribution must take in a packaged build has been decided (docs/compliance/english-pilot-data.md section 5). Until then nothing generated from it leaves build/."
+  ],
+  "P1_2_build_provenance": {
+    "build_entry": "tools/build_librime_baseline.ps1 (performs no network I/O)",
+    "layout": "build/librime-baseline/{dependencies,prefix,rime,smoke,logs}",
+    "configuration": "Windows x64, Release, generator \"Visual Studio 17 2022\", librime shared, all located dependencies static, static CRT",
+    "upstream_sources_modified": false,
+    "patches_applied": "none - third_party/patches/ does not exist",
+    "report": "docs/reports/P1.2-native-baseline.md"
+  },
+  "P1_4_component_probe": {
+    "build_entry": "tools/build_librime_baseline.ps1 -Mode component-probe -Fresh -Verbose_Build (performs no network I/O, installs nothing, rebuilds no dependency)",
+    "layout": "build/librime-component-probe/{rime,probe,logs}; dependencies are READ from build/librime-baseline/prefix and never rewritten",
+    "sources_compiled_in": "engine/rime_components/probe/{probe_module.cc,probe_processor.cc} -> OBJECT library epocanva_rime_probe_objs -> target rime, i.e. inside rime.dll",
+    "artefact_identity": {
+      "component_rime_dll_sha256_first_run": "01d6ef38fd2177d18dec33431d9cabb6cd0a5338a6fe6977877be0907fe75b75",
+      "component_rime_dll_sha256_reverified_run": "25cff030bf1efdbe8ea27d9ddd03118fb9d28445b5dfd27326c45e03eec21ebd",
+      "baseline_rime_dll_sha256": "333b5fa021c283c45b48b3f6972b4947d43a9eb7315e5802ff00e328d7609e9a",
+      "rime_import_library_sha256_both_modes": "024b64d2aef813c181317603ac9adbf03cabc632fc7d3ff394b643e9768a5a24",
+      "note": "The import library is byte-identical between the two modes and dumpbin reports 571 export names in both images, so compiling the component in added no exported symbol and no new ABI surface. The DLLs differ, and each contains the component's strings only in the component build.",
+      "dll_hash_is_not_a_reproducibility_checksum": "Two builds of the same sources produced different component DLL hashes (the two values above). cmp -l shows the files differ by 28 bytes only, at the PE TimeDateStamp, two debug-directory timestamps and a 16-byte PDB GUID; file size (2670080 bytes), rime.lib and the 571-name export table are unchanged. So the recorded value identifies THE BINARY THAT PRODUCED A GIVEN RESULT and proves baseline != component; it must not be used as a 'same hash means same build' gate. The time-independent judgements are: 113 -> 115 object files, component strings present in the component DLL and absent from the baseline, empty export-set difference, and the runtime diagnostic counters. ENABLE_TIMESTAMP (third_party/librime/CMakeLists.txt:31) stamps compiled schema artefacts, not rime.dll, and is not the cause. Byte-level reproducibility would need an upstream patch to the linker timestamp source; none was applied.",
+      "reverified_on_utc": "2026-10-18",
+      "reverification_evidence": "build/p14-verify/ (git-ignored; 7 tool steps, all exit 0) and the preserved first-run logs in build/p14-evidence-previous/. Re-ran: engine -Fresh build, 5/5 probe CTest, 2/2 replay, 1/1 smoke, 4/4 root, both cross-injections (exit 21 and 18), six structural failure injections (4, 6, 5, 2, 2, 5) and the replay matrix on the new component engine (117 assertions)."
+    },
+    "object_count_evidence": "113 .obj files in build/librime-baseline/rime versus 115 in build/librime-component-probe/rime; the two extras are probe_module.obj and probe_processor.obj under epocanva-rime-components/, both carrying RuntimeLibrary=MT_StaticRelease and no msvcrt default library",
+    "upstream_sources_modified": false,
+    "upstream_worktree_at_build_time": "third_party/librime HEAD 33e78140250125871856cdc5b42ddc6a5fcd3cd4, detached, 'git status --porcelain' 0 lines, four required submodules at their recorded commits and clean - re-verified by the same run that produced the component DLL, and again after the 2026-10-18 re-verification rebuild (submodule porcelain 0 lines each, 0 .dll/.lib/.exe/.obj inside the upstream tree)",
+    "patches_applied": "none - third_party/patches/ still does not exist; the component is attached by the project-side adaptation input registered above",
+    "external_plugin_loading": "ENABLE_EXTERNAL_PLUGINS=OFF in both modes; no plugin DLL is produced or loaded",
+    "default_mode_unchanged": "Running the same script without -Mode, or with -Mode baseline, produces the P1.2 artefacts: its rime build cache contains no EPOCANVA_* and no CMAKE_PROJECT_rime_INCLUDE entry, the produced rime.dll hash is unchanged, and it contains none of the component's strings",
+    "report": "docs/reports/P1.4-component-probe.md"
+  },
+  "P2_1_english_completion": {
+    "build_entry": "tools/build_librime_baseline.ps1 -Mode english-completion -Fresh -Verbose_Build (performs no network I/O, installs nothing, rebuilds no dependency)",
+    "layout": "build/librime-english/{rime,test,logs}; dependencies are READ from build/librime-baseline/prefix and never rewritten",
+    "sources_compiled_in": "engine/rime_components/english/{english_module.cc,english_translator.cc} plus engine/languages/en/{english_lexicon.cc,prefix_completer.cc} -> OBJECT libraries epocanva_english_objs and epocanva_en_core_objs -> target rime, i.e. inside rime.dll",
+    "module_and_component_names": {
+      "module": "epocanva_english",
+      "component": "epocanva_english_translator",
+      "loaded_via": "RimeTraits.modules = {\"default\", \"levers\", \"epocanva_english\"}; kDefaultModules is untouched. \"levers\" is required because deploy_config_file/deploy_schema run task components registered by that module (src/rime/lever/levers_module.cc:20-31).",
+      "schema_selection": "engine/translators lists 'epocanva_english_translator@english'; the @english part sets the name space the translator reads english/lexicon_path from (src/rime/ticket.cc:13-22)"
+    },
+    "probe_absent_in_this_mode": "EPOCANVA_RIME_COMPONENT_NAMES is 'english' only, so epocanva_probe is not compiled in at all and no F6 behaviour exists in this engine: 0 probe_*.obj under build/librime-english/rime. Object counts: 113 baseline -> 115 probe -> 117 english, the four extras being english_module.obj, english_translator.obj, english_lexicon.obj, prefix_completer.obj.",
+    "artefact_identity": {
+      "english_rime_dll_sha256": "fa3ed957e9e8102bea3578886f9b23bac4666d0692e868044b4ff87bdb9d3db7",
+      "baseline_rime_dll_sha256_unchanged": "333b5fa021c283c45b48b3f6972b4947d43a9eb7315e5802ff00e328d7609e9a",
+      "component_probe_rime_dll_sha256_unchanged": "25cff030bf1efdbe8ea27d9ddd03118fb9d28445b5dfd27326c45e03eec21ebd",
+      "rime_import_library_sha256_all_three_modes": "024b64d2aef813c181317603ac9adbf03cabc632fc7d3ff394b643e9768a5a24",
+      "export_name_count": "571 in all three images, empty set difference -- neither compiled-in component adds an exported symbol",
+      "english_rime_dll_sha256_superseded_in_p2_2": "The P2.2 rebuild added engine/languages/en/english_case.cc to the same OBJECT library set, so the English engine was recompiled and relinked; its DLL is now 6090d1b9c47e0880db64ac763b0cb7dab1a036b250c900f9e220c2ec6b8611e8 and the value above identifies only the binary that produced the P2.1 results. Object count for that mode moved 117 -> 118 and the English component object list moved from four names to five. See P2_2_english_case_preservation.",
+      "note": "Same caveat as P1_4_component_probe.artefact_identity.dll_hash_is_not_a_reproducibility_checksum: these hashes identify the binary that produced a given result, they are not content-addressed reproducibility digests. The time-independent judgements are the object counts 113/115/117, the component-string hits, the unchanged import library and export table, and the runtime diagnostics counters.",
+      "component_probe_relinked_during_p2_1_regression": "d81ac4efae8a0caa801c691da0496a2f43c9ec477363c8c0807f712c944b2570",
+      "relink_note": "The P2.1 regression pass rebuilt the component-probe engine from scratch to prove the generalised hook still attaches for that mode (it does: 'EpoCanva P1.4 ATTACHED: 1 object library(ies) [epocanva_rime_probe_objs]', 2 component .obj, 115 objects, 5/5 CTest passed). Because that is a fresh LINK, the DLL digest moved from 25cff030... to d81ac4ef... exactly as P1.4 section 5.5 predicts (PE TimeDateStamp / PDB GUID only). The import library stayed 024b64d2... byte-identical and the export table stayed 571, so no ABI surface changed. build/librime-baseline was NOT rebuilt: its DLL is still 333b5fa0...."
+    },
+    "lexicon_load_is_not_per_key": "Observed across 17 injected letter keys and 2 sessions in one process: lexicon_load_attempts=1 while queries=18 and translator_constructed=4. Failed loads are cached too, so the missing-lexicon negative run also shows attempts=1. The mechanism is a mutex-guarded map keyed by the normalised resolved path in english_translator.cc; Query() performs no file I/O.",
+    "offline_and_boundary_evidence": "rime.dll imports only KERNEL32.dll and USER32.dll; 0 hits for ws2_32/wininet/winhttp/mswsock/bcrypt/dnsapi; 0 socket or connection calls and 0 LOG/DLOG statements anywhere under engine/; the install prefix contains exactly one DLL (no plugin DLL); the three test executables import only rime.dll + KERNEL32.dll, which also proves the static CRT. The language core includes no librime and no platform header, so it compiles and unit-tests standalone in the root project.",
+    "upstream_sources_modified": false,
+    "patches_applied": "none - third_party/patches/ still does not exist",
+    "upstream_worktree_at_build_time": "third_party/librime HEAD 33e78140250125871856cdc5b42ddc6a5fcd3cd4, detached, 'git status --porcelain' 0 lines, four required submodules at their recorded commits with 0 porcelain lines each, 0 .dll/.lib/.exe/.obj inside the upstream tree - re-verified after the P2.1 builds",
+    "baseline_and_probe_not_polluted": "build/librime-baseline/rime/CMakeCache.txt has 0 matches for ^EPOCANVA_ or ^CMAKE_PROJECT_rime (asserted by the build script itself since P2.1, not only by manual grep), and its rime.dll is still 333b5fa0..., byte-unchanged. The P1.4 suite still passes 5/5 after being rebuilt with the generalised hook; P1.3 replay 2/2 and P1.2 smoke 1/1 pass against the untouched baseline engine.",
+    "test_suites": "build/librime-english/test = 8 CTest cases; build/vs2022-x64-debug = 7 cases (4 infrastructure + 3 new English core unit tests, the latter containing 213 internal assertions); plus the unchanged P1.2/P1.3/P1.4 suites. 23 cases total, every ctest exit code 0. Two of the 8 English cases and one of the 3 core cases are deliberately non-zero-exit assertions that the tests can fail.",
+    "capabilities_not_implemented": "Only current-word prefix completion AT THIS PHASE. Correction, next-word prediction, learning, morphological variation, automatic segmentation, abbreviation expansion and cross-application consistency remain unimplemented (AGENTS.md section 1). Case mapping was NOT implemented at P2.1 and was added by P2.2 (see P2_2_english_case_preservation). The word list is 49 hand-written rows, not a dictionary, and all 49 stored words are lowercase; proper-noun and brand-name casing recovery is still out of scope.",
+    "report": "docs/reports/P2.1-english-prefix-completion.md",
+    "testing_document": "docs/testing/rime-english-completion.md"
+  },
+  "P2_2_english_case_preservation": {
+    "build_entry": "tools/build_librime_baseline.ps1 -Mode english-completion (performs no network I/O, installs nothing, rebuilds no dependency)",
+    "layout": "build/librime-english/{rime,test,logs} (reused from P2.1, no parallel build system) plus a separate evidence run root build/p22-verify/",
+    "sources_compiled_in": "engine/languages/en/{english_case.cc,english_lexicon.cc,prefix_completer.cc} plus engine/rime_components/english/{english_module.cc,english_translator.cc} -> OBJECT libraries epocanva_en_core_objs (3 objects) and epocanva_english_objs (2 objects) -> target rime, i.e. inside rime.dll",
+    "what_p2_2_adds": "ASCII case mapping with original-text preservation. The completer classifies the raw input, lowers it only into a separate lookup key, and re-applies the input's case shape to the canonical dictionary word to build the display/commit text. Single-letter uppercase input is treated as initial-capital (H -> Hello). Mixed-case input (HeL, hEL, iPh) is not completed: it yields the original candidate only, and is counted as a case decision, never as a lexicon load failure. Raw input is never modified in place; the default commit remains exactly what the user typed.",
+    "the_four_texts_are_distinct": "raw input (never mutated, returned by context->preedit()) / lookup key (lowercase ASCII, derived, not stored) / canonical dictionary word (the lexicon's own lowercase text) / display-and-commit candidate (canonical re-cased). english_case.h documents this separation at the API comment level, and the core test suite compares a byte-for-byte copy of every input buffer after every call.",
+    "not_unicode_case_folding": "Only the 26 ASCII letter pairs are mapped, by explicit byte-range comparison (no <cctype>, no towlower/towlower, no std::locale, no setlocale). Non-ASCII byte sequences are classified kNotAlphabetic and refused; the docs and the enum name say 'ASCII case style', and no document calls this Unicode case folding or general case mapping.",
+    "artefact_identity": {
+      "english_rime_dll_sha256": "6090d1b9c47e0880db64ac763b0cb7dab1a036b250c900f9e220c2ec6b8611e8",
+      "english_rime_dll_sha256_superseded_in_p2_3": "The P2.3 rebuild added engine/languages/en/english_token.cc to epocanva_en_core_objs, so the English engine was recompiled and relinked from scratch: its DLL is now ab1d54412ec52b72efbe5f97e3e63c3b15f3b5c11e99b21cf49f93fcccfecb1c and the value above identifies only the binary that produced the P2.2 results. The English component object list went from five names to six and the object total from 117 to 119 (see P2_3_english_token_protection).",
+      "supersedes_english_rime_dll_sha256": "fa3ed957e9e8102bea3578886f9b23bac4666d0692e868044b4ff87bdb9d3db7 (P2.1)",
+      "baseline_rime_dll_sha256_unchanged": "333b5fa021c283c45b48b3f6972b4947d43a9eb7315e5802ff00e328d7609e9a",
+      "component_probe_rime_dll_sha256_unchanged": "d81ac4efae8a0caa801c691da0496a2f43c9ec477363c8c0807f712c944b2570 (P2.1 regression relink; the P1.4 values 01d6ef38... and 25cff030... are recorded in P1_4_component_probe and P2_1_english_completion)",
+      "rime_import_library_sha256_unchanged": "024b64d2aef813c181317603ac9adbf03cabc632fc7d3ff394b643e9768a5a24",
+      "export_name_count": "571 in both the English and the baseline image, empty set difference -- the case layer adds no exported symbol",
+      "object_counts": "113 baseline -> 115 component-probe -> 118 English; the English extras are english_case.obj, english_lexicon.obj, prefix_completer.obj, english_module.obj, english_translator.obj",
+      "note": "Per P1_4_component_probe.artefact_identity.dll_hash_is_not_a_reproducibility_checksum, these DLL digests identify the binary that produced the recorded results and are not reproducibility gates. The time-independent judgements are the object counts, the component-string hits, the unchanged import library and export table, and the runtime diagnostic counters."
+    },
+    "lexicon_is_not_reloaded_per_case_change": "Observed in one process across the whole P2.2 case matrix plus a second session: lexicon_load_attempts stayed 1 while queries rose to 33 and translator_constructed reached 4. The lowercase index is built once and the lookup key is derived per query; no case variant creates a new index, a new cache entry or a second file read.",
+    "case_reaches_composition_through_real_key_events": "Uppercase letters are injected as uppercase keysyms through process_key(), never by writing the context. The program asserts shift+h yields preedit 'h' (KeyBindingProcessor strips kShiftMask when matching, src/rime/gear/key_binding_processor_impl.h:31,38, and Speller::ProcessKeyEvent uses key_event.keycode() verbatim at src/rime/gear/speller.cc:104 and drops keys outside speller/alphabet at :109-110), which is why the test schema's speller/alphabet grew to contain both cases; AbcSegmentor::Proceed then keeps both in the segment (src/rime/gear/abc_segmentor.cc:46). The mapping route actually used is recorded in docs/testing/rime-english-completion.md rather than assumed.",
+    "test_suites": "23 CTest cases unchanged in name and count plus one new case, i.e. 24: build/librime-english/test 9 (the new one is english.completion.case_preservation_and_mapped_commit), build/librime-component-probe/probe 5, build/librime-baseline/replay 2, build/librime-baseline/smoke 1, build/vs2022-x64-debug 7. Every ctest exit code 0. Internal assertions: English core 304 (was 213 at P2.1) and the case-preservation integration mode 85, both 0 failed; the other integration modes still report 82 / 19 / 19 / 19 / 13.",
+    "no_match_mixed_and_load_failure_stay_distinct": "The integration evidence separates them by counters, not by inference: attempts=1 ok=1 fail=0 errline=0 with nomatch=1, mixed=1, notalpha=0, toolong=0 in the same run, and the mixed-case row 'HeL' shows cands=1 list=HeL while the lexicon counters still report a successful load of 49 entries.",
+    "scope_control": "kDefaultModules untouched; no automatic sentence capitalization; no proper-noun or brand recovery; no apostrophe, hyphen, segmentation, correction, prediction or learning; no cache hot-reload; no byte-level reproducible-DLL work; the P2.1 build entry and CTest harness were reused instead of a parallel system. The scratch edit helpers used to apply the multi-line source edits were deleted after use and were not promoted into tools/.",
+    "report": "docs/reports/P2.2-english-case-preservation.md",
+    "testing_document": "docs/testing/rime-english-completion.md"
+  },
+  "P2_3_english_token_protection": {
+    "build_entry": "tools/build_librime_baseline.ps1 -Mode english-completion -Fresh -Verbose_Build (performs no network I/O, installs nothing, rebuilds no dependency; the four dependency libraries are read from build/librime-baseline/prefix)",
+    "layout": "build/librime-english/{rime,test,logs} plus the evidence run roots under build/p23-verify/. No new build space and no parallel entry point were created.",
+    "sources_compiled_in": "engine/languages/en/{english_lexicon.cc,english_case.cc,english_token.cc,prefix_completer.cc} plus engine/rime_components/english/{english_module.cc,english_translator.cc} -> OBJECT libraries epocanva_en_core_objs (4 objects) and epocanva_english_objs (2 objects) -> target rime, i.e. inside rime.dll. Object totals: 113 baseline -> 115 component-probe -> 119 english.",
+    "what_p2_3_adds": "A limited English word-form layer with protected-text fidelity. engine/languages/en/english_token.{h,cc} answers, as named values rather than a bool, whether the input is a complete entry, a queryable prefix, which byte class stopped it and where; english_case.{h,cc} treats the two ASCII word delimiters as case-transparent so don't maps to Don't and DON'T while Co-Operate stays mixed and is refused; english_lexicon.{h,cc} validates entries through the same grammar the query layer uses and reports a misplaced delimiter as the new status illegal-word-form, distinct from illegal-word which means a byte the word alphabet never had; prefix_completer.cc replaced P2.1's key + '{' range bound with the prefix successor.",
+    "range_bound_change": "P2.1 bounded the matched range at key + '{', which is only correct while every byte that can FOLLOW the prefix is below 0x7B. That held for an a-z-only word list and stops being a property of the algorithm the moment entries contain U+0027 and U+002D. The bound is now succ(key) = key with its last byte incremented, whose correctness proof mentions neither 'z' nor the entry alphabet. tests/english_core/main.cc case 23 asserts both edges as index pairs derived by hand from a ten-row table (co- -> [1,2) finds co-operate and must NOT find coopt; don' -> [6,7) finds don't and must NOT find done), plus a loop that re-checks every entry inside the range for the prefix and both neighbours for its absence.",
+    "protection_mechanism": "The fixture schema's speller/alphabet now contains, besides the 52 ASCII letters, the two word delimiters, the ten digits and the marks @ . _ : / \\ ? & = # % +. This is not a relaxation of the rule; it is how the rule can exist at all. A byte outside speller/alphabet is dropped by Speller::ProcessKeyEvent (src/rime/gear/speller.cc:109-110) so the composition would stop before it and the translator would never learn the token was technical; worse, src/rime/gear/fallback_segmentor.cc:16-56 would then append one-byte raw segments for the leftovers and this translator would be queried about the LETTER part alone, completing 'user' while the user typed an address. With the marks in the alphabet, AbcSegmentor::Proceed (src/rime/gear/abc_segmentor.cc:39-57, membership test at :46) keeps the whole token inside ONE abc segment and the language core refuses it as a unit. No new Processor or Segmentor was needed, and kDefaultModules and the upstream source are untouched.",
+    "segment_scope_evidence": "queries_covering_whole_input and queries_covering_part_of_input are event counts (english_diagnostics.h), so no composition text or offset crosses the C boundary. Across the whole token-protection run: queries=405, whole=405, part=0. Every query this process made was about the entire composition, which is what proves no partial completion was offered and discarded.",
+    "artefact_identity": {
+      "english_rime_dll_sha256": "ab1d54412ec52b72efbe5f97e3e63c3b15f3b5c11e99b21cf49f93fcccfecb1c",
+      "supersedes_english_rime_dll_sha256": "6090d1b9c47e0880db64ac763b0cb7dab1a036b250c900f9e220c2ec6b8611e8 (P2.2)",
+      "baseline_rime_dll_sha256_unchanged": "333b5fa021c283c45b48b3f6972b4947d43a9eb7315e5802ff00e328d7609e9a",
+      "component_probe_rime_dll_sha256_unchanged": "d81ac4efae8a0caa801c691da0496a2f43c9ec477363c8c0807f712c944b2570",
+      "rime_import_library_sha256_unchanged": "024b64d2aef813c181317603ac9adbf03cabc632fc7d3ff394b643e9768a5a24",
+      "export_name_count": "571 in both the English and the baseline image; the token layer adds no exported symbol",
+      "note": "Per P1_4_component_probe.artefact_identity.dll_hash_is_not_a_reproducibility_checksum these are the identity of the binary that produced the recorded results, not reproducibility gates. The time-independent judgements are the object counts (119 total, 6 of 6 named component objects present), the per-artefact MT_StaticRelease directives, the unchanged import library and export table, and the runtime counters."
+    },
+    "fresh_build_evidence": "build/p23-verify/engine-english-fresh.log records '-Fresh' with 'objects written by this run: 119 of 119', so every translation unit including english_token.cc was compiled in that run; build/librime-english/logs/04-rime.build.log contains its CL.exe line (/MT /O2 /std:c++17 /permissive- /W4) and the verify stage lists 'english_token.obj MT_Static=1 MD_Dynamic=0'. An earlier run of the same phase (same mode, without -Fresh) ended with exit 1 because the newly written translator source did not compile; that failure is recorded rather than hidden, and the -Fresh log above is the run that produced the artefact.",
+    "lexicon_is_not_reloaded_per_token": "Observed through the whole P2.3 matrix: lexicon_load_attempts stayed 1 while queries reached 405 and translator_constructed 4. The lowercase index with its delimiters is built once; case, delimiter position and protection are decided per query from the input alone.",
+    "refusal_buckets_stay_distinct": "Final counters of the token run: rejected=138 = mixed 10 + too_long 1 + not_alphabetic 108 + illegal_word_form 19, and not_alphabetic 108 = non_ascii 0 + protected 108 + unsupported_byte 0; compl=399 = cl 341 + ci 42 + cu 16, with delimited=111 as a subset. 'protected', 'illegal-word-form', 'mixed-case', 'no-match' and 'load failure' are five different answers to 'why is there no completion', and a mixed-case or technical input is never recorded as a word-list problem.",
+    "test_suites": "26 CTest cases, every ctest exit code 0: build/librime-english/test 11 (two new: english.completion.token_boundaries_and_protection and english.completion.negative_bad_lexicon_illegal_form), build/librime-component-probe/probe 5, build/librime-baseline/replay 2, build/librime-baseline/smoke 1, build/vs2022-x64-debug 7. Internal assertions: English core 1196 (was 304 at P2.2) and the token-protection integration mode 393 (was 85 for case-preservation), both 0 failed; the unchanged modes still report 82 / 85 / 19 / 19 / 19 / 13, and the baseline-engine cross-injection still exits 20.",
+    "fixture_growth_is_recorded": "tests/fixtures/english_completion/lexicon.tsv went from 49 to 54 rows by adding don't, doesn't, can't, co-operate and re-enter. Every affected expectation was re-derived by hand and is written out in tests/fixtures/english_completion/README.md section 5.2, including the sort-order fact that U+0027 and U+002D both sort below every lowercase letter. The P2.1 and P2.2 reports still say 49 because that was what they ran with.",
+    "upstream_sources_modified": false,
+    "patches_applied": "none - third_party/patches/ still does not exist",
+    "upstream_worktree_at_build_time": "third_party/librime HEAD 33e78140250125871856cdc5b42ddc6a5fcd3cd4, detached, 'git status --porcelain' 0 lines, four required submodules 0 porcelain lines each, 'librime worktree : clean' reported by the same run that linked the component DLL",
+    "capabilities_not_implemented": "Multi-delimiter word forms, Unicode curly-apostrophe and dash normalisation, automatic punctuation replacement, URL/e-mail/code parsing, correction, prediction, learning, morphological variation, automatic segmentation, abbreviation expansion, cross-application consistency, automatic sentence capitalisation and proper-noun or brand-name case recovery (iPhone, GitHub are refused as mixed case, not completed). The word list is 54 hand-written rows, not a dictionary, and the protection rule is a conservative completion policy rather than syntax recognition.",
+    "report": "docs/reports/P2.3-english-token-protection.md",
+    "testing_document": "docs/testing/rime-english-completion.md"
+  },
+  "P2_4_english_pilot_lexicon": {
+    "what_p2_4_adds": "A real English word list used as TEST DATA, at 42,356 rows, so the P2.1-P2.3 assertions run against dictionary data instead of only the 54 hand-written rows. Its precise identity is a LOCAL TRIAL ON A PINNED ALT12DICTS SUBSET -- one file, alt12dicts/2of12full.txt, at one commit -- NOT an ESDB/SCOWL 35/50/60 size-variant export and not an aspell/hunspell dictionary. No capability was added and no engine source changed.",
+    "why_it_is_not_a_packages_entry": "This file is the lock for the ENGINE build inputs. The pilot word list is not linked, compiled or installed: it is read by the test program at run time from build/english-pilot/. Its identity, licence review, conversion contract and generated-artefact hashes are recorded in data/manifests/english-pilot.sources.lock.json and docs/compliance/english-pilot-data.md, which are the authoritative records -- nothing is duplicated here beyond this pointer.",
+    "source_identity": "English Speller Database (SourceForge project wordlist), remote https://git.code.sf.net/p/wordlist/code, pinned by full commit 7bbe293425d48a1210bf17aaf156b28ade5c2de1; the tag name rel-2018.04.16 is recorded descriptively and the branch tip (42 commits ahead) is explicitly not used.",
+    "licence_basis": "public domain with a request for acknowledgment, read verbatim at alt12dicts/README:28-29 and alt12dicts/README-orig:1441-1446 of that commit; the AGID carve-out those lines state is honoured by keeping every AGID-derived file out of the export scope.",
+    "network_policy": "tools/data/build_english_pilot.py performs no network I/O unless --fetch is passed, and --fetch only downloads (nothing is uploaded). It installs nothing.",
+    "generated_outputs": "build/english-pilot/epocanva_en_pilot.tsv (42,356 rows, 502,333 bytes, sha256 6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b) plus its conversion report. Both are generated, git-ignored, and deliberately NOT committed while the project licence (AGENTS.md section 8) and the redistribution questions in docs/compliance/english-pilot-data.md section 5 stay open.",
+    "engine_change": "none. No file under engine/ was touched, the component build id stays epocanva-english/0.0.0-p2.3, and the english build's object total stays 119, so the pilot measures data scale rather than a configuration or engine change.",
+    "report": "docs/reports/P2.4-english-pilot-lexicon.md",
+    "testing_document": "docs/testing/rime-english-completion.md sections 4.6, 5.3, 6.3 and 7"
+  },
+  "P2_5_english_space_processor": {
+    "what_p2_5_adds": "A fourth English behaviour: the space bar as a commit boundary, so continuous multi-word input works (Hello + Space + world + Space yields \"Hello world \"). Two translation units were added to the compiled-in component set -- engine/languages/en/english_space_policy.{h,cc} (the rules, Rime-free and unit-testable) and engine/rime_components/english/english_space_processor.{h,cc} (the rime::Processor that acts on them, first in engine/processors).",
+    "build_entry_change": "tools/build_librime_baseline.ps1 was re-registered above: the english-completion mode's expected component-object list grew from six names to eight and gained a third DLL needle. Object total 119 -> 121.",
+    "artefact_identity": "Component rime.dll sha256 8df580f8d62f8c2d81aa64489509cf2622d260292091f4ed7e0fa75d7cb35aaf, 2708992 bytes, built by the run that printed 'component objects: 8 of 8 expected present' and 'objects written by this run: 4 of 121'. Export table still 571 names, identical to baseline, so the new component adds no ABI (docs/adr/0004). Baseline rime.dll unchanged at 333b5fa0.... These are per-link identities, not reproducibility checksums.",
+    "upstream_left_byte_clean": "third_party/librime 'git status --porcelain' = 0 lines at 33e78140250125871856cdc5b42ddc6a5fcd3cd4, re-verified after the build. No upstream file was edited and third_party/patches/ still does not exist; the Processor is registered through the same CMAKE_PROJECT_rime_INCLUDE hook as before.",
+    "why_no_new_engine_lock_entry": "Nothing was fetched or version-changed in P2.5: no dependency, no upstream revision, no data source. The only new inputs are EpoCanva's own sources, which no SHA in this file covers -- see the standing note in epocanva_build_adaptation_inputs[2].why_upstream_shas_are_not_sufficient.",
+    "report": "docs/reports/P2.5-english-space-boundaries.md",
+    "testing_document": "docs/testing/rime-english-completion.md sections 1, 5.1 and 6.4"
+  }
+}

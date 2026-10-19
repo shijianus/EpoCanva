@@ -1,0 +1,28 @@
+# EpoCanva P2.6 test fixture -- default settings for the spelling-suggestion run.
+#
+# Same shape as tests/fixtures/english_completion/default.yaml, and deliberately
+# separate: each fixture owns its config, its schema and its run directory, so
+# enabling suggestions cannot change what the other suites measure.
+#
+# Consumed by: tools/rime_english_completion --mode spelling, deployed through the
+# public C API slot deploy_config_file("default.yaml", "config_version").
+
+config_version: "0.0.0-p2.6-fixture"
+
+# Exactly one entry, for the reason recorded in tests/fixtures/rime_raw/README.md:
+# Switcher::CreateSchema() resolves the synthetic ".default" schema from this list
+# (src/rime/engine.cc:338-341, src/rime/switcher.cc:174-196), and a second entry
+# would make a new session's initial schema depend on user.yaml history instead of
+# being deterministic.
+#
+# The id differs from the other fixtures on purpose: three schemas sharing one id in
+# a repository would leave a compiled-artefact log ambiguous about which word list --
+# and which feature switches -- it describes.
+schema_list:
+  - schema: epocanva_spell_english
+
+# Inherited by every schema through DefaultConfigPlugin's optional include of
+# default:/menu (src/rime/config/default_config_plugin.cc:22-28). The schema
+# restates page_size explicitly rather than relying on that merge.
+menu:
+  page_size: 8

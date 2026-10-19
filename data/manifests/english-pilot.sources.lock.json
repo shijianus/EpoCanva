@@ -1,0 +1,229 @@
+{
+  "_purpose": "Provenance record for the EpoCanva English PILOT lexicon: the local word-list trial that exercises the compiled-in translator at data scale. Precisely: ONE file (alt12dicts/2of12full.txt) of the Alt12Dicts package, taken from one pinned commit of the English Speller Database repository. It is NOT an ESDB/SCOWL size-variant export (the 35 / 50 / 60 series) and not a merged multi-package word list; calling it 'ESDB 试验词表' without that qualification would misdescribe what was converted. This file is the source of truth for what was fetched, under what licence, and what the converter is allowed to turn into engine input. It is a data manifest, not a build-recipe manifest: third_party/sources.lock.json stays the record for the engine build inputs.",
+  "schema_version": 1,
+  "phase": "P2.4",
+  "created_on_utc": "2026-10-19",
+  "source": {
+    "display_name": "English Speller Database (ESDB)",
+    "project_page": "https://wordlist.sourceforge.net/",
+    "external_homepage": "https://wordlist.aspell.net",
+    "sourceforge_shortname": "wordlist",
+    "package_used": "Alt12Dicts (unofficial alternate 12Dicts package), files by Alan Beale, packaged by Kevin Atkinson, package version stated in alt12dicts/README as 2016.06.26",
+    "how_the_identity_was_established": [
+      "https://wordlist.sourceforge.net/ <title> = 'English Speller Database (ESDB)'",
+      "https://sourceforge.net/rest/p/wordlist/ -> tools[] lists exactly one git tool, mounted at 'code', so the clone URL is https://git.code.sf.net/p/wordlist/code",
+      "git ls-remote --tags on that URL -> 16 tags, newest release tag rel-2018.04.16"
+    ]
+  },
+  "remote": {
+    "clone_url": "https://git.code.sf.net/p/wordlist/code",
+    "access": "read-only HTTPS git-download; the fetch step sends nothing but the ref negotiation and its own GET requests (P2.4 brief boundary 4: local content is never uploaded)",
+    "default_off": "tools/data/build_english_pilot.py performs no network I/O unless --fetch is passed"
+  },
+  "pinned_commit": "7bbe293425d48a1210bf17aaf156b28ade5c2de1",
+  "pinned_tag": "rel-2018.04.16",
+  "pinned_commit_date_iso8601": "2018-04-16T22:11:56-04:00",
+  "pinned_commit_subject": "Release 2018.04.16",
+  "why_a_commit_and_not_a_ref": "The recovery identity is the 40-hex-digit commit. The tag NAME is recorded only as a description of what that commit is: a tag can be moved or deleted by the maintainer, so it is not an identity. The branch tip is explicitly NOT used: at fetch time refs/heads/master was 42 commits ahead of this tag (observed tip 9998c28e2d5506357aa790a0c396b67eb907dc40), i.e. an untagged working state with no release statement. `git tag --points-at HEAD` at the pinned checkout returns exactly rel-2018.04.16, and `git rev-list --count HEAD..refs/heads/master` returns 42 -- both re-runnable against build/third-party-fetch/esdb.",
+  "checkout_verification": {
+    "tool": "tools/data/build_english_pilot.py --fetch",
+    "checks": [
+      "git rev-parse HEAD equals pinned_commit, otherwise exit 6",
+      "git status --porcelain is empty inside the checkout (the tree is byte-clean; nothing in EpoCanva edits it)",
+      "every file under inputs[] is SHA-256 verified before a single row is parsed, otherwise exit 5"
+    ],
+    "default_cache_dir": "build/third-party-fetch/esdb",
+    "note": "The checkout lives under build/ because AGENTS.md section 10 keeps all fetched and generated material out of the source tree, and third_party/ stays reserved for the pinned C++ dependencies recorded in third_party/sources.lock.json."
+  },
+  "licence": {
+    "reviewed_file": "alt12dicts/README",
+    "reviewed_file_sha256": "efec389cc088381843171c579f8358fe9d570537ec0e36badcf5e6c9751e1d73",
+    "statement_lines": "28-29",
+    "statement_verbatim": "All of these files have been explicitly placed in the Public Domain by Alan Beale.",
+    "attribution_request_lines": "alt12dicts/README-orig:1441-1447",
+    "attribution_request_verbatim": "The 12dicts lists were compiled by Alan Beale. I explicitly release them to the public domain, but request acknowledgment of their use. (Actually, the dependency of the 2of12inf list and the 2+2+3 lists on AGID prevents their release into the public domain. However, I do not impose any additional requirements on their use beyond those imposed by AGID and its sources, as described in agid.txt.)",
+    "scope_of_the_statement": "The sentence in alt12dicts/README:28 refers to 'these files', i.e. the files of the Alt12Dicts package as described in that README. The only file this project converts, alt12dicts/2of12full.txt, is described by that same README (section '2of12full.txt description:', line 32 onward) as words appearing in more than one of Alan Beale's source dictionaries, which is the 12dicts material the public-domain sentence and the acknowledgment request both concern.",
+    "carve_out_honoured": "The parenthetical in README-orig says the AGID dependency PREVENTS 2of12inf and the 2+2+3 lists from being released into the public domain. Those files are therefore NOT inputs here: alt12dicts/2of12infl.txt, agid/* and anything derived from AGID is out of scope. alt12dicts/README:25-26 is the passage that ties 2of12infl.txt (not 2of12full.txt) to AGID.",
+    "third_party_licence_of_the_agid_files": "agid/README states 'Copyright 2000-2016 by Kevin Atkinson <kevina@gnu.org>' for the AGID package, which is a different licence basis from the 12dicts public-domain statement. Recorded here so that nobody later widens the export scope by assuming the whole repository shares one licence.",
+    "other_directories_in_the_same_repository": "scowl/, varcon/, pos/, ukacd/, yawl/, jargon-wl/, mwords/, census/, enable/, enable-sup/, other/, site/, uk-freq-class/ (contains only notes.txt at this commit), alt12dicts/README-agid, alt12dicts/README-infl, agid/. None of them is used. scowl/ in particular carries its OWN licence text (see the next field) which is NOT public domain and NOT a superset of the 12dicts statement, so 'the repository is a word-list project' is not a reason to widen the export scope. Each directory would need its own review before it could be an input.",
+    "scowl_copyright_correction": "An earlier draft of this manifest asserted that scowl/Copyright is generated by 'make' and absent at this commit. That was wrong and is corrected here against the checked-out tree: scowl/Copyright exists at the pinned commit, 12006 bytes, 248 CRLF lines, sha256 1420a34cf9088f12... Its lines 1-13 read 'The collective work is Copyright 2000-2016 by Kevin Atkinson as well as any of the copyrights mentioned below' followed by a permission notice granting use 'provided that the above copyright notice appears in all copies and that both that copyright notice and this permission notice appear in supporting documentation'. That is an attribution-conditioned MIT-like licence, recorded here because the top-level README.md:9-11 points at it and because a future scowl-derived input would inherit those conditions, not the 12dicts public-domain basis.",
+    "conclusion_for_this_phase": "Using alt12dicts/2of12full.txt at the pinned commit is defensible as public-domain data with a request for acknowledgment. The acknowledgment is discharged by this manifest, docs/compliance/english-pilot-data.md and the attribution line in the phase report.",
+    "open_decision_for_the_project_owner": [
+      "Public domain is a US-law concept. Before ANY binary or installer ships outside this repository, get a statement on redistribution for the jurisdictions the product targets; EpoCanva's own licence is still undecided (AGENTS.md section 8) and third_party/sources.lock.json already records that no artefact produced so far is cleared for external distribution.",
+      "Decide whether an attribution file must travel with the data in a packaged build, and if so where it lives; this phase only records the text, it does not invent a packaging system."
+    ]
+  },
+  "inputs": [
+    {
+      "repo_path": "alt12dicts/2of12full.txt",
+      "sha256": "76dc8ed76ada4d4d0a67ffc2b81499a5c8a25f3f741df2f3a3d9bb438bf6eaf2",
+      "size_bytes": 1702816,
+      "line_count": 53789,
+      "line_endings": "CRLF (verified: 53789 CR-LF pairs, no lone CR)",
+      "crlf_pairs": 53789,
+      "encoding": "7-bit ASCII (decoded with errors='strict'; any byte >= 0x80 would abort the run)",
+      "row_format": "<N>: <non-variant> <variant#> <non-American&> <second-class=>   <word>",
+      "weight_field": "the leading <N> of each row, i.e. how many of Alan Beale's source dictionaries list that word. Field order and meaning are stated by the package itself: alt12dicts/README:35-38 ('Each line contains five numbers, being the total number of dictionaries, the non-variant entries, the variant entries, the non-American entries and the \"second-class\" entries') and the worked example at alt12dicts/README:41-45 ('aeroplane' is listed in 7 of the dictionaries). Observed values in the accepted rows are 2..12; a weight of 1 cannot occur because the file is defined as words appearing in MORE THAN ONE source dictionary (alt12dicts/README:34-35), and that minimum-of-2 is itself the cross-check that the leading field was the one read. It is NOT a corpus frequency, NOT an n-gram probability and NOT usage data.",
+      "rows_total": 53789,
+      "role": "the only converted data file"
+    }
+  ],
+  "licence_evidence_files": [
+    {
+      "repo_path": "alt12dicts/README",
+      "sha256": "efec389cc088381843171c579f8358fe9d570537ec0e36badcf5e6c9751e1d73",
+      "size_bytes": 9443,
+      "line_count": 230,
+      "role": "public-domain statement, lines 28-29"
+    },
+    {
+      "repo_path": "alt12dicts/README-orig",
+      "sha256": "9576e583782d828e751f30940d1eea4ffa2e711df556ceb33075c7bd3c0dc915",
+      "size_bytes": 91203,
+      "line_count": 1448,
+      "role": "original 12Dicts readme: acknowledgment request and the AGID carve-out, lines 1441-1447"
+    },
+    {
+      "repo_path": "README.md",
+      "sha256": "39948c691ab94885b04400f3a82d955bc8f294bc2eb512c89eea77e8c28c17b1",
+      "size_bytes": 843,
+      "line_count": 25,
+      "role": "repository-level statement about SCOWL only; read to prove the SCOWL licence does NOT cover alt12dicts"
+    },
+    {
+      "repo_path": "scowl/Copyright",
+      "sha256": "1420a34cf9088f12bf9a837b5b0aa4b1affb553a1c66d82ba73a63b12cc80cec",
+      "size_bytes": 12006,
+      "line_count": 248,
+      "role": "NOT an input and NOT the licence basis for this pilot. Read because README.md:11 points at it: it is the attribution-conditioned SCOWL licence, kept here as the evidence that a different directory of the same repository carries different obligations."
+    }
+  ],
+  "actually_read": {
+    "checkout_root": "<repo>/build/third-party-fetch/esdb",
+    "path_note": "Only the repository-relative shape is recorded: the absolute prefix belongs to this machine (AGENTS.md section 10). Under that root every path below is the file that was opened, byte for byte.",
+    "converted": [
+      {
+        "path": "alt12dicts/2of12full.txt",
+        "sha256": "76dc8ed76ada4d4d0a67ffc2b81499a5c8a25f3f741df2f3a3d9bb438bf6eaf2",
+        "size_bytes": 1702816,
+        "line_count": 53789,
+        "licence_coverage_basis": "alt12dicts/README:28-29 places 'these files' -- the Alt12Dicts package files that README describes -- in the public domain, and this very file is one of them: the same README documents it at lines 32-46. The acknowledgment request at README-orig:1441-1442 attaches to the same 12dicts material. The AGID carve-out at README-orig:1442-1444 does NOT reach it, because README:25-26 ties AGID to 2of12infl.txt and README-agid, not to 2of12full.txt."
+      }
+    ],
+    "read_only_for_licence_or_format_evidence": [
+      {
+        "path": "alt12dicts/README",
+        "sha256": "efec389cc088381843171c579f8358fe9d570537ec0e36badcf5e6c9751e1d73",
+        "size_bytes": 9443,
+        "line_count": 230,
+        "why_read": "public-domain statement (28-29), package identity (1, 3, 5), the row field definitions (35-38, 41-46) and the AGID pointer (25-26)"
+      },
+      {
+        "path": "alt12dicts/README-orig",
+        "sha256": "9576e583782d828e751f30940d1eea4ffa2e711df556ceb33075c7bd3c0dc915",
+        "size_bytes": 91203,
+        "line_count": 1448,
+        "why_read": "acknowledgment request and the AGID exception, 1441-1446"
+      },
+      {
+        "path": "agid/README",
+        "sha256": "0b1ca46aff5e9cb5b40c956872206a444aa2d195831624456142875095570d80",
+        "size_bytes": 15838,
+        "line_count": 358,
+        "why_read": "line 5 states a Kevin Atkinson copyright for AGID, i.e. a different licence basis -- read to prove the exclusion is real rather than assumed"
+      },
+      {
+        "path": "scowl/Copyright",
+        "sha256": "1420a34cf9088f12bf9a837b5b0aa4b1affb553a1c66d82ba73a63b12cc80cec",
+        "size_bytes": 12006,
+        "line_count": 248,
+        "why_read": "the attribution-conditioned SCOWL licence referenced by the top-level README.md:9-11; read to establish that a licence label at repository level does not transfer to alt12dicts and vice versa"
+      },
+      {
+        "path": "README.md",
+        "sha256": "39948c691ab94885b04400f3a82d955bc8f294bc2eb512c89eea77e8c28c17b1",
+        "size_bytes": 843,
+        "line_count": 25,
+        "why_read": "repository-level statement, about SCOWL only"
+      }
+    ],
+    "no_repo_level_label_was_enough": "AGENTS.md section 6 required reading the texts themselves. The pinned commit contains no single licence covering the whole tree, so this record names the file, the line range and the sentence it relies on rather than a repository-level tag."
+  },
+  "explicitly_excluded_sources": [
+    "alt12dicts/2of12infl.txt, alt12dicts/README-infl and everything under agid/ -- excluded because README-orig:1442-1444 states the AGID dependency keeps them OUT of the public domain.",
+    "alt12dicts/README-agid (Kevin Atkinson copyright text for AGID).",
+    "Every ESDB/SCOWL size variant: the 35 / 50 / 60 series and any 'American' or 'British' export of SCOWL. None of them is an input here, and no upstream Makefile was run to produce one. Describing this pilot as an ESDB 35/50/60 export would be wrong.",
+    "scowl/, varcon/, pos/, ukacd/, yawl/, jargon-wl/, mwords/, census/, enable/, enable-sup/, other/, site/, uk-freq-class/ -- each carries its own licence basis and would need its own review.",
+    "Any aspell/hunspell binary dictionary, any packaged word list downloaded from a mirror, and any pre-built rime .dict.yaml.",
+    "The only file converted is alt12dicts/2of12full.txt at the pinned commit."
+  ],
+  "transform": {
+    "script": "tools/data/build_english_pilot.py",
+    "offline_by_default": true,
+    "no_cleaning_rule": "A row outside the accepted complete-entry form is excluded and counted, never repaired. Not lowercased, not de-punctuated, not truncated, not re-split.",
+    "accepted_word_form": "[a-z]+ | [a-z]+ '[' [a-z]+ | [a-z]+ '-' [a-z]+, at most 64 UTF-8 code units. This is the same contract as engine/languages/en/english_token.h IsDictionaryEntryForm, so a word that converts is a word the loader accepts and the query layer can find.",
+    "exclusion_reasons_in_order": [
+      "non-ascii-byte",
+      "word-too-long",
+      "contains-space",
+      "digit-or-other-punctuation",
+      "capitalised-letter",
+      "leading-or-trailing-delimiter",
+      "more-than-one-delimiter",
+      "duplicate-word"
+    ],
+    "order_is_part_of_the_contract": "The first matching rule wins, so a row that is capitalised AND badly delimited gets exactly one recorded reason and re-running the tool cannot change the tally.",
+    "weight_is_not_corpus_frequency": "weight is a coarse attestation rank across compiled dictionaries (values 2..12 in this release). It is NOT a corpus word frequency, NOT an n-gram probability and NOT usage data from any input method. Any text describing it must say 'coarse tier/attestation rank'.",
+    "output_ordering": "ascending UTF-8 byte order of the word, which is also the order the engine's index sorts by",
+    "output_line_endings": "LF, no trailing blank line, ASCII only",
+    "determinism": "no timestamp, no absolute path and no host name in either output file; --check re-runs the conversion and requires byte-identical output"
+  },
+  "output": {
+    "out_dir": "build/english-pilot",
+    "lexicon_file": "epocanva_en_pilot.tsv",
+    "report_file": "epocanva_en_pilot.report.json",
+    "sha256": "6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b",
+    "size_bytes": 502333,
+    "line_count": 42356,
+    "rows": 42356,
+    "first_run_observed": {
+      "source_rows": 53789,
+      "source_rows_unparsed": 0,
+      "accepted_rows": 42356,
+      "excluded_rows": 11433,
+      "accepted_forms": {
+        "plain-letter-run": 40590,
+        "with-apostrophe": 69,
+        "with-hyphen": 1697
+      },
+      "exclusions_by_reason": {
+        "contains-space": 6006,
+        "capitalised-letter": 4373,
+        "digit-or-other-punctuation": 831,
+        "more-than-one-delimiter": 208,
+        "leading-or-trailing-delimiter": 15,
+        "non-ascii-byte": 0,
+        "word-too-long": 0,
+        "duplicate-word": 0
+      },
+      "weight_values_seen": "2..12, no other value",
+      "min_word_bytes": 1,
+      "max_word_bytes": 23,
+      "spelling": "These are the tallies printed by tools/data/build_english_pilot.py on the run that produced the sha256 above. tests/english_pilot/assert_pilot_output.cmake re-checks every one of them against the report file on each CTest run, so a conversion that quietly changed the population cannot pass as 'the same data'."
+    },
+    "note": "Generated material stays under build/. It is derived data, reproducible from the pinned commit, and is deliberately not committed while the project licence and the redistribution question above are open."
+  },
+  "engine_integration": {
+    "fixture_dir": "tests/fixtures/english_pilot",
+    "schema_id": "epocanva_pilot_english",
+    "schema_file": "tests/fixtures/english_pilot/epocanva_pilot_english.schema.yaml",
+    "default_file": "tests/fixtures/english_pilot/default.yaml",
+    "lexicon_path_key": "english/lexicon_path = lexicon/epocanva_pilot_lexicon.tsv",
+    "separate_run_root": "build/english-pilot/run (the directory used for the standalone runs recorded in the phase report; under CTest each case gets its own root below)",
+    "ctest_run_root": "build/english-pilot/test/rime-english-completion-run/pilot-real-lexicon",
+    "separate_ctest_binary_dir": "build/english-pilot/test",
+    "configure_option": "-DEPOCANVA_ENGLISH_PILOT_LEXICON=<absolute path to the generated TSV>",
+    "why_separate": "P2.4 brief boundary 6 and 7: the hand-written 54-row fixture and all 26 existing CTest cases must keep running untouched, and the pilot gets its own config, its own output directory and its own run directory. The pilot cases are only registered when the option names a generated file, so a clean machine never sees a silently-skipped pilot test."
+  },
+  "scale_measurement_status": "See docs/reports/P2.4-english-pilot-lexicon.md. Timings measured in this repository's build tree on one Windows x64 host, on a 42k-row list: not a production benchmark and not comparable to any other input method."
+}

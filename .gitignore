@@ -1,0 +1,62 @@
+# --- build outputs (never commit) ---
+# Root-anchored on purpose: an unanchored "build/" also matched docs/build/,
+# which silently excluded the bootstrap documentation from version control.
+/build/
+/out/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CMakeCache.txt.tmp
+cmake_install.cmake
+# CTest's per-binary-dir state. Root-anchored on purpose: an unanchored "Testing/"
+# also matched docs/testing/, which on Windows (core.ignorecase=true) silently
+# excluded the whole testing-methodology directory from version control.
+# Binary trees live under /build/ above, so anchoring loses nothing.
+/Testing/
+*.log
+compile_commands.json
+.cache/
+.vs/
+.vscode/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# --- machine-local reports: contain this machine's real paths/versions ---
+docs/reports/environment.local.md
+docs/reports/*.local.md
+
+# --- machine-local CMake presets (instance paths, toolset overrides) ---
+CMakeUserPresets.json
+
+# --- local caches / tool state ---
+*.user
+*.suo
+# tools/data/*.py is a versioned tool, and importing it (verification scripts do) makes
+# CPython write __pycache__ next to it -- a generated artefact inside the source tree,
+# which AGENTS.md section 10 forbids. Ignoring it is the cheap half; the scripts under
+# build/ are the ones that must not leave it behind.
+__pycache__/
+*.pyc
+Desktop.ini
+Thumbs.db
+.DS_Store
+
+# --- third-party upstream working copies ---
+# Precisely anchored on the checkout itself. Do NOT widen this: the lock manifest
+# (third_party/sources.lock.json), the rules document (third_party/README.md),
+# third_party/patches/ and every EpoCanva document must stay versioned.
+# /third_party/librime/ is an independent git clone pinned by sources.lock.json.
+/third_party/librime/
+
+# --- secrets must never enter the repo ---
+*.pfx
+*.key
+*.pem
+secrets.json
+.env
+.env.*

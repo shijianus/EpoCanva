@@ -1,0 +1,98 @@
+# EpoCanva P1.3 test fixture -- raw input-link probe schema.
+#
+# schema_id: epocanva_test_raw
+#
+# WHAT THIS IS: the smallest schema that lets a headless program prove that keys
+# really travel  process_key -> processor -> segmentor -> translator -> context
+# -> preedit/candidates, and that a composition really travels
+# -> commit -> session commit queue -> get_commit.
+#
+# WHAT THIS IS NOT: it is not an English predictor, not an English completer,
+# not a word list, not a spelling corrector and not a "minimal English MVP".
+# It transliterates nothing: the candidate text is byte-identical to the keys the
+# test injected. Passing every assertion in tools/rime_input_replay says only
+# that the input link works for the seven ASCII keys the fixture claims to own.
+#
+# Every component name below was read out of the pinned checkout (librime 1.17.0,
+# commit 33e78140250125871856cdc5b42ddc6a5fcd3cd4), from the Registry::Register
+# calls in src/rime/gear/gears_module.cc:46-88. Nothing here is a guess and
+# nothing here names a plugin, an external dictionary or a language model.
+
+schema:
+  schema_id: epocanva_test_raw
+  # ASCII-only name on purpose: schema_name crosses the C ABI as UTF-8 bytes and
+  # the replay program asserts on it byte-for-byte.
+  name: EpoCanva raw link fixture
+  version: "0.0.0-p1.3-fixture"
+
+# No `switches:` section -> ConcreteEngine::InitializeOptions() finds nothing to
+# reset (src/rime/engine.cc:376-395), so every RimeStatus flag the replay reads
+# stays in its documented false state instead of depending on fixture ordering.
+
+# Declared explicitly rather than inherited from default:/menu via
+# DefaultConfigPlugin (src/rime/config/default_config_plugin.cc:22-28). Where the
+# two differ the schema wins: IncludeReference::Resolve replaces the target with
+# the included map and then merges the schema's own keys back over it
+# (src/rime/config/config_compiler.cc:62-76).
+menu:
+  page_size: 5
+
+engine:
+  processors:
+    # Owns exactly the lowercase ASCII letters listed in speller/alphabet.
+    # A letter -> PushInput + BeginEditing -> kAccepted (src/rime/gear/speller.cc:128-145).
+    # Anything else -> kNoop at :109-110, before any input is touched.
+    - speller
+    # Supplies the BackSpace / Escape / Return bindings. Its catch-all
+    # "printable char goes into the input buffer" handler is switched off below,
+    # which is what keeps this fixture from accepting digits and punctuation.
+    - fluid_editor
+  segmentors:
+    # Groups a run of alphabet characters into one "abc"-tagged segment
+    # (src/rime/gear/abc_segmentor.cc:39-69). Reads speller/alphabet, same key.
+    - abc_segmentor
+    # Claims any input position abc_segmentor left uncovered, one character at a
+    # time, as a "raw" segment (src/rime/gear/fallback_segmentor.cc:16-57). With
+    # an alphabet-gated speller nothing should ever reach it; it is present so
+    # that "no position is left untranslated" is structurally guaranteed rather
+    # than merely observed.
+    - fallback_segmentor
+  translators:
+    # The only translation source: it turns the segment's own input text into a
+    # single SimpleCandidate of type "raw" at quality -100
+    # (src/rime/gear/echo_translator.cc:30-43). It opens no dictionary, no user
+    # dictionary, no prediction model and no file handle.
+    - echo_translator
+
+speller:
+  # Lowercase ASCII only, a-z. Deliberately not upstream's reverse-order default
+  # "zyxwvutsrqponmlkjihgfedcba" (src/rime/gear/speller.cc:20) so that the fixture
+  # states its own accepted key set.
+  alphabet: "abcdefghijklmnopqrstuvwxyz"
+  # No delimiter -> "'" and " " never enter the input buffer. With delimiter empty,
+  # Speller::ProcessKeyEvent's `belongs_to(ch, delimiters_)` is false for every
+  # character (std::string::find on an empty string returns npos).
+  delimiter: ""
+  # Left unset on purpose so initials_ == alphabet_ (src/rime/gear/speller.cc:95-97):
+  # every letter is an initial, and no letter is ever rejected as "not a valid
+  # spelling start". Also unset: auto_select, max_code_length, auto_clear,
+  # use_space -> every one of those features keeps its source default
+  # (auto_select_ false, max_code_length_ 0, auto_clear_ kClearNone, use_space_
+  # false; src/rime/gear/speller.h:44-48) and no key can silently commit, clear or
+  # auto-select anything behind the test's back.
+
+editor:
+  # fluid_editor's constructor hardcodes char_handler_ = &Editor::AddToInput
+  # (src/rime/gear/editor.cc:201), which pushes ANY byte in 0x21..0x7e into the
+  # input buffer (src/rime/gear/editor.cc:58-63). Selecting "noop" maps to the
+  # nullptr entry of editor_char_handler_definitions
+  # (src/rime/gear/editor.cc:34-39, 74-85) and clears it, so digits, uppercase
+  # letters and punctuation are NOT consumed by this fixture.
+  char_handler: noop
+  # Unbinds the constructor's {XK_space, 0} -> Confirm binding
+  # (src/rime/gear/editor.cc:191). A `noop` action erases the keymap entry
+  # (Keymap::Bind, src/rime/gear/key_binding_processor_impl.h:71-78). Space is
+  # therefore expected to be reported as unhandled, leaving exactly one commit
+  # key in this fixture: Return.
+  bindings:
+    space: noop

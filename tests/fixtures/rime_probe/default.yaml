@@ -1,0 +1,27 @@
+# EpoCanva P1.4 test fixture -- default settings for the compiled-in component probe.
+#
+# Same shape as tests/fixtures/rime_raw/default.yaml, one thing different: the
+# single schema this deployment offers is epocanva_test_probe.
+#
+# It defines NO punctuator, NO key_binder, NO recognizer, NO translator beyond the
+# echo translator named by the schema, and NO dictionary. Nothing here is imported
+# from an upstream production preset and nothing here is a distribution candidate.
+#
+# Consumed by: tools/rime_component_probe, deployed through the public C API slots
+# deploy_config_file("default.yaml", "config_version").
+
+config_version: "0.0.0-p1.4-fixture"
+
+# Exactly one entry, for the reason recorded in tests/fixtures/rime_raw/README.md:
+# Switcher::CreateSchema() resolves the synthetic ".default" schema from this list
+# (src/rime/engine.cc:338-341, src/rime/switcher.cc:174-196), and a second entry
+# would make a new session's initial schema depend on user.yaml history
+# (src/rime/switcher.cc:179-181) instead of being deterministic.
+schema_list:
+  - schema: epocanva_test_probe
+
+# Inherited by every schema through DefaultConfigPlugin's optional include of
+# default:/menu (src/rime/config/default_config_plugin.cc:22-28). The schema
+# restates page_size explicitly rather than relying on that merge.
+menu:
+  page_size: 5

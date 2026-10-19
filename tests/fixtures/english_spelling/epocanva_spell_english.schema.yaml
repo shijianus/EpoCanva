@@ -1,0 +1,74 @@
+# EpoCanva P2.6 test fixture -- the same component, with spelling suggestions ON.
+#
+# schema_id: epocanva_spell_english
+#
+# WHY A SEPARATE SCHEMA AND NOT A FLIPPED DEFAULT. `english/enable_suggestions` is
+# false when a schema does not name it, so the two older fixtures
+# (english_completion, english_pilot) keep producing exactly the menus they produced
+# before P2.6 -- and the CTest cases that prove that are regression evidence rather
+# than a hope. A suggestion feature that came on by default would silently change
+# eleven existing cases' expected menus, which is the difference between "we added a
+# capability" and "we moved the goalposts".
+#
+# WHAT DIFFERS FROM tests/fixtures/english_completion/epocanva_test_english.schema.yaml:
+# the schema identity, the word list, and two keys under `english:`. The engine chain,
+# the 76-byte speller/alphabet, the empty delimiter, the neutralised editor and the
+# completion budget are copied verbatim. In particular `page_size: 8` and
+# `max_completions: 7` are unchanged, so the candidate ceiling this phase must respect
+# is the same ceiling -- suggestions do not get to be wider.
+#
+# THE WORD LIST IS CONTROLLED TEST DATA, NOT ENGLISH. Its 16 rows exist so each of the
+# four allowed edits has an isolated example, so a weight tie and a budget cut are
+# observable, and so every suppression gate has an input that reaches it. See
+# README.md next to this file for the derivation of every expectation.
+#
+# Component and option names were read out of the pinned librime checkout
+# (1.17.0 / 33e78140250125871856cdc5b42ddc6a5fcd3cd4); the reasons for each line are
+# recorded in tests/fixtures/english_completion/epocanva_test_english.schema.yaml,
+# which this file mirrors.
+
+schema:
+  schema_id: epocanva_spell_english
+  # ASCII-only id, asserted byte for byte through the C ABI.
+  name: EpoCanva English spelling suggestion test
+  version: "0.0.0-p2.6-fixture"
+
+menu:
+  # 8, as everywhere else: one original candidate plus at most seven others.
+  page_size: 8
+
+engine:
+  processors:
+    - epocanva_english_space
+    - speller
+    - fluid_editor
+  segmentors:
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - epocanva_english_translator@english
+
+speller:
+  # Copied verbatim from the hand-written fixture, including the doubled backslash
+  # that a double-quoted YAML scalar needs for the single 0x5C byte.
+  alphabet: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'@._:/\\?&=#%+-"
+  delimiter: ""
+
+editor:
+  char_handler: noop
+  bindings:
+    space: noop
+
+english:
+  # Staged by the test program at <shared>/lexicon/epocanva_spell_lexicon.tsv; the
+  # name is spelling-specific so no compiled log can be read as the 54-row or the
+  # pilot list. Relative paths resolve against the engine's shared data directory,
+  # never the process working directory (src/rime/setup.cc:46-47).
+  lexicon_path: "lexicon/epocanva_spell_lexicon.tsv"
+  max_completions: 7
+  # P2.6, and the reason this file exists: the only two keys that turn the
+  # one-edit suggester on. `max_suggestions` may be lowered by a schema and never
+  # raised above the component's own ceiling, so the menu cannot be widened by
+  # configuration however many rows sit one edit away.
+  enable_suggestions: true
+  max_suggestions: 3

@@ -1,0 +1,48 @@
+# Normalize line endings so the C++ sources keep a stable byte layout across
+# machines; the toolchain probe asserts exact byte counts.
+* text=auto eol=lf
+
+*.md   text eol=lf
+*.txt  text eol=lf
+*.cc   text eol=lf
+*.h    text eol=lf
+*.hpp  text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.patch text eol=lf
+*.diff  text eol=lf
+
+# Windows scripts must keep CRLF to be runnable by cmd.exe.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Never let git rewrite bytes inside binaries; charset probes depend on exact content.
+*.png     binary
+*.jpg     binary
+*.ico     binary
+*.icns    binary
+*.ttf     binary
+*.otf     binary
+*.dylib   binary
+*.so      binary
+*.obj     binary
+*.lib     binary
+*.dll     binary
+*.exe     binary
+*.msi     binary
+*.cab     binary
+*.apk     binary
+*.zip     binary
+*.7z      binary
+*.rime.bin binary
+
+# Generated / vendored content should not pollute diffs.
+# Anchored: an unanchored build/ would also match docs/build/ and kill diffs
+# for the bootstrap documentation.
+/build/ -diff
+*.min.js -diff
+*.lock -diff

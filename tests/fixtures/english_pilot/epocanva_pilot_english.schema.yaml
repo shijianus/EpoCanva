@@ -1,0 +1,126 @@
+# EpoCanva P2.4 pilot fixture -- the same component, driven by a REAL word list.
+#
+# WHAT DIFFERS FROM tests/fixtures/english_completion/: one thing only -- the word
+# list. It is the 42,356-row pilot lexicon produced by
+# tools/data/build_english_pilot.py from ONE file of the Alt12Dicts package
+# (alt12dicts/2of12full.txt) at the pinned commit recorded in
+# data/manifests/english-pilot.sources.lock.json -- a local trial on a pinned
+# Alt12Dicts subset, NOT an ESDB/SCOWL 35/50/60 size-variant export -- staged by the
+# test program under the name this schema asks for. Everything below the header is
+# copied from the hand-written fixture verbatim: the same processor chain including
+# the P2.5 space policy, the same inert segmentors and translator, the same 76-byte
+# speller/alphabet, the same page_size and the same max_completions. If a behaviour
+# changes between the two fixtures, it is the data that changed, not the
+# configuration -- which is the only way this phase can call its numbers a scale
+# measurement instead of a configuration change.
+#
+# WHY A SEPARATE FILE AND RUN DIRECTORY (P2.4 brief boundaries 6 and 7): the 54-row
+# fixture and its 11 CTest cases stay exactly as they are, including the hand-derived
+# candidate expectations that only hold for those 54 rows. The pilot is configured,
+# built and run in build/english-pilot/, and its cases are registered only when
+# -DEPOCANVA_ENGLISH_PILOT_LEXICON names a generated file. A machine that has not
+# fetched the pinned source therefore does not run a quietly-skipped pilot test: it
+# does not register one at all, and docs/reports/P2.4-english-pilot-lexicon.md says
+# which cases were run here.
+#
+# WHAT THIS IS NOT: not a production dictionary, not a frequency-ranked list (the
+# weights are a coarse count of source dictionaries, see docs/compliance/
+# english-pilot-data.md), not spelling correction, not prediction, not learning, and
+# not a segmentation or general-orthography implementation.
+#
+# Component and option names were read out of the pinned librime checkout
+# (1.17.0 / 33e78140250125871856cdc5b42ddc6a5fcd3cd4), and the reasons for each
+# line are recorded in tests/fixtures/english_completion/epocanva_test_english.schema.yaml,
+# which this file mirrors.
+
+schema:
+  schema_id: epocanva_pilot_english
+  # ASCII-only id: it crosses the C ABI as UTF-8 bytes and the test asserts it
+  # byte-for-byte.
+  name: EpoCanva English pilot lexicon test
+  version: "0.0.0-p2.5-fixture"
+
+menu:
+  # 8 so that the whole candidate budget (1 original + 7 completions) is visible on
+  # the first page; a smaller page size would make the cap unobservable here.
+  page_size: 8
+
+engine:
+  processors:
+    # P2.5: identical chain to the hand-written fixture, space policy first. If this
+    # list ever diverges from tests/fixtures/english_completion/, the pilot stops
+    # being a data-scale measurement of the same behaviour and the comparison in
+    # tests/fixtures/english_pilot/README.md section 1 is void.
+    - epocanva_english_space
+    - speller
+    - fluid_editor
+  segmentors:
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - epocanva_english_translator@english
+
+speller:
+  # P2.2: A-Z are in the alphabet on purpose. Speller::ProcessKeyEvent() drops any
+  # printable key that is not in speller/alphabet or speller/delimiter
+  # (src/rime/gear/speller.cc:109-110) and the chain has no char_handler to catch it
+  # (editor/char_handler is noop below), so without these 26 bytes an uppercase key
+  # never reaches the composition at all and "Hel" could not be tested through real
+  # keys. Nothing in the chain lowercases: speller.cc, abc_segmentor.cc, editor.cc,
+  # context.cc and key_event.cc contain no tolower/toupper, and the only use of
+  # shift() in speller.cc is for the space key (:107).
+  #
+  # P2.3: the ASCII letters are joined by the two word delimiters (' -), the ten
+  # digits and the eleven technical marks @ . _ : / \ ? & = # % +. THIS IS THE
+  # PROTECTION MECHANISM, not a relaxation of it. Reason, from the pinned source:
+  #   - a byte outside speller/alphabet is dropped by the speller (:109-110), so the
+  #     composition would stop at "user" and the "@" would never be seen at all;
+  #   - a byte that IS in the alphabet keeps AbcSegmentor::Proceed() extending the
+  #     same segment over it (:46 tests membership, and :34-36 makes every alphabet
+  #     byte an initial because speller/initials is unset), so "user@example.com"
+  #     arrives as ONE segment covering the whole token;
+  #   - if instead the composition were cut, FallbackSegmentor::Proceed()
+  #     (src/rime/gear/fallback_segmentor.cc:16-56) would add one-byte "raw"
+  #     segments for the leftovers, and this translator would then be queried about
+  #     the letters only -- completing "user" while the user was typing an address,
+  #     which is exactly the corruption P2.3 forbids.
+  # So the marks are accepted into the composition and then refused by the token
+  # layer, which counts the refusal (english_token.h ->
+  # CompletionOutcome::kProtectedText). Nothing is stripped, translated or
+  # "normalised" on the way: the candidate list for these inputs is the typed text
+  # and nothing else. The integration test asserts
+  # queries_covering_part_of_input stays 0 while typing them, which is what proves
+  # the token reached the translator whole.
+  #
+  # YAML note: the backslash below is DOUBLED because this is a double-quoted YAML
+  # scalar, which processes escapes: the two bytes \\ below deploy as the single
+  # 0x5C byte the token layer expects.
+  alphabet: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'@._:/\\?&=#%+-"
+  # Left empty on purpose. A byte in speller/delimiter is accepted by the speller
+  # (src/rime/gear/speller.cc:109) but then makes the NEXT byte have to be an
+  # initial (src/rime/gear/abc_segmentor.cc:50-56), which is a segmentation rule,
+  # and P2.3 needs "user@example.com" to stay one segment that the language core
+  # refuses as a whole. The two word delimiters are therefore ordinary alphabet
+  # bytes here; whether they are legal inside a token is english_token.h's call.
+  delimiter: ""
+
+editor:
+  # Neutralise the two default behaviours that would otherwise add text or commit
+  # without the test asking (reasons recorded in tests/fixtures/rime_raw/README.md).
+  char_handler: noop
+  bindings:
+    space: noop
+
+english:
+  # Path the Translator resolves. Relative paths are resolved against the engine's
+  # shared data directory (RimeTraits.shared_data_dir -> Deployer::shared_data_dir,
+  # src/rime/setup.cc:46-47, src/rime/deployer.h:35), NEVER against the process
+  # working directory. The test program stages the word list at
+  # <shared>/lexicon/epocanva_pilot_lexicon.tsv, so this line is the join point.
+  # Staged by the test program from the generated pilot file. The staged name
+  # is pilot-specific so no compiled log can be read as the 54-row list.
+  lexicon_path: "lexicon/epocanva_pilot_lexicon.tsv"
+  # The component's own default is 7 and it may only be lowered, so that the
+  # "at most 8 candidates" contract cannot be widened by configuration. Stated
+  # explicitly here to make the budget visible in the fixture.
+  max_completions: 7
