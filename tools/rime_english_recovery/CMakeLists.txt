@@ -123,6 +123,8 @@ foreach(_f
         "${CMAKE_CURRENT_SOURCE_DIR}/recovery_test_support.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/completion_tests.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/completion_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/case_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/case_tests.cc"
         "${EpoCanva_Assert_Script}")
   if(NOT EXISTS "${_f}")
     message(FATAL_ERROR "required input missing: ${_f}")
@@ -132,7 +134,8 @@ endforeach()
 set(_SOURCES
   main.cc
   recovery_test_support.cc
-  completion_tests.cc)
+  completion_tests.cc
+  case_tests.cc)
 set(_DEFINES RIME_IMPORTS _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 set(_OPTIONS /utf-8 /permissive- /Zc:__cplusplus /W4 /EHsc)
 
@@ -270,6 +273,30 @@ epocanva_add_case(
   MARKER_POLICY forbid
   LABEL     self-check-fail)
 
+# 7. The P2.2 case matrix, same fixture and same engine: three shapes render the same
+#    rows, mixed case is refused, an exact entry in another shape dedupes rather than
+#    refuses, the default commit keeps the user's own case, a selected completion commits
+#    in that shape, BackSpace recomputes the shape, two sessions keep their own, and the
+#    whole matrix costs exactly one word-list read.
+epocanva_add_case(
+  NAME      recovery.case.preservation_and_mapped_commit
+  MODE      case-preservation
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     case-preservation)
+
+# 8. The case group's own falsification control: the right four words in the wrong order.
+#    A menu check that compared only the SET would keep passing here, which is exactly the
+#    degradation this case exists to catch.
+epocanva_add_case(
+  NAME      recovery.case.suite_can_fail_on_menu_ranking
+  MODE      case-self-check-fail
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     case-self-check-fail)
+
 set_tests_properties(
   recovery.completion.prefix_candidates_and_commit
   recovery.completion.negative_baseline_engine
@@ -277,7 +304,9 @@ set_tests_properties(
   recovery.completion.negative_mode_fails_on_english_engine
   recovery.completion.rejects_unknown_mode
   recovery.completion.suite_can_fail
-  PROPERTIES TIMEOUT 180 LABELS "librime;english;completion;recovery")
+  recovery.case.preservation_and_mapped_commit
+  recovery.case.suite_can_fail_on_menu_ranking
+  PROPERTIES TIMEOUT 180 LABELS "librime;english;completion;case;recovery")
 
 # The wrapper's own timeout is one notch below the CTest TIMEOUT so a hung program is
 # reported by the wrapper (non-numeric result) before CTest kills the run.

@@ -94,6 +94,10 @@ enum class Mode {
   kCompletion,
   kExpectModuleAbsent,
   kSelfCheckFail,
+  kCasePreservation,
+  kCaseSelfCheckFail,
+  kTokenProtection,
+  kTokenSelfCheckFail,
 };
 
 struct Options {
@@ -175,9 +179,21 @@ struct KeyEvent {
   StateSnapshot state;
 };
 
+// Asserts everything one keystroke frame must show: that the key was handled, the raw
+// composition as get_input() returned it, the preedit text and its length in UTF-8 code
+// units, the whole candidate menu in menu order, an empty comment column, and candidate 0
+// equal to the typed text. Expected menus are written the way the fixture documentation
+// writes them -- pipe-joined, index 0 first.
+//
+// `want_page_size` is the schema's menu/page_size and is asserted per frame, because a
+// frame whose page size reads 0 is an engine that never built the menu this run claims to
+// have read.
+void CheckFrame(Checker* checks, const KeyEvent& e, const std::string& want_raw,
+                 const std::string& want_menu, long want_page_size,
+                 const std::string& label);
+
 // The engine, the fixture and the accounting a mode is allowed to touch.
-struct Harness {
-  RimeApi* api = nullptr;
+struct Harness {  RimeApi* api = nullptr;
   EnglishSurface surface;
   std::filesystem::path schema_source;  // staged copy, in the shared dir
   std::filesystem::path shared_dir;
@@ -221,6 +237,18 @@ ExitCode ReadCommitOnce(RimeApi* api, RimeSessionId sid, ApiBalance* balance,
 EnglishSurface AcquireEnglishSurface(RimeApi* api);
 bool ReadCounters(const EnglishSurface& surface, EpoCanvaEnglishCounters* out);
 std::string LastStatusName(const EnglishSurface& surface);
+// Signed difference of ONE counter field between two snapshots. A negative delta is
+// itself a finding -- it would mean the counters were reset mid-run -- so it must not be
+// swallowed by unsigned arithmetic. `field` is a member of the C struct, named at the
+// call site, which keeps this helper from encoding any opinion about which counters
+// should move.
+long long CounterDelta(const EpoCanvaEnglishCounters& before,
+                       const EpoCanvaEnglishCounters& after,
+                       unsigned long long EpoCanvaEnglishCounters::*field);
+// The sum of every P2.6 spelling counter. Zero is how a mode proves the schema it
+// deployed asked for no suggestions at all: "the menu looked right" cannot show that,
+// because a suggestion and a completion are indistinguishable in the text column.
+long long SpellingTotal(const EpoCanvaEnglishCounters& c);
 
 // --- keys ---------------------------------------------------------------------
 ExitCode SendKey(RimeApi* api, RimeSessionId sid, int keycode, int mask,

@@ -13,6 +13,7 @@
 // assert_exit.cmake.
 #include <cstdio>
 
+#include "case_tests.h"
 #include "completion_tests.h"
 #include "recovery_test_support.h"
 
@@ -33,6 +34,8 @@ constexpr ModeEntry kModes[] = {
     {Mode::kCompletion, epocanva::recovery::RunCompletionMode},
     {Mode::kExpectModuleAbsent, epocanva::recovery::RunExpectModuleAbsentMode},
     {Mode::kSelfCheckFail, epocanva::recovery::RunSelfCheckFailMode},
+    {Mode::kCasePreservation, epocanva::recovery::RunCasePreservationMode},
+    {Mode::kCaseSelfCheckFail, epocanva::recovery::RunCaseSelfCheckFailMode},
 };
 
 ModeFn FindMode(Mode mode) {
@@ -54,7 +57,8 @@ int main(int argc, char** argv) {
         "usage: rime_english_recovery --expect-dll <the rime.dll this run must have "
         "loaded, compared after GetFullPathNameW normalization> --fixture-dir <path> "
         "--run-root <a leaf under rime-english-recovery-run> [--mode completion|"
-        "expect-module-absent|self-check-fail]\n");
+        "expect-module-absent|self-check-fail|case-preservation|"
+        "case-self-check-fail]\n");
     epocanva::recovery::Fail(epocanva::recovery::kUsage, "arguments", error);
     return epocanva::recovery::kUsage;
   }

@@ -28,7 +28,8 @@
 | 测试必须能失败 | 断言一条夹具证明不存在的候选，程序必须以 14 退出且不打印成功标记 | **已从新源码编译验证**（`recovery.completion.suite_can_fail`） | 新：`build/english-recovery/evidence-self-check-fail.log` |
 | 参数与模式校验 | 缺参数 exit 2；未知模式 exit 2；run-root 守护名不符 exit 6 且不删除任何东西 | **已从新源码编译验证**（`recovery.completion.rejects_unknown_mode` + 手工三条） | 新：`build/english-recovery/evidence-unknown-mode.log`、`evidence-noargs.log`、`evidence-relative.log` |
 | 资源按公开 API 契约释放 | `get_/free_` 逐对配平，未配平则 exit 16；finalize 后不再触碰诊断面且 `create_session()` 被拒 | **已从新源码编译验证**（实测 status 27/27、context 27/27、commit 3/3） | 同上 completion 日志 |
-| ASCII 大小写映射与原文保真<br>`english.completion.case_preservation_and_mapped_commit` | `lowercase`/`initial-capital`/`uppercase` 三形状可补全并按原形状渲染；`mixed` 与整词命中只出原文；`nomatch/mixed/notalpha/toolong` 四桶分离；`compl == cl+ci+cu`；`shift+h` 必须得到小写 `h` | **尚未恢复** | 仅有事故前日志证据：`build/p23-verify/evidence-case-preservation.log`；判据 `docs/testing/rime-english-completion.md` §6.1、`tests/fixtures/english_completion/README.md` §5.1 |
+| ASCII 大小写映射与原文保真<br>`english.completion.case_preservation_and_mapped_commit` | `lowercase`/`initial-capital`/`uppercase` 三形状可补全并按原形状渲染；`HeL`/`hE`/`hEL` 混合仅原文；`Hello` 整词命中是**去重**而非拒绝（`nomatch=1` 而 `rejected` 不动）；单个 `H` 归 initial-capital；`HEL` 退格回 `HE` 仍按全大写重算；默认 Return 提交原形状；显式选择提交 `HELLO`；提交二次读取为空；A=`HE` 与 B=`he` 互不污染；shift+`h` 实测得到小写 `h`（事件形状是被断言的事实）；整套形状矩阵只读词表一次 | **已从新源码编译验证**（新名 `recovery.case.preservation_and_mapped_commit`，466 条断言 0 失败；终局 `queries=29 with_index=29 rejected=3 mixed=3 notalpha=0 toolong=0 illegal=0 delimited=0 nomatch=1 cl=43 ci=67 cu=30 compl=140 attempts=1 whole=29 part=0 spell=0`，`api.balance status 42/42 context 42/42 commit 6/6`，`xl_ctor=4 xl_dstr=4 live=0`）。**范围声明**：只覆盖 52 个 ASCII 字母的四种形状，**不是** Unicode case folding、区位大小写或句首自动大写；按键走 `process_key()` 的 API 层，**不是** Windows 键盘适配 / TSF 层验证 | 新：`build/english-recovery/evidence-case.log`；旧：`build/p23-verify/evidence-case-preservation.log`；判据 `docs/testing/rime-english-completion.md` §6.1、`tests/fixtures/english_completion/README.md` §5.1 |
+| 大小写组必须能失败 | 断言"同样四个词、次序错误"的菜单须以 14 退出且无成功标记；若菜单检查退化为只比集合，这一条会继续假装绿 | **已从新源码编译验证**（`recovery.case.suite_can_fail_on_menu_ranking`，实测 `[index 1]: got "Hello"`、`[index 2]: got "Help"`，11 checked / 2 failed） | 新：`build/english-recovery/evidence-case-self-check-fail.log` |
 | 词形与技术文本保护<br>`english.completion.token_boundaries_and_protection`、`…negative_bad_lexicon_illegal_form` | 分隔符前缀（`don'`/`co-`/`can'`/`re-`）继续补全；数字与 11 个技术标记整词原样返回；非法词形是**独立状态名**；逐帧 `compl` 增量为 0 而原因桶 +1；`whole==queries, part==0`；65 字节不裁字节 | **尚未恢复** | 仅有事故前日志证据：`build/p23-verify/evidence-token-protection.log`、`evidence-bad-lexicon-illegal-form.log`；判据 §6.2、README §5.2 |
 | 空格与连续多词输入<br>`english.completion.space_boundaries_and_multi_word_commit` | A/B/C 三规则；每步同时断言 handled、`get_input()` 原串、菜单、提交队列、`space_case_*` 计数；高亮≠选择；Ctrl/Alt/Super/release 不消费；四条恒等式 | **尚未恢复** | 仅有事故前日志证据：`build/p25-verify/evidence-space.log`；判据 §6.4、README §5.3 |
 | 词表负向路径<br>`…negative_missing_lexicon`、`…bad_lexicon-duplicate`、`…bad_lexicon-illegal` | 四种失败各有 `attempts/ok/fail/entries/errline` + 状态名组合，且都只出原文 1 项；失败结果同样被缓存（`attempts=1`） | **尚未恢复**（新工程目前只复制正向夹具，负向夹具 `lexicon_bad_*.tsv` 与运行时改名规则未接） | 仅有事故前日志证据：`build/p23-verify/evidence-missing-lexicon.log` 等；判据 §8 表 |
@@ -45,8 +46,10 @@
    marker 策略），未新增第二种判定口径；也复用存活的
    `tests/fixtures/english_completion/`，夹具只读。
 
-## 3. 下一步顺序（每步一个可编译、可判定的增量）
+## 3. 顺序与已完成批次（每步一个可编译、可判定的增量）
 
-`case-preservation` → 三条词表负向 → `token-protection` → `space-commit` →
+已完成：批次 1 = 公共框架 + `completion`（6 条）；批次 2a = `case-preservation`（新增 2 条，共 8 条）。
+
+待做：`token-protection` → 三条词表负向 → `space-commit` →
 `spelling`（先只读判定 `patch_spell_mode.py` 的插入文本，外层骨架由新工程补齐）→
 `pilot-lexicon` → 最后才是 `pilot-spelling`（新增，非恢复）。

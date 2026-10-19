@@ -322,8 +322,37 @@ std::string JoinComments(const StateSnapshot& state) {
   return line;
 }
 
-std::string DescribeState(const StateSnapshot& s) {
-  char buf[96];
+void CheckFrame(Checker* checks, const KeyEvent& e, const std::string& want_raw,
+                 const std::string& want_menu, long want_page_size,
+                 const std::string& label) {
+  const std::vector<std::string> want = SplitPipeList(want_menu);
+  checks->Check(e.handled, label + ": process_key() handled the key",
+                e.handled ? "True" : "False");
+  checks->CheckStr(e.state.raw_input, want_raw,
+                   label + ": get_input() raw composition");
+  checks->Check(e.state.has_preedit, label + ": preedit present",
+                e.state.has_preedit ? e.state.preedit : std::string("absent"));
+  checks->CheckStr(e.state.preedit, want_raw, label + ": preedit text");
+  checks->CheckNum(e.state.preedit_length,
+                   static_cast<long long>(want_raw.size()),
+                   label + ": preedit length (UTF-8 code units)");
+  checks->CheckNum(e.state.num_candidates, static_cast<long long>(want.size()),
+                   label + ": candidate count");
+  checks->CheckNum(e.state.page_size, want_page_size, label + ": menu page_size");
+  checks->CheckMenu(e.state, want_menu, label + ": menu");
+  // An empty comment column, one empty field per candidate. A label here would mean
+  // this run deployed a schema with the suggestion feature on.
+  checks->CheckStr(
+      JoinComments(e.state),
+      want.empty() ? std::string() : std::string(want.size() - 1, '|'),
+      label + ": empty comment column");
+  if (!want.empty()) {
+    checks->CheckStr(e.state.candidates[0], want_raw,
+                     label + ": candidate 0 is the typed text");
+  }
+}
+
+std::string DescribeState(const StateSnapshot& s) {  char buf[96];
   std::string line;
   std::snprintf(buf, sizeof(buf), "schema=%s composing=%d disabled=%d ",
                 s.schema_id.c_str(), s.status_composing ? 1 : 0,
@@ -350,12 +379,15 @@ std::string DescribeState(const StateSnapshot& s) {
 }
 
 std::string DescribeCounters(const EpoCanvaEnglishCounters& c) {
-  char buf[512];
+  char buf[896];
   std::snprintf(buf, sizeof(buf),
                 "mod_init=%llu mod_fin=%llu xl_ctor=%llu xl_dstr=%llu xl_live=%llu "
                 "attempts=%llu ok=%llu fail=%llu entries=%llu errline=%llu "
                 "queries=%llu with_index=%llu rejected=%llu orig=%llu compl=%llu "
-                "cl=%llu ci=%llu cu=%llu whole=%llu part=%llu",
+                "cl=%llu ci=%llu cu=%llu delimited=%llu "
+                "nomatch=%llu mixed=%llu notalpha=%llu toolong=%llu illegal=%llu "
+                "protected=%llu nonascii=%llu unsup=%llu "
+                "whole=%llu part=%llu spell=%lld",
                 static_cast<unsigned long long>(c.module_initialized),
                 static_cast<unsigned long long>(c.module_finalized),
                 static_cast<unsigned long long>(c.translator_constructed),
@@ -374,9 +406,54 @@ std::string DescribeCounters(const EpoCanvaEnglishCounters& c) {
                 static_cast<unsigned long long>(c.completions_lowercase),
                 static_cast<unsigned long long>(c.completions_initial_capital),
                 static_cast<unsigned long long>(c.completions_uppercase),
+                static_cast<unsigned long long>(c.completions_with_delimiter),
+                static_cast<unsigned long long>(c.queries_no_match),
+                static_cast<unsigned long long>(c.queries_mixed_case),
+                static_cast<unsigned long long>(c.queries_not_alphabetic),
+                static_cast<unsigned long long>(c.queries_too_long),
+                static_cast<unsigned long long>(c.queries_illegal_word_form),
+                static_cast<unsigned long long>(c.queries_protected),
+                static_cast<unsigned long long>(c.queries_non_ascii),
+                static_cast<unsigned long long>(c.queries_unsupported_byte),
                 static_cast<unsigned long long>(c.queries_covering_whole_input),
-                static_cast<unsigned long long>(c.queries_covering_part_of_input));
+                static_cast<unsigned long long>(c.queries_covering_part_of_input),
+                SpellingTotal(c));
   return std::string(buf);
+}
+
+long long CounterDelta(const EpoCanvaEnglishCounters& before,
+                       const EpoCanvaEnglishCounters& after,
+                       unsigned long long EpoCanvaEnglishCounters::*field) {
+  return static_cast<long long>(after.*field) - static_cast<long long>(before.*field);
+}
+
+long long SpellingTotal(const EpoCanvaEnglishCounters& c) {
+  const unsigned long long EpoCanvaEnglishCounters::*fields[] = {
+      &EpoCanvaEnglishCounters::spelling_suggested,
+      &EpoCanvaEnglishCounters::spelling_no_candidate,
+      &EpoCanvaEnglishCounters::spelling_candidates_appended,
+      &EpoCanvaEnglishCounters::spelling_variants_generated,
+      &EpoCanvaEnglishCounters::spelling_lexicon_lookups,
+      &EpoCanvaEnglishCounters::spelling_skipped_word_in_lexicon,
+      &EpoCanvaEnglishCounters::spelling_skipped_completion,
+      &EpoCanvaEnglishCounters::spelling_skipped_protected,
+      &EpoCanvaEnglishCounters::spelling_skipped_delimited,
+      &EpoCanvaEnglishCounters::spelling_skipped_mixed_case,
+      &EpoCanvaEnglishCounters::spelling_skipped_too_short,
+      &EpoCanvaEnglishCounters::spelling_skipped_too_long,
+      &EpoCanvaEnglishCounters::spelling_skipped_unsupported_byte,
+      &EpoCanvaEnglishCounters::spelling_skipped_non_ascii,
+      &EpoCanvaEnglishCounters::spelling_skipped_empty,
+      &EpoCanvaEnglishCounters::spelling_lexicon_unavailable,
+      &EpoCanvaEnglishCounters::spelling_suggestions_lowercase,
+      &EpoCanvaEnglishCounters::spelling_suggestions_initial_capital,
+      &EpoCanvaEnglishCounters::spelling_suggestions_uppercase,
+  };
+  long long total = 0;
+  for (const auto& field : fields) {
+    total += static_cast<long long>(c.*field);
+  }
+  return total;
 }
 
 std::string DescribeDelta(const EpoCanvaEnglishCounters& before,
@@ -407,6 +484,22 @@ bool ModeFromName(const std::string& name, Mode* out) {
     *out = Mode::kSelfCheckFail;
     return true;
   }
+  if (name == "case-preservation") {
+    *out = Mode::kCasePreservation;
+    return true;
+  }
+  if (name == "case-self-check-fail") {
+    *out = Mode::kCaseSelfCheckFail;
+    return true;
+  }
+  if (name == "token-protection") {
+    *out = Mode::kTokenProtection;
+    return true;
+  }
+  if (name == "token-self-check-fail") {
+    *out = Mode::kTokenSelfCheckFail;
+    return true;
+  }
   return false;
 }
 
@@ -418,6 +511,14 @@ const char* ModeName(Mode mode) {
       return "expect-module-absent";
     case Mode::kSelfCheckFail:
       return "self-check-fail";
+    case Mode::kCasePreservation:
+      return "case-preservation";
+    case Mode::kCaseSelfCheckFail:
+      return "case-self-check-fail";
+    case Mode::kTokenProtection:
+      return "token-protection";
+    case Mode::kTokenSelfCheckFail:
+      return "token-self-check-fail";
   }
   return "?";
 }
