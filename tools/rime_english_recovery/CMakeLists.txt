@@ -125,6 +125,8 @@ foreach(_f
         "${CMAKE_CURRENT_SOURCE_DIR}/completion_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/case_tests.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/case_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/token_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/token_tests.cc"
         "${EpoCanva_Assert_Script}")
   if(NOT EXISTS "${_f}")
     message(FATAL_ERROR "required input missing: ${_f}")
@@ -135,7 +137,8 @@ set(_SOURCES
   main.cc
   recovery_test_support.cc
   completion_tests.cc
-  case_tests.cc)
+  case_tests.cc
+  token_tests.cc)
 set(_DEFINES RIME_IMPORTS _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 set(_OPTIONS /utf-8 /permissive- /Zc:__cplusplus /W4 /EHsc)
 
@@ -297,6 +300,34 @@ epocanva_add_case(
   MARKER_POLICY forbid
   LABEL     case-self-check-fail)
 
+# 9. The P2.3 matrix: a prefix ending in one ASCII delimiter stays completable in all three
+#    shapes and commits the whole word on selection; digits and the eleven technical marks
+#    come back whole, frame by frame, with no completion and the reason named; a delimiter
+#    pattern outside the limited grammar is refused as illegal-word-form, never as
+#    no-match and never as technical text; the whole token reaches the translator
+#    (queries_covering_part_of_input stays 0); protection is not sticky across BackSpace,
+#    Escape or a second session; and 64 code units is still queried while 65 is refused
+#    without losing a byte.
+epocanva_add_case(
+  NAME      recovery.token.boundaries_and_protection
+  MODE      token-protection
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     token-protection)
+
+# 10. The token group's falsification control: it asserts the exact corruption P2.3 forbids
+#     -- the letters of "hel@example.com" completed while the address was being typed -- and
+#     must exit 14. This is what proves the group checks candidate CONTENT and token SCOPE
+#     rather than only whether the final committed string happens to match.
+epocanva_add_case(
+  NAME      recovery.token.suite_can_fail_on_protected_text
+  MODE      token-self-check-fail
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     token-self-check-fail)
+
 set_tests_properties(
   recovery.completion.prefix_candidates_and_commit
   recovery.completion.negative_baseline_engine
@@ -306,7 +337,9 @@ set_tests_properties(
   recovery.completion.suite_can_fail
   recovery.case.preservation_and_mapped_commit
   recovery.case.suite_can_fail_on_menu_ranking
-  PROPERTIES TIMEOUT 180 LABELS "librime;english;completion;case;recovery")
+  recovery.token.boundaries_and_protection
+  recovery.token.suite_can_fail_on_protected_text
+  PROPERTIES TIMEOUT 180 LABELS "librime;english;completion;case;token;recovery")
 
 # The wrapper's own timeout is one notch below the CTest TIMEOUT so a hung program is
 # reported by the wrapper (non-numeric result) before CTest kills the run.

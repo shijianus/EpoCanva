@@ -16,6 +16,7 @@
 #include "case_tests.h"
 #include "completion_tests.h"
 #include "recovery_test_support.h"
+#include "token_tests.h"
 
 namespace {
 
@@ -36,6 +37,8 @@ constexpr ModeEntry kModes[] = {
     {Mode::kSelfCheckFail, epocanva::recovery::RunSelfCheckFailMode},
     {Mode::kCasePreservation, epocanva::recovery::RunCasePreservationMode},
     {Mode::kCaseSelfCheckFail, epocanva::recovery::RunCaseSelfCheckFailMode},
+    {Mode::kTokenProtection, epocanva::recovery::RunTokenProtectionMode},
+    {Mode::kTokenSelfCheckFail, epocanva::recovery::RunTokenSelfCheckFailMode},
 };
 
 ModeFn FindMode(Mode mode) {
@@ -58,7 +61,7 @@ int main(int argc, char** argv) {
         "loaded, compared after GetFullPathNameW normalization> --fixture-dir <path> "
         "--run-root <a leaf under rime-english-recovery-run> [--mode completion|"
         "expect-module-absent|self-check-fail|case-preservation|"
-        "case-self-check-fail]\n");
+        "case-self-check-fail|token-protection|token-self-check-fail]\n");
     epocanva::recovery::Fail(epocanva::recovery::kUsage, "arguments", error);
     return epocanva::recovery::kUsage;
   }

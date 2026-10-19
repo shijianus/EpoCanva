@@ -30,7 +30,8 @@
 | 资源按公开 API 契约释放 | `get_/free_` 逐对配平，未配平则 exit 16；finalize 后不再触碰诊断面且 `create_session()` 被拒 | **已从新源码编译验证**（实测 status 27/27、context 27/27、commit 3/3） | 同上 completion 日志 |
 | ASCII 大小写映射与原文保真<br>`english.completion.case_preservation_and_mapped_commit` | `lowercase`/`initial-capital`/`uppercase` 三形状可补全并按原形状渲染；`HeL`/`hE`/`hEL` 混合仅原文；`Hello` 整词命中是**去重**而非拒绝（`nomatch=1` 而 `rejected` 不动）；单个 `H` 归 initial-capital；`HEL` 退格回 `HE` 仍按全大写重算；默认 Return 提交原形状；显式选择提交 `HELLO`；提交二次读取为空；A=`HE` 与 B=`he` 互不污染；shift+`h` 实测得到小写 `h`（事件形状是被断言的事实）；整套形状矩阵只读词表一次 | **已从新源码编译验证**（新名 `recovery.case.preservation_and_mapped_commit`，466 条断言 0 失败；终局 `queries=29 with_index=29 rejected=3 mixed=3 notalpha=0 toolong=0 illegal=0 delimited=0 nomatch=1 cl=43 ci=67 cu=30 compl=140 attempts=1 whole=29 part=0 spell=0`，`api.balance status 42/42 context 42/42 commit 6/6`，`xl_ctor=4 xl_dstr=4 live=0`）。**范围声明**：只覆盖 52 个 ASCII 字母的四种形状，**不是** Unicode case folding、区位大小写或句首自动大写；按键走 `process_key()` 的 API 层，**不是** Windows 键盘适配 / TSF 层验证 | 新：`build/english-recovery/evidence-case.log`；旧：`build/p23-verify/evidence-case-preservation.log`；判据 `docs/testing/rime-english-completion.md` §6.1、`tests/fixtures/english_completion/README.md` §5.1 |
 | 大小写组必须能失败 | 断言"同样四个词、次序错误"的菜单须以 14 退出且无成功标记；若菜单检查退化为只比集合，这一条会继续假装绿 | **已从新源码编译验证**（`recovery.case.suite_can_fail_on_menu_ranking`，实测 `[index 1]: got "Hello"`、`[index 2]: got "Help"`，11 checked / 2 failed） | 新：`build/english-recovery/evidence-case-self-check-fail.log` |
-| 词形与技术文本保护<br>`english.completion.token_boundaries_and_protection`、`…negative_bad_lexicon_illegal_form` | 分隔符前缀（`don'`/`co-`/`can'`/`re-`）继续补全；数字与 11 个技术标记整词原样返回；非法词形是**独立状态名**；逐帧 `compl` 增量为 0 而原因桶 +1；`whole==queries, part==0`；65 字节不裁字节 | **尚未恢复** | 仅有事故前日志证据：`build/p23-verify/evidence-token-protection.log`、`evidence-bad-lexicon-illegal-form.log`；判据 §6.2、README §5.2 |
+| 词形与技术文本保护<br>`english.completion.token_boundaries_and_protection` | `don'`/`Don'`/`DON'`/`co-`/`CO-`/`can'`/`re-` 作为**尾随分隔符前缀**继续补全并在选中后提交整词；`word-` 是可查询前缀但词表无行（计 no-match 而非拒绝）；数字与 11 个技术标记（`@ . _ : / \ ? & = # % +`）从决定字节起**每帧**塌成 1 项原文、`compl` 增量 0、`rejected` 恰好 +1、并命名 `protected`；`rock'n'roll`/`'hello`/`co--operate` 命名 `illegal-word-form`（与 protected、与 `mixed` 都是不同桶）；`Co-Operate`/`DoN't` 记 mixed 而非词形非法；`hel→hel@→BackSpace` 恢复帧恰好重发 3 条补全、`he2/he.→BackSpace` 重发 6 条；取消与跨 Session 不留残余保护；64 字节仍被查询、65 字节被拒绝且 `preedit`/`get_input()`/提交都逐字节保留 65 字节 | **已从新源码编译验证**（新名 `recovery.token.boundaries_and_protection`，1889 条断言 0 失败；终局 `queries=389 with_index=389 rejected=94 orig=389 compl=285 cl=210 ci=57 cu=18 delimited=90 nomatch=202 mixed=10 notalpha=63 toolong=2 illegal=19 protected=63 nonascii=0 unsup=0 whole=389 part=0 spell=0`，`api.balance status 446/446 context 446/446 commit 27/27`）。**范围声明**：`notalpha == protected + nonascii + unsup` 且 `nonascii == 0`，因此本组**只是 ASCII 证据**，不含任何非 ASCII 输入；`stop_offset`/长度一律为原始输入的 UTF-8 **码单元下标**（本组输入全 ASCII，故等于字节下标），不是字素位也不是屏幕列 | 新：`build/english-recovery/evidence-token3.log`（逐事件 `ev=` 上报）、控制组 `evidence-token-self-check-fail.log`；旧：`build/p23-verify/evidence-token-protection.log`；判据 §6.2、README §5.2 |
+| 词表数据加载负向<br>`…negative_bad_lexicon_illegal_form`、`…missing_lexicon`、`…bad_lexicon-duplicate`、`…bad_lexicon-illegal` | 四种加载失败各有 `attempts/ok/fail/entries/errline` + 状态名组合；`illegal-word-form` 作为**加载状态名**与 `illegal-word` 区分 | **尚未恢复**——本轮未对加载负向作任何声明 | 仅有事故前日志证据：`build/p23-verify/evidence-bad-lexicon-illegal-form.log` 等；判据 §8 表 |
 | 空格与连续多词输入<br>`english.completion.space_boundaries_and_multi_word_commit` | A/B/C 三规则；每步同时断言 handled、`get_input()` 原串、菜单、提交队列、`space_case_*` 计数；高亮≠选择；Ctrl/Alt/Super/release 不消费；四条恒等式 | **尚未恢复** | 仅有事故前日志证据：`build/p25-verify/evidence-space.log`；判据 §6.4、README §5.3 |
 | 词表负向路径<br>`…negative_missing_lexicon`、`…bad_lexicon-duplicate`、`…bad_lexicon-illegal` | 四种失败各有 `attempts/ok/fail/entries/errline` + 状态名组合，且都只出原文 1 项；失败结果同样被缓存（`attempts=1`） | **尚未恢复**（新工程目前只复制正向夹具，负向夹具 `lexicon_bad_*.tsv` 与运行时改名规则未接） | 仅有事故前日志证据：`build/p23-verify/evidence-missing-lexicon.log` 等；判据 §8 表 |
 | pilot 真实词表<br>`english.pilot.real_lexicon_candidates_commit_and_protection`、`…output_matches_the_pinned_manifest` | 42,356 行上同一套断言；`scale.*` 只打印不判定；产物哈希对上钉住清单 | **尚未恢复**（词表与清单在位：`build/english-pilot/epocanva_en_pilot.tsv`、`data/manifests/english-pilot.sources.lock.json`；第二条用例本身与夹具无关，仍由旧 CMake 注册） | 仅有事故前日志证据：`build/p25-verify/evidence-pilot.log`；判据 §6.3、§7 |
@@ -48,8 +49,17 @@
 
 ## 3. 顺序与已完成批次（每步一个可编译、可判定的增量）
 
-已完成：批次 1 = 公共框架 + `completion`（6 条）；批次 2a = `case-preservation`（新增 2 条，共 8 条）。
+已完成：批次 1 = 公共框架 + `completion`（6 条）；批次 2a = `case-preservation`（8 条）；
+批次 2b = `token-protection`（10 条）。
 
-待做：`token-protection` → 三条词表负向 → `space-commit` →
+待做：三条词表**加载**负向 → `space-commit` →
 `spelling`（先只读判定 `patch_spell_mode.py` 的插入文本，外层骨架由新工程补齐）→
 `pilot-lexicon` → 最后才是 `pilot-spelling`（新增，非恢复）。
+
+### 批次 2a 的一处披露
+
+`case` 组那一次提交里，我先在 `recovery_test_support.h/.cc` 写入了**四个**新
+`Mode` 名（含 `token-protection` / `token-self-check-fail`），而 `main.cc` 的派发表当时只
+登记了 `case` 的两个。那次提交的树因此接受 `--mode token-protection` 这个名字、却在
+派发处落到"该模式在此构建中没有实现"，返回 2。`case` 组自身的 8 条测试不受影响，也
+没有任何断言被放宽；该不一致在批次 2b 实现 token 组后自然消失，历史不重写。
