@@ -15,6 +15,7 @@
 
 #include "case_tests.h"
 #include "completion_tests.h"
+#include "lexicon_failure_tests.h"
 #include "recovery_test_support.h"
 #include "space_tests.h"
 #include "token_tests.h"
@@ -42,6 +43,12 @@ constexpr ModeEntry kModes[] = {
     {Mode::kTokenSelfCheckFail, epocanva::recovery::RunTokenSelfCheckFailMode},
     {Mode::kSpaceCommit, epocanva::recovery::RunSpaceCommitMode},
     {Mode::kSpaceSelfCheckFail, epocanva::recovery::RunSpaceSelfCheckFailMode},
+    {Mode::kMissingLexicon, epocanva::recovery::RunMissingLexiconMode},
+    {Mode::kBadLexiconDuplicate, epocanva::recovery::RunBadLexiconDuplicateMode},
+    {Mode::kBadLexiconIllegal, epocanva::recovery::RunBadLexiconIllegalMode},
+    {Mode::kBadLexiconIllegalForm, epocanva::recovery::RunBadLexiconIllegalFormMode},
+    {Mode::kLexiconFailureSelfCheckFail,
+     epocanva::recovery::RunLexiconFailureSelfCheckFailMode},
 };
 
 ModeFn FindMode(Mode mode) {
@@ -63,8 +70,10 @@ int main(int argc, char** argv) {
         "usage: rime_english_recovery --expect-dll <the rime.dll this run must have "
         "loaded, compared after GetFullPathNameW normalization> --fixture-dir <path> "
         "--run-root <a leaf under rime-english-recovery-run> [--mode completion|"
-        "expect-module-absent|self-check-fail|case-preservation|"
-        "case-self-check-fail|token-protection|token-self-check-fail]\n");
+        "expect-module-absent|self-check-fail|case-preservation|case-self-check-fail|"
+        "token-protection|token-self-check-fail|space-commit|space-self-check-fail|"
+        "missing-lexicon|bad-lexicon-duplicate|bad-lexicon-illegal|"
+        "bad-lexicon-illegal-form|lexicon-failure-self-check-fail]\n");
     epocanva::recovery::Fail(epocanva::recovery::kUsage, "arguments", error);
     return epocanva::recovery::kUsage;
   }

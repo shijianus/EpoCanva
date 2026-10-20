@@ -117,6 +117,9 @@ foreach(_f
         "${EpoCanva_English_Fixture_Dir}/default.yaml"
         "${EpoCanva_English_Fixture_Dir}/epocanva_test_english.schema.yaml"
         "${EpoCanva_English_Fixture_Dir}/lexicon.tsv"
+        "${EpoCanva_English_Fixture_Dir}/lexicon_bad_duplicate.tsv"
+        "${EpoCanva_English_Fixture_Dir}/lexicon_bad_illegal.tsv"
+        "${EpoCanva_English_Fixture_Dir}/lexicon_bad_illegal_form.tsv"
         "${EpoCanva_English_Fixture_Dir}/README.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/main.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/recovery_test_support.h"
@@ -129,6 +132,8 @@ foreach(_f
         "${CMAKE_CURRENT_SOURCE_DIR}/token_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/space_tests.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/space_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/lexicon_failure_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/lexicon_failure_tests.cc"
         "${EpoCanva_Assert_Script}")
   if(NOT EXISTS "${_f}")
     message(FATAL_ERROR "required input missing: ${_f}")
@@ -141,7 +146,8 @@ set(_SOURCES
   completion_tests.cc
   case_tests.cc
   token_tests.cc
-  space_tests.cc)
+  space_tests.cc
+  lexicon_failure_tests.cc)
 set(_DEFINES RIME_IMPORTS _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 set(_OPTIONS /utf-8 /permissive- /Zc:__cplusplus /W4 /EHsc)
 
@@ -360,6 +366,57 @@ epocanva_add_case(
   MARKER_POLICY forbid
   LABEL     space-self-check-fail)
 
+# 13-16. The word-list LOAD failures. Each runs in its own process, against its own run
+#        root, with only the file at the path the schema names changed -- and each asserts
+#        the candidate list AND the load counters AND the status name together, because a
+#        failed load still offers the typed text and would otherwise look like a working
+#        completer that simply had nothing to say. The english engine is required: an absent
+#        module must not be able to impersonate a word-list error, so each mode refuses to
+#        run (exit 20) unless the module and its diagnostics are present.
+epocanva_add_case(
+  NAME      recovery.lexicon.negative_missing_file
+  MODE      missing-lexicon
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     missing-lexicon)
+
+epocanva_add_case(
+  NAME      recovery.lexicon.negative_duplicate_entry
+  MODE      bad-lexicon-duplicate
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     bad-lexicon-duplicate)
+
+epocanva_add_case(
+  NAME      recovery.lexicon.negative_illegal_word
+  MODE      bad-lexicon-illegal
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     bad-lexicon-illegal)
+
+epocanva_add_case(
+  NAME      recovery.lexicon.negative_illegal_word_form
+  MODE      bad-lexicon-illegal-form
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     bad-lexicon-illegal-form)
+
+# 17. The control that keeps the group honest: the same verification path run against the
+#     GOOD 54-row fixture while claiming a duplicate-word load failure. The healthy
+#     completion menu is asserted first, so this run can only fail on the load diagnostics
+#     -- not on a wrong DLL, a missing module or a bad argument. Exit 14, marker forbidden.
+epocanva_add_case(
+  NAME      recovery.lexicon.suite_can_fail_on_valid_data
+  MODE      lexicon-failure-self-check-fail
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     lexicon-failure-self-check-fail)
+
 set_tests_properties(
   recovery.completion.prefix_candidates_and_commit
   recovery.completion.negative_baseline_engine
@@ -373,7 +430,13 @@ set_tests_properties(
   recovery.token.suite_can_fail_on_protected_text
   recovery.space.commit_and_multiword
   recovery.space.suite_can_fail_on_highlight
-  PROPERTIES TIMEOUT 180 LABELS "librime;english;completion;case;token;space;recovery")
+  recovery.lexicon.negative_missing_file
+  recovery.lexicon.negative_duplicate_entry
+  recovery.lexicon.negative_illegal_word
+  recovery.lexicon.negative_illegal_word_form
+  recovery.lexicon.suite_can_fail_on_valid_data
+  PROPERTIES TIMEOUT 180
+             LABELS "librime;english;completion;case;token;space;lexicon;recovery")
 
 # The wrapper's own timeout is one notch below the CTest TIMEOUT so a hung program is
 # reported by the wrapper (non-numeric result) before CTest kills the run.

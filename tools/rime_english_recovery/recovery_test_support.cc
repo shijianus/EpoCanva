@@ -15,10 +15,9 @@ constexpr std::size_t kPathBuffer = 4096;
 constexpr char kFixtureDefaultYaml[] = "default.yaml";
 constexpr char kFixtureSchemaYaml[] = "epocanva_test_english.schema.yaml";
 constexpr char kFixtureLexicon[] = "lexicon.tsv";
-// The name the fixture's english/lexicon_path key asks for, relative to the engine's
-// own shared data directory (src/rime/setup.cc:46-47, src/rime/deployer.h:35) -- never
-// the process working directory.
-constexpr char kStagedLexicon[] = "lexicon/epocanva_test_lexicon.tsv";
+// The staged name this run writes the word list under is kStagedLexiconName, declared in
+// the header: the load-failure modes have to prove what sits at that path, so one copy of
+// the string is shared instead of two that can drift.
 // The name the compiler writes the staged schema under: <schema_id>.schema.yaml, which
 // for this fixture is the same file name the fixture directory uses.
 constexpr char kCompiledSchemaYaml[] = "epocanva_test_english.schema.yaml";
@@ -168,7 +167,7 @@ ExitCode StageFixture(const Options& opt, const std::filesystem::path& shared_di
   if (rc != kOk) {
     return rc;
   }
-  rc = CopyInto(lexicon_src, shared_dir / kStagedLexicon);
+  rc = CopyInto(lexicon_src, shared_dir / kStagedLexiconName);
   if (rc != kOk) {
     return rc;
   }
@@ -513,6 +512,26 @@ bool ModeFromName(const std::string& name, Mode* out) {
     *out = Mode::kSpaceSelfCheckFail;
     return true;
   }
+  if (name == "missing-lexicon") {
+    *out = Mode::kMissingLexicon;
+    return true;
+  }
+  if (name == "bad-lexicon-duplicate") {
+    *out = Mode::kBadLexiconDuplicate;
+    return true;
+  }
+  if (name == "bad-lexicon-illegal") {
+    *out = Mode::kBadLexiconIllegal;
+    return true;
+  }
+  if (name == "bad-lexicon-illegal-form") {
+    *out = Mode::kBadLexiconIllegalForm;
+    return true;
+  }
+  if (name == "lexicon-failure-self-check-fail") {
+    *out = Mode::kLexiconFailureSelfCheckFail;
+    return true;
+  }
   return false;
 }
 
@@ -536,6 +555,16 @@ const char* ModeName(Mode mode) {
       return "space-commit";
     case Mode::kSpaceSelfCheckFail:
       return "space-self-check-fail";
+    case Mode::kMissingLexicon:
+      return "missing-lexicon";
+    case Mode::kBadLexiconDuplicate:
+      return "bad-lexicon-duplicate";
+    case Mode::kBadLexiconIllegal:
+      return "bad-lexicon-illegal";
+    case Mode::kBadLexiconIllegalForm:
+      return "bad-lexicon-illegal-form";
+    case Mode::kLexiconFailureSelfCheckFail:
+      return "lexicon-failure-self-check-fail";
   }
   return "?";
 }
@@ -844,6 +873,54 @@ ExitCode SelectAndConfirmSchema(RimeApi* api, RimeSessionId sid,
   return kOk;
 }
 
+long long RestageLexicon(Harness* h, const char* fixture_lexicon) {
+  const std::filesystem::path staged = h->shared_dir / kStagedLexiconName;
+  std::error_code ec;
+  if (fixture_lexicon == nullptr) {
+    const bool removed = std::filesystem::remove(staged, ec);
+    if (ec) {
+      Fail(kRunDirectoryFailed, "lexicon.stage",
+           "cannot remove the staged word list " + staged.string() + " (" +
+               ec.message() + ")");
+      return -2;
+    }
+    if (std::filesystem::exists(staged, ec)) {
+      Fail(kRunDirectoryFailed, "lexicon.stage",
+           "the staged word list is still in place after removal: " +
+               staged.string());
+      return -2;
+    }
+    std::printf("[english] lexicon.removed            %s (%s)\n",
+                staged.string().c_str(), removed ? "removed" : "was already absent");
+    return -1;
+  }
+  const std::filesystem::path src = h->fixture_dir / fixture_lexicon;
+  if (!std::filesystem::is_regular_file(src, ec) || ec) {
+    Fail(kFixtureMissing, "lexicon.source",
+         "no such fixture word list to stage: " + src.string());
+    return -2;
+  }
+  const std::uintmax_t src_size = std::filesystem::file_size(src, ec);
+  if (ec) {
+    Fail(kFixtureMissing, "lexicon.source",
+         "cannot size the fixture word list " + src.string());
+    return -2;
+  }
+  if (CopyInto(src, staged) != kOk) {
+    return -2;
+  }
+  const std::uintmax_t staged_size = std::filesystem::file_size(staged, ec);
+  if (ec || staged_size != src_size) {
+    Fail(kRunDirectoryFailed, "lexicon.stage",
+         "the staged copy does not have the fixture's size: " + staged.string());
+    return -2;
+  }
+  std::printf("[english] lexicon.staged             %s <- fixture '%s' (%llu bytes)\n",
+              staged.string().c_str(), fixture_lexicon,
+              static_cast<unsigned long long>(staged_size));
+  return static_cast<long long>(staged_size);
+}
+
 ExitCode DeployFixture(Harness* h) {
   const int failures_before = h->checks.failed();
   if (!RIME_API_AVAILABLE(h->api, deploy_config_file) ||
@@ -908,6 +985,7 @@ ExitCode RunHarness(const Options& opt, ModeFn mode_fn) {
               "counter is an event count\n");
 
   Harness h;
+  h.fixture_dir = opt.fixture_dir;
   std::filesystem::path user_dir, log_dir;
   ExitCode rc = PrepareRunRoot(opt, &h.shared_dir, &user_dir, &log_dir);
   if (rc != kOk) {

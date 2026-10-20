@@ -100,6 +100,11 @@ enum class Mode {
   kTokenSelfCheckFail,
   kSpaceCommit,
   kSpaceSelfCheckFail,
+  kMissingLexicon,
+  kBadLexiconDuplicate,
+  kBadLexiconIllegal,
+  kBadLexiconIllegalForm,
+  kLexiconFailureSelfCheckFail,
 };
 
 struct Options {
@@ -200,11 +205,19 @@ void CheckFrame(Checker* checks, const KeyEvent& e, const std::string& want_raw,
                  const std::string& want_menu, long want_page_size,
                  const std::string& label);
 
+// The path the fixture schema names in english/lexicon_path, relative to the engine's own
+// shared data directory (src/rime/setup.cc:46-47, src/rime/deployer.h:35) and never to the
+// process working directory. Named in the header because the load-failure modes have to
+// prove what is sitting at that exact path, not merely hope it.
+inline constexpr char kStagedLexiconName[] = "lexicon/epocanva_test_lexicon.tsv";
+
 // The engine, the fixture and the accounting a mode is allowed to touch.
-struct Harness {  RimeApi* api = nullptr;
+struct Harness {
+  RimeApi* api = nullptr;
   EnglishSurface surface;
   std::filesystem::path schema_source;  // staged copy, in the shared dir
   std::filesystem::path shared_dir;
+  std::filesystem::path fixture_dir;    // the read-only fixture directory
   std::string staging_dir;              // read back from the engine, not assumed
   ApiBalance balance;
   Checker checks;
@@ -289,6 +302,13 @@ ExitCode SelectAndConfirmSchema(RimeApi* api, RimeSessionId sid,
 // (docs/testing/rime-input-replay.md section 7), so return values alone are never the
 // judgement here.
 ExitCode DeployFixture(Harness* h);
+// Puts one named word list from the fixture directory at the path the schema names, or
+// removes whatever is there when `fixture_lexicon` is null. This is how the load-failure
+// cases are built: tests/fixtures/ itself is only ever read, each run stages into its own
+// directory, and no fixture is edited and "forgotten to restore". Returns the byte size it
+// staged (or -1 when it removed the file) so the caller can prove the engine is looking at
+// exactly the bytes it intended.
+long long RestageLexicon(Harness* h, const char* fixture_lexicon);
 
 // --- whole-program lifecycle ---------------------------------------------------
 // Parses, prepares the run directory, stages the fixture, starts the engine, runs the
