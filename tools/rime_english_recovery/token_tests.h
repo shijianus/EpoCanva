@@ -11,13 +11,15 @@
 // final frame looking correct.
 //
 // UNITS, per engine/languages/en/english_token.h: stop_offset and every length here is a
-// UTF-8 code-unit index into the raw input, which for the ASCII bytes this group types
-// equals the byte index -- it is not a grapheme position and not a screen column. The
-// frame count a protected token produces is therefore (length - stop_offset): the frames
-// whose length is strictly greater than the stop byte's index. All inputs in this file are
-// ASCII, so nothing here is evidence about non-ASCII text; the core reports non-ASCII as
-// its own class and the engine path for those bytes is not reachable through the fixture's
-// speller/alphabet.
+// UTF-8 BYTE OFFSET into the raw input (the code-unit index; for the ASCII bytes this
+// group types, code units and bytes coincide). It is not a grapheme position and not a
+// screen column. The frame count a protected token produces is therefore
+// (length - stop_offset): the frames whose length is strictly greater than the byte offset
+// of the deciding byte. Every input in this file is ASCII, so this group is evidence about
+// ASCII only -- the current engine tests do not cover non-ASCII at all, because a byte
+// >= 0x80 is not in the fixture's speller/alphabet and can never reach the composition
+// through a real key event. The core classifies such bytes as its own kind, and that is
+// covered in the core unit tests, not here.
 //
 // EXPECTATIONS come from tests/fixtures/english_completion/lexicon.tsv (row weights) and
 // tests/fixtures/english_completion/README.md section 5.2 (the hand-derived frame

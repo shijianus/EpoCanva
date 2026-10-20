@@ -880,7 +880,7 @@ ExitCode RunTokenProtectionMode(Harness& h) {
                     "no token was ever cut: a fragment would move this counter while the "
                     "final menu still looked correct");
   h.checks.CheckNum(LL(c.queries_covering_whole_input), LL(c.queries),
-                    "queries_covering_whole_input == queries");
+                    "queries_covering_whole_input == queries (scope evidence 4 of 4)");
   h.checks.CheckNum(LL(c.original_candidates), LL(c.queries),
                     "every query offered the typed text");
   h.checks.CheckNum(LL(c.completion_candidates),

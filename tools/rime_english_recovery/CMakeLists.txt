@@ -127,6 +127,8 @@ foreach(_f
         "${CMAKE_CURRENT_SOURCE_DIR}/case_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/token_tests.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/token_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/space_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/space_tests.cc"
         "${EpoCanva_Assert_Script}")
   if(NOT EXISTS "${_f}")
     message(FATAL_ERROR "required input missing: ${_f}")
@@ -138,7 +140,8 @@ set(_SOURCES
   recovery_test_support.cc
   completion_tests.cc
   case_tests.cc
-  token_tests.cc)
+  token_tests.cc
+  space_tests.cc)
 set(_DEFINES RIME_IMPORTS _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 set(_OPTIONS /utf-8 /permissive- /Zc:__cplusplus /W4 /EHsc)
 
@@ -328,6 +331,35 @@ epocanva_add_case(
   MARKER_POLICY forbid
   LABEL     token-self-check-fail)
 
+# 11. The P2.5 matrix, on real process_key() events and real get_commit() reads: the three
+#     rules A/B/C, a highlight that must NOT be accepted, a selection that must be committed
+#     exactly once, two empty-composition spaces staying two spaces, continuous multi-word
+#     input assembled only from returned commits, protected text committing byte-for-byte
+#     with completions back on the next word, no case shape inherited across a commit,
+#     Escape not revived by a later space, Ctrl/Alt/Super/release spaces refused with the
+#     composition intact, BackSpace on an empty composition left to the host, two sessions
+#     interleaved, and the four counter identities that make "committed once, then one
+#     space" observable at all.
+epocanva_add_case(
+  NAME      recovery.space.commit_and_multiword
+  MODE      space-commit
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     space-commit)
+
+# 12. The space group's falsification control: it claims that a space after a highlighted
+#     "hello" commits "hello ", which case A forbids. Must exit 14 -- otherwise a space test
+#     that only checked "something was committed" would be indistinguishable from one that
+#     accepted highlights.
+epocanva_add_case(
+  NAME      recovery.space.suite_can_fail_on_highlight
+  MODE      space-self-check-fail
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     space-self-check-fail)
+
 set_tests_properties(
   recovery.completion.prefix_candidates_and_commit
   recovery.completion.negative_baseline_engine
@@ -339,7 +371,9 @@ set_tests_properties(
   recovery.case.suite_can_fail_on_menu_ranking
   recovery.token.boundaries_and_protection
   recovery.token.suite_can_fail_on_protected_text
-  PROPERTIES TIMEOUT 180 LABELS "librime;english;completion;case;token;recovery")
+  recovery.space.commit_and_multiword
+  recovery.space.suite_can_fail_on_highlight
+  PROPERTIES TIMEOUT 180 LABELS "librime;english;completion;case;token;space;recovery")
 
 # The wrapper's own timeout is one notch below the CTest TIMEOUT so a hung program is
 # reported by the wrapper (non-numeric result) before CTest kills the run.

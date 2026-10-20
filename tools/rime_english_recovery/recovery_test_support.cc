@@ -365,8 +365,8 @@ std::string DescribeState(const StateSnapshot& s) {  char buf[96];
   } else {
     line += "preedit=- ";  // sentinel: composition.preedit == NULL
   }
-  std::snprintf(buf, sizeof(buf), "cands=%ld page=%ld raw=\"%s\" ", s.num_candidates,
-                s.page_size, s.raw_input.c_str());
+  std::snprintf(buf, sizeof(buf), "cands=%ld page=%ld hl=%ld raw=\"%s\" ",
+                s.num_candidates, s.page_size, s.highlighted, s.raw_input.c_str());
   line += buf;
   line += "list=" + JoinMenu(s);
   const std::string comments = JoinComments(s);
@@ -374,6 +374,11 @@ std::string DescribeState(const StateSnapshot& s) {  char buf[96];
     line += " cmts=" + comments;
   }
   line += " ";
+  // Reported, not judged: GetCommitText() also moves for a bare highlight, so what a
+  // space commits is settled by the case counters and the committed text, never by this.
+  if (s.has_commit_text_preview) {
+    line += "preview=\"" + s.commit_text_preview + "\" ";
+  }
   line += s.commit_present ? ("commit=\"" + s.commit_text + "\"") : "commit=-";
   return line;
 }
@@ -500,6 +505,14 @@ bool ModeFromName(const std::string& name, Mode* out) {
     *out = Mode::kTokenSelfCheckFail;
     return true;
   }
+  if (name == "space-commit") {
+    *out = Mode::kSpaceCommit;
+    return true;
+  }
+  if (name == "space-self-check-fail") {
+    *out = Mode::kSpaceSelfCheckFail;
+    return true;
+  }
   return false;
 }
 
@@ -519,6 +532,10 @@ const char* ModeName(Mode mode) {
       return "token-protection";
     case Mode::kTokenSelfCheckFail:
       return "token-self-check-fail";
+    case Mode::kSpaceCommit:
+      return "space-commit";
+    case Mode::kSpaceSelfCheckFail:
+      return "space-self-check-fail";
   }
   return "?";
 }
@@ -605,6 +622,10 @@ bool ReadState(RimeApi* api, RimeSessionId sid, ApiBalance* balance,
     out->num_candidates = context.menu.num_candidates;
     out->page_size = context.menu.page_size;
     out->highlighted = context.menu.highlighted_candidate_index;
+    out->has_commit_text_preview = (context.commit_text_preview != nullptr);
+    if (out->has_commit_text_preview) {
+      out->commit_text_preview = context.commit_text_preview;
+    }
     const long count = context.menu.num_candidates;
     if (count > 0 && context.menu.candidates != nullptr) {
       // The menu array belongs to the context and is released by free_context(), so
@@ -750,6 +771,20 @@ ExitCode SelectCandidate(RimeApi* api, RimeSessionId sid, std::size_t index,
   *accepted = (ok == True);
   std::printf("[english] select_candidate           index=%zu %s\n", index,
               *accepted ? "accepted" : "REFUSED");
+  return kOk;
+}
+
+ExitCode HighlightCandidate(RimeApi* api, RimeSessionId sid, std::size_t index,
+                            bool* accepted) {
+  if (!RIME_API_AVAILABLE(api, highlight_candidate)) {
+    Fail(kGetStatusFailed, "highlight_candidate.slot",
+         "the loaded API table has no highlight_candidate slot");
+    return kGetStatusFailed;
+  }
+  const Bool ok = api->highlight_candidate(sid, index);
+  *accepted = (ok == True);
+  std::printf("[english] highlight_candidate        index=%zu %s\n", index,
+              *accepted ? "moved" : "did not move (already there, or no such candidate)");
   return kOk;
 }
 

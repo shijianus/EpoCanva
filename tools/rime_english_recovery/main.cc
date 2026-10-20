@@ -16,6 +16,7 @@
 #include "case_tests.h"
 #include "completion_tests.h"
 #include "recovery_test_support.h"
+#include "space_tests.h"
 #include "token_tests.h"
 
 namespace {
@@ -39,6 +40,8 @@ constexpr ModeEntry kModes[] = {
     {Mode::kCaseSelfCheckFail, epocanva::recovery::RunCaseSelfCheckFailMode},
     {Mode::kTokenProtection, epocanva::recovery::RunTokenProtectionMode},
     {Mode::kTokenSelfCheckFail, epocanva::recovery::RunTokenSelfCheckFailMode},
+    {Mode::kSpaceCommit, epocanva::recovery::RunSpaceCommitMode},
+    {Mode::kSpaceSelfCheckFail, epocanva::recovery::RunSpaceSelfCheckFailMode},
 };
 
 ModeFn FindMode(Mode mode) {

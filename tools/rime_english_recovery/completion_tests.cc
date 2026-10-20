@@ -412,9 +412,13 @@ ExitCode RunCompletionMode(Harness& h) {
                     "this mode typed no uppercase input");
   h.checks.CheckNum(static_cast<long long>(c.queries_covering_part_of_input), 0,
                     "no query was ever handed part of a composition");
+  // Scope evidence, one of four together: get_input() carried the whole token, candidate 0
+  // equalled it, the menu held nothing else, and the commit was byte-identical -- each of
+  // those is asserted per frame above, so this counter corroborates rather than carries the
+  // claim on its own.
   h.checks.CheckNum(static_cast<long long>(c.queries_covering_whole_input),
                     static_cast<long long>(c.queries),
-                    "queries_covering_whole_input == queries");
+                    "queries_covering_whole_input == queries (scope evidence 4 of 4)");
   h.checks.CheckNum(static_cast<long long>(c.module_finalized), 0,
                     "module still not finalized");
 

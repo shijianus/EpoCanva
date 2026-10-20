@@ -98,6 +98,8 @@ enum class Mode {
   kCaseSelfCheckFail,
   kTokenProtection,
   kTokenSelfCheckFail,
+  kSpaceCommit,
+  kSpaceSelfCheckFail,
 };
 
 struct Options {
@@ -121,6 +123,12 @@ struct StateSnapshot {
   std::vector<std::string> candidates;  // menu order, index 0 first
   std::vector<std::string> comments;    // one per candidate; absent comment is ""
   std::string raw_input;                // get_input(), never preedit
+  // Context::GetCommitText() as the C API reports it. It moves for a HIGHLIGHT as well
+  // as for a selection (Segment::GetSelectedCandidate() reads selected_index without
+  // consulting Segment::status -- src/rime/segmentation.cc:51-53), so it is reported for
+  // the record and never used as a judgement about what a space will commit.
+  bool has_commit_text_preview = false;
+  std::string commit_text_preview;
   bool commit_present = false;
   std::string commit_text;
 };
@@ -259,6 +267,12 @@ ExitCode TypeText(RimeApi* api, RimeSessionId sid, const std::string& text,
                   ApiBalance* balance, std::vector<KeyEvent>* events);
 ExitCode SelectCandidate(RimeApi* api, RimeSessionId sid, std::size_t index,
                          bool* accepted);
+// Moves the menu highlight WITHOUT confirming a candidate: Context::Highlight() sets
+// selected_index and leaves Segment::status alone (src/rime/context.cc:132-149), which is
+// the difference a space has to respect. Returns False when the index did not change, so a
+// caller that ignores the return value cannot tell "already there" from "worked".
+ExitCode HighlightCandidate(RimeApi* api, RimeSessionId sid, std::size_t index,
+                            bool* accepted);
 
 // --- session and schema lifecycle ---------------------------------------------
 RimeSessionId CreateSessionOrZero(RimeApi* api, const std::string& what);

@@ -464,8 +464,12 @@ ExitCode RunCasePreservationMode(Harness& h) {
                     "this mode never typed a word delimiter");
   h.checks.CheckNum(LL(c.queries_covering_part_of_input), 0,
                     "no token reached the translator as a fragment");
+  // Scope evidence, one of four together: get_input() carried the whole token, candidate 0
+  // equalled it, the menu held nothing else, and the commit was byte-identical. This
+  // counter is the engine-side half of that claim; the other three are asserted per frame
+  // above, so a fragment would have shown up there as well as here.
   h.checks.CheckNum(LL(c.queries_covering_whole_input), LL(c.queries),
-                    "queries_covering_whole_input == queries");
+                    "queries_covering_whole_input == queries (scope evidence 4 of 4)");
   h.checks.CheckNum(LL(c.original_candidates), LL(c.queries),
                     "every query offered the typed text");
   // The fixture schema sets no english/enable_suggestions key. Nothing in this run may
