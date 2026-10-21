@@ -14,13 +14,15 @@ constexpr std::size_t kPathBuffer = 4096;
 
 constexpr char kFixtureDefaultYaml[] = "default.yaml";
 constexpr char kFixtureSchemaYaml[] = "epocanva_test_english.schema.yaml";
+constexpr char kPilotFixtureSchemaYaml[] = "epocanva_pilot_english.schema.yaml";
 constexpr char kFixtureLexicon[] = "lexicon.tsv";
 // The staged name this run writes the word list under is kStagedLexiconName, declared in
 // the header: the load-failure modes have to prove what sits at that path, so one copy of
 // the string is shared instead of two that can drift.
-// The name the compiler writes the staged schema under: <schema_id>.schema.yaml, which
-// for this fixture is the same file name the fixture directory uses.
-constexpr char kCompiledSchemaYaml[] = "epocanva_test_english.schema.yaml";
+// The compiler writes the staged schema under its own file name, so DeployFixture derives
+// the expected artefact from what THIS mode staged instead of naming the hand-written
+// fixture here: a pilot run must not be able to look green by finding the other fixture's
+// compiled file, and the hand-written cases keep checking exactly the name they always did.
 
 // A run directory may only be deleted when its parent carries exactly this name, which
 // nothing outside this project's generated CTest commands produces.
@@ -532,6 +534,22 @@ bool ModeFromName(const std::string& name, Mode* out) {
     *out = Mode::kLexiconFailureSelfCheckFail;
     return true;
   }
+  if (name == "pilot-lexicon") {
+    *out = Mode::kPilotLexicon;
+    return true;
+  }
+  if (name == "pilot-assertion-self-check-fail") {
+    *out = Mode::kPilotAssertionSelfCheckFail;
+    return true;
+  }
+  if (name == "pilot-truncated-rejected") {
+    *out = Mode::kPilotTruncatedRejected;
+    return true;
+  }
+  if (name == "pilot-missing-rejected") {
+    *out = Mode::kPilotMissingRejected;
+    return true;
+  }
   return false;
 }
 
@@ -565,13 +583,21 @@ const char* ModeName(Mode mode) {
       return "bad-lexicon-illegal-form";
     case Mode::kLexiconFailureSelfCheckFail:
       return "lexicon-failure-self-check-fail";
+    case Mode::kPilotLexicon:
+      return "pilot-lexicon";
+    case Mode::kPilotAssertionSelfCheckFail:
+      return "pilot-assertion-self-check-fail";
+    case Mode::kPilotTruncatedRejected:
+      return "pilot-truncated-rejected";
+    case Mode::kPilotMissingRejected:
+      return "pilot-missing-rejected";
   }
   return "?";
 }
 
 bool ParseArgs(int argc, char** argv, Options* out, std::string* error) {
   std::string mode_name = "completion";
-  std::string expect_dll, fixture_dir, run_root;
+  std::string expect_dll, fixture_dir, run_root, pilot_lexicon;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     std::string* slot = nullptr;
@@ -583,6 +609,8 @@ bool ParseArgs(int argc, char** argv, Options* out, std::string* error) {
       slot = &run_root;
     } else if (arg == "--mode") {
       slot = &mode_name;
+    } else if (arg == "--pilot-lexicon") {
+      slot = &pilot_lexicon;
     } else {
       *error = "unrecognised argument '" + arg + "'";
       return false;
@@ -614,6 +642,36 @@ bool ParseArgs(int argc, char** argv, Options* out, std::string* error) {
   if (!ModeFromName(mode_name, &out->mode)) {
     *error = "--mode '" + mode_name + "' is not a mode this program implements";
     return false;
+  }
+  // The pilot flag belongs to the pilot modes and to nothing else, and a pilot mode without
+  // it is a usage error rather than a silently empty trial.
+  const bool wants_pilot_list = ModeNeedsPilotLexicon(out->mode);
+  if (wants_pilot_list && pilot_lexicon.empty()) {
+    *error = "--mode " + mode_name + " requires --pilot-lexicon <absolute path>";
+    return false;
+  }
+  if (!wants_pilot_list && !pilot_lexicon.empty()) {
+    *error = "--pilot-lexicon is only accepted with the pilot modes";
+    return false;
+  }
+  if (!pilot_lexicon.empty()) {
+    // An absolute path only: a relative one would be resolved against whichever directory
+    // CTest happened to launch from, and the run would then report on a file nobody chose.
+    const std::size_t len = pilot_lexicon.size();
+    const bool drive = len > 2 && pilot_lexicon[1] == ':' &&
+                       (pilot_lexicon[2] == '/' || pilot_lexicon[2] == '\\');
+    const bool unc = len > 2 && pilot_lexicon[0] == '\\' && pilot_lexicon[1] == '\\';
+    if (!drive && !unc) {
+      *error = "--pilot-lexicon must be an absolute path, got '" + pilot_lexicon + "'";
+      return false;
+    }
+    for (const unsigned char ch : pilot_lexicon) {
+      if (ch < 0x20 || ch > 0x7E) {
+        *error = "--pilot-lexicon must be printable ASCII";
+        return false;
+      }
+    }
+    out->pilot_lexicon = std::filesystem::path(pilot_lexicon);
   }
   return true;
 }
@@ -921,6 +979,62 @@ long long RestageLexicon(Harness* h, const char* fixture_lexicon) {
   return static_cast<long long>(staged_size);
 }
 
+bool ModeNeedsPilotLexicon(Mode mode) {
+  switch (mode) {
+    case Mode::kPilotLexicon:
+    case Mode::kPilotAssertionSelfCheckFail:
+    case Mode::kPilotTruncatedRejected:
+    case Mode::kPilotMissingRejected:
+      return true;
+    default:
+      return false;
+  }
+}
+
+StagePlan PlanForMode(Mode mode) {
+  switch (mode) {
+    case Mode::kPilotLexicon:
+    case Mode::kPilotAssertionSelfCheckFail:
+      return StagePlan::kPilotFixture;
+    case Mode::kPilotTruncatedRejected:
+    case Mode::kPilotMissingRejected:
+      return StagePlan::kNothing;
+    default:
+      return StagePlan::kHandWrittenFixture;
+  }
+}
+
+ExitCode StagePilotFixture(const Options& opt, const std::filesystem::path& shared_dir,
+                           std::filesystem::path* schema_source) {
+  const std::filesystem::path default_src = opt.fixture_dir / kFixtureDefaultYaml;
+  const std::filesystem::path schema_src = opt.fixture_dir / kPilotFixtureSchemaYaml;
+  std::error_code ec;
+  bool absent = false;
+  for (const std::filesystem::path& p : {default_src, schema_src, opt.pilot_lexicon}) {
+    if (!std::filesystem::is_regular_file(p, ec) || ec) {
+      std::printf("[english] fixture.absent             %s\n", p.string().c_str());
+      absent = true;
+    }
+  }
+  if (absent) {
+    return kFixtureMissing;
+  }
+  ExitCode rc = CopyInto(default_src, shared_dir / kFixtureDefaultYaml);
+  if (rc != kOk) {
+    return rc;
+  }
+  rc = CopyInto(opt.pilot_lexicon, shared_dir / kPilotStagedLexiconName);
+  if (rc != kOk) {
+    return rc;
+  }
+  rc = CopyInto(schema_src, shared_dir / kPilotFixtureSchemaYaml);
+  if (rc != kOk) {
+    return rc;
+  }
+  *schema_source = shared_dir / kPilotFixtureSchemaYaml;
+  return kOk;
+}
+
 ExitCode DeployFixture(Harness* h) {
   const int failures_before = h->checks.failed();
   if (!RIME_API_AVAILABLE(h->api, deploy_config_file) ||
@@ -944,7 +1058,7 @@ ExitCode DeployFixture(Harness* h) {
   const std::filesystem::path compiled_default =
       std::filesystem::path(h->staging_dir) / kFixtureDefaultYaml;
   const std::filesystem::path compiled_schema =
-      std::filesystem::path(h->staging_dir) / kCompiledSchemaYaml;
+      std::filesystem::path(h->staging_dir) / h->schema_source.filename();
   const bool default_written =
       std::filesystem::is_regular_file(compiled_default, ec) && !ec;
   const bool schema_written =
@@ -986,16 +1100,29 @@ ExitCode RunHarness(const Options& opt, ModeFn mode_fn) {
 
   Harness h;
   h.fixture_dir = opt.fixture_dir;
+  h.pilot_lexicon = opt.pilot_lexicon;
+  h.run_root = opt.run_root;
   std::filesystem::path user_dir, log_dir;
   ExitCode rc = PrepareRunRoot(opt, &h.shared_dir, &user_dir, &log_dir);
   if (rc != kOk) {
     return rc;
   }
-  rc = StageFixture(opt, h.shared_dir, &h.schema_source);
+  switch (PlanForMode(opt.mode)) {
+    case StagePlan::kHandWrittenFixture:
+      rc = StageFixture(opt, h.shared_dir, &h.schema_source);
+      break;
+    case StagePlan::kPilotFixture:
+      rc = StagePilotFixture(opt, h.shared_dir, &h.schema_source);
+      break;
+    case StagePlan::kNothing:
+      rc = kOk;  // the mode asserts an identity refusal, so nothing may be staged
+      break;
+  }
   if (rc != kOk) {
     if (rc == kFixtureMissing) {
       Fail(rc, "fixture.precondition",
-           "required fixture files are missing from --fixture-dir");
+           "required fixture files are missing from --fixture-dir, or the generated pilot "
+           "word list named by --pilot-lexicon is not a readable file");
     }
     return rc;
   }

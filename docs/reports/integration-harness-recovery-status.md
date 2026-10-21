@@ -37,7 +37,7 @@
 | 空格组的可失败性 | 断言"高亮后空格提交了 `hello `"这一被禁止的行为，必须以 14 失败且无成功标记 | **已从新源码编译验证**（`recovery.space.suite_can_fail_on_highlight`，实测 `got "hel "`） | 同上控制组日志 |
 | 加载失败组必须能失败 | 把**合法**的 54 行夹具放到同一路径，再走同一条"期望加载失败"的验证路径：健康菜单断言必须通过，而三条加载诊断断言（`failures=1`、`entries=0`、状态名 `duplicate-word`）必须因与实测 `ok/54` 不符而失败，退出码 14 且无成功标记 | **已从新源码编译验证**（`recovery.lexicon.suite_can_fail_on_valid_data`，实测 16 checked / 3 failed，失败项名字逐条指名"deliberately claimed …"） | 新：`build/english-recovery/evidence-3b-control-r2.log` |
 | 一处实现观察（非本轮修复范围） | 重复词条的行号归因：`english_lexicon.cc:203-216` 在 `std::sort` **之后**相邻比对并报 `origin_line[order[i]]`，而 `std::sort` 不保证等值元素保持文件顺序，因此 `lexicon_bad_duplicate.tsv`（`hello` 在第 1 与第 3 行）报告的行号可能是 1 或 3；本轮实测为 3 | **未修改产品**：测试按夹具事实断言"行号 ∈ 重复对所处的两行"，并打印实测值；若希望行号归因确定，建议把重复检测改为按文件顺序比对（例如排序时携带原下标做 tie-break，或先线性扫一遍已见集合），属产品改动，等授权 | 观察来源：该文件源码；`build/english-recovery/evidence-3b-duplicate-r2.log` |
-| pilot 真实词表<br>`english.pilot.real_lexicon_candidates_commit_and_protection`、`…output_matches_the_pinned_manifest` | 42,356 行上同一套断言；`scale.*` 只打印不判定；产物哈希对上钉住清单 | **尚未恢复**（词表与清单在位：`build/english-pilot/epocanva_en_pilot.tsv`、`data/manifests/english-pilot.sources.lock.json`；第二条用例本身与夹具无关，仍由旧 CMake 注册） | 仅有事故前日志证据：`build/p25-verify/evidence-pilot.log`；判据 §6.3、§7 |
+| pilot 真实词表<br>新名 `recovery.pilot.real_lexicon_reference_compared`、`…suite_can_fail_on_reference_ranking`、`…truncated_data_refused_before_the_engine`、`…absent_data_refused_before_the_engine`、`…output_matches_the_pinned_manifest` | 在**真实词表**上跑同一套断言，且预期值不得来自被测实现：候选由独立的整表线性扫描参考实现（`pilot_reference.{h,cc}`：全表匹配 → weight 降序、同分按规范词 ASCII 升序 → 按输入形状渲染 → 与显示文本去重 → 截到 1+7）逐帧比对，它不 include 也不调用 `prefix_completer`/`english_case`/`english_token`/`english_lexicon`；查询集 28 行覆盖单字母、2/3 字母、长前缀、整词、无命中、`'`/`-` 尾随前缀、initial-capital、uppercase、混合与非法词形、邮箱/URL/Windows 路径/下划线/版本号；**数据身份是被验证的事实而非假设**：`build/english-pilot/epocanva_en_pilot.tsv` 实测 502,333 字节、SHA-256 `6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b`、42,356 行合法词条，与清单 `output.{sha256,size_bytes,line_count}` 逐项相等，来源 `alt12dicts/2of12full.txt` @ `7bbe293425d48a1210bf17aaf156b28ade5c2de1`；权重是 2..12 的**跨词典佐证档位**，`weights_are_corpus_frequency: false`，因此本 pilot 是 Alt12Dicts 单文件子集的本地试验，**不是** ESDB/SCOWL 35/50/60 尺寸变体导出，也不是语料频率 | **已从新源码编译验证**（正向 `recovery.pilot.real_lexicon_reference_compared` 实测 **868 条断言 0 失败**、`RESULT PASS`、exit 0；引擎 `entries=42356` 与被验证行数相等、`attempts=1 ok=1 fail=0 errline=0` 状态名 `ok`（数百键仍只读一次）；终局 `queries=211 with_index=211 rejected=86 orig=211 compl=737 cl=624 ci=71 cu=42 delimited=67 nomatch=14 mixed=1 notalpha=71 protected=71 illegal=14 nonascii=0 unsup=0 toolong=0 whole=211 part=0 spell=0`，`processor_key_events==注入键数 248`；`api.balance status 252/252 context 252/252 commit 5/5`，两 Session 销毁后 `translator_live=0 space_processor_live=0`；默认 Return 提交原文、显式选择提交参考实现排名第一的整词、`co-` 空格得 `co- `、选择后得整词+一个空格、`user@example.com ` 逐字节整串提交后下一个词恢复补全；耗时分布只打印不判定：`keys=248 min=1.0us med=4.1us p95=254.9us max=318.6us mean=42.2us`，单机单次，**不是基准测试**）。**三种拒绝种类彼此可区分**：exit 22 = 预校验在引擎打开任何文件前拒绝（`lexicon_load_attempts` 仍为 0，实测理由 `size-mismatch`、`file-absent`，另有手工 `digest-mismatch`）；exit 14 = 预校验通过、引擎真的加载了 42k 行、某条预期与实测不符（控制组实测 `[index 1]: got "practicable"`、`[index 2]: got "practical"`，37 checked / 2 failed）；exit 18 = 那条"应当拒绝"的断言本身没成立（用未编译进身份预期的构建跑同一模式实证，见 §3 批次 4）。配置层另有三重拒绝：路径非绝对 / 文件名与清单不符 / 字节数或 SHA-256 与清单不符一律 `FATAL_ERROR`，**绝不静默不注册**。开关关闭时 `ctest --show-only=json-v1` 仍为 **17** 条且不含任何 pilot 名，开启时为 **22** 条 | 新：`build/english-pilot-recovery/evidence-pilot-positive-r1.log`、`evidence-pilot-control-r1.log`、`evidence-pilot-truncated-r1.log`、`evidence-pilot-absent-r1.log`、`build/english-recovery/evidence-pilot-digest-control-r1.log`、`evidence-pilot-truncated-noexpectation-r1.log`；ctest 列表 `build/english-pilot-recovery/show-off-r1.json`(17)、`show-on-r1.json`(22)，运行结果 `ctest-on-pilotnew-r1.log`、`ctest-on-full-r1.log`(22/22)、`ctest-off-full-r1.log`(17/17)；身份三重独立印证：CMake `file(SHA256)`、`sha256sum`、本工程自实现的 `pilot_sha256.cc`（先用 FIPS 180-4 空串/`abc`/56 字节三向量验过）给出同一值；旧证据仅作历史：`build/p25-verify/evidence-pilot.log`；判据 §6.3、§7、`tests/fixtures/english_pilot/README.md` |
 | P2.6 拼写建议<br>`english.completion.spelling_suggestions_and_suppressions` | 逐键一帧报十三具名状态之一；建议与补全互斥；`spell` 注释列区分二者；预算 ≤3/菜单 ≤8；三种大小写；退格重算；双 Session；词表不可读必须报"加载失败" | **尚未恢复**。整段实现文本仍在 `EpoCanva-preserve-2026-10-19T1652/incident-evidence/build/p26-verify/patch_spell_mode.py`（约 840 行插入文本），**但外层骨架（模式枚举、参数校验、dispatch、`EnglishSurface`、候选注释列采集）不在其中**；且该脚本以截断式写法落盘，禁止执行 | 仅有事故前日志证据：`build/p26-verify/mode-spelling.log`、`timing.txt`；判据 `tests/fixtures/english_spelling/README.md` |
 | pilot-spelling 性能模式<br>`english.pilot.spelling_suggestion_cost_a_b_on_pilot_data` | 13 输入在开关两侧各跑一遍，逐键耗时分布，off 侧拼写计数零变化 | **原本就未完成**：补丁脚本崩溃于写入之前，该模式从未进入过任何一次绿色扫描（13/13 与 15/15 日志均无它）。它**不属于**事故前必须恢复的绿色基线 | `check_restored.py` 将其列为 FORBIDDEN；`patch_pilot_mode.py` 自述崩溃原因 |
 
@@ -54,11 +54,14 @@
 
 已完成：批次 1 = 公共框架 + `completion`（6 条）；批次 2a = `case-preservation`（8 条）；
 批次 2b = `token-protection`（10 条）；批次 3a = `space-commit`（12 条）；
-批次 3b = 四类词表**加载**失败 + 该组可失败性控制（17 条）。
+批次 3b = 四类词表**加载**失败 + 该组可失败性控制（17 条）；
+批次 4 = `pilot-lexicon` 真实词表 + 独立参考实现 + 数据身份三Kind拒绝（开关关闭仍 17 条，
+开启 22 条）。
 
 待做：其余加载状态（空文件、空行、缺字段、多字段、权重非法/溢出、词太长）→
 `spelling`（先只读判定 `patch_spell_mode.py` 的插入文本，外层骨架由新工程补齐）→
-`pilot-lexicon` → 最后才是 `pilot-spelling`（新增，非恢复）。
+最后才是 `pilot-spelling`（新增，非恢复）。**`spelling` 至今仍未恢复**：批次 4 没有触碰它，
+也没有为它建空壳。
 
 ### 批次 2a 的一处披露
 
@@ -101,3 +104,45 @@
    结果写入新的 `-r2` 日志并检查目标不存在才写。
 4. 重复词条的行号归因不是确定值（见 §1 表末行的实现观察），因此该用例断言"行号属于夹具中
    持有该重复词的两行之一"并打印实测值；其余三类是顺序扫描，行号按精确值断言。
+
+### 批次 4 的几处披露（同样全部是测试或工具自身的错误，产品行为未改）
+
+1. **自实现的 SHA-256 头一版是错的，而且错在两处**：K 表尾部凭记忆手写（伪造值），压缩
+   函数的 `t2` 误用了小 σ。改为从根的小数部分推导常数（`FractionTop32(sqrt(p))`、
+   `FractionTop32(cbrt(p))`），并先用 FIPS 180-4 的 `""`、`abc`、56 字节三向量验过、再对
+   真实产物求摘要与 `sha256sum` 相等之后，才让任何测试依赖它。教训按原样记在这里：**不要
+   背常数**。
+2. 数据身份因此有三个互不相干的来源：CMake `file(SHA256)`（配置期）、外部 `sha256sum`
+   （命令行）、本工程自实现的 `pilot_sha256.cc`（运行期）。三者给出同一个
+   `6e46587d…aae6b`。清单没有被改动去迎合任何产物，产物也没有被改动去迎合清单。
+3. 独立参考实现 `pilot_reference.{h,cc}` 不 include 也不调用 `prefix_completer`、
+   `english_case`、`english_token`、`english_lexicon`；它的排序/去重/截断另用 `awk` 对
+   `co-`、`pro`、`world` 三组独立核对过，与引擎、与自身实现三方一致。
+4. `DeployFixture()` 检查的编译产物名原先硬编码为 `epocanva_test_english.schema.yaml`，
+   现改为**由本次运行实际暂存的 schema 文件名派生**。理由是判定强度：否则 pilot 运行可以
+   靠"找到另一套夹具的编译文件"假装部署成功，54 行夹具那 17 条则不受影响（派生出的名字
+   与原来相同）。
+5. 两条"设计上 exit 22"的负向用例，其成功状态本身是非零码，因此"进程非零退出"绝不等于
+   控制成立。两条模式都改为看护自己声明的断言：任一失败即返回 **18**，与 22（按设计拒绝）、
+   14（引擎预期不符）互不混淆。这一点是实测的，不是推理的——用**未编译进身份预期**的那个
+   构建目录跑同一模式，得到 `exit=18`、两条 `ASSERT FAIL` 指名"refused for an identity
+   reason, named"与"the original pilot file is untouched"
+   （`build/english-recovery/evidence-pilot-truncated-noexpectation-r1.log`）。
+6. 身份拒绝的三个层次也各自实测：配置期 `FATAL_ERROR` 分别命中"字节数不符"（截断副本
+   376,749 vs 502,333）、"文件名与清单不符"、"SHA-256 不符"（同长度、只改一个字母的副本）；
+   运行期正向模式对同一份同长度副本给出 `22 / digest-mismatch` 且 `0 failed assertion(s)`
+   —— 这与引擎报 `file-not-found`、与断言失败 14 都是**不同的种类**。
+7. 落盘后编译错三处（`QueueEmpty` 里 `h.api` 应为 `h->api`，连带一个 `const` 未初始化报错；
+   `CheckMenu(run.last(), …)` 传的是 `KeyEvent` 而形参是 `StateSnapshot`），修完构建 0 error
+   0 warning。更早的一版草稿引用了根本不存在的 `CountBars`/`type_probe`/`LastProbe`/
+   `ev_keys_` 与 `Harness::run_root`，整份废弃重写而非原地打补丁。
+8. `patch_support_pilot.py` 沿用批次 1 起的纪律：每个锚点先要求**恰好命中一次**，任何一处
+   命中数不符即中止且不写盘；写盘前另存 `.bak`。首轮因锚点与实际枚举末尾不符而安全中止，
+   重新读取真实文本后才通过（6 处头文件替换 + 11 处实现替换）。
+9. **数据不进 Git**：产物仍只在 `build/english-pilot/`（被 `.gitignore` 的 `/build/` 覆盖），
+   本轮没有新增或修改任何夹具，没有改动产品解析器，没有下载任何东西，配置/构建/测试全程
+   无网络步骤。
+10. 范围声明：pilot 的 28 行查询集全部是 ASCII（终局 `nonascii=0`），所以它提供的是
+    **数据规模**证据而不是 Unicode 输入证据；按键仍经 `RimeApi::process_key()`，不是 Windows
+    TSF 宿主层验证；逐键耗时分布只打印、不判定，也不做任何拼写 A/B 或索引改写。
+11. `pilot-spelling` 仍是"原本就未完成"，本轮**未实现、未注册**；`spelling` 仍未恢复。

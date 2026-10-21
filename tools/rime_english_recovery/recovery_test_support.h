@@ -64,6 +64,10 @@ enum ExitCode : int {
   kProcessKeyIndeterminate = 19,
   kEnglishSurfaceUnavailable = 20,
   kCounterReadFailed = 21,
+  // The pilot data was refused by identity verification BEFORE the engine was asked to read
+  // anything. It is its own code because "this is not the pinned word list" is a different
+  // fact from "the word list failed to load" and from "an expectation disagreed".
+  kPilotDataRejected = 22,
   kSelectCandidateRefused = 25,
 };
 
@@ -105,6 +109,19 @@ enum class Mode {
   kBadLexiconIllegal,
   kBadLexiconIllegalForm,
   kLexiconFailureSelfCheckFail,
+  kPilotLexicon,
+  kPilotAssertionSelfCheckFail,
+  kPilotTruncatedRejected,
+  kPilotMissingRejected,
+};
+
+// What RunHarness must stage before a mode runs. The two pilot refusal cases deliberately
+// stage nothing: their whole claim is that the data was rejected before the engine opened a
+// word list, and staging would contradict the assertion they exist to make.
+enum class StagePlan {
+  kHandWrittenFixture,
+  kPilotFixture,
+  kNothing,
 };
 
 struct Options {
@@ -112,6 +129,10 @@ struct Options {
   std::filesystem::path fixture_dir;
   std::filesystem::path run_root;
   Mode mode = Mode::kCompletion;
+  // The generated pilot word list, for the pilot modes only. Their fixture directory is the
+  // --fixture-dir they were already given, which holds the pilot schema instead of the
+  // hand-written one.
+  std::filesystem::path pilot_lexicon;
 };
 
 // Everything one key event makes observable, as returned by the API.
@@ -211,6 +232,12 @@ void CheckFrame(Checker* checks, const KeyEvent& e, const std::string& want_raw,
 // prove what is sitting at that exact path, not merely hope it.
 inline constexpr char kStagedLexiconName[] = "lexicon/epocanva_test_lexicon.tsv";
 
+// The pilot fixture's own join points. tests/fixtures/english_pilot/ is the hand-written
+// schema with the word-list path swapped, and the staged name is pilot-specific so no line
+// of a report can be read as the 54-row list.
+inline constexpr char kPilotSchemaId[] = "epocanva_pilot_english";
+inline constexpr char kPilotStagedLexiconName[] = "lexicon/epocanva_pilot_lexicon.tsv";
+
 // The engine, the fixture and the accounting a mode is allowed to touch.
 struct Harness {
   RimeApi* api = nullptr;
@@ -218,6 +245,8 @@ struct Harness {
   std::filesystem::path schema_source;  // staged copy, in the shared dir
   std::filesystem::path shared_dir;
   std::filesystem::path fixture_dir;    // the read-only fixture directory
+  std::filesystem::path pilot_lexicon;  // the generated list, verified before it is used
+  std::filesystem::path run_root;       // this run's own leaf, for scratch copies
   std::string staging_dir;              // read back from the engine, not assumed
   ApiBalance balance;
   Checker checks;
@@ -309,6 +338,16 @@ ExitCode DeployFixture(Harness* h);
 // staged (or -1 when it removed the file) so the caller can prove the engine is looking at
 // exactly the bytes it intended.
 long long RestageLexicon(Harness* h, const char* fixture_lexicon);
+// Stages the pilot fixture: its default.yaml, its schema, and the GENERATED word list at the
+// name that schema resolves. The generated file is copied, never moved or edited, so the
+// artefact under build/ stays byte-identical to what its converter wrote -- which the pilot
+// modes then prove by re-hashing it.
+ExitCode StagePilotFixture(const Options& opt, const std::filesystem::path& shared_dir,
+                           std::filesystem::path* schema_source);
+// True for the modes that cannot run without --pilot-lexicon, and that are the only ones
+// allowed to accept the flag.
+bool ModeNeedsPilotLexicon(Mode mode);
+StagePlan PlanForMode(Mode mode);
 
 // --- whole-program lifecycle ---------------------------------------------------
 // Parses, prepares the run directory, stages the fixture, starts the engine, runs the

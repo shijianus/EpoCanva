@@ -74,6 +74,26 @@ set(EpoCanva_Assert_Script
     "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/english_completion/assert_exit.cmake"
     CACHE FILEPATH "Wrapper that compares an exact exit code and a marker policy")
 
+# --- the pilot switch: OFF by default, and OFF means the data is never mentioned -------
+# EPOCANVA_ENGLISH_PILOT_LEXICON is empty in the normal configure, and with it empty this
+# project registers exactly the cases it registered before the pilot existed, requires no
+# generated data, and reads no manifest. Setting it is a promise that the data is present
+# and is the pinned data: every check below runs at configure time and fails the configure
+# loudly rather than deregistering the case, so there is no such thing as a machine that
+# "passed" the pilot suite by not running it. Nothing here downloads, fetches or builds the
+# data; tools/data/build_english_pilot.py is run by a human, and the option only names the
+# result. See data/manifests/english-pilot.sources.lock.json for what the file must be.
+set(EPOCANVA_ENGLISH_PILOT_LEXICON "" CACHE FILEPATH
+  "Absolute path of the generated pilot word list; empty registers no pilot case")
+set(EPOCANVA_ENGLISH_PILOT_OUTPUT_DIR "" CACHE PATH
+  "Directory holding the generated pilot lexicon and its conversion report")
+set(EpoCanva_English_Pilot_Fixture_Dir
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_pilot" CACHE PATH
+  "Directory holding the pilot default.yaml and schema; used only by pilot cases")
+set(EpoCanva_Pilot_Manifest
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../data/manifests/english-pilot.sources.lock.json"
+    CACHE FILEPATH "The pinned identity record the pilot data is checked against")
+
 # Reuses the surviving wrapper rather than inventing a second judgement: exact integer
 # exit code, plus the success marker required or forbidden. The engine half of every
 # claim is the program's own observation, not this file's.
@@ -134,11 +154,96 @@ foreach(_f
         "${CMAKE_CURRENT_SOURCE_DIR}/space_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/lexicon_failure_tests.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/lexicon_failure_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/pilot_sha256.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/pilot_sha256.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/pilot_reference.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/pilot_reference.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/pilot_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/pilot_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_pilot/default.yaml"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_pilot/epocanva_pilot_english.schema.yaml"
         "${EpoCanva_Assert_Script}")
   if(NOT EXISTS "${_f}")
     message(FATAL_ERROR "required input missing: ${_f}")
   endif()
 endforeach()
+
+# --- pilot identity, established before anything is compiled -------------------------
+# The expectations the test program carries are read OUT of the manifest, and the file on
+# disk is hashed against them here. Both directions matter: a wrong artefact cannot be
+# accommodated by editing this file (the digest comes from the manifest, not from a literal
+# below), and an edited manifest cannot be accommodated by the artefact (the hash of the
+# real file is compared, and a mismatch stops the configure). A truncated list is the case
+# that shows why: it still parses and still loads, so only the digest separates it.
+if(EPOCANVA_ENGLISH_PILOT_LEXICON)
+  if(NOT IS_ABSOLUTE "${EPOCANVA_ENGLISH_PILOT_LEXICON}")
+    message(FATAL_ERROR
+      "EPOCANVA_ENGLISH_PILOT_LEXICON must be an absolute path, got: "
+      "${EPOCANVA_ENGLISH_PILOT_LEXICON}")
+  endif()
+  if(NOT EXISTS "${EPOCANVA_ENGLISH_PILOT_LEXICON}")
+    message(FATAL_ERROR
+      "EPOCANVA_ENGLISH_PILOT_LEXICON names a file that does not exist: "
+      "${EPOCANVA_ENGLISH_PILOT_LEXICON}. Generate it with "
+      "tools/data/build_english_pilot.py (no network step is run by this build).")
+  endif()
+  if(NOT EPOCANVA_ENGLISH_PILOT_OUTPUT_DIR)
+    get_filename_component(EPOCANVA_ENGLISH_PILOT_OUTPUT_DIR
+      "${EPOCANVA_ENGLISH_PILOT_LEXICON}" DIRECTORY)
+    set(EPOCANVA_ENGLISH_PILOT_OUTPUT_DIR "${EPOCANVA_ENGLISH_PILOT_OUTPUT_DIR}" CACHE PATH
+      "Directory holding the generated pilot lexicon and its conversion report" FORCE)
+  endif()
+  if(NOT EXISTS "${EpoCanva_Pilot_Manifest}")
+    message(FATAL_ERROR
+      "the pilot manifest is missing, so no identity expectation can be read: "
+      "${EpoCanva_Pilot_Manifest}")
+  endif()
+  if(NOT EXISTS "${EpoCanva_English_Pilot_Fixture_Dir}/epocanva_pilot_english.schema.yaml")
+    message(FATAL_ERROR
+      "the pilot fixture directory is missing its schema: "
+      "${EpoCanva_English_Pilot_Fixture_Dir}")
+  endif()
+
+  file(READ "${EpoCanva_Pilot_Manifest}" _pilot_manifest)
+  string(JSON _pilot_name  GET "${_pilot_manifest}" output lexicon_file)
+  string(JSON _pilot_sha   GET "${_pilot_manifest}" output sha256)
+  string(JSON _pilot_bytes GET "${_pilot_manifest}" output size_bytes)
+  string(JSON _pilot_rows  GET "${_pilot_manifest}" output line_count)
+  string(JSON _pilot_src   GET "${_pilot_manifest}" inputs 0 repo_path)
+  string(JSON _pilot_commit GET "${_pilot_manifest}" pinned_commit)
+  foreach(_v _pilot_name _pilot_sha _pilot_bytes _pilot_rows _pilot_src _pilot_commit)
+    if("${${_v}}" STREQUAL "")
+      message(FATAL_ERROR "pilot: ${_v} is empty in ${EpoCanva_Pilot_Manifest}")
+    endif()
+  endforeach()
+
+  # The name matters as well as the content: pointing the option at some other TSV while the
+  # manifest describes another file would otherwise let a wrong list through on a lucky hash.
+  get_filename_component(_pilot_given_name "${EPOCANVA_ENGLISH_PILOT_LEXICON}" NAME)
+  if(NOT _pilot_given_name STREQUAL _pilot_name)
+    message(FATAL_ERROR
+      "pilot: EPOCANVA_ENGLISH_PILOT_LEXICON names ${_pilot_given_name}, but the manifest "
+      "records the generated list as ${_pilot_name}")
+  endif()
+
+  file(SIZE "${EPOCANVA_ENGLISH_PILOT_LEXICON}" _pilot_actual_bytes)
+  file(SHA256 "${EPOCANVA_ENGLISH_PILOT_LEXICON}" _pilot_actual_sha)
+  if(NOT _pilot_actual_bytes EQUAL _pilot_bytes)
+    message(FATAL_ERROR
+      "pilot data identity FAILED on size: ${EPOCANVA_ENGLISH_PILOT_LEXICON} is "
+      "${_pilot_actual_bytes} bytes, the manifest ${EpoCanva_Pilot_Manifest} expects "
+      "${_pilot_bytes}")
+  endif()
+  if(NOT _pilot_actual_sha STREQUAL _pilot_sha)
+    message(FATAL_ERROR
+      "pilot data identity FAILED on SHA-256: ${EPOCANVA_ENGLISH_PILOT_LEXICON} hashes to "
+      "${_pilot_actual_sha}, the manifest expects ${_pilot_sha}. This configure does not "
+      "adjust the expectation to fit the file; regenerate the data with "
+      "tools/data/build_english_pilot.py or point the option at the pinned artefact.")
+  endif()
+  message(STATUS "pilot identity   : OK  sha256 ${_pilot_actual_sha}  ${_pilot_actual_bytes} "
+                 "bytes  ${_pilot_rows} rows  source ${_pilot_src} @ ${_pilot_commit}")
+endif()
 
 set(_SOURCES
   main.cc
@@ -147,7 +252,10 @@ set(_SOURCES
   case_tests.cc
   token_tests.cc
   space_tests.cc
-  lexicon_failure_tests.cc)
+  lexicon_failure_tests.cc
+  pilot_sha256.cc
+  pilot_reference.cc
+  pilot_tests.cc)
 set(_DEFINES RIME_IMPORTS _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 set(_OPTIONS /utf-8 /permissive- /Zc:__cplusplus /W4 /EHsc)
 
@@ -171,6 +279,22 @@ target_link_libraries(rime_english_recovery_baseline PRIVATE "${Base_IMPORT_LIB}
 set_target_properties(rime_english_recovery_baseline PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/baseline-engine")
 
+# The identity expectations the pilot modes check the file on disk against, taken from the
+# manifest read above and compiled in. Both executables get them because both compile the
+# same sources; only the english-linked one is registered with pilot cases. If the quoting
+# were lost the string literal would stop being a literal and the build would fail, which is
+# the loud outcome this file prefers over a mode that compares against an empty expectation.
+if(EPOCANVA_ENGLISH_PILOT_LEXICON)
+  set(_pilot_defines
+    "EPOCANVA_PILOT_EXPECTED_SHA256=\"${_pilot_sha}\""
+    "EPOCANVA_PILOT_EXPECTED_BYTES=${_pilot_bytes}"
+    "EPOCANVA_PILOT_EXPECTED_ROWS=${_pilot_rows}"
+    "EPOCANVA_PILOT_SOURCE_PATH=\"${_pilot_src}\""
+    "EPOCANVA_PILOT_PINNED_COMMIT=\"${_pilot_commit}\"")
+  target_compile_definitions(rime_english_recovery PRIVATE ${_pilot_defines})
+  target_compile_definitions(rime_english_recovery_baseline PRIVATE ${_pilot_defines})
+endif()
+
 # Place the exact built rime.dll in each executable's own directory, so the load path is
 # explicit and independent of PATH. Each program then verifies at run time that the module
 # which supplied rime_get_api() really is that file.
@@ -192,12 +316,18 @@ enable_testing()
 set(_run_root "${CMAKE_CURRENT_BINARY_DIR}/rime-english-recovery-run")
 set(_assert ${EpoCanva_Assert_Script})
 
+# FIXTURE_DIR and EXTRA_ARGS exist for the pilot cases and default to nothing, so every
+# case registered without them keeps the command line it was verified with -- the existing
+# 17 registrations are not re-worded, re-ordered or re-pathed by this change.
 function(epocanva_add_case)
   cmake_parse_arguments(CASE "BASELINE_EXE"
-                        "NAME;MODE;EXPECTED_EXIT;MARKER;MARKER_POLICY;LABEL"
-                        "" ${ARGN})
+                        "NAME;MODE;EXPECTED_EXIT;MARKER;MARKER_POLICY;LABEL;FIXTURE_DIR"
+                        "EXTRA_ARGS" ${ARGN})
   if(NOT CASE_MARKER_POLICY)
     set(CASE_MARKER_POLICY require)
+  endif()
+  if(NOT CASE_FIXTURE_DIR)
+    set(CASE_FIXTURE_DIR "${EpoCanva_English_Fixture_Dir}")
   endif()
   if(CASE_BASELINE_EXE)
     set(exe_dir "${CMAKE_CURRENT_BINARY_DIR}/baseline-engine")
@@ -206,6 +336,10 @@ function(epocanva_add_case)
     set(exe_dir "${CMAKE_CURRENT_BINARY_DIR}/english-engine")
     set(exe "$<TARGET_FILE:rime_english_recovery>")
   endif()
+  set(_extra "")
+  foreach(_arg IN LISTS CASE_EXTRA_ARGS)
+    string(APPEND _extra ";${_arg}")
+  endforeach()
   add_test(
     NAME ${CASE_NAME}
     COMMAND ${CMAKE_COMMAND}
@@ -214,7 +348,7 @@ function(epocanva_add_case)
       -DEXPECTED_EXIT=${CASE_EXPECTED_EXIT}
       "-DMARKER=${CASE_MARKER}"
       "-DMARKER_POLICY=${CASE_MARKER_POLICY}"
-      "-DPASS_ARGS=--expect-dll;${exe_dir}/rime.dll;--fixture-dir;${EpoCanva_English_Fixture_Dir};--run-root;${_run_root}/${CASE_LABEL};--mode;${CASE_MODE}"
+      "-DPASS_ARGS=--expect-dll;${exe_dir}/rime.dll;--fixture-dir;${CASE_FIXTURE_DIR};--run-root;${_run_root}/${CASE_LABEL};--mode;${CASE_MODE}${_extra}"
       -DTIMEOUT_SECONDS=120
       -P ${_assert}
   )
@@ -417,6 +551,103 @@ epocanva_add_case(
   MARKER_POLICY forbid
   LABEL     lexicon-failure-self-check-fail)
 
+# ------------------------------------------------------------------ pilot cases --
+# Registered ONLY when EPOCANVA_ENGLISH_PILOT_LEXICON names a generated file that has
+# already passed the configure-time identity check above. With the option empty, none of
+# these names exists in CTest and nothing in the project asks for the data -- so the
+# default configure keeps exactly the 17 cases it had, and a machine without the pinned
+# word list does not run a quietly-skipped pilot test, it simply has no pilot test.
+#
+# Four engine cases and one data case, each with its own run root and its own exit code:
+# 0 = the trial ran and every reference comparison held, 14 = the group's falsification
+# control (a deliberately mis-ranked menu on real data), 22 = pre-validation refused the
+# data before the engine opened it. A crash, a missing DLL or a bad argument produces a
+# different code and therefore fails the judgement rather than impersonating it.
+if(EPOCANVA_ENGLISH_PILOT_LEXICON)
+  epocanva_add_case(
+    NAME      recovery.pilot.real_lexicon_reference_compared
+    MODE      pilot-lexicon
+    FIXTURE_DIR "${EpoCanva_English_Pilot_Fixture_Dir}"
+    EXTRA_ARGS --pilot-lexicon "${EPOCANVA_ENGLISH_PILOT_LEXICON}"
+    EXPECTED_EXIT 0
+    MARKER    "RESULT PASS"
+    MARKER_POLICY require
+    LABEL     pilot-real-lexicon)
+
+  # The control that keeps the pilot honest: the identity check passes, the real list
+  # loads, the healthy menu is asserted and passes, and ONE menu is then claimed with two
+  # rows of the same weight tier swapped. Exit 14 with the marker forbidden is what shows
+  # the comparison has teeth on 42k rows instead of merely running green.
+  epocanva_add_case(
+    NAME      recovery.pilot.suite_can_fail_on_reference_ranking
+    MODE      pilot-assertion-self-check-fail
+    FIXTURE_DIR "${EpoCanva_English_Pilot_Fixture_Dir}"
+    EXTRA_ARGS --pilot-lexicon "${EPOCANVA_ENGLISH_PILOT_LEXICON}"
+    EXPECTED_EXIT 14
+    MARKER    "RESULT PASS"
+    MARKER_POLICY forbid
+    LABEL     pilot-assertion-self-check-fail)
+
+  # Data identity, negative control 1: three quarters of the real list, written as an
+  # independent copy inside this run's own directory. It parses cleanly, is strictly
+  # ascending and has no duplicate row, so a row count or a grammar check cannot refuse it
+  # -- only the digest can. The mode asserts lexicon_load_attempts == 0 on the way out,
+  # which is what separates "pre-validation refused it" (22) from "the engine failed to
+  # load it" (a load-failure code) from "an expectation disagreed" (14), and it re-verifies
+  # the original afterwards to show nothing was repaired in place.
+  epocanva_add_case(
+    NAME      recovery.pilot.truncated_data_refused_before_the_engine
+    MODE      pilot-truncated-rejected
+    FIXTURE_DIR "${EpoCanva_English_Pilot_Fixture_Dir}"
+    EXTRA_ARGS --pilot-lexicon "${EPOCANVA_ENGLISH_PILOT_LEXICON}"
+    EXPECTED_EXIT 22
+    MARKER    "RESULT PASS"
+    MARKER_POLICY forbid
+    LABEL     pilot-truncated-rejected)
+
+  # Data identity, negative control 2: a path that is not there. Same code, different named
+  # reason, and again the engine is never asked to read anything -- so this is not a
+  # re-labelled file-not-found load test.
+  epocanva_add_case(
+    NAME      recovery.pilot.absent_data_refused_before_the_engine
+    MODE      pilot-missing-rejected
+    FIXTURE_DIR "${EpoCanva_English_Pilot_Fixture_Dir}"
+    EXTRA_ARGS --pilot-lexicon
+      "${CMAKE_CURRENT_BINARY_DIR}/pilot-absence-control/epocanva_en_pilot.tsv"
+    EXPECTED_EXIT 22
+    MARKER    "RESULT PASS"
+    MARKER_POLICY forbid
+    LABEL     pilot-missing-rejected)
+
+  # The identity check that is not written by this recovery at all: the surviving P2.4
+  # script re-hashes the file on disk against the manifest and re-checks the conversion
+  # report's own arithmetic. If my own digest implementation were wrong, the pilot modes
+  # would agree with each other and this case would still fail.
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/english_pilot/assert_pilot_output.cmake")
+    message(FATAL_ERROR
+      "pilot: tests/english_pilot/assert_pilot_output.cmake is missing, so the generated "
+      "list cannot be checked against the manifest by the surviving script")
+  endif()
+  add_test(
+    NAME    recovery.pilot.output_matches_the_pinned_manifest
+    COMMAND ${CMAKE_COMMAND}
+      -DMANIFEST=${EpoCanva_Pilot_Manifest}
+      -DOUT_DIR=${EPOCANVA_ENGLISH_PILOT_OUTPUT_DIR}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/../../tests/english_pilot/assert_pilot_output.cmake
+  )
+
+  set_tests_properties(
+    recovery.pilot.real_lexicon_reference_compared
+    recovery.pilot.suite_can_fail_on_reference_ranking
+    recovery.pilot.truncated_data_refused_before_the_engine
+    recovery.pilot.absent_data_refused_before_the_engine
+    PROPERTIES TIMEOUT 300
+               LABELS "librime;english;completion;case;token;space;lexicon;recovery;pilot")
+  set_tests_properties(
+    recovery.pilot.output_matches_the_pinned_manifest
+    PROPERTIES TIMEOUT 120 LABELS "english;recovery;pilot;data")
+endif()
+
 set_tests_properties(
   recovery.completion.prefix_candidates_and_commit
   recovery.completion.negative_baseline_engine
@@ -451,3 +682,16 @@ message(STATUS "  diagnostics header   : ${EpoCanva_English_Header_Dir}")
 message(STATUS "  fixture dir          : ${EpoCanva_English_Fixture_Dir}")
 message(STATUS "  assert wrapper       : ${EpoCanva_Assert_Script}")
 message(STATUS "  run root             : ${_run_root}")
+if(EPOCANVA_ENGLISH_PILOT_LEXICON)
+  list(LENGTH _pilot_defines _pilot_define_count)
+  message(STATUS "  pilot lexicon        : ${EPOCANVA_ENGLISH_PILOT_LEXICON}")
+  message(STATUS "  pilot output dir     : ${EPOCANVA_ENGLISH_PILOT_OUTPUT_DIR}")
+  message(STATUS "  pilot fixture dir    : ${EpoCanva_English_Pilot_Fixture_Dir}")
+  message(STATUS "  pilot manifest       : ${EpoCanva_Pilot_Manifest}")
+  message(STATUS "  pilot defines        : ${_pilot_define_count} identity expectations "
+                 "compiled in")
+  message(STATUS "  pilot cases          : 5 registered (4 engine modes + 1 data check)")
+else()
+  message(STATUS "  pilot lexicon        : not configured -- no pilot case is registered, "
+                 "no generated data is required, no manifest is read")
+endif()

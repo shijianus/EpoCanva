@@ -16,6 +16,7 @@
 #include "case_tests.h"
 #include "completion_tests.h"
 #include "lexicon_failure_tests.h"
+#include "pilot_tests.h"
 #include "recovery_test_support.h"
 #include "space_tests.h"
 #include "token_tests.h"
@@ -49,6 +50,11 @@ constexpr ModeEntry kModes[] = {
     {Mode::kBadLexiconIllegalForm, epocanva::recovery::RunBadLexiconIllegalFormMode},
     {Mode::kLexiconFailureSelfCheckFail,
      epocanva::recovery::RunLexiconFailureSelfCheckFailMode},
+    {Mode::kPilotLexicon, epocanva::recovery::RunPilotLexiconMode},
+    {Mode::kPilotAssertionSelfCheckFail,
+     epocanva::recovery::RunPilotAssertionSelfCheckFailMode},
+    {Mode::kPilotTruncatedRejected, epocanva::recovery::RunPilotTruncatedRejectedMode},
+    {Mode::kPilotMissingRejected, epocanva::recovery::RunPilotMissingRejectedMode},
 };
 
 ModeFn FindMode(Mode mode) {
@@ -73,7 +79,11 @@ int main(int argc, char** argv) {
         "expect-module-absent|self-check-fail|case-preservation|case-self-check-fail|"
         "token-protection|token-self-check-fail|space-commit|space-self-check-fail|"
         "missing-lexicon|bad-lexicon-duplicate|bad-lexicon-illegal|"
-        "bad-lexicon-illegal-form|lexicon-failure-self-check-fail]\n");
+        "bad-lexicon-illegal-form|lexicon-failure-self-check-fail|"
+        "pilot-lexicon|pilot-assertion-self-check-fail|pilot-truncated-rejected|"
+        "pilot-missing-rejected]\n"
+        "       the four pilot modes additionally require --pilot-lexicon <absolute path "
+        "to the generated word list> and accept it and nothing else\n");
     epocanva::recovery::Fail(epocanva::recovery::kUsage, "arguments", error);
     return epocanva::recovery::kUsage;
   }
