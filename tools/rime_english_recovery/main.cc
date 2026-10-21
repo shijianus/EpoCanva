@@ -22,6 +22,7 @@
 #include "spelling_commit_tests.h"
 #include "spelling_negative_tests.h"
 #include "spelling_tests.h"
+#include "spelling_toggle_tests.h"
 #include "token_tests.h"
 
 namespace {
@@ -66,6 +67,9 @@ constexpr ModeEntry kModes[] = {
      epocanva::recovery::RunSpellingSuggestionRankingSelfCheckFailMode},
     {Mode::kSpellingLabelSelfCheckFail,
      epocanva::recovery::RunSpellingLabelSelfCheckFailMode},
+    {Mode::kSpellingToggleAb, epocanva::recovery::RunSpellingToggleAbMode},
+    {Mode::kSpellingToggleSelfCheckFail,
+     epocanva::recovery::RunSpellingToggleSelfCheckFailMode},
 };
 
 ModeFn FindMode(Mode mode) {
@@ -94,7 +98,8 @@ int main(int argc, char** argv) {
         "pilot-lexicon|pilot-assertion-self-check-fail|pilot-truncated-rejected|"
         "pilot-missing-rejected|spelling-suggestions|spelling-commit|"
         "spelling-lexicon-unavailable|spelling-ranking-self-check-fail|"
-        "spelling-label-self-check-fail]\n"
+        "spelling-label-self-check-fail|spelling-toggle-ab|"
+        "spelling-toggle-self-check-fail]\n"
         "       the four pilot modes additionally require --pilot-lexicon <absolute path "
         "to the generated word list> and accept it and nothing else\n");
     epocanva::recovery::Fail(epocanva::recovery::kUsage, "arguments", error);

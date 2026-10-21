@@ -348,6 +348,164 @@ ExitCode StageSpellingFixture(const Options& opt, const std::filesystem::path& s
   return kOk;
 }
 
+// --- the suggestions-disabled twin, derived for the feature-toggle comparison -----------
+// This is the StagePlan::kSpellingToggleFixture plan: the fixture's default.yaml, schema and
+// 16-row word list, plus ONE derived file. It deliberately does not derive the broken pair --
+// the toggle run compares two schemas and nothing else, and its staging is checked to say so.
+// The derivation contract is that exactly two lines move, the schema identity and the switch,
+// so "the two controlled solutions differ in the switch" is a fact about the bytes handed to
+// the engine rather than a habit of whoever edits the fixture next.
+// The two anchors below are held to the same discipline as the broken schema: indented YAML
+// keys with the newline included (the fixture's own header comment contains `# schema_id:
+// epocanva_spell_english`, which a loose anchor would rewrite instead of the real key),
+// exactly one hit required BEFORE anything is written, and the generated text re-verified
+// afterwards. Line endings are LF in this repository; an anchor carrying its '\n' means a
+// CRLF checkout fails the count rather than deriving something nobody asked for.
+constexpr char kSpellingEnableOnKey[] = "  enable_suggestions: true\n";
+constexpr char kSpellingEnableOffKey[] = "  enable_suggestions: false\n";
+constexpr char kSpellingOffSchemaIdKey[] =
+    "  schema_id: epocanva_spell_off_english\n";
+// Keys that must survive the derivation untouched, because the two controlled schemas may
+// differ in the switch and in their identity and in NOTHING else.
+constexpr char kSpellingMaxSuggestionsKey[] = "  max_suggestions: 3\n";
+constexpr char kSpellingMaxCompletionsKey[] = "  max_completions: 7\n";
+
+// Splits on '\n' the same way for both texts, so "the same line index differs" is a
+// statement about the two files and not about how either one was read.
+std::vector<std::string> SplitOnNewline(const std::string& text) {
+  std::vector<std::string> lines;
+  std::string current;
+  for (const char ch : text) {
+    if (ch == '\n') {
+      current.push_back(ch);
+      lines.push_back(current);
+      current.clear();
+    } else {
+      current.push_back(ch);
+    }
+  }
+  if (!current.empty()) {
+    lines.push_back(current);
+  }
+  return lines;
+}
+
+ExitCode StageSpellingToggleFixture(const Options& opt,
+                                    const std::filesystem::path& shared_dir,
+                                    std::filesystem::path* schema_source) {
+  const std::filesystem::path default_src = opt.fixture_dir / kFixtureDefaultYaml;
+  const std::filesystem::path schema_src = opt.fixture_dir / kSpellingFixtureSchemaYaml;
+  const std::filesystem::path lexicon_src = opt.fixture_dir / kSpellingFixtureLexicon;
+  std::error_code ec;
+  bool absent = false;
+  for (const std::filesystem::path& p : {default_src, schema_src, lexicon_src}) {
+    if (!std::filesystem::is_regular_file(p, ec) || ec) {
+      std::printf("[english] fixture.absent             %s\n", p.string().c_str());
+      absent = true;
+    }
+  }
+  if (absent) {
+    return kFixtureMissing;
+  }
+  ExitCode rc = CopyInto(default_src, shared_dir / kFixtureDefaultYaml);
+  if (rc != kOk) {
+    return rc;
+  }
+  rc = CopyInto(lexicon_src, shared_dir / kSpellingStagedLexiconName);
+  if (rc != kOk) {
+    return rc;
+  }
+  rc = CopyInto(schema_src, shared_dir / kSpellingFixtureSchemaYaml);
+  if (rc != kOk) {
+    return rc;
+  }
+
+  std::ifstream in(schema_src, std::ios::binary);
+  const std::string original((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+  if (!in || original.empty()) {
+    Fail(kFixtureMissing, "spelling.toggle-schema.rewrite",
+         "the spelling schema could not be read: " + schema_src.string());
+    return kFixtureMissing;
+  }
+  // Fail before writing if the source does not carry the switch this derivation intends to
+  // turn off. A fixture whose `enable_suggestions` had drifted or disappeared would otherwise
+  // produce two identical schemas and a toggle comparison that compares nothing.
+  if (CountOccurrences(original, kSpellingEnableOnKey) != 1 ||
+      CountOccurrences(original, kSpellingSchemaIdKey) != 1 ||
+      CountOccurrences(original, kSpellingLexiconPathKey) != 1 ||
+      CountOccurrences(original, kSpellingMaxSuggestionsKey) != 1 ||
+      CountOccurrences(original, kSpellingMaxCompletionsKey) != 1) {
+    Fail(kFixtureMissing, "spelling.toggle-schema.rewrite",
+         "the spelling schema does not contain each of enable_suggestions:true, schema_id, "
+         "lexicon_path, max_suggestions:3 and max_completions:7 exactly once, so a "
+         "switch-only twin cannot be derived from it");
+    return kFixtureMissing;
+  }
+
+  std::string off = original;
+  if (!ReplaceOnce(&off, kSpellingEnableOnKey, kSpellingEnableOffKey)) {
+    Fail(kFixtureMissing, "spelling.toggle-schema.rewrite",
+         "the indented enable_suggestions anchor did not match exactly once");
+    return kFixtureMissing;
+  }
+  if (!ReplaceOnce(&off, kSpellingSchemaIdKey, kSpellingOffSchemaIdKey)) {
+    Fail(kFixtureMissing, "spelling.toggle-schema.rewrite",
+         "the indented schema_id anchor did not match exactly once");
+    return kFixtureMissing;
+  }
+
+  // Re-verify the generated text. The switch must be the ONLY behavioural difference: the
+  // word list still resolves to the same staged name, the two budgets are still the same
+  // numbers, and no other line moved at all.
+  const bool text_ok =
+      CountOccurrences(off, kSpellingEnableOnKey) == 0 &&
+      CountOccurrences(off, kSpellingEnableOffKey) == 1 &&
+      CountOccurrences(off, kSpellingSchemaIdKey) == 0 &&
+      CountOccurrences(off, kSpellingOffSchemaIdKey) == 1 &&
+      CountOccurrences(off, kSpellingSchemaBrokenIdKey) == 0 &&
+      CountOccurrences(off, kSpellingLexiconPathKey) == 1 &&
+      CountOccurrences(off, kSpellingBrokenLexiconPathKey) == 0 &&
+      CountOccurrences(off, kSpellingMaxSuggestionsKey) == 1 &&
+      CountOccurrences(off, kSpellingMaxCompletionsKey) == 1;
+  if (!text_ok) {
+    Fail(kFixtureMissing, "spelling.toggle-schema.rewrite",
+         "the derived schema failed its own read-back checks (the switch, the identity, the "
+         "word-list path or one of the two budgets is not what a switch-only twin requires)");
+    return kFixtureMissing;
+  }
+  const std::vector<std::string> on_lines = SplitOnNewline(original);
+  const std::vector<std::string> off_lines = SplitOnNewline(off);
+  std::size_t differing = 0;
+  if (on_lines.size() != off_lines.size()) {
+    differing = static_cast<std::size_t>(-1);
+  } else {
+    for (std::size_t i = 0; i < on_lines.size(); ++i) {
+      if (on_lines[i] != off_lines[i]) {
+        ++differing;
+      }
+    }
+  }
+  if (differing != 2) {
+    Fail(kFixtureMissing, "spelling.toggle-schema.rewrite",
+         "the derived schema differs from the source in " + std::to_string(differing) +
+             " lines; exactly 2 (schema_id and enable_suggestions) were intended, so the "
+             "two controlled solutions would not be a switch apart");
+    return kFixtureMissing;
+  }
+  std::printf("[english] toggle.derived             %s (%zu bytes, %zu lines, 2 lines "
+              "apart from the source: schema_id and enable_suggestions)\n",
+              kSpellingOffSchemaYaml, off.size(), off_lines.size());
+
+  rc = WriteGeneratedFile(shared_dir / kSpellingOffSchemaYaml, off,
+                          "suggestions-disabled spelling schema");
+  if (rc != kOk) {
+    return rc;
+  }
+  *schema_source = shared_dir / kSpellingFixtureSchemaYaml;
+  return kOk;
+}
+
 ExitCode VerifyLoadedModule(const Options& opt, RimeApi* api) {
   if (!api->get_version) {
     Fail(kLoadedModuleMismatch, "module.identity", "get_version slot is NULL");
@@ -737,6 +895,14 @@ bool ModeFromName(const std::string& name, Mode* out) {
     *out = Mode::kSpellingLabelSelfCheckFail;
     return true;
   }
+  if (name == "spelling-toggle-ab") {
+    *out = Mode::kSpellingToggleAb;
+    return true;
+  }
+  if (name == "spelling-toggle-self-check-fail") {
+    *out = Mode::kSpellingToggleSelfCheckFail;
+    return true;
+  }
   return false;
 }
 
@@ -788,6 +954,10 @@ const char* ModeName(Mode mode) {
       return "spelling-ranking-self-check-fail";
     case Mode::kSpellingLabelSelfCheckFail:
       return "spelling-label-self-check-fail";
+    case Mode::kSpellingToggleAb:
+      return "spelling-toggle-ab";
+    case Mode::kSpellingToggleSelfCheckFail:
+      return "spelling-toggle-self-check-fail";
   }
   return "?";
 }
@@ -1009,6 +1179,89 @@ std::string LastStatusName(const EnglishSurface& surface) {
   return name ? std::string(name) : std::string("(null)");
 }
 
+// Reads one deployed schema back through the engine's own config component.
+// RimeSchemaOpen resolves "<id>.schema" through Config::Require("schema")
+// (src/rime_api_impl.h:568-570 -> src/rime/schema.cc:40-42), which is the same lookup
+// Engine::ApplySchema() performs when a session selects that id (src/rime_api_impl.h:540-549),
+// so what this returns is the configuration the engine itself would act on -- not the file
+// this program copied into the shared directory.
+ExitCode ReadDeployedEnglishConfig(RimeApi* api, ApiBalance* balance,
+                                   const char* schema_id,
+                                   DeployedEnglishConfig* out) {
+  *out = DeployedEnglishConfig();
+  if (!RIME_API_AVAILABLE(api, schema_open) ||
+      !RIME_API_AVAILABLE(api, config_close) ||
+      !RIME_API_AVAILABLE(api, config_get_bool) ||
+      !RIME_API_AVAILABLE(api, config_get_int) ||
+      !RIME_API_AVAILABLE(api, config_get_string)) {
+    Fail(kApiUnavailable, "config.slots",
+         "the loaded API table is missing one of schema_open/config_close/"
+         "config_get_bool/config_get_int/config_get_string");
+    return kApiUnavailable;
+  }
+  RimeConfig cfg;
+  cfg.ptr = nullptr;
+  if (api->schema_open(schema_id, &cfg) != True) {
+    Fail(kDeployFailed, "config.open",
+         std::string("schema_open(\"") + schema_id +
+             "\") was refused, so this run cannot show what the engine reads for that id");
+    return kDeployFailed;
+  }
+  balance->config_get += 1;
+
+  Bool enable = False;
+  out->enable_suggestions_present =
+      api->config_get_bool(&cfg, "english/" EPOCANVA_ENGLISH_ENABLE_SUGGESTIONS_KEY,
+                           &enable) == True;
+  out->enable_suggestions_value = (enable == True);
+
+  int number = -1;
+  out->max_suggestions_present =
+      api->config_get_int(&cfg, "english/" EPOCANVA_ENGLISH_MAX_SUGGESTIONS_KEY,
+                          &number) == True;
+  out->max_suggestions = number;
+
+  number = -1;
+  out->max_completions_present =
+      api->config_get_int(&cfg, "english/" EPOCANVA_ENGLISH_MAX_COMPLETIONS_KEY,
+                          &number) == True;
+  out->max_completions = number;
+
+  number = -1;
+  out->page_size_present =
+      api->config_get_int(&cfg, "menu/page_size", &number) == True;
+  out->page_size = number;
+
+  char path_buf[kPathBuffer];
+  path_buf[0] = '\0';
+  out->lexicon_path_present =
+      api->config_get_string(&cfg, "english/" EPOCANVA_ENGLISH_LEXICON_PATH_KEY, path_buf,
+                             sizeof(path_buf)) == True;
+  if (out->lexicon_path_present) {
+    out->lexicon_path.assign(path_buf);
+  }
+
+  std::printf("[english] deployed config            %s  enable_suggestions=%s(%d) "
+              "max_suggestions=%lld max_completions=%lld page_size=%lld lexicon_path=%s\n",
+              schema_id, out->enable_suggestions_present ? "read" : "ABSENT",
+              static_cast<int>(out->enable_suggestions_value),
+              static_cast<long long>(out->max_suggestions),
+              static_cast<long long>(out->max_completions),
+              static_cast<long long>(out->page_size),
+              out->lexicon_path_present ? out->lexicon_path.c_str() : "(ABSENT)");
+
+  const Bool closed = api->config_close(&cfg);
+  if (closed != True) {
+    Fail(kApiResultUnbalanced, "config.close",
+         std::string("config_close() refused the handle schema_open() gave for ") +
+             schema_id);
+    return kApiResultUnbalanced;
+  }
+  balance->config_free += 1;
+  out->opened = true;
+  return kOk;
+}
+
 // --- keys ---------------------------------------------------------------------
 
 ExitCode SendKey(RimeApi* api, RimeSessionId sid, int keycode, int mask,
@@ -1202,6 +1455,9 @@ StagePlan PlanForMode(Mode mode) {
     case Mode::kSpellingSuggestionRankingSelfCheckFail:
     case Mode::kSpellingLabelSelfCheckFail:
       return StagePlan::kSpellingFixture;
+    case Mode::kSpellingToggleAb:
+    case Mode::kSpellingToggleSelfCheckFail:
+      return StagePlan::kSpellingToggleFixture;
     default:
       return StagePlan::kHandWrittenFixture;
   }
@@ -1319,6 +1575,9 @@ ExitCode RunHarness(const Options& opt, ModeFn mode_fn) {
       break;
     case StagePlan::kSpellingFixture:
       rc = StageSpellingFixture(opt, h.shared_dir, &h.schema_source);
+      break;
+    case StagePlan::kSpellingToggleFixture:
+      rc = StageSpellingToggleFixture(opt, h.shared_dir, &h.schema_source);
       break;
     case StagePlan::kNothing:
       rc = kOk;  // the mode asserts an identity refusal, so nothing may be staged
@@ -1464,9 +1723,10 @@ ExitCode RunHarness(const Options& opt, ModeFn mode_fn) {
     }
   } else {
     std::printf("[english] api.balance                status %d/%d context %d/%d "
-                "commit %d/%d -- paired\n",
+                "commit %d/%d config %d/%d -- paired\n",
                 h.balance.status_get, h.balance.status_free, h.balance.context_get,
-                h.balance.context_free, h.balance.commit_get, h.balance.commit_free);
+                h.balance.context_free, h.balance.commit_get, h.balance.commit_free,
+                h.balance.config_get, h.balance.config_free);
   }
 
   {

@@ -175,6 +175,8 @@ foreach(_f
         "${CMAKE_CURRENT_SOURCE_DIR}/spelling_commit_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/spelling_negative_tests.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/spelling_negative_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/spelling_toggle_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/spelling_toggle_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/default.yaml"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/epocanva_spell_english.schema.yaml"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/lexicon_spell.tsv"
@@ -282,6 +284,7 @@ set(_SOURCES
   spelling_tests.cc
   spelling_commit_tests.cc
   spelling_negative_tests.cc
+  spelling_toggle_tests.cc
   pilot_sha256.cc
   pilot_reference.cc
   pilot_tests.cc)
@@ -701,6 +704,38 @@ epocanva_add_case(
   MARKER_POLICY forbid
   LABEL     spelling-label-self-check-fail)
 
+# 22b. The feature switch, measured as a comparison rather than as a sentence in a README.
+#      One process, one 16-row word list, the same keystrokes, and two schemas that the program
+#      derived from each other and proved are two lines apart. Asserted here: the enabled side
+#      shows the documented suggestions with the spell label and the disabled side shows none;
+#      the deployed english/enable_suggestions reads true on one and false on the other through
+#      the engine's own config lookup (not by re-reading the fixture); both sides load the same
+#      word list and both keep the typed text at index 0; the default commit on either side is
+#      what was typed, with no acceptance action; and the 27 non-spelling counters move
+#      identically in both phases, so an empty disabled side can never be earned by a side that
+#      did nothing. See spelling_toggle_tests.h.
+epocanva_add_case(
+  NAME      recovery.spelling.feature_toggle_ab
+  MODE      spelling-toggle-ab
+  FIXTURE_DIR "${EpoCanva_English_Spelling_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     spelling-toggle-ab)
+
+# 22c. Control for that comparison: the same two-sided setup and one deliberately false claim
+#      -- that the two menus came out the same. If the switch ever stops making a difference,
+#      or if the comparison stops looking, this is the case that fails to prove it could have
+#      noticed. Exit 14, marker forbidden.
+epocanva_add_case(
+  NAME      recovery.spelling.suite_can_fail_on_toggle_comparison
+  MODE      spelling-toggle-self-check-fail
+  FIXTURE_DIR "${EpoCanva_English_Spelling_Fixture_Dir}"
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     spelling-toggle-self-check-fail)
+
 # ------------------------------------------------------------------ helper cases --
 # The digest helper's own three cases. They start no engine and read no generated data, so
 # they are registered in BOTH configure modes -- which is the point: with the pilot switch off
@@ -752,7 +787,7 @@ epocanva_add_sha256_case(
 # Registered ONLY when EPOCANVA_ENGLISH_PILOT_LEXICON names a generated file that has
 # already passed the configure-time identity check above. With the option empty, none of
 # these names exists in CTest and nothing in the project asks for the data -- so the
-# default configure keeps exactly the 22 engine cases it had plus the 3 helper cases above,
+# default configure keeps exactly the 24 engine cases it had plus the 3 helper cases above,
 # and a machine without the pinned word list does not run a quietly-skipped pilot test, it
 # simply has no pilot test.
 #
@@ -894,6 +929,8 @@ set_tests_properties(
   recovery.spelling.negative_lexicon_unavailable
   recovery.spelling.suite_can_fail_on_suggestion_ranking
   recovery.spelling.suite_can_fail_on_labels
+  recovery.spelling.feature_toggle_ab
+  recovery.spelling.suite_can_fail_on_toggle_comparison
   PROPERTIES TIMEOUT 180
              LABELS "librime;english;completion;case;token;space;lexicon;spelling;recovery")
 
@@ -925,11 +962,12 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
                  "compiled in")
   message(STATUS "  pilot cases          : 6 registered (4 engine modes + 1 data check + "
                  "1 real-list digest)")
-  message(STATUS "  ctest total          : 31 = 17 pre-spelling engine cases + 5 spelling "
-                 "engine cases + 4 pilot engine cases + 1 pilot data check + 4 helper cases")
+  message(STATUS "  ctest total          : 33 = 17 pre-spelling engine cases + 7 spelling "
+                 "engine cases (5 gate/commit/negative + 2 toggle) + 4 pilot engine cases + "
+                 "1 pilot data check + 4 helper cases")
 else()
   message(STATUS "  pilot lexicon        : not configured -- no pilot case is registered, "
                  "no generated data is required, no manifest is read")
-  message(STATUS "  ctest total          : 25 = 22 engine cases (17 pre-spelling + 5 "
+  message(STATUS "  ctest total          : 27 = 24 engine cases (17 pre-spelling + 7 "
                  "spelling) + 3 helper cases")
 endif()

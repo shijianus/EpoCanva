@@ -118,6 +118,8 @@ enum class Mode {
   kSpellingLexiconUnavailable,
   kSpellingSuggestionRankingSelfCheckFail,
   kSpellingLabelSelfCheckFail,
+  kSpellingToggleAb,
+  kSpellingToggleSelfCheckFail,
 };
 
 // What RunHarness must stage before a mode runs. The two pilot refusal cases deliberately
@@ -129,6 +131,10 @@ enum class StagePlan {
   // The spelling fixture plus the two files this program derives from it (the broken schema
   // and its three-row duplicate word list), staged in this run's own directory.
   kSpellingFixture,
+  // The spelling fixture plus ONE derived file: the suggestions-disabled twin of the schema.
+  // It deliberately does not stage the broken pair, so the toggle run touches exactly the
+  // two schemas it compares and nothing else.
+  kSpellingToggleFixture,
   kNothing,
 };
 
@@ -174,14 +180,19 @@ struct ApiBalance {
   int context_free = 0;
   int commit_get = 0;
   int commit_free = 0;
+  // schema_open() allocates a Config that only config_close() releases
+  // (src/rime_api_impl.h:561-565, :581-588), so a run that reads deployed
+  // configuration is held to the same pairing as the three slots above.
+  int config_get = 0;
+  int config_free = 0;
 
   bool balanced() const {
     return status_get == status_free && context_get == context_free &&
-           commit_get == commit_free;
+           commit_get == commit_free && config_get == config_free;
   }
   int outstanding() const {
     return (status_get - status_free) + (context_get - context_free) +
-           (commit_get - commit_free);
+           (commit_get - commit_free) + (config_get - config_free);
   }
 };
 
@@ -255,9 +266,15 @@ inline constexpr char kPilotStagedLexiconName[] = "lexicon/epocanva_pilot_lexico
 // that dropped a row cannot agree with its own test.
 inline constexpr char kSpellingSchemaId[] = "epocanva_spell_english";
 inline constexpr char kSpellingBrokenSchemaId[] = "epocanva_spell_broken_english";
+// The suggestions-DISABLED twin used by the feature-toggle comparison. Derived the same way
+// the broken schema is, and for the same reason: "only the switch differs" is the assertion,
+// so a hand-copied second file would turn it into a convention that can drift.
+inline constexpr char kSpellingOffSchemaId[] = "epocanva_spell_off_english";
 inline constexpr char kSpellingFixtureSchemaYaml[] = "epocanva_spell_english.schema.yaml";
 inline constexpr char kSpellingBrokenSchemaYaml[] =
     "epocanva_spell_broken_english.schema.yaml";
+inline constexpr char kSpellingOffSchemaYaml[] =
+    "epocanva_spell_off_english.schema.yaml";
 inline constexpr char kSpellingFixtureLexicon[] = "lexicon_spell.tsv";
 inline constexpr char kSpellingStagedLexiconName[] = "lexicon/epocanva_spell_lexicon.tsv";
 inline constexpr char kSpellingBrokenStagedLexiconName[] =
@@ -321,6 +338,35 @@ std::string LastStatusName(const EnglishSurface& surface);
 long long CounterDelta(const EpoCanvaEnglishCounters& before,
                        const EpoCanvaEnglishCounters& after,
                        unsigned long long EpoCanvaEnglishCounters::*field);
+
+// What the ENGINE can see of one schema's configuration, read back through
+// schema_open()/config_get_*() after it has been deployed. This exists so a claim about a
+// switch is a claim about the compiled file the engine resolves, not about the fixture text
+// this program copied: a schema whose name says "off" and whose content still says "true"
+// would otherwise be caught only by behaviour, and behaviour is what it is being used to
+// explain. `*_present` is the return value of the read itself (Config::GetBool/GetInt return
+// false for an absent path -- src/rime/config/config_component.cc:66-76), so an absent key
+// and a key reading false stay two different findings.
+// Units: lexicon_path is UTF-8 code units, exactly as the C API hands them back.
+struct DeployedEnglishConfig {
+  bool opened = false;
+  bool enable_suggestions_present = false;
+  bool enable_suggestions_value = false;
+  bool max_suggestions_present = false;
+  long long max_suggestions = -1;
+  bool max_completions_present = false;
+  long long max_completions = -1;
+  bool page_size_present = false;
+  long long page_size = -1;
+  bool lexicon_path_present = false;
+  std::string lexicon_path;
+};
+// Returns kApiUnavailable only when the loaded API table lacks a slot this needs; every
+// other outcome is reported in the struct and judged by the caller.
+ExitCode ReadDeployedEnglishConfig(RimeApi* api, ApiBalance* balance,
+                                   const char* schema_id,
+                                   DeployedEnglishConfig* out);
+
 // The sum of every P2.6 spelling counter. Zero is how a mode proves the schema it
 // deployed asked for no suggestions at all: "the menu looked right" cannot show that,
 // because a suggestion and a completion are indistinguishable in the text column.
