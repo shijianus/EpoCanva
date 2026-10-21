@@ -1,13 +1,14 @@
-# Test wrapper for the P2.1 English completion program.
+# Test wrapper for the English integration programs.
 #
 # Invoked as: cmake -D<vars> -P assert_exit.cmake
 #
 # WHY THIS EXISTS ALONGSIDE tests/infrastructure/assert_probe.cmake rather than
 # replacing it: assert_probe.cmake deliberately accepts at most two program
 # arguments, and its own comments say that is on purpose so "a lost second
-# argument would not silently make the case pass". rime_english_completion needs
-# FOUR (--expect-dll, --fixture-dir, --run-root, --mode), so a separate wrapper is
-# honest here; the alternative -- relaxing assert_probe.cmake to a ;-list -- would
+# argument would not silently make the case pass". The English integration program needs
+# FOUR (--expect-dll, --fixture-dir, --run-root, --mode), and the pilot modes a fifth,
+# so a separate wrapper is honest here; the alternative -- relaxing
+# assert_probe.cmake to a ;-list -- would
 # weaken the guarantee that file documents for the P0.1 cases that already use it.
 #
 # Contract:

@@ -1,13 +1,14 @@
 # `tests/fixtures/english_spelling/` — 拼写建议夹具（P2.6）
 
-消费方：`tools/rime_english_completion --mode spelling`。
+消费方：`tools/rime_english_recovery` 的五个拼写 `--mode`（经
+`tools/test_english_integration.ps1` 运行）。
 本目录**只有配置与那份受控词表**；期望值写在三处：本文件（推导过程）、
 `tests/english_core/main.cc` 的 case 32–38（核心层字面量）、
-`tools/rime_english_completion/main.cc` 的 `RunSpellingMode`（引擎端到端字面量）。
+`tools/rime_english_recovery/spelling_tests.cc` 等三个拼写文件（引擎端到端字面量）。
 
 | 文件 | 行数 | 字节 | 作用 |
 | --- | ---: | ---: | --- |
-| `default.yaml` | 28 | 1,374 | 单条 `schema_list`；`menu/page_size: 8` |
+| `default.yaml` | 28 | 1,373 | 单条 `schema_list`；`menu/page_size: 8` |
 | `epocanva_spell_english.schema.yaml` | 74 | 3,281 | 与手写夹具同链，另开 `enable_suggestions: true`、`max_suggestions: 3` |
 | `lexicon_spell.tsv` | 16 | 157 | **受控测试词表**（不是英语词表），16 行 `word<TAB>weight` |
 | `README.md` | 本文件 | — | 推导与不变量 |
@@ -92,27 +93,55 @@ abcdefghijklmnopqrstuvwxyzabcdef 1
 ## 7. 关闭时等于没有本阶段
 
 同一份词表把 `enable_suggestions` 去掉（或设为 false），菜单与 P2.5 完全一致、
-所有 `spelling_*` 计数保持 0 —— 这句话在**两条**已注册的 CTest 用例上被读成数字：
+所有 `spelling_*` 计数保持 0 —— 这句话现在在**三条**已注册的 CTest 用例上被读成数字：
 
-- `english.completion.*` 的 12 条旧用例全部跑在 `tests/fixtures/english_completion/`
-  那份**没有** `enable_suggestions` 的 schema 上。`spelling` 之外每个 mode 的末尾都有一条
-  `SpellingTotal(c) == 0` 断言：19 个 `spelling_*` 字段（13 个状态 + 追加候选数 +
-  生成变体数 + 索引查表数 + 3 种大小写渲染数）逐项求和必须为 0，
-  也就是说"关闭"不是只看菜单没变，而是**整条建议通路一次都没进过**。
+- **同一份词表、同一串键入的开关对照**：`recovery.spelling.feature_toggle_ab`
+  （`--mode spelling-toggle-ab`）。它在**一个进程**里跑两套受控方案：夹具这份开
+  `enable_suggestions: true`，另一份由程序从夹具逐行派生、**只差两行**
+  （schema 身份 + 那一个开关），两边 `english/lexicon_path` 解析到同一份 157 字节的
+  受控词表。两侧都部署、都选中、都跑同样六个探针（每侧 25 次按键），然后：开启侧出现
+  §4 约定的建议并带 `spell` 标签，关闭侧同样的输入只有原文（而原本就该走补全/抑制的
+  输入两侧菜单**逐字节相同**）；两侧候选 0 恒为原文；两侧默认 Return 与默认空格提交的
+  都是用户自己打的字节。关闭侧不是只看菜单——19 个 `spelling_*` 字段**逐个**为零，
+  且每个都写明"若非零意味着进了哪条门"；同时 27 个**非拼写**计数器在两阶段之间必须一致，
+  所以"干净"不可能是靠"那一侧什么都没跑"挣来的。开关的取值也不是读文件文本得出的，
+  而是用引擎自己的 `schema_open()` + `config_get_bool()` 从**已部署**配置里读回来，
+  "键不存在"与"键为 false"是两种不同结论。它的控制条
+  `recovery.spelling.suite_can_fail_on_toggle_comparison` 故意声称两侧菜单一样，必须失败。
+- `recovery.completion.*` / `case` / `token` / `space` / `lexicon` / `pilot` 各组
+  （跑在**不命名** `enable_suggestions` 的 `tests/fixtures/english_completion/` 与
+  `english_pilot/` 上）每个 mode 末尾都有一条 `SpellingTotal(c) == 0` 断言：
+  19 个 `spelling_*` 字段（13 个状态 + 追加候选数 + 生成变体数 + 索引查表数 +
+  3 种大小写渲染数）逐项求和必须为 0，也就是说"关闭"不是只看菜单没变，
+  而是**整条建议通路一次都没进过**。这一条是**回归证据**，不是开关对照本身——
+  它换的是另一份词表和另一份 schema。
 - 核心层 `TestSpellingGateTable`（case 36，注册在
   `english.core.lexicon_and_completion_unit_tests` 这一条 CTest 用例里）直接调用
   `enabled=false`，要求返回 `disabled` 而不是任何一种"没有建议"。
 
-## 8. 第二份 schema 是程序生成的，不在本目录里
+一条容易混的边界，写在这里以免被读成"关掉开关就什么都不会替换"的反例：**高亮一行
+然后按 Return，提交的是被高亮的那一行**。这是上游语义
+（`Context::Commit()` → `ConcreteEngine::OnCommit()` → `Context::GetCommitText()` →
+`Composition::GetCommitText()` 读 `Segment::selected_index`，而 `Context::Highlight()`
+正是设它的），不是本阶段新增的行为。"高亮不等于接受"说的是**空格**走自有
+`epocanva_english_space` 的 case A 时提交原文，与 Return 不是同一条路径。
 
-`--mode spelling` 还需要一条"词表读不出来"的路径，用来证明
+## 8. 程序生成的 schema 不在本目录里
+
+`spelling` 组还需要一条"词表读不出来"的路径，用来证明
 `lexicon-unavailable` 不会被压成"没有拼写建议"。为此存在两份**由
-`tools/rime_english_completion` 在暂存阶段生成**的夹具，本目录不存放它们：
+`tools/rime_english_recovery` 在暂存阶段生成**的夹具，本目录不存放它们：
 
-| 生成物 | 暂存位置 | 与原件的差异 |
-| --- | --- | --- |
-| `epocanva_spell_broken_english.schema.yaml` | `<shared>/` | 只改两行：`  schema_id:` 与 `  lexicon_path:` 缩进键（换成 `…_lexicon_broken.tsv`） |
-| 三行重复词表 | `<shared>/lexicon/epocanva_spell_lexicon_broken.tsv` | `hello 9 / help 8 / hello 7` —— 第 3 行重复第 1 行 |
+| 生成物 | 暂存位置 | 与原件的差异 | 由哪个暂存计划生成 |
+| --- | --- | --- | --- |
+| `epocanva_spell_broken_english.schema.yaml` | `<shared>/` | 只改两行：`  schema_id:` 与 `  lexicon_path:` 缩进键（换成 `…_lexicon_broken.tsv`） | `spelling-*` 四个模式 |
+| 三行重复词表 | `<shared>/lexicon/epocanva_spell_lexicon_broken.tsv` | `hello 9 / help 8 / hello 7` —— 第 3 行重复第 1 行 | 同上 |
+| `epocanva_spell_off_english.schema.yaml` | `<shared>/` | 只改两行：`  schema_id:` 与 `  enable_suggestions:`（true → false）；**词表路径与两个预算原样保留** | `spelling-toggle-ab` 与它的控制条 |
+
+第三个生成物是 §7 那条开关对照的一侧。它对**逐行差异**有硬要求：行数必须与原件相等，
+且不同的行**恰好两行**，否则以 `spelling.toggle-schema.rewrite` 失败退出——
+"两套受控方案只差一个开关"是断言，不是约定。它的暂存计划也**不**生成上面那份坏词表，
+用例为此专门断言两个路径在本此运行目录里**不存在**。
 
 生成而不是再抄一份文件的理由：这两行差异是**断言**，抄写会让它变成习惯。
 两处改写都用**缩进后的 YAML 键**做锚点，因为这份 schema 的头部注释里就写着

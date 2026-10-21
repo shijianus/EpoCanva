@@ -1,7 +1,8 @@
 # EpoCanva P2.1 -- CTest cases for the English language core.
 #
 # These run the core directly (no engine, no librime). The Rime-level behaviour is
-# proved separately by tools/rime_english_completion, which needs a real engine.
+# proved separately by tools/rime_english_recovery (run through
+# tools/test_english_integration.ps1), which needs a real engine.
 #
 # The assertion wrapper is the one shipped in P0.1 (tests/infrastructure/
 # assert_probe.cmake): exact exit code plus success-marker policy, no WILL_FAIL.
@@ -95,7 +96,10 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/run")
 #    the generator) and a checked worst-case ceiling. Registered only when that list
 #    exists, on the same policy as the pilot engine cases: a machine that has not
 #    generated it registers nothing rather than a test that silently skips, and
-#    docs/reports/P2.6-spelling-suggestions.md states which cases ran here.
+#    docs/reports/integration-harness-recovery-status.md records which cases ran and on
+#    which configuration. Note the scope: this is the CORE half of the P2.6 cost trial.
+#    The engine half was ever only registered, never implemented, and is not registered
+#    here -- see the matrix's class-C row for pilot-spelling.
 set(EPOCANVA_ENGLISH_PILOT_LEXICON "" CACHE FILEPATH
     "Absolute path of the generated pilot word list for the P2.6 cost trial")
 if(EPOCANVA_ENGLISH_PILOT_LEXICON)

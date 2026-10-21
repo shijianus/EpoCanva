@@ -13,6 +13,10 @@
 - **本轮"通过"只指新工程** `tools/rime_english_recovery`（CTest 前缀 `recovery.*`）。
   原工程 `tools/rime_english_completion` 的注册与 `--mode` 名一律保留、未修改、未删除，
   它是"还有哪些行为待恢复"的记录，不是当前可运行的测试。
+  **【批次 7 更正，2026-10-22】**该目录的两个文件此后已按授权删除（0 字节的 `main.cc`
+  与失效且先注册后实现的旧 `CMakeLists.txt`），目录内只剩指向新正式入口的 `README.md`。
+  "还有哪些行为待恢复"的职责由本文 **§1A 覆盖矩阵**接管，旧注册名仍逐条列在矩阵里。
+  运行方式改为 `tools/test_english_integration.ps1`，不要再手工拼 cmake/ctest 命令。
 - 状态取值只有五种：`已从新源码编译验证` / `实现中` / `尚未恢复` /
   `仅有事故前日志证据` / `原本就未完成`。
 - **"日志曾证明通过"绝不写成"源码已恢复"。** 反过来也一样：恢复目标不是复刻旧文件的
@@ -40,13 +44,81 @@
 | pilot 真实词表<br>新名 `recovery.pilot.real_lexicon_reference_compared`、`…suite_can_fail_on_reference_ranking`、`…truncated_data_refused_before_the_engine`、`…absent_data_refused_before_the_engine`、`…output_matches_the_pinned_manifest` | 在**真实词表**上跑同一套断言，且预期值不得来自被测实现：候选由独立的整表线性扫描参考实现（`pilot_reference.{h,cc}`：全表匹配 → weight 降序、同分按规范词 ASCII 升序 → 按输入形状渲染 → 与显示文本去重 → 截到 1+7）逐帧比对，它不 include 也不调用 `prefix_completer`/`english_case`/`english_token`/`english_lexicon`；查询集 28 行覆盖单字母、2/3 字母、长前缀、整词、无命中、`'`/`-` 尾随前缀、initial-capital、uppercase、混合与非法词形、邮箱/URL/Windows 路径/下划线/版本号；**数据身份是被验证的事实而非假设**：`build/english-pilot/epocanva_en_pilot.tsv` 实测 502,333 字节、SHA-256 `6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b`、42,356 行合法词条，与清单 `output.{sha256,size_bytes,line_count}` 逐项相等，来源 `alt12dicts/2of12full.txt` @ `7bbe293425d48a1210bf17aaf156b28ade5c2de1`；权重是 2..12 的**跨词典佐证档位**，`weights_are_corpus_frequency: false`，因此本 pilot 是 Alt12Dicts 单文件子集的本地试验，**不是** ESDB/SCOWL 35/50/60 尺寸变体导出，也不是语料频率 | **已从新源码编译验证**（正向 `recovery.pilot.real_lexicon_reference_compared` 实测 **868 条断言 0 失败**、`RESULT PASS`、exit 0；引擎 `entries=42356` 与被验证行数相等、`attempts=1 ok=1 fail=0 errline=0` 状态名 `ok`（数百键仍只读一次）；终局 `queries=211 with_index=211 rejected=86 orig=211 compl=737 cl=624 ci=71 cu=42 delimited=67 nomatch=14 mixed=1 notalpha=71 protected=71 illegal=14 nonascii=0 unsup=0 toolong=0 whole=211 part=0 spell=0`，`processor_key_events==注入键数 248`；`api.balance status 252/252 context 252/252 commit 5/5`，两 Session 销毁后 `translator_live=0 space_processor_live=0`；默认 Return 提交原文、显式选择提交参考实现排名第一的整词、`co-` 空格得 `co- `、选择后得整词+一个空格、`user@example.com ` 逐字节整串提交后下一个词恢复补全；耗时分布只打印不判定：`keys=248 min=1.0us med=4.1us p95=254.9us max=318.6us mean=42.2us`，单机单次，**不是基准测试**）。**三种拒绝种类彼此可区分**：exit 22 = 预校验在引擎打开任何文件前拒绝（`lexicon_load_attempts` 仍为 0，实测理由 `size-mismatch`、`file-absent`，另有手工 `digest-mismatch`）；exit 14 = 预校验通过、引擎真的加载了 42k 行、某条预期与实测不符（控制组实测 `[index 1]: got "practicable"`、`[index 2]: got "practical"`，37 checked / 2 failed）；exit 18 = 那条"应当拒绝"的断言本身没成立（用未编译进身份预期的构建跑同一模式实证，见 §3 批次 4）。配置层另有三重拒绝：路径非绝对 / 文件名与清单不符 / 字节数或 SHA-256 与清单不符一律 `FATAL_ERROR`，**绝不静默不注册**。开关关闭时 `ctest --show-only=json-v1` 仍为 **17** 条且不含任何 pilot 名，开启时为 **22** 条；批次 5 把摘要辅助自己的 3 条（开启时 4 条）也注册进来，批次 6 再加 5 条 `recovery.spelling.*`，因此现为 **25 / 31** 条；17 条既有引擎用例与 5 条 pilot 用例的名称、模式与判定一字未改（批次 6 只在同一 `set_tests_properties` 名单尾部追加，并把 LABELS 增加 `spelling` 一项） | 新：`build/english-pilot-recovery/evidence-pilot-positive-r1.log`、`evidence-pilot-control-r1.log`、`evidence-pilot-truncated-r1.log`、`evidence-pilot-absent-r1.log`、`build/english-recovery/evidence-pilot-digest-control-r1.log`、`evidence-pilot-truncated-noexpectation-r1.log`；ctest 列表 `build/english-pilot-recovery/show-off-r1.json`(17)、`show-on-r1.json`(22)，运行结果 `ctest-on-pilotnew-r1.log`、`ctest-on-full-r1.log`(22/22)、`ctest-off-full-r1.log`(17/17)；身份三重独立印证：CMake `file(SHA256)`、`sha256sum`、`pilot_sha256.cc`（批次 4 时为该工程自实现的 SHA-256，先用 FIPS 180-4 空串/`abc`/56 字节三向量验过；批次 5 起改为调用 Windows CNG，见下一行）给出同一值；旧证据仅作历史：`build/p25-verify/evidence-pilot.log`；判据 §6.3、§7、`tests/fixtures/english_pilot/README.md` |
 | 摘要辅助自身（测试工具，不是产品能力）<br>新名 `recovery.pilot_sha256.known_vectors`、`…negative_identity_kinds`、`…suite_can_fail_on_wrong_vector`、`…real_lexicon_digest_matches_the_manifest` | 身份校验依赖一个文件摘要，所以那个摘要的实现必须被单独检验，而且**期望值不得由被测实现产出**：空文件、`abc`、FIPS 180-4 的 56 字节样例句、55/56/57 填充边界、63/64/65 分组边界、整段 `0x00..0xFF` 二进制、以及被测实现的读块边界 65,535/65,536/65,537 字节共 15 个夹具，逐一与 python hashlib、GNU coreutils `sha256sum`、PowerShell `Get-FileHash` 三个外部实现算出的值比对；负向侧要求区分四种种类：文件缺失、目录（两者都必须报**打不开**且**不产出任何摘要**）、截断副本、同长度只改一字节（后两者必须报**摘要不同**而不是 I/O 失败）；控制组用一条故意写错的 `abc` 期望实证该组能失败 | **已从新源码编译验证**（批次 5：`pilot_sha256.cc` 的自实现 SHA-256 已删除，改为调用 **Windows CNG**（`bcrypt.dll` 的 `BCryptOpenAlgorithmProvider(SHA256)`/`CreateHash`/`HashData`/`FinishHash`，每个 NTSTATUS 都判、`BCryptGetProperty(HashDigestLength)` 必须恰好 32 字节否则拒绝渲染），二进制分块 64 KiB，句柄由三个 RAII 对象在任何返回路径上释放；实测 vectors **60 条断言 0 失败**、negatives **21 条 0 失败**、控制组 **2 checked / 1 failed** 且退出 14 无成功标记；真实 TSV 经 CNG 得 `6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b`（4 条断言 0 失败），与 `sha256sum`、配置期 CMake `file(SHA256)` 逐项相等。**范围声明**：`kReadFailed`/`kHashFailed` 两种分类在本轮**没有被运行时触发**（无故障注入），只在类型与命名上与之可区分；该辅助**只在 Windows 上成立**，本轮不宣称跨平台；身份固定也**不等于**来源作者签名验证） | 新：`build/english-recovery/cng-evidence-helper-vectors-r1.log`、`cng-evidence-helper-negatives-r1.log`、`cng-evidence-helper-control-r1.log`、`cng-evidence-helper-refusals-r1.log`（首轮，含我写错的 usage 串）、`cng-evidence-helper-refusals-r2.log`（最终二进制：守护名不符 6、未知模式 2、`--pilot-lexicon` 被不接收它的模式拒掉 2、相对路径被 `real-file` 拒掉 2、`…/rime-english-recovery-run/../x` 这种拼回去能过守护的写法同样被拒 6）、`build/english-pilot-recovery/cng-evidence-helper-realtsv-r1.log`、`cng-evidence-digest-mismatch-r1.log`（同长度改一字节的真实副本：`22 / digest-mismatch`、`0 failed assertion(s)`）、`cng-evidence-open-failed-r1.log`（ACL 拒绝读的真实副本：落到暂存层 `fixture.copy … Access is denied` 退出 6，仍不是 `digest-mismatch`）、`build/english-recovery/cng-evidence-imports-r1.log`（`dumpbin /IMPORTS`：`rime.dll` 只导入 `KERNEL32/USER32`，`bcrypt.dll` 只出现在三个测试可执行文件里）、`cng-ctest-off-r1/r2.log`(20/20)、`cng-ctest-on-r1/r2.log`(26/26)，最终一轮对着最终二进制重跑：`build/english-recovery/cng-ctest-off-final-r3.log`(20/20)、`build/english-pilot-recovery/cng-ctest-on-final-r3.log`(26/26)、`show-off-cng-r1.json`(20)、`show-on-cng-r1.json`(26) |
 | P2.6 拼写建议<br>旧名 `english.completion.spelling_suggestions_and_suppressions`<br>新名 `recovery.spelling.suggestions_and_suppressions`、`recovery.spelling.commit_and_selection`、`recovery.spelling.negative_lexicon_unavailable`、`recovery.spelling.suite_can_fail_on_suggestion_ranking`、`recovery.spelling.suite_can_fail_on_labels` | 逐键一帧报十三具名状态**之一**（`summed == 本帧查询数`、`恰好一个状态计数移动`、且状态名与预期一致）；一次编辑只允许删除/插入/替换/相邻换位四种且不许合成第二次编辑；`spell` 注释列是 C API 唯一能区分建议与补全的东西；建议与补全每查询互斥（判据用**截断前**的 `match_count`）；预算 ≤3、菜单仍 ≤8；权重降序、同分按规范词 ASCII 升序；多条路径命中同一行只出现一次；`lowercase`/`initial-capital`/`uppercase` 三形状渲染，`mixed-case` 不猜；长度窗口 4..32 两端与两端之外；技术文本与带分隔符词形整词拒绝且**在"词是否已存在"之前**判定；退格按当前输入重算；默认 Return 保原文、默认 Space 保原文+一个空格、高亮不等于接受、明确选择后提交建议且只提交一次；Escape 不留残余；双 Session 不串扰；建议提交后下一个普通词照常补全；词表不可读必须报 `lexicon-unavailable` 而不是"没有建议" | **已从新源码编译验证**（新工程 `tools/rime_english_recovery/spelling_tests.{h,cc}`、`spelling_commit_tests.{h,cc}`、`spelling_negative_tests.{h,cc}`，共 5 条具名用例；门槛组实测 **4361 条断言 0 失败**、`frames=250 one-query=250 queries=250 max=1`、终局 `queries=257 with_index=257 orig=257 compl=358 cl=292 ci=39 cu=27 nomatch=59 mixed=7 protected=54 delimited=19 nonascii=0 unsup=0 toolong=0 whole=257 part=0 spell=16385`、`attempts=1 entries=16 errline=0 status ok`；提交组 **308 条 0 失败**，`pk_events=85 space_seen=11 case_a=6 case_b=4 case_c=1 commits_issued=10 spaces_emitted=11`（三条恒等式全部闭合）且 `sp_app=31 = l25 + i3 + u3`，transcript 只由 `get_commit()` 拼出：`"helohelo helo hellohello HELLO Hello user@example.com  hello hel wrld helo "`，`api.balance status 102/102 context 102/102 commit 13/13`；不可读组 **63 条 0 失败**：`attempts=1 ok=0 fail=1 entries=0 errline=3` 状态名 `duplicate-word`、`config_missing_path=0`、4 帧查询 = 4 次 `lexicon-unavailable`、`no_candidate=0`、`appended=0`、`variants=0`，菜单仍只有原文 1 项且 Return 逐字节提交 `helo`；两条控制组分别 **11 checked / 2 failed**（`[index 1]: got "hello"`、`[index 2]: got "help"`）与 **7 checked / 1 failed**（实测注释列只有一个空字段加一个分隔符，即补全项确实没有 `spell` 标签），退出 14 且无成功标记）。**期望值两条独立来源**：字面量菜单手抄自 `tests/fixtures/english_spelling/README.md` §4，逐帧状态与候选列表/次序由 `spelling_tests.cc` 内**反向一次编辑参考实现**（拿词表每一行与输入做长度差判定，不生成变体、不 include 也不调用 `spelling_suggester`/`prefix_completer`/`english_case`/`english_token`）现算，并要求它等于 README 的 `(权重,编辑)` 表；引擎菜单同时与两者比对。**范围声明**：`spelling_skipped_unsupported_byte == 0` 与 `spelling_skipped_non_ascii == 0` 是**不可达**而不是没测——`;` 之类字节不在 `speller/alphabet` 里，真实按键进不了组合区，该两态只在核心单测 case 36 门槛表覆盖，因此本组同样只是 ASCII 证据；`SpellingEdit` 标签在 C API 不可见（`RimeCandidate` 只有 text/comment），所以四类编辑的**种类**由参考实现与文档表断言，引擎侧断言文本/次序/预算/标签列；按键经 `RimeApi::process_key()`，不是 Windows TSF 宿主层验证；词表权重是手工档位，**不是**纠错概率；5 条用例全部跑手工夹具，**不依赖** pilot 词表；"功能关闭"由 `recovery.completion.*`/`case`/`token`/`space`/`pilot` 各条既有用例末尾的 `SpellingTotal == 0`（19 个 `spelling_*` 字段逐项求和）承担，本轮未新增空壳模式，`pilot-spelling` 未注册、未实现 | 新（pilot 关闭配置，逐条单跑最终二进制）：`build/english-recovery/spelling-ctest-off-final-gates-r1.log`、`…-final-commit-r1.log`、`…-final-unavailable-r1.log`、`…-final-rank-r1.log`、`…-final-label-r1.log`，全套 `spelling-ctest-off-all-r2.log`(25/25)；新（pilot 开启配置）：`spelling-ctest-on-all-r2.log`(31/31)、`spelling-ctest-on-group-r1.log`(5/5 逐条详单，数字与关闭侧逐项相同)，构建 `spelling-build-off-r4.log`、`spelling-build-on-r2.log`（均 0 error 0 warning），清单 `show-off-spelling-r1.json`(25)、`show-on-spelling-r1.json`(31)；过程中三份失败或未跑的日志原样保留且未被覆盖：`spelling-ctest-off-gates-r1.log`（ctest 参数）、`-gates-r2.log`（注释列拼接缺陷）、`spelling-ctest-off-commit-r1.log`（"No tests were found"，见批次 6 披露 1/2）；旧证据仅作历史：`build/p26-verify/mode-spelling.log`、`timing.txt`；判据 `tests/fixtures/english_spelling/README.md`、`engine/languages/en/spelling_suggester.{h,cc}`、`engine/rime_components/english/english_translator.cc:362-514` |
-| pilot-spelling 性能模式<br>`english.pilot.spelling_suggestion_cost_a_b_on_pilot_data` | 13 输入在开关两侧各跑一遍，逐键耗时分布，off 侧拼写计数零变化 | **原本就未完成**：补丁脚本崩溃于写入之前，该模式从未进入过任何一次绿色扫描（13/13 与 15/15 日志均无它）。它**不属于**事故前必须恢复的绿色基线 | `check_restored.py` 将其列为 FORBIDDEN；`patch_pilot_mode.py` 自述崩溃原因 |
+| pilot-spelling 性能模式<br>`english.pilot.spelling_suggestion_cost_a_b_on_pilot_data` | 13 输入在开关两侧各跑一遍，逐键耗时分布，off 侧拼写计数零变化 | **原本就未完成**：补丁脚本崩溃于写入之前，该模式从未进入过任何一次绿色扫描（13/13 与 15/15 日志均无它）。它**不属于**事故前必须恢复的绿色基线。**批次 7 复核**：成本试验的**核心**那一半 `english.core.spelling_cost_trial_on_pilot_lexicon` 已注册并通过（真实词表在位时）；**引擎**那一半仍未实现、仍未注册，也不迁入正式入口。见 §1A 第 16 / 16b 行 | `check_restored.py` 将其列为 FORBIDDEN；`patch_pilot_mode.py` 自述崩溃原因 |
+
+**§1 表中各行的用例条数（"17 条"、"25 / 31"等）是那一行被写下时那一批的快照，不随后续批次回改。**
+当前计数见 §1A 与 §4：批次 7 之后，pilot 关闭 **27** 条、pilot 开启 **33** 条，
+拼写组从 5 条增至 7 条。数量不是恢复完整性的判据，判据是 §1A 的行为对齐。
+
+## 1A. 覆盖矩阵（原能力 → 当前具名测试 → 层 → 状态）
+
+状态取值：**A** 已恢复；**B** 必须恢复但仍缺失；**C** 原本未完成；
+**D** 当前仅核心覆盖；**E** 额外待补测试。
+
+矩阵按**可观测行为**逐条对齐，不按断言条数对齐。旧工程的 `main.cc` 已经不存在，
+它每条用例内部究竟断言到什么颗粒度**无法从现存材料恢复**，因此"新用例断言更多"
+不构成"恢复更完整"的证据：两边的对应关系只能由**判据文档**
+（`tests/fixtures/*/README.md`、本文 §6–§10、`docs/testing/rime-english-completion.md`）
+来定义，而判据文档全部存活。下表凡"层"列写"集成"的，都是真实 `process_key()` +
+真实 `get_context()`/`get_commit()` 读数。
+
+| # | 原能力 / 旧注册名 | 当前具名测试 | 层 | 状态 |
+| --- | --- | --- | --- | --- |
+| 1 | 前缀补全、候选 0 恒为原文、weight 降序同分 ASCII 升序、预算 1+7、逐键 preedit 文本与字节长度、默认提交原文、显式选择提交整词、退格重算、Escape 无残留、双 Session 隔离<br>`english.completion.prefix_candidates_and_commit` | `recovery.completion.prefix_candidates_and_commit` | 集成（另有核心 `TestQuerySets`/`TestOrdering`/`TestKLimits`/`TestFileLoads`） | A |
+| 2 | 结论由实际加载的二进制决定，而非 `--mode` 字符串（交叉注入）<br>`english.completion.positive_mode_fails_on_baseline_engine`、`…negative_mode_fails_on_english_engine` | 同名 `recovery.*` 两条 | 集成 | A |
+| 3 | 组件缺失时引擎本身仍健康：候选 **0 项**、组合与提交照常<br>`english.completion.negative_baseline_engine` | `recovery.completion.negative_baseline_engine` | 集成 | A |
+| 4 | 词表不逐键重载（`attempts` 只在缓存未命中时移动）<br>（内建于第 1 条） | 第 1 条 + 四条词表失败 + `feature_toggle_ab` 显式断言两阶段 `attempts` 零增量 | 集成 | A |
+| 5 | 资源按公开 API 契约逐对配平，未配平 exit 16；finalize 后诊断面不再被触碰<br>（内建于每条用例） | 全部引擎用例；本轮把 `schema_open()/config_close()` 也纳入同一配平面（`config n/n`） | 集成 | A |
+| 6 | 参数与模式校验<br>`english.completion.rejects_unknown_mode` | `recovery.completion.rejects_unknown_mode`（未知模式 → 2） | 集成 | A |
+| 6b | 缺参数 → 2；`--run-root` 守护名不符 → 6 且**不删除任何东西** | **无注册用例**，只有手工运行日志 | 手工 | **E**（应补成注册用例） |
+| 7 | 测试必须能失败 | `recovery.completion.suite_can_fail`、`recovery.case.suite_can_fail_on_menu_ranking`、`recovery.token.suite_can_fail_on_protected_text`、`recovery.space.suite_can_fail_on_highlight`、`recovery.lexicon.suite_can_fail_on_valid_data`、`recovery.spelling.suite_can_fail_on_suggestion_ranking`、`…on_labels`、`…suite_can_fail_on_toggle_comparison`、`recovery.pilot.suite_can_fail_on_reference_ranking`、`recovery.pilot_sha256.suite_can_fail_on_wrong_vector` | 集成 + 辅助 | A（旧工程**没有**任何可失败性注册，属超出恢复范围的新增） |
+| 8 | ASCII 大小写映射与原文保真（四形状、混合不猜、整词命中是去重、退格后按剩余形状重算、默认提交原形状、选择按形状提交、双 Session 互不污染、整套矩阵只读词表一次）<br>`english.completion.case_preservation_and_mapped_commit` | `recovery.case.preservation_and_mapped_commit` | 集成（另有核心 `TestCasePreservation`/`TestApplyCaseStyleWithDelimiters`） | A。**范围**：只有 52 个 ASCII 字母；Unicode case folding、区位大小写、句首自动大写均未实现，非恢复项 |
+| 9 | 词形边界与技术文本保护<br>`english.completion.token_boundaries_and_protection` | `recovery.token.boundaries_and_protection` | 集成（另有核心 `TestTokenStructureTable`/`TestProtectionTransition`） | A |
+| 9b | 非 ASCII 字节进不了组合区，引擎路径不可达 | `recovery.token.*` 里 `nonascii == 0` 是**不可达**证明而非覆盖 | 核心 `TestRejectedInputs`/`TestDictionaryEntryForms` | **D** |
+| 10 | 空格三条规则、真实 commit 逐事件读取、修饰键不消费、空组合 BackSpace 交回宿主、双 Session 交错、四条计数恒等式<br>`english.completion.space_boundaries_and_multi_word_commit` | `recovery.space.commit_and_multiword` | 集成（另有核心 `TestSpaceKeyClassification`/`TestSpaceCaseTable`/`TestSpacePolicyConstants`） | A |
+| 11 | 四类词表**加载**失败各自可区分（候选 + 加载计数 + 状态名三元组）<br>`…negative_missing_lexicon`、`…bad_lexicon-duplicate`、`…bad_lexicon-illegal`、`…negative_bad_lexicon_illegal_form` | `recovery.lexicon.negative_missing_file` / `…_duplicate_entry` / `…_illegal_word` / `…_illegal_word_form` | 集成 | A |
+| 11b | 其余加载状态：空文件、空行、缺字段、多字段、权重非法/溢出、词过长 | 无引擎用例 | 核心 `TestMalformedData` | **D**（→ **E**：至少"空文件"与"权重溢出"值得补成引擎用例） |
+| 12 | 真实词表上跑同一套断言，且预期值不来自被测实现<br>`english.pilot.real_lexicon_candidates_commit_and_protection` | `recovery.pilot.real_lexicon_reference_compared` + 三条拒绝/控制 | 集成（另有独立参考实现与 CMake/`sha256sum` 双路核对） | A |
+| 13 | 生成产物与锁定清单逐项对齐<br>`english.pilot.output_matches_the_pinned_manifest` | `recovery.pilot.output_matches_the_pinned_manifest` + 4 条 `recovery.pilot_sha256.*` | 数据 + 辅助 | A |
+| 14 | P2.6 拼写建议：门槛表、四类编辑、`spell` 标签列、预算与长度窗口、三形状渲染、退格重算、抑制先于成员判定<br>`english.completion.spelling_suggestions_and_suppressions`（1 条） | `recovery.spelling.suggestions_and_suppressions`、`…commit_and_selection`、`…negative_lexicon_unavailable` + 2 条控制 | 集成（另有核心 case 32–38） | A |
+| 14b | 三态 `empty-input` / `unsupported-byte` / `non-ascii-input`：真实按键进不了组合区 | 引擎侧只能断言其**为 0**（不可达） | 核心 case 36 门槛表 | **D** |
+| 14c | `SpellingEdit` 编辑**种类**在 C API 不可见（`RimeCandidate` 只有 text/comment） | 引擎侧断言文本/次序/预算/标签列，种类由反向一次编辑参考实现与文档表断言 | 核心 `TestSpellingFourEdits` | **D** |
+| 15 | **开关关闭等于没有本阶段**（夹具 README §7 那条声明） | 旧工程：无对照，只由**另一份词表 + 未命名该键的 schema** 间接承担；<br>现工程：`recovery.spelling.feature_toggle_ab`（同一份 16 行词表、同一串键入、两套受控 schema 只差开关，并读回**已部署**配置值）+ `…suite_can_fail_on_toggle_comparison` | 集成 | A（本轮补的直接证据；旧的间接证据同时保留为回归） |
+| 15b | 高亮一行后按 Return 提交的是**被高亮那一行**（上游 `Composition::GetCommitText()` 读 `selected_index`） | **无任何注册用例断言过这一点**；本轮实测发现并记入 §3 批次 7 披露 | 无 | **E**（应在提交边界组补一条，与"空格时高亮不等于接受"并列） |
+| 16 | pilot-spelling 引擎侧 A/B 成本试验<br>`english.pilot.spelling_suggestion_cost_a_b_on_pilot_data` | **不注册、不实现** | — | **C**（注册先于实现，从未进入任何一次绿色扫描，不属于事故前绿色基线，故不迁入正式注册） |
+| 16b | 拼写成本试验的核心那一半 | `english.core.spelling_cost_trial_on_pilot_lexicon`（根工程，真实词表在位才注册） | 核心 | D（引擎那一半仍是 C） |
+| 17 | 重复词条的行号归因不确定（`english_lexicon.cc:203-216` 在 `std::sort` 之后相邻比对） | 用例按夹具事实断言"行号 ∈ 重复对所处的两行"并打印实测值 | 集成 | A（测试侧处理）；**产品侧未决**，改成确定性归因属产品改动，等授权 |
+| 18 | `docs/testing/rime-english-completion.md` 为每个 mode 写一节判定口径 | §6–§6.4 有 completion / case / token / pilot / space；**spelling 与 spelling-toggle 没有对应小节**，判据只在 `tests/fixtures/english_spelling/README.md` | 文档 | **E**（补 §6.5/§6.6） |
+
+**B 类：空。** 旧工程 13 条常规注册 + 3 条 pilot 注册中，除第 16 行那条"注册先于实现"
+的 pilot-spelling（C 类）以外，**每一条都有一个或多个当前具名用例对应**，且
+`ctest --show-only=json-v1` 导出的清单与 `CMakeLists.txt` 里的注册逐名双向一致
+（由正式入口在每次运行时机器核对，见 §4）。所以"恢复"这一件事到这里可以判定完成；
+**但"英文能力齐全"没有完成**，见 §1B。
+
+## 1B. AGENTS.md §1 的英文能力清单（产品视角，不是恢复视角）
+
+这张表存在的唯一理由：矩阵 §1A 全绿只说明**测试能力从事故中恢复了**，
+不说明产品能力已经齐备。两者不能混为一谈。
+
+| AGENTS.md §1 条目 | 当前状态 | 证据所在 |
+| --- | --- | --- |
+| 拼写纠错 | **部分实现**：一次编辑（删/插/换/相邻换位）建议器，长度窗口 4..32，预算 ≤3，需 schema 显式 `enable_suggestions`，且**只建议不替换**。两次以上编辑、概率排序、词频纠错均未实现 | `engine/languages/en/spelling_suggester.{h,cc}`；§5.2 的 7 条 `recovery.spelling.*` |
+| 词汇选择 / 词频 / 上下文学习 | **未实现**。pilot 权重是跨词典佐证的 2..12 档位，`weights_are_corpus_frequency: false`；无任何学习存储 | `docs/compliance/english-pilot-data.md` |
+| 形态变化（复数、`-s/-ed/-ing`、所有格、缩合） | **未实现**。`don't`/`co-operate` 这类带分隔符词形当前是**拒绝纠正**，不是形态分析 | 夹具 §4 的 delimited 行 |
+| 连写输入自动分段 | **未实现**。`helloworld` 仍是一个整串原文 | §1 表"空格与连续多词"行的范围声明 |
+| 缩写展开 | **未实现** | — |
+| 跨应用一致性 | **未实现**（各宿主进程各自持有引擎实例，无跨进程一致性层） | — |
+| 非 ASCII / Unicode 输入 | **未验证**（引擎侧不可达，见 §1A 第 9b、14b 行） | 核心单测 |
 
 ## 2. 与新工程有关的两个事实
 
 1. `tools/rime_english_completion/CMakeLists.txt`（mtime 2026-10-19 16:40）在 main.cc 已为
    0 字节之后被改过，其中 `pilot-spelling` 的注册（第 429-437 行）**先于实现存在**。
-   因此旧工程当前无法构建成功；本轮不修改它，只在此登记。
+   因此旧工程无法构建成功。**该文件与那份 0 字节的 `main.cc` 已于批次 7 删除**
+   （提交 `build: promote modular English integration test entrypoint`）；删除前确认
+   没有任何 `add_subdirectory`、脚本或构建预设引用该目录。目录本身保留，
+   里面只剩一个指向新正式入口的 `README.md`。本条其余部分按原样留存，是当时的事实。
 2. 新工程复用存活的 `tests/english_completion/assert_exit.cmake`（精确退出码 +
    marker 策略），未新增第二种判定口径；也复用存活的
    `tests/fixtures/english_completion/`，夹具只读。
@@ -70,8 +142,83 @@ CNG，并给它单独建一个不启动引擎的可执行文件与 3/4 条用例
 
 待做：其余加载状态（空文件、空行、缺字段、多字段、权重非法/溢出、词太长）→
 最后才是 `pilot-spelling`（新增，非恢复）。
-`spelling` 已在批次 6 恢复；`pilot-spelling` 仍是"原本就未完成"，本轮**未实现、未注册**，
-也没有为它建空壳。下一轮做整体覆盖核对与旧入口迁移，不在本轮范围内。
+`spelling` 已在批次 6 恢复；`pilot-spelling` 仍是"原本就未完成"，批次 6 **未实现、未注册**，
+也没有为它建空壳。
+
+批次 7 = **整体覆盖核对与正式测试入口迁移**（本轮）。三件事：
+① 补上 spelling 开关的**直接对照**用例（`recovery.spelling.feature_toggle_ab` + 其控制条，
+提交 `test: verify explicit spelling feature toggle behavior`）；
+② 新增正式入口 `tools/test_english_integration.ps1`，把参数与工具检查 → 配置 → 构建 →
+导出实际测试清单 → CTest → 真实退出码走成一条不可半途的策略，并让它**机器核对**
+源码注册与生成清单一致；
+③ 退役旧入口（删 0 字节 `main.cc` 与失效的旧 `CMakeLists.txt`，目录留指针 README），
+把当前有效文档与脚本引用改到新入口。
+**产品、引擎、判据文档、清单一律未改**；夹具目录只有**注释文本**变更（三个
+`default.yaml` 的"Consumed by"行与三份 README 的消费方/生成物说明），YAML 语义、
+`config_version`、schema 内容与全部词表**逐字节未动**。
+开关对照**不使用 pilot 数据，不测性能**。数量指标：pilot 关闭 **27** 条（批次 6 后 25），
+pilot 开启 **33** 条（批次 6 后 31）。
+
+### 批次 7 的几处披露（本轮；置于各批次披露之首便于先读最新，批次 2a–6 的披露在其后，按批次顺序排列）
+
+1. **我一开始把"高亮不等于接受"错误地推广到了 Return 上**。开关对照的正向用例里我加了一段
+   "在开启侧高亮 index 1（`hello`）后按 Return，应当仍提交原文 `helo`"，实测
+   `ASSERT FAIL … got "hello"`（临时驱动轮次的日志
+   `build/english-recovery/toggle-ctest-spelling-r1.log`）。回上游核对：`Context::Commit()` →
+   `ConcreteEngine::OnCommit()` → `Context::GetCommitText()` →
+   `Composition::GetCommitText()` 取的是 `Segment::GetSelectedCandidate()`，
+   而 `Context::Highlight()` 正是设 `selected_index` 的那个调用
+   （`src/rime/context.cc:19-32`、`:132-137`，`src/rime/composition.cc:102-109`，
+   `src/rime/engine.cc:251-257`）。所以**这是上游语义，不是缺陷**：
+   "高亮不等于接受"讲的是**空格**走自有 `epocanva_english_space` case A 时提交原文，
+   与 Return 不是同一条路径。处理方式是把这段**从开关对照里删掉**（它测的是提交边界，
+   不是开关），并在 `spelling_toggle_tests.{h,cc}` 与夹具 README §7 写明这条边界，
+   同时把它记为 §1A 第 **15b** 行的 **E 类缺口**（至今没有任何注册用例断言过它）。
+   **没有**为了让绿色通过而放宽任何断言：那 1253 条里其余 1252 条都是先过的。
+2. **正式入口自己有两处缺陷，都是实测暴露的**：
+   ① 我把 `-Filter` 直接接到了"清单一致性核对"上，于是过滤运行必然报
+   "注册的用例没出现在生成清单里"。改为**永远**先导出完整清单做一致性核对，
+   再单独导出过滤选择集并要求非空、且每个名字都在完整清单里
+   （`build/english-recovery/test/integration-logs/list-all-*.log` 与
+   `list-filtered-*.log` 是两份日志）。
+   ② PowerShell 侧两个真坑：`function f { return @() }` 返回空数组会被摊平成 `$null`，
+   于是 `$selection.Count` 在 `Set-StrictMode -Version Latest` 下抛
+   `PropertyNotFoundStrict`；以及 `[Parameter(Mandatory)][string]$Regex` **拒绝空字符串**，
+   让"无过滤"这条路自己炸掉。两处都实测复现后修掉（外层一律 `@(...)` 包裹；
+   参数改 `[AllowEmptyString()]`）。
+3. **一次构建失败被我用来当证据链的一环，而不是当事故**：为了实证"构建失败不会去跑旧
+   exe"，我在本轮新建的 `spelling_toggle_tests.cc` 里临时加了一行
+   `static_assert(false, …)`，跑正式入口得到 `FAILED [build] exit=5`，
+   该 `-LogTag` 下只有 `configure-*.log` 与 `build-*.log`、**没有 ctest 日志**，
+   而 `english-engine/rime_english_recovery.exe` 的 mtime 仍是上一轮那个
+   （`build/english-recovery/test/integration-logs/{configure,build}-buildfail.log`）。
+   随后撤销该标记行并用 `git diff --exit-code` 证明文件与工作树一致。
+4. **旧 CMake 的注册数在我自己的记忆里是 11 条，实际是 13 条常规 + 3 条 pilot**。
+   旧文件里 `# The default 11 cases above` 是它自己的过期注释。本轮删除前逐行核过
+   `epocanva_add_case` / `add_test` 的出现位置，§1A 的对齐以**读到的文本**为准，
+   不以旧注释的自述为准（AGENTS.md §6）。
+5. **`tests/english_core/main.cc` 里有一处过度声明被我改掉**：`--pilot-bench` 的注释原本写
+   "核心那一半 + 引擎那一半由 `tools/rime_english_completion --mode pilot-spelling` 测量，
+   两者分别报告"。引擎那一半从未存在（C 类），所以那句话把一件没做过的事写成了做过。
+   现改为"只有核心这一半存在，引擎那一半从未实现也从未在本工程注册"。
+   同文件还引用过一份**不存在的**报告 `docs/reports/P2.6-spelling-suggestions.md`
+   （`tests/english_core/CMakeLists.txt` 里），改指向本文。
+6. **根工程实际是 8 条而不是文档里写的 7 条**，英文核心是 4 条而不是 3 条，
+   核心单测内部是 1566 条断言而不是文档里的 1196 条。三者都是本轮实跑读数
+   （`build/regressions/root-ctest-r1.log`，直跑 `--unit` 打印
+   `1566 checked, 0 failed`）。文档按实测改正。
+7. **`ctest --version` 一类的工具自检不能用 `| Select-Object -First 1`**：提前结束原生命令的
+   管道会让 `$LASTEXITCODE` 变成 `-1`，我第一次的运行因此把"CTest 正常"判成失败。
+   改为整体消费输出之后再取第一行。
+8. **工具发现必须按"这台机器上哪个实例真的带 CMake"筛，而不是按"有没有 VS"**：本机
+   VS2022 Community 有 DevShell 但没有内置 CMake，Professional 才有；只按 DevShell 筛会
+   选到 Community 然后失败。正式入口现在要求实例同时带 DevShell + `cmake.exe` + `ctest.exe`，
+   都不满足时报出实例清单并以 3 退出（不安装、不改 PATH）。**这次失败本身被完整保留**：
+   它是"缺工具清楚报错"第一条现成的证据。
+9. Git：未 push、未 tag、未 amend、未 `reset --hard`、未 `clean`；两次提交各自只暂存本轮
+   路径，提交沿用命令级空 `hooksPath`（`-c core.hooksPath=build/empty-hooks`，指向一个
+   确实为空的目录，因此 `.git/hooks/post-commit` 之类未知 hook 不会被执行），
+   未改任何全局或仓库配置。
 
 ### 批次 2a 的一处披露
 
@@ -250,5 +397,88 @@ CNG，并给它单独建一个不启动引擎的可执行文件与 3/4 条用例
    理由，没有伪造触发，也没有把它们算进"已覆盖"。
 8. Git：未 push、未 tag、未 amend、未 `reset --hard`、未 `clean`；只暂存本轮 10 个文件路径，
    提交沿用命令级空 `hooksPath`，未执行任何未知 hook。
+
+## 4. 正式测试入口与批次 7 的实测结果
+
+### 4.1 入口
+
+`tools/test_english_integration.ps1` 是唯一受支持的英文集成测试运行方式，驱动
+`tools/rime_english_recovery/`。三个必填参数：`-EnginePrefix`、`-BaselinePrefix`、
+`-BuildDir`；可选 `-PilotLexicon`（默认不给 → 不注册 pilot 用例）、`-PilotOutputDir`、
+`-Filter`、`-LogTag`、`-LogDir`、`-RepoRoot`、`-SourceDir`、`-Generator`、`-Platform`、
+`-VsInstallPath`。仓库根由脚本自身位置推导，**没有任何个人机器绝对路径被写进文件**。
+
+阶段与退出码：`0` 通过；`2` 调用被拒（含日志已存在）；`3` 工具/产物缺失；`4` 配置失败；
+`5` 构建失败；`6` 清单与注册不一致或选择为空；`7` 拿不到可判定的计数；`8+` 原样返回 CTest 的码。
+它不下载、不安装、不改 PATH、不清理、不重建依赖，`build/` 之外的东西一律不删。
+
+三道反空转闸门：每次 CTest 调用都带 `--no-tests=error`；带 `-Filter` 时先确认匹配清单
+非空且每个名字都在完整导出里；判定同时要求 CTest 自己汇总行的"跑了几条"等于导出的
+选择集大小——**日志里出现 `RESULT PASS` 从来不是判据**。
+
+### 4.2 两套配置的实际清单与结果（2026-10-22 实测）
+
+| 配置 | `-BuildDir` | 源码注册 | CTest 生成 | 跑出 | 失败 | 脚本退出 | 证据 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| pilot 关闭 | `build/english-recovery/test` | 27 无条件 + 6 pilot-only | **27** | 27 | 0 | **0** | 最终一轮：`build/english-recovery/test/integration-logs/{configure,build,list-all,ctest-all}-FINAL-off.log`（文档改动后的同一套配置另有一轮 `-afterdocs-off`，结果相同）|
+| pilot 开启 | `build/english-pilot-recovery/test` | 同上 | **33** | 33 | 0 | **0** | 最终一轮：`build/english-pilot-recovery/test/integration-logs/*-FINAL-on.log`（`-afterdocs-on` 同结果）|
+
+pilot 开启那一行同时打印配置期身份结论：
+`pilot identity : OK sha256 6e46587d…aae6b 502333 bytes 42356 rows source
+alt12dicts/2of12full.txt @ 7bbe293425d48a1210bf17aaf156b28ade5c2de1`。
+两套构建均 **0 warning 0 error**（构建日志逐行匹配 `: (warning|error)` 计数为 0）。
+
+开关对照那条在最终二进制上的读数：`recovery.spelling.feature_toggle_ab`
+**1253 条断言 0 失败**；其控制条 `recovery.spelling.suite_can_fail_on_toggle_comparison`
+**36 条断言 1 失败**、退出码 14、marker 未出现，失败项就是那句故意写错的
+"切换开关什么都没改变"。派生那一侧 `toggle.derived epocanva_spell_off_english.schema.yaml
+(3286 bytes, 74 lines, 2 lines apart from the source)`，原件是 3281 字节 / 74 行，
+差的 5 字节 = 身份 4 + `true`→`false` 的 1。配置回读两侧打印：
+`enable_suggestions=read(1)` 与 `enable_suggestions=read(0)`，
+其余 `max_suggestions=3 max_completions=7 page_size=8
+lexicon_path=lexicon/epocanva_spell_lexicon.tsv` 两侧逐字相同。
+`api.balance` 末行含 `config 2/2 -- paired`。
+
+### 4.3 失败控制（本轮实测，不是推理）
+
+| 要验证的纪律 | 怎么触发 | 实际结果 |
+| --- | --- | --- |
+| 参数错误返回非零 | 不给任何参数 | `FAILED [arguments] exit=2`，打印 usage |
+| 前缀指向不存在的东西 | `-EnginePrefix build/does-not-exist` | `exit=2` |
+| pilot 数据缺失**不静默跳过** | `-PilotLexicon <不存在的路径>` | `exit=2`，消息明说"pilot 用例不会被静默丢弃" |
+| pilot 路径为相对 | `-PilotLexicon build/english-pilot/…tsv` | `exit=2` |
+| pilot 身份不符 | 对真实清单做**同长度改一字节**的独立副本（第 1001 字节 `xor 0x01`，长度仍 502,333，副本 sha `4024e5ac…`），指给它 | 配置期 `pilot data identity FAILED on SHA-256`，`FAILED [configure] exit=4`；该 `-LogTag` 下**只有** configure 日志 |
+| 零匹配不能判绿 | `-Filter recovery.nosuchgroup.` | `FAILED [list] exit=6`：matched none of the 27 generated case(s)，CTest 未被调用 |
+| 构建失败阻止后续测试 | 在本轮新增的 `spelling_toggle_tests.cc` 里临时插一行 `static_assert(false,…)` | `FAILED [build] exit=5`；无 ctest 日志；旧 exe mtime 未变。随后撤销并用 `git diff --exit-code` 证明复原 |
+| 日志不覆盖 | 同一 `-LogTag` 跑第二次 | `FAILED [logs] exit=2`，指名拒绝覆盖的路径 |
+| 缺工具清楚报错 | （非人为触发）机器上 VS2022 Community 有 DevShell 但无内置 CMake | `FAILED [tools] exit=3`，打印探针命令与实例清单，不安装、不改 PATH；入口改为按"同时带 DevShell + cmake + ctest"筛选后选中 Professional |
+
+### 4.4 本轮实际执行范围（明确记录，不含未跑项）
+
+跑了：正式入口 pilot 关闭全套 27 条；正式入口 pilot 开启全套 33 条；`-Filter` 命中 2 条的
+过滤运行；上表 9 项失败控制；根工程 `cmake --preset vs2022-x64-debug` 配置 + Debug 构建 +
+8 条 ctest（4 基础设施 + 4 英文核心，核心单测直跑 `--unit` 报 `1566 checked, 0 failed`）；
+`build/librime-baseline/replay` 2 条；`build/librime-baseline/smoke` 1 条；
+`build/librime-component-probe/probe` 5 条。日志在 `build/regressions/*-final-r1.log`
+（文档与注释定稿后又跑了一轮，`build/regressions/*-r1.log` 是夹具文本改动后的那一轮，
+两轮数字相同）。
+
+**没跑**：`tools/build_librime_baseline.ps1` 的任何模式（引擎与依赖一律复用现有产物，
+未重建、未下载）；pilot 数据的生成脚本；任何性能/计时对比；任何 UI、任何其它语言。
+`build/english-build.ps1` 的 `tool` 阶段被改为调用新入口，但该脚本整体**未在本轮执行**
+（它是 git 忽略的临时驱动，改动只保证不再指向已删除的目录）。
+
+### 4.5 事故恢复的结束条件
+
+- §1A 的 **B 类为空**：旧工程 13 + 3 条注册里，除那条"注册先于实现"的
+  `pilot-spelling`（C 类，本就不属于绿色基线）外，每条都有当前具名用例对应。
+- 源码注册与 CTest 生成清单由入口在每次运行时机器核对，两套配置分别为 27/33 且无重名。
+- 两套配置全绿，失败控制 9 项各自以预期的非零码退出，回归 16 条全绿。
+- 旧入口已退役，当前有效文档与脚本引用全部指向新入口；历史报告未回改。
+
+**结论：集成测试能力的事故恢复到此判定为完成。**
+以下**不**因此视为完成，且都不属于恢复范围：§1B 里除"一次编辑建议"之外的英文能力、
+§1A 中标 **D**（仅核心覆盖）与 **E**（待补注册）的每一行、以及第 17 行那条产品侧
+行号归因未决项。
 
 

@@ -1,8 +1,10 @@
 # `tests/fixtures/english_completion/` — 英文前缀补全夹具（P2.1）
 
-消费方：`tools/rime_english_completion`（集成测试）与
+消费方：`tools/rime_english_recovery`（集成测试，经
+`tools/test_english_integration.ps1` 运行）与
 `engine/rime_components/english/`（被编译进 `rime.dll` 的 Translator）。
-运行方法与判定口径见 `docs/reports/P2.1-english-prefix-completion.md`（前缀补全）
+运行方法与判定口径见 `docs/testing/rime-english-completion.md`，阶段结论见
+`docs/reports/P2.1-english-prefix-completion.md`（前缀补全）
 与 `docs/reports/P2.2-english-case-preservation.md`（大小写映射与原文保真，§5.1 的期望表即本轮依据）。
 
 本目录与 `tests/fixtures/rime_raw/`（P1.3）、`tests/fixtures/rime_probe/`（P1.4）互不覆盖：
@@ -74,7 +76,7 @@
 ## 5. 手工推导的期望结果
 
 以下每条都由本文件的人工推导得出，**不由被测函数生成**；
-`tools/rime_english_completion/main.cc` 里逐字硬编码这些字符串。
+`tools/rime_english_recovery/` 的各行为组文件里逐字硬编码这些字符串。
 
 ### `hel`（4 个候选）
 

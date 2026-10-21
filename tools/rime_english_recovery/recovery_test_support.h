@@ -1,6 +1,7 @@
 // EpoCanva P2.6-recovery -- shared harness for the rebuilt English integration tests.
 //
-// WHY THIS FILE EXISTS. The original tools/rime_english_completion/main.cc held the
+// WHY THIS FILE EXISTS. The original integration harness (the pre-incident
+// tools/rime_english_completion/main.cc, since retired) held the
 // harness and every mode's expectations in one ~5,100 line translation unit, and that
 // file is gone. This is the harness half of its replacement: engine lifecycle, fixture
 // staging, observation of the public C API, resource accounting and reporting. It

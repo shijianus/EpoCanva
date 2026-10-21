@@ -1,8 +1,15 @@
 # 英文当前词前缀补全的验证方法（P2.1）
 
 本文说明 `engine/languages/en/`、`engine/rime_components/english/`、
-`tests/english_core`、`tools/rime_english_completion` 与
+`tests/english_core`、`tools/rime_english_recovery` 与
 `tests/fixtures/english_completion/` 的**构建方法、运行方法、判定口径与失败注入方法**。
+
+> **集成测试的入口已经变更**（事故后的模块化重建）。当前唯一受支持的运行方式是
+> `tools/test_english_integration.ps1`，它驱动 `tools/rime_english_recovery/`；
+> 旧的 `tools/rime_english_completion/` 已退役，目录内只留一个指向本文件的 README。
+> 本文 §4 与 §5 按新入口书写；§6–§10 写的是**模式级判定口径**，那些口径跨迁移仍然有效，
+> 但里面出现的 `english.completion.*` 是事故前的注册名，现名与逐条去向见
+> `docs/reports/integration-harness-recovery-status.md` 的覆盖矩阵。
 
 阶段结论见 `docs/reports/P2.1-english-prefix-completion.md`（前缀补全）与
 `docs/reports/P2.2-english-case-preservation.md`（ASCII 大小写映射与原文保真）；
@@ -29,7 +36,8 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 拼写纠错、下一词预测、词频/上下文学习、形态变化、自动分段、缩写展开 | **未实现**。`AGENTS.md` §1 的其余条目完全未触及 |
+| 下一词预测、词频/上下文学习、形态变化、自动分段、缩写展开 | **未实现**。`AGENTS.md` §1 的这些条目完全未触及 |
+| 拼写纠错（P2.6，**已实现但默认关闭**） | **已实现为"一次编辑"建议器**：删除 / 插入 / 替换 / 相邻换位四种，长度窗口 4..32，预算 ≤3，与建议互斥于补全，`spell` 注释列是 C API 唯一能区分两者的东西。它是**建议不是替换**：默认提交仍是用户自己打的字节，只有显式选中才提交建议。它由 schema 的 `english/enable_suggestions` **显式开启**，未命名的 schema 行为与 P2.5 完全一致。**不是**编辑距离 ≥2 的纠错、不是语言模型、不打分概率；词表权重是夹具的手工档位 |
 | ASCII 大小写映射（P2.2） | **已实现**：`lowercase` / `initial-capital` / `uppercase` 三种形状可补全并按原形状渲染；`mixed` 与含非字母的一律不补全。**不是** Unicode case folding，也不做句首自动大写或专名恢复 |
 | 撇号与连字符（**仅** ASCII `'` 与 `-`） | **已实现为受限词形**（P2.3）：`[a-z]+`、`[a-z]+'[a-z]+`、`[a-z]+-[a-z]+`，至多一个分隔符、永不在首尾、两种分隔符不同现；查询前缀**可以**以一个分隔符结尾（`don'`、`co-`）。多分隔符（`rock'n'roll`）、Unicode 弯撇号、`–` 一律不支持，只保留原文 |
 | 数字与 11 个技术符号 `@ . _ : / \ ? & = # % +` | **不补全**（P2.3 的保护策略）：这些键被 `speller/alphabet` 放行进组合区，再由词形层**整词**拒绝，判为 `protected-text`；纯字母串里混入数字则判 `not-alphabetic`。**不改写、不裁剪、不提取局部** |
@@ -57,8 +65,8 @@
 | --- | --- | --- | --- |
 | 语言核心单测 | 根工程 `tests/english_core` | `build/vs2022-x64-debug` | Debug / 动态（核心不含 rime，故可独立编） |
 | 引擎与组件 | `tools/build_librime_baseline.ps1 -Mode english-completion` | `build/librime-english/` | Release / `/MT` |
-| 集成测试 | `tools/rime_english_completion` | `build/librime-english/test` | Release / `/MT` |
-| 集成测试·真实词表（P2.4） | 同一份 `main.cc`，`--mode pilot-lexicon` | `build/english-pilot/test` | Release / `/MT` |
+| 集成测试 | `tools/rime_english_recovery`，经 `tools/test_english_integration.ps1` | `build/english-recovery/test` | Release / `/MT` |
+| 集成测试·真实词表（P2.4） | 同一份模块化源码，`--mode pilot-lexicon` | `build/english-pilot-recovery/test` | Release / `/MT` |
 
 核心层**不含任何 Rime 或平台头文件**，所以它能被根工程的 Debug 工程直接编译并单测；
 同一份源文件列表由 `engine/languages/en/CMakeLists.txt` 同时供给引擎构建，
@@ -99,36 +107,65 @@ baseline 的 rime CMakeCache 不含任何 `^EPOCANVA_` 条目。
 增量重跑（**不带** `-Fresh` / `-Verbose_Build`）也必须 exit 0；
 这是 P1.4 遗留误报的回归点，判据见 §4.5。
 
-### 4.3 集成测试
+### 4.3 集成测试：正式入口
 
-```sh
-cmake -S tools/rime_english_completion -B build/librime-english/test `
-      -G "Visual Studio 17 2022" -A x64 -DCMAKE_CONFIGURATION_TYPES:STRING=Release `
-      -DRime_Install_Prefix:PATH=<repo>/build/librime-english/rime/install `
-      -DBaseline_Rime_Prefix:PATH=<repo>/build/librime-baseline/rime/install
-
-cmake --build build/librime-english/test --config Release
-ctest --test-dir build/librime-english/test -C Release --output-on-failure --no-tests=error
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/test_english_integration.ps1 `
+  -EnginePrefix   build/librime-english/rime/install `
+  -BaselinePrefix build/librime-baseline/rime/install `
+  -BuildDir       build/english-recovery/test `
+  -LogTag         <本轮后缀>
 ```
 
-缺 `Rime_Install_Prefix` / `Baseline_Rime_Prefix`、或夹具文件缺失，都在
+三个参数都是**必填**且按调用者的当前目录解析（含空格路径无需任何引号技巧：脚本用
+`& $exe @数组` 逐项传参，不走 shell 插值）。脚本按
+参数与工具检查 → 配置 → 构建 → 导出实际测试清单 → CTest → 真实退出码 一条线走完，
+每步失败立即停止，退出码区分阶段：
+
+| 退出 | 含义 |
+| --- | --- |
+| 0 | 全部通过 |
+| 2 | 调用被拒：必填参数缺失/畸形/指向不存在的东西，或该 `-LogTag` 的日志已存在 |
+| 3 | 工具或产物缺失（打印探针命令；**不安装、不改 PATH、不修工具链**） |
+| 4 | 配置失败（pilot 身份不符就在这一层 `FATAL_ERROR`） |
+| 5 | 构建失败——**CTest 根本不会被调用**，所以不可能把上一轮的旧 exe 当成本轮结果 |
+| 6 | 生成的测试清单与源码注册不一致，或选择为空 |
+| 7 | 拿不到可判定的计数（CTest 没打印汇总行，或跑出的条数与导出清单不符） |
+| 8+ | CTest 的真实退出码，原样返回 |
+
+入口自带的三条反空转纪律：
+
+1. **每次 CTest 调用都带 `--no-tests=error`**；带 `-Filter` 时先用
+   `ctest -N --show-only=json-v1 -R <filter>` 确认匹配到的清单**非空**才去跑。
+2. **判定看条数，不看日志里有没有 PASS**：脚本解析 CTest 自己的
+   `N tests failed out of M` 汇总行，并要求 `M` 等于它导出的选择集大小。
+3. **注册一致性**：无论是否过滤，完整清单都会与 `CMakeLists.txt` 里解析出的
+   `NAME` 注册逐项比对两个方向，重名注册直接判失败——重复注册不算新增能力。
+
+缺 `Rime_Install_Prefix` / `Baseline_Rime_Prefix`、或夹具文件缺失，仍在
 **配置阶段** `FATAL_ERROR`。每个前缀下的 `rime_api.h` / `rime.lib` / `rime.dll`
 都用 `NO_DEFAULT_PATH` 查找，并额外断言命中路径**落在该前缀之内**，
 因此不会悄悄链接到机器上另一份 librime。
 
 ### 4.4 手工运行某个模式
 
+只应在排查单个模式时手工运行，且必须用同一套判定包装件，不要自己发明第四种口径：
+
 ```sh
-build/librime-english/test/english-engine/rime_english_completion.exe `
+build/english-recovery/test/english-engine/rime_english_recovery.exe `
   --expect-dll <绝对路径>/english-engine/rime.dll `
   --fixture-dir <repo>/tests/fixtures/english_completion `
-  --run-root <某目录>/rime-english-completion-run/<leaf> `
+  --run-root <某目录>/rime-english-recovery-run/<leaf> `
   --mode completion
 ```
 
 `--expect-dll` 必须是**绝对路径**：程序用 `GetModuleHandleExW(FROM_ADDRESS)` 反查真实
 提供了 `get_version` 的模块再逐字比较，给相对路径会得到 exit 4 并打印 expected/actual。
-这是设计，不是缺陷。
+这是设计，不是缺陷。`--run-root` 的父目录名必须是 `rime-english-recovery-run`，
+否则程序以 exit 6 退出且**不删除任何东西**——这个守护就是防止误删别的目录。
+用 PowerShell 手工单跑时**不要用 `Start-Process`**：它在含空格仓库路径上会把参数拆断，
+五个模式一律 exit 2（这是脚本缺陷，不是测试结论，事故恢复里踩过一次）；
+用 `& $exe arg1 arg2 …` + `$LASTEXITCODE`。
 
 ### 4.5 `-Skip` 的调用契约
 
@@ -152,86 +189,148 @@ python tools/data/build_english_pilot.py --fetch
 #    重转并要求逐字节相同： --source-root build/third-party-fetch/esdb --check
 #    纯规则自测（不读源文件）： --self-check
 
-# 2) 用**独立的二进制目录**配置，pilot 用例只在显式给出词表时注册
-cmake -S tools/rime_english_completion -B build/english-pilot/test `
-      -G "Visual Studio 17 2022" -A x64 -DCMAKE_CONFIGURATION_TYPES:STRING=Release `
-      -DRime_Install_Prefix:PATH=<repo>/build/librime-english/rime/install `
-      -DBaseline_Rime_Prefix:PATH=<repo>/build/librime-baseline/rime/install `
-      -DEPOCANVA_ENGLISH_PILOT_LEXICON:FILEPATH=<repo>/build/english-pilot/epocanva_en_pilot.tsv
-
-cmake --build build/english-pilot/test --config Release
-ctest --test-dir build/english-pilot/test -C Release --output-on-failure --no-tests=error
+# 2) 用**独立的二进制目录**跑，pilot 用例只在显式给出词表时注册
 ```
 
-该选项**必须是绝对路径且文件必须存在**，否则配置阶段 `FATAL_ERROR`；
-不设置它，这个二进制目录里就只有原来那 11 条——**不存在"静默跳过的 pilot 用例"**，
-报告必须写清自己跑的是哪一种。
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/test_english_integration.ps1 `
+  -EnginePrefix   build/librime-english/rime/install `
+  -BaselinePrefix build/librime-baseline/rime/install `
+  -BuildDir       build/english-pilot-recovery/test `
+  -PilotLexicon   <repo>\build\english-pilot\epocanva_en_pilot.tsv `
+  -LogTag         <本轮后缀>
+```
 
-手工跑单个模式（`--pilot-lexicon` 只与 `pilot-lexicon` 一起被接受，其他模式带它就报错）：
+该选项**必须是绝对路径且文件必须存在**，否则脚本在参数阶段就退出；身份
+（文件名与清单一致、字节数、SHA-256）由工程在**配置阶段**逐项核对并 `FATAL_ERROR`，
+**绝不静默不注册**。不设置它，这个二进制目录里就只有手写夹具那批用例——
+**不存在"静默跳过的 pilot 用例"**，报告必须写清自己跑的是哪一种。
+脚本自己不实现第二种摘要，判定口径只有一套。
+
+手工跑单个模式（`--pilot-lexicon` 只与四个 pilot 模式一起被接受，其他模式带它就报错）：
 
 ```sh
-build/english-pilot/test/english-engine/rime_english_completion.exe `
+build/english-pilot-recovery/test/english-engine/rime_english_recovery.exe `
   --expect-dll <绝对路径>/english-engine/rime.dll `
   --fixture-dir <repo>/tests/fixtures/english_pilot `
-  --run-root <某目录>/rime-english-completion-run/<leaf> `
+  --run-root <某目录>/rime-english-recovery-run/<leaf> `
   --mode pilot-lexicon --pilot-lexicon <绝对路径>/build/english-pilot/epocanva_en_pilot.tsv
 ```
 
 产物一致性由第二条用例判定：`cmake -DMANIFEST=… -DOUT_DIR=… -P
 tests/english_pilot/assert_pilot_output.cmake`（见 §6.3）。
 
-## 5. CTest 用例（累计 17 条：P2.1 的 11 条 + P2.2 的 1 条 + P2.3 的 2 条 + P2.4 的 2 条 + P2.5 的 1 条）
+## 5. CTest 用例（pilot 关闭 **27** 条 = 24 条引擎 + 3 条摘要辅助；pilot 开启 **33** 条）
 
-### 5.1 集成（`build/librime-english/test`，Release，12 条）
+前缀一律 `recovery.*`。判定口径对每条都相同：**精确整数退出码 + marker 策略**，由
+`tests/english_completion/assert_exit.cmake` 执行；**不使用 `WILL_FAIL`，也不使用
+`PASS_REGULAR_EXPRESSION`**。下表"期望"列写的是退出码，`require` 表示必须出现
+`RESULT PASS`，`forbid` 表示必须不出现。
 
-| 注册名 | 可执行 | `--mode` | 期望退出 | 判定 |
+这个包装件刻意与 P0.1 的 `tests/infrastructure/assert_probe.cmake` 并存而不合并——
+后者只接受 ≤2 个参数，并且其注释说明这是有意的（丢掉第二个参数会让用例失去意义）；
+英文集成程序需要 4–6 个参数，所以放宽旧包装件会削弱它为自己那批用例提供的保证。
+新工程**复用**存活的 `assert_exit.cmake`，没有新增第二种判定口径。
+
+### 5.1 手写夹具组（`tests/fixtures/english_completion/`，54 行词表，17 条）
+
+| 注册名 | 可执行 | `--mode` | 期望 | marker |
 | --- | --- | --- | --- | --- |
-| `english.completion.prefix_candidates_and_commit` | english | `completion` | 0 | 退出码 + `RESULT PASS` |
-| `english.completion.case_preservation_and_mapped_commit` | english | `case-preservation` | 0 | 同上 |
-| `english.completion.negative_missing_lexicon` | english | `missing-lexicon` | 0 | 同上 |
-| `english.completion.negative_bad_lexicon_duplicate` | english | `bad-lexicon-duplicate` | 0 | 同上 |
-| `english.completion.negative_bad_lexicon_illegal` | english | `bad-lexicon-illegal` | 0 | 同上 |
-| `english.completion.token_boundaries_and_protection` | english | `token-protection` | 0 | 同上（P2.3，393 条内部断言）|
-| `english.completion.space_boundaries_and_multi_word_commit` | english | `space-commit` | 0 | 同上（P2.5，459 条内部断言；判据见 §6.4）|
-| `english.completion.negative_bad_lexicon_illegal_form` | english | `bad-lexicon-illegal-form` | 0 | 同上（P2.3 新状态名）|
-| `english.completion.negative_baseline_engine` | baseline | `expect-module-absent` | 0 | 同上 |
-| `english.completion.positive_mode_fails_on_baseline_engine` | baseline | `completion` | **20** | 退出码 + **禁止** marker |
-| `english.completion.negative_mode_fails_on_english_engine` | english | `expect-module-absent` | **18** | 同上 |
-| `english.completion.rejects_unknown_mode` | english | `not-a-real-mode` | **2** | 同上 |
+| `recovery.completion.prefix_candidates_and_commit` | english | `completion` | 0 | require |
+| `recovery.completion.negative_baseline_engine` | baseline | `expect-module-absent` | 0 | require |
+| `recovery.completion.positive_mode_fails_on_baseline_engine` | baseline | `completion` | **20** | forbid |
+| `recovery.completion.negative_mode_fails_on_english_engine` | english | `expect-module-absent` | **18** | forbid |
+| `recovery.completion.rejects_unknown_mode` | english | `not-a-real-mode` | **2** | forbid |
+| `recovery.completion.suite_can_fail` | english | `self-check-fail` | **14** | forbid |
+| `recovery.case.preservation_and_mapped_commit` | english | `case-preservation` | 0 | require |
+| `recovery.case.suite_can_fail_on_menu_ranking` | english | `case-self-check-fail` | **14** | forbid |
+| `recovery.token.boundaries_and_protection` | english | `token-protection` | 0 | require |
+| `recovery.token.suite_can_fail_on_protected_text` | english | `token-self-check-fail` | **14** | forbid |
+| `recovery.space.commit_and_multiword` | english | `space-commit` | 0 | require |
+| `recovery.space.suite_can_fail_on_highlight` | english | `space-self-check-fail` | **14** | forbid |
+| `recovery.lexicon.negative_missing_file` | english | `missing-lexicon` | 0 | require |
+| `recovery.lexicon.negative_duplicate_entry` | english | `bad-lexicon-duplicate` | 0 | require |
+| `recovery.lexicon.negative_illegal_word` | english | `bad-lexicon-illegal` | 0 | require |
+| `recovery.lexicon.negative_illegal_word_form` | english | `bad-lexicon-illegal-form` | 0 | require |
+| `recovery.lexicon.suite_can_fail_on_valid_data` | english | `lexicon-failure-self-check-fail` | **14** | forbid |
 
-两条可执行文件来自同一份 `main.cc`，分别链接 **english 构建**与 **baseline 构建**的
-`rime.lib`，并各自在自己的输出目录里放对应的那一个 `rime.dll`。
-第 9、10 条是**交叉注入**：它们证明结果由实际加载的二进制决定，而不是由 `--mode` 字符串决定。
-（编号按 CTest 注册顺序，即上表从上到下；CMakeLists 里的 `# 2b` / `# 5b` 是插入位置的注释，不是用例编号。）
+两条可执行文件来自**同一份模块化源码**，分别链接 english 构建与 baseline 构建的
+`rime.lib`，并各自在自己的输出目录里放对应的那一个 `rime.dll`。第 3、4 条是**交叉注入**：
+它们证明结果由实际加载的二进制决定，而不是由 `--mode` 字符串决定。
+每组末尾的 `suite_can_fail_*` 是"测试必须能失败"的实证（`AGENTS.md` §3）：
+它们各自断言一条夹具能证伪的行为，必须以 14 退出且不打印 marker。
 
-**不使用 `WILL_FAIL`，也不使用 `PASS_REGULAR_EXPRESSION`。**
-判定用 `tests/english_completion/assert_exit.cmake`：精确整数退出码 +
-marker 策略（`require` / `forbid`）。它刻意与 P0.1 的
-`tests/infrastructure/assert_probe.cmake` 并存而不合并——后者只接受 ≤2 个参数，
-并且其注释说明这是有意的（丢掉第二个参数会让用例失去意义）；
-本程序需要 4 个参数，所以放宽旧包装件会削弱它为自己那批用例提供的保证。
+### 5.2 拼写建议组（`tests/fixtures/english_spelling/`，16 行受控词表，7 条）
 
-### 5.2 核心单测（`build/vs2022-x64-debug`，Debug，3 条）
+| 注册名 | `--mode` | 期望 | marker |
+| --- | --- | --- | --- |
+| `recovery.spelling.suggestions_and_suppressions` | `spelling-suggestions` | 0 | require |
+| `recovery.spelling.commit_and_selection` | `spelling-commit` | 0 | require |
+| `recovery.spelling.negative_lexicon_unavailable` | `spelling-lexicon-unavailable` | 0 | require |
+| `recovery.spelling.suite_can_fail_on_suggestion_ranking` | `spelling-ranking-self-check-fail` | **14** | forbid |
+| `recovery.spelling.suite_can_fail_on_labels` | `spelling-label-self-check-fail` | **14** | forbid |
+| `recovery.spelling.feature_toggle_ab` | `spelling-toggle-ab` | 0 | require |
+| `recovery.spelling.suite_can_fail_on_toggle_comparison` | `spelling-toggle-self-check-fail` | **14** | forbid |
+
+`feature_toggle_ab` 是**开关对照**，不是又一组门槛断言：一个进程里暂存两套受控方案
+（夹具那份开 `enable_suggestions`，另一份由程序派生、**必须只差两行**——schema 身份与开关），
+跑完全相同的六个探针、每侧 25 次按键，然后用引擎自己的 `schema_open()` +
+`config_get_*()` 读回两套**已部署**配置：开启侧读到 true、关闭侧读到"键存在且为 false"
+（缺键与读成 false 是两种不同结论），而 `max_suggestions: 3`、`max_completions: 7`、
+`menu/page_size: 8` 与词表路径两侧逐项相同。判定内容：开启侧出现文档约定的建议并带
+`spell` 标签，关闭侧该输入只有原文（原本就是补全/抑制的输入则两侧菜单逐字节相同）；
+两侧候选 0 恒为原文；两侧默认 Return 与默认空格提交的都是用户自己打的字节；
+关闭侧 19 个 `spelling_*` 字段**逐个**为零并各自写明"若非零意味着什么"（而不是只压一个总和），
+同时 27 个非拼写计数器在两阶段之间**必须一致**——这样"关闭侧很干净"就不可能靠"什么都没跑"挣来。
+它的控制条 `suite_can_fail_on_toggle_comparison` 故意声称"两侧菜单一样"，必须失败。
+
+### 5.3 摘要辅助组（不启动引擎，pilot 关闭时 3 条）
+
+| 注册名 | `--mode` | 期望 | marker |
+| --- | --- | --- | --- |
+| `recovery.pilot_sha256.known_vectors` | `vectors` | 0 | require |
+| `recovery.pilot_sha256.negative_identity_kinds` | `identity-negatives` | 0 | require |
+| `recovery.pilot_sha256.suite_can_fail_on_wrong_vector` | `self-check-fail` | **14** | forbid |
+
+第三条（可执行文件 `rime_english_recovery_sha256`）验证的是**测试工具自己**的摘要实现，
+期望值来自仓库外三个互不相同的实现，因此它不是"被测代码给被测代码背书"。
+这三种在 pilot 开关**关闭**时也注册——没有生成数据可跑，向量与负向种类照样成立。
+
+### 5.4 核心单测（`build/vs2022-x64-debug`，Debug，4 条）
 
 | 注册名 | 参数 | 期望退出 |
 | --- | --- | --- |
-| `english.core.lexicon_and_completion_unit_tests` | `--unit` | 0 + `RESULT PASS` |
+| `english.core.lexicon_and_completion_unit_tests` | `--unit` | 0 + `RESULT PASS`（实测 1566 条断言 0 失败）|
 | `english.core.unit_suite_can_fail` | `--forcefail` | **1** + 禁止 marker |
 | `english.core.rejects_unknown_arguments` | `--not-a-real-mode` | **2** + 禁止 marker |
+| `english.core.spelling_cost_trial_on_pilot_lexicon` | `--pilot-bench <tsv>` | 0 + `RESULT PASS`，**仅在生成的真实词表在位时注册** |
 
-### 5.3 pilot（`build/english-pilot/test`，Release，2 条，仅在 §4.6 的选项在位时注册）
+第四条是 P2.6 成本试验的**核心那一半**：它在 42,356 行常驻索引上按输入类别测量一次编辑
+通路的开销，并用闭合算术式核对变体数。**引擎那一半从未存在**——事故前工程里注册的
+`--mode pilot-spelling` 是先注册后实现，恢复工程既不实现也不注册它。
+没有生成词表的机器上根工程只有 7 条，那一条是**不注册**，不是注册了然后跳过。
 
-| 注册名 | 判定 | 超时 |
+### 5.5 pilot 附加项（`build/english-pilot-recovery/test`，仅 §4.6 显式给出词表时注册，6 条）
+
+| 注册名 | 期望 | 判定 |
 | --- | --- | --- |
-| `english.pilot.real_lexicon_candidates_commit_and_protection` | `--mode pilot-lexicon` + `--pilot-lexicon <tsv>`；精确退出 0 + `RESULT PASS` | 300 s |
-| `english.pilot.output_matches_the_pinned_manifest` | `cmake -P tests/english_pilot/assert_pilot_output.cmake`；无 marker 概念，以 CMake `FATAL_ERROR` 为失败 | 120 s |
+| `recovery.pilot.real_lexicon_reference_compared` | 0 + marker | `--mode pilot-lexicon`，42k 行上与独立参考实现逐帧比对 |
+| `recovery.pilot.suite_can_fail_on_reference_ranking` | **14** + 禁止 marker | 真实数据上故意报错的次序 |
+| `recovery.pilot.truncated_data_refused_before_the_engine` | **22** + 禁止 marker | 预校验在引擎读任何文件之前拒绝 |
+| `recovery.pilot.absent_data_refused_before_the_engine` | **22** + 禁止 marker | 同上，另一种具名理由 |
+| `recovery.pilot.output_matches_the_pinned_manifest` | CMake `FATAL_ERROR` 为失败 | `cmake -P tests/english_pilot/assert_pilot_output.cmake` |
+| `recovery.pilot_sha256.real_lexicon_digest_matches_the_manifest` | 0 + marker | 用 Windows CNG 复核真实产物与清单一致 |
 
-第一条**不是**第二条用例的重复：它证明引擎在 42k 行上的**行为**；
-第二条证明那份词表**就是清单钉住的那一份**。二者可以独立失败——
-截断的文件仍能让引擎跑通（只是少一批词），被改过的清单也能对上旧产物。
+第一条**不是**第五条的重复：它证明引擎在 42k 行上的**行为**；第五条证明那份词表**就是
+清单钉住的那一份**。二者可以独立失败——截断的文件仍能让引擎跑通（只是少一批词），
+被改过的清单也能对上旧产物。
 
-同一个二进制目录里，§5.1 的 11 条也照样注册并通过：pilot 的注册是**附加**，
-不移除、不改写手写夹具的任何一条（任务书边界 6）。
+pilot 的注册是**附加**，不移除、不改写手写夹具的任何一条；开关关闭时上面这些名字在
+CTest 里根本不存在，也就没有"静默跳过的 pilot 用例"这回事。
+
+`english.pilot.spelling_suggestion_cost_a_b_on_pilot_data`（旧 `pilot-spelling` 性能模式）
+**不在任何一张表里**：它在事故前就是注册先于实现、从未进入过任何一次绿色扫描，
+现工程既未实现也未注册它。
 
 ## 6. `completion` 模式的判定口径
 
@@ -484,7 +583,7 @@ pilot 不复述它，也不假装它已在 pilot 路径上被验证。
 
 ## 9. 隔离与可重建性
 
-- 运行根必须是 `rime-english-completion-run` 名下的叶子，否则程序 exit 6 并拒绝删除任何东西。
+- 运行根必须是 `rime-english-recovery-run` 名下的叶子，否则程序 exit 6 并拒绝删除任何东西。
 - `shared_data_dir`/`user_data_dir`/`log_dir` 全部指向私有目录；
   **不使用 `%APPDATA%\Rime`，不读个人配置**。
 - 程序还会调用 `get_shared_data_dir_s` **读回**引擎实际使用的目录并与之比对——
@@ -500,15 +599,21 @@ pilot 不复述它，也不假装它已在 pilot 路径上被验证。
 
 | 码 | 含义 | 码 | 含义 |
 | --- | --- | --- | --- |
-| 0 | 通过 | 10 | schema 选择或读回不符 |
-| 2 | 参数错误 | 11 | 读状态/上下文失败 |
-| 3 | `rime_get_api()` 返回 NULL | 14 | 至少一条值断言失败 |
-| 4 | 实际加载模块 ≠ 期望 DLL | 15 | destroy 后仍失败 |
-| 5 | 夹具缺失 | 16 | `get_*`/`free_*` 未配对 |
-| 6 | 运行目录准备失败 / 守护名不符 | 17 | 日志目录出现文件 |
+| 0 | 通过 | 11 | `get_status()` 失败 |
+| 2 | 参数错误 | 12 | `get_context()` 失败 |
+| 3 | `rime_get_api()` 返回 NULL | 13 | `get_commit()` 失败 |
+| 4 | 实际加载模块 ≠ 期望 DLL | 14 | 至少一条值断言失败 |
+| 5 | 夹具缺失 | 15 | destroy 后仍失败 |
+| 6 | 运行目录准备失败 / 守护名不符 | 16 | `get_*`/`free_*` 未配对 |
+| 7 | traits 未落到引擎（目录读回与请求不符） | 17 | 日志目录出现文件 |
 | 8 | 部署返回值或产物不符 | 18 | **负向预期未成立**（引擎比声称的更能干） |
 | 9 | `create_session()` 失败 | 19 | `process_key` 返回既非 0 也非 1 |
-| 20 | **英文诊断面不可用**（模块或 `get_api` 缺失） | 21 | `get_counters()` 返回 False |
+| 10 | schema 选择或读回不符 | 20 | **英文诊断面不可用**（模块或 `get_api` 缺失） |
+| 21 | `get_counters()` 返回 False | 22 | **pilot 数据在引擎打开任何文件之前被身份预校验拒绝** |
 | 25 | `select_candidate()` 被拒绝 | — | — |
 
 任何 API 调用失败都直接返回对应阶段码，**不会用空值继续把测试跑绿**。
+第 22 码与第 14、第 18 是三种**互不相同**的事实："这不是清单钉住的那份词表"、
+"引擎真的加载了、某条预期与实测不符"、"那条应当拒绝的断言自己没成立"。
+pilot 的两条设计为 22 的用例，其成功状态本身就是非零码，因此模式内部任何一条
+自声明断言失败都会改报 **18**，绝不与 22 混读。

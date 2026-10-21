@@ -2343,13 +2343,16 @@ void RunBenchMode() {
 // WHAT THIS MEASURES. The cost of the one-edit suggestion pass over an index that is
 // already resident -- 42,356 rows, the largest data set this project has -- per input
 // class: a correct word, a prefix that completes, and searched inputs at 4, 5, 8, 10,
-// 25 and 32 letters, plus the three suppression classes that must cost nothing. It is
-// the core half of the P2.6 cost story; the engine half (process_key, segmentation, the
-// candidate menu) is measured by --mode pilot-spelling in
-// tools/rime_english_completion, and the two are reported separately on purpose.
+// 25 and 32 letters, plus the three suppression classes that must cost nothing. This is
+// the ONLY half of the P2.6 cost story that exists. The planned engine half (process_key,
+// segmentation, the candidate menu) was registered as --mode pilot-spelling in the
+// pre-incident project before any implementation of it existed, and it has never run in
+// any green scan; the recovery project neither implements nor registers it. So the two
+// are not "reported separately" -- one of them was never measured. See the coverage
+// matrix in docs/reports/integration-harness-recovery-status.md.
 //
-// WHAT IT DOES NOT MEASURE. Not a cold file read (the pilot engine mode already reports
-// that), not a user's machine, not a distribution over real typing, and not a claim
+// WHAT IT DOES NOT MEASURE. Not a cold file read, not an engine-level per-key cost under
+// a real menu, not a user's machine, not a distribution over real typing, and not a claim
 // about any future trie or database. The inputs and their expected properties come from
 // build/p26-verify/pick_bench_inputs2.py, which reads the TSV and brute-forces the
 // one-edit relation itself -- the code under test is not consulted for an expectation.

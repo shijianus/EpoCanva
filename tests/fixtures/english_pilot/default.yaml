@@ -6,8 +6,8 @@
 # the pilot gets its own copy of each. Nothing in this directory is imported from
 # an upstream production preset and nothing here is a distribution candidate.
 #
-# Consumed by: tools/rime_english_completion --mode pilot-lexicon, deployed
-# through the public C API slot deploy_config_file("default.yaml", "config_version").
+# Consumed by: tools/rime_english_recovery --mode pilot-lexicon, deployed through
+# the public C API slot deploy_config_file("default.yaml", "config_version").
 
 config_version: "0.0.0-p2.4-fixture"
 

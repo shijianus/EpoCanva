@@ -1,11 +1,12 @@
 # `tests/fixtures/english_pilot/` — 真实词表试验夹具（P2.4）
 
-消费方：`tools/rime_english_completion --mode pilot-lexicon`。
+消费方：`tools/rime_english_recovery --mode pilot-lexicon`（经
+`tools/test_english_integration.ps1` 运行）。
 本目录**只放配置**：词表数据不在这里，也不进版本库。
 
 | 文件 | 行数 | 字节 | 作用 |
 | --- | ---: | ---: | --- |
-| `default.yaml` | 34 | 1,813 | 只列一个 schema；`menu/page_size: 8` |
+| `default.yaml` | 34 | 1,811 | 只列一个 schema；`menu/page_size: 8` |
 | `epocanva_pilot_english.schema.yaml` | 126 | 7,239 | 与手写夹具同一条 inert 引擎链，词表路径指向暂存后的 42,356 行清单 |
 
 数据来源、授权与转换政策：`docs/compliance/english-pilot-data.md`；
@@ -55,7 +56,7 @@ lexicon_path:   lexicon/epocanva_test_lexicon.tsv -> lexicon/epocanva_pilot_lexi
 - 试验用词表有自己的 schema_id：同一个 id 在本仓库出现两次，
   编译产物日志就会歧义——看不出某份日志描述的是哪一份词表。
 - 自己的运行目录（`build/english-pilot/run/…`）、自己的 CTest 二进制目录
-  （`build/english-pilot/test`）、自己的暂存文件名
+  （`build/english-pilot-recovery/test`）、自己的暂存文件名
   （`<shared>/lexicon/epocanva_pilot_lexicon.tsv`）。
 
 ## 3. 词表怎么到这里
@@ -71,9 +72,11 @@ schema 所写的相对路径（相对路径由引擎按 `RimeTraits.shared_data_
 
 ## 4. 用例注册条件（不留"静默跳过"）
 
-`tools/rime_english_completion/CMakeLists.txt` 只在
+`tools/rime_english_recovery/CMakeLists.txt` 只在
 `-DEPOCANVA_ENGLISH_PILOT_LEXICON=<绝对路径>` 指向**存在的文件**时才注册 pilot 用例；
 路径是相对路径或文件不存在 → **配置阶段 FATAL_ERROR**。
+正式入口 `tools/test_english_integration.ps1` 把 `-PilotLexicon` 原样传给它，
+并且自己先在参数阶段拒绝"给了名字但文件不在"——两条路径都不会退化成静默不注册。
 没有配置该选项的机器**根本看不到 pilot 用例**（既不失败，也不假装通过），
 这是设计而非缺陷，报告里必须写清哪些机器上跑过哪些用例。
 

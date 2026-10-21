@@ -1,7 +1,8 @@
 # EpoCanva P2.6-recovery -- standalone project for the rebuilt English integration tests.
 #
 # Deliberately NOT add_subdirectory()'d into the EpoCanva root project, for the reason
-# recorded in P1.3 and re-asserted by the original tools/rime_english_completion: the root
+# recorded in P1.3 and re-asserted by the pre-incident project that lived in
+# tools/rime_english_completion (now retired): the root
 # project is a Debug / dynamic-CRT build while these programs must link the Release /
 # static-CRT rime.lib. Keeping them apart is what stops the two CRTs leaking into each
 # other, so this project refuses to be configured as anything but its own top level.
@@ -25,12 +26,19 @@
 # and nowhere else -- rime.dll, the engine and engine/languages/en keep no dependency on it. The
 # helper calls Windows CNG; this project makes no cross-platform claim about it.
 #
-# WHY THIS PROJECT EXISTS ALONGSIDE tools/rime_english_completion. The original
-# integration harness was one ~5,100 line main.cc and that file is gone (truncated on
-# 2026-10-19; it is committed empty in the snapshot so the loss is visible). This is a
-# modular rebuild of it: entry, shared harness, and one file per behaviour group. The old
-# project and its CTest registrations are left untouched and remain the record of what
-# still has to be recovered -- nothing here deletes them.
+# WHY THIS PROJECT EXISTS. The original integration harness was one ~5,100 line main.cc
+# and that file is gone (truncated on 2026-10-19; it was committed empty in snapshot
+# 0c4bc62 so the loss stayed visible). This is a modular rebuild of it: entry, shared
+# harness, and one file per behaviour group.
+#
+# It is now the ONLY English integration project in the repository. The pre-incident
+# tools/rime_english_completion/ was retired in
+# "build: promote modular English integration test entrypoint" because its main.cc was 0
+# bytes and its CMakeLists still registered --mode pilot-spelling for a mode that never
+# existed, so it could not be configured, built or run at all. Its directory now holds a
+# README pointing here, and the case-by-case account of what its 13 + 3 registrations
+# became is the coverage matrix in docs/reports/integration-harness-recovery-status.md.
+# Run this project through tools/test_english_integration.ps1.
 #
 # Configure with:
 #   cmake -S tools/rime_english_recovery -B build/english-recovery/test `
