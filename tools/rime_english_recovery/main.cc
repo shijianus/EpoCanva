@@ -19,6 +19,9 @@
 #include "pilot_tests.h"
 #include "recovery_test_support.h"
 #include "space_tests.h"
+#include "spelling_commit_tests.h"
+#include "spelling_negative_tests.h"
+#include "spelling_tests.h"
 #include "token_tests.h"
 
 namespace {
@@ -55,6 +58,14 @@ constexpr ModeEntry kModes[] = {
      epocanva::recovery::RunPilotAssertionSelfCheckFailMode},
     {Mode::kPilotTruncatedRejected, epocanva::recovery::RunPilotTruncatedRejectedMode},
     {Mode::kPilotMissingRejected, epocanva::recovery::RunPilotMissingRejectedMode},
+    {Mode::kSpelling, epocanva::recovery::RunSpellingMode},
+    {Mode::kSpellingCommit, epocanva::recovery::RunSpellingCommitMode},
+    {Mode::kSpellingLexiconUnavailable,
+     epocanva::recovery::RunSpellingLexiconUnavailableMode},
+    {Mode::kSpellingSuggestionRankingSelfCheckFail,
+     epocanva::recovery::RunSpellingSuggestionRankingSelfCheckFailMode},
+    {Mode::kSpellingLabelSelfCheckFail,
+     epocanva::recovery::RunSpellingLabelSelfCheckFailMode},
 };
 
 ModeFn FindMode(Mode mode) {
@@ -81,7 +92,9 @@ int main(int argc, char** argv) {
         "missing-lexicon|bad-lexicon-duplicate|bad-lexicon-illegal|"
         "bad-lexicon-illegal-form|lexicon-failure-self-check-fail|"
         "pilot-lexicon|pilot-assertion-self-check-fail|pilot-truncated-rejected|"
-        "pilot-missing-rejected]\n"
+        "pilot-missing-rejected|spelling-suggestions|spelling-commit|"
+        "spelling-lexicon-unavailable|spelling-ranking-self-check-fail|"
+        "spelling-label-self-check-fail]\n"
         "       the four pilot modes additionally require --pilot-lexicon <absolute path "
         "to the generated word list> and accept it and nothing else\n");
     epocanva::recovery::Fail(epocanva::recovery::kUsage, "arguments", error);

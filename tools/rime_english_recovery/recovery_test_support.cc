@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 
 namespace epocanva {
 namespace recovery {
@@ -178,6 +180,171 @@ ExitCode StageFixture(const Options& opt, const std::filesystem::path& shared_di
     return rc;
   }
   *schema_source = shared_dir / kFixtureSchemaYaml;
+  return kOk;
+}
+
+// --- the P2.6 spelling fixture: staging plus the two derived files -------------------
+//
+// WHY THESE TWO FILES ARE GENERATED AND NOT COPIED. The spelling suite needs a schema whose
+// word list cannot be loaded, to prove that "there is no word list" is never reported as
+// "nothing you typed is misspelled". The difference from the surviving original is exactly
+// two indented YAML keys, and generating it keeps that difference an ASSERTION: a hand-copied
+// second file would let the pair drift, and the fixture README records what drift looked
+// like -- a loose anchor once matched the header COMMENT "# schema_id: ..." instead of the
+// key, so the compiled artefact kept the good schema while the file name said the broken
+// one, every behavioural assertion still passed, and only the artefact name betrayed it.
+// Therefore: anchor on the indented key with its newline, require exactly one hit BEFORE
+// replacing anything, apply the later key first (the new id is longer, so rewriting the
+// earlier anchor would shift the offset of the later one), and re-verify the generated TEXT
+// afterwards -- the old id line gone, the new id line present once, the broken word-list
+// path present once and the good quoted path gone. Any mismatch stops the run; nothing is
+// ever opened for writing until the replacement text has been built and checked.
+constexpr char kSpellingSchemaIdKey[] = "  schema_id: epocanva_spell_english\n";
+constexpr char kSpellingSchemaBrokenIdKey[] =
+    "  schema_id: epocanva_spell_broken_english\n";
+constexpr char kSpellingLexiconPathKey[] =
+    "  lexicon_path: \"lexicon/epocanva_spell_lexicon.tsv\"\n";
+constexpr char kSpellingBrokenLexiconPathKey[] =
+    "  lexicon_path: \"lexicon/epocanva_spell_lexicon_broken.tsv\"\n";
+
+// The three-row list whose THIRD row repeats the first: a duplicate-word load failure with
+// the duplicate on line 3, and 23 bytes so a report can name the size it staged.
+constexpr char kSpellingBrokenLexiconText[] =
+    "hello\t9\nhelp\t8\nhello\t7\n";
+
+std::size_t CountOccurrences(const std::string& text, const std::string& needle) {
+  std::size_t n = 0;
+  std::size_t pos = 0;
+  while ((pos = text.find(needle, pos)) != std::string::npos) {
+    ++n;
+    pos += needle.size();
+  }
+  return n;
+}
+
+bool ReplaceOnce(std::string* text, const std::string& from, const std::string& to) {
+  if (CountOccurrences(*text, from) != 1) {
+    return false;
+  }
+  const std::size_t pos = text->find(from);
+  text->replace(pos, from.size(), to);
+  return true;
+}
+
+// Writes `bytes` to a path that must not exist yet, then reads it back and requires the
+// same bytes. The run directory was recreated empty by PrepareRunRoot, so "already exists"
+// means this program staged it twice in one run -- a fact worth stopping on rather than
+// silently overwriting.
+ExitCode WriteGeneratedFile(const std::filesystem::path& dst, const std::string& bytes,
+                            const char* what) {
+  std::error_code ec;
+  if (std::filesystem::exists(dst, ec)) {
+    Fail(kRunDirectoryFailed, "spelling.generate",
+         std::string(what) + ": refusing to overwrite " + dst.string());
+    return kRunDirectoryFailed;
+  }
+  std::ofstream out(dst, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    Fail(kRunDirectoryFailed, "spelling.generate",
+         std::string(what) + ": cannot open " + dst.string() + " for writing");
+    return kRunDirectoryFailed;
+  }
+  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  out.close();
+  if (!out) {
+    Fail(kRunDirectoryFailed, "spelling.generate",
+         std::string(what) + ": the write to " + dst.string() + " did not complete");
+    return kRunDirectoryFailed;
+  }
+  std::ifstream back(dst, std::ios::binary);
+  const std::string read_back((std::istreambuf_iterator<char>(back)),
+                              std::istreambuf_iterator<char>());
+  if (!back || read_back != bytes) {
+    Fail(kRunDirectoryFailed, "spelling.generate",
+         std::string(what) + ": " + dst.string() + " does not read back as written");
+    return kRunDirectoryFailed;
+  }
+  std::printf("[english] fixture.staged             %s (%zu bytes, generated)\n",
+              dst.string().c_str(), read_back.size());
+  return kOk;
+}
+
+ExitCode StageSpellingFixture(const Options& opt, const std::filesystem::path& shared_dir,
+                              std::filesystem::path* schema_source) {
+  const std::filesystem::path default_src = opt.fixture_dir / kFixtureDefaultYaml;
+  const std::filesystem::path schema_src = opt.fixture_dir / kSpellingFixtureSchemaYaml;
+  const std::filesystem::path lexicon_src = opt.fixture_dir / kSpellingFixtureLexicon;
+  std::error_code ec;
+  bool absent = false;
+  for (const std::filesystem::path& p : {default_src, schema_src, lexicon_src}) {
+    if (!std::filesystem::is_regular_file(p, ec) || ec) {
+      std::printf("[english] fixture.absent             %s\n", p.string().c_str());
+      absent = true;
+    }
+  }
+  if (absent) {
+    return kFixtureMissing;
+  }
+  ExitCode rc = CopyInto(default_src, shared_dir / kFixtureDefaultYaml);
+  if (rc != kOk) {
+    return rc;
+  }
+  rc = CopyInto(lexicon_src, shared_dir / kSpellingStagedLexiconName);
+  if (rc != kOk) {
+    return rc;
+  }
+  rc = CopyInto(schema_src, shared_dir / kSpellingFixtureSchemaYaml);
+  if (rc != kOk) {
+    return rc;
+  }
+
+  // Read the surviving original, derive the broken variant in memory, and check the result
+  // before anything is written.
+  std::ifstream in(schema_src, std::ios::binary);
+  const std::string original((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+  if (!in || original.empty()) {
+    Fail(kFixtureMissing, "spelling.broken-schema.rewrite",
+         "the staged spelling schema could not be read: " + schema_src.string());
+    return kFixtureMissing;
+  }
+  std::string broken = original;
+  // Later key first, then the earlier one.
+  if (!ReplaceOnce(&broken, kSpellingLexiconPathKey, kSpellingBrokenLexiconPathKey)) {
+    Fail(kFixtureMissing, "spelling.broken-schema.rewrite",
+         "the indented lexicon_path anchor did not match exactly once, so the derived "
+         "schema would not name a different word list");
+    return kFixtureMissing;
+  }
+  if (!ReplaceOnce(&broken, kSpellingSchemaIdKey, kSpellingSchemaBrokenIdKey)) {
+    Fail(kFixtureMissing, "spelling.broken-schema.rewrite",
+         "the indented schema_id anchor did not match exactly once, so the derived schema "
+         "would not have its own identity");
+    return kFixtureMissing;
+  }
+  // Re-verify the generated text, not just the two replacements: a derived file whose name
+  // says "broken" while its contents still describe the good schema must never reach the
+  // engine.
+  if (CountOccurrences(broken, kSpellingSchemaIdKey) != 0 ||
+      CountOccurrences(broken, kSpellingSchemaBrokenIdKey) != 1 ||
+      CountOccurrences(broken, "\"lexicon/epocanva_spell_lexicon.tsv\"") != 0 ||
+      CountOccurrences(broken, kSpellingBrokenLexiconPathKey) != 1) {
+    Fail(kFixtureMissing, "spelling.broken-schema.rewrite",
+         "the derived schema failed its own read-back checks (old id still present, new id "
+         "not present exactly once, or the good lexicon path still reachable)");
+    return kFixtureMissing;
+  }
+  rc = WriteGeneratedFile(shared_dir / kSpellingBrokenSchemaYaml, broken,
+                          "broken spelling schema");
+  if (rc != kOk) {
+    return rc;
+  }
+  rc = WriteGeneratedFile(shared_dir / kSpellingBrokenStagedLexiconName,
+                          kSpellingBrokenLexiconText, "broken spelling word list");
+  if (rc != kOk) {
+    return rc;
+  }
+  *schema_source = shared_dir / kSpellingFixtureSchemaYaml;
   return kOk;
 }
 
@@ -550,6 +717,26 @@ bool ModeFromName(const std::string& name, Mode* out) {
     *out = Mode::kPilotMissingRejected;
     return true;
   }
+  if (name == "spelling-suggestions") {
+    *out = Mode::kSpelling;
+    return true;
+  }
+  if (name == "spelling-commit") {
+    *out = Mode::kSpellingCommit;
+    return true;
+  }
+  if (name == "spelling-lexicon-unavailable") {
+    *out = Mode::kSpellingLexiconUnavailable;
+    return true;
+  }
+  if (name == "spelling-ranking-self-check-fail") {
+    *out = Mode::kSpellingSuggestionRankingSelfCheckFail;
+    return true;
+  }
+  if (name == "spelling-label-self-check-fail") {
+    *out = Mode::kSpellingLabelSelfCheckFail;
+    return true;
+  }
   return false;
 }
 
@@ -591,6 +778,16 @@ const char* ModeName(Mode mode) {
       return "pilot-truncated-rejected";
     case Mode::kPilotMissingRejected:
       return "pilot-missing-rejected";
+    case Mode::kSpelling:
+      return "spelling-suggestions";
+    case Mode::kSpellingCommit:
+      return "spelling-commit";
+    case Mode::kSpellingLexiconUnavailable:
+      return "spelling-lexicon-unavailable";
+    case Mode::kSpellingSuggestionRankingSelfCheckFail:
+      return "spelling-ranking-self-check-fail";
+    case Mode::kSpellingLabelSelfCheckFail:
+      return "spelling-label-self-check-fail";
   }
   return "?";
 }
@@ -999,6 +1196,12 @@ StagePlan PlanForMode(Mode mode) {
     case Mode::kPilotTruncatedRejected:
     case Mode::kPilotMissingRejected:
       return StagePlan::kNothing;
+    case Mode::kSpelling:
+    case Mode::kSpellingCommit:
+    case Mode::kSpellingLexiconUnavailable:
+    case Mode::kSpellingSuggestionRankingSelfCheckFail:
+    case Mode::kSpellingLabelSelfCheckFail:
+      return StagePlan::kSpellingFixture;
     default:
       return StagePlan::kHandWrittenFixture;
   }
@@ -1113,6 +1316,9 @@ ExitCode RunHarness(const Options& opt, ModeFn mode_fn) {
       break;
     case StagePlan::kPilotFixture:
       rc = StagePilotFixture(opt, h.shared_dir, &h.schema_source);
+      break;
+    case StagePlan::kSpellingFixture:
+      rc = StageSpellingFixture(opt, h.shared_dir, &h.schema_source);
       break;
     case StagePlan::kNothing:
       rc = kOk;  // the mode asserts an identity refusal, so nothing may be staged

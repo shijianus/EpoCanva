@@ -80,6 +80,14 @@ set(EpoCanva_English_Fixture_Dir
 set(EpoCanva_Assert_Script
     "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/english_completion/assert_exit.cmake"
     CACHE FILEPATH "Wrapper that compares an exact exit code and a marker policy")
+# The P2.6 spelling suite runs on its OWN fixture directory, so that enabling suggestions
+# cannot change what any other case measures. Only these three files live here; the broken
+# schema and its three-row word list are derived by the program at staging time, because the
+# difference from the original is itself the assertion
+# (tests/fixtures/english_spelling/README.md section 8).
+set(EpoCanva_English_Spelling_Fixture_Dir
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling" CACHE PATH
+  "Directory holding the spelling fixture's default.yaml, schema and 16-row word list")
 
 # --- the pilot switch: OFF by default, and OFF means the data is never mentioned -------
 # EPOCANVA_ENGLISH_PILOT_LEXICON is empty in the normal configure, and with it empty this
@@ -161,6 +169,16 @@ foreach(_f
         "${CMAKE_CURRENT_SOURCE_DIR}/space_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/lexicon_failure_tests.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/lexicon_failure_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/spelling_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/spelling_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/spelling_commit_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/spelling_commit_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/spelling_negative_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/spelling_negative_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/default.yaml"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/epocanva_spell_english.schema.yaml"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/lexicon_spell.tsv"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/README.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/pilot_sha256.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/pilot_sha256.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/pilot_sha256_tests.cc"
@@ -261,6 +279,9 @@ set(_SOURCES
   token_tests.cc
   space_tests.cc
   lexicon_failure_tests.cc
+  spelling_tests.cc
+  spelling_commit_tests.cc
+  spelling_negative_tests.cc
   pilot_sha256.cc
   pilot_reference.cc
   pilot_tests.cc)
@@ -345,9 +366,9 @@ enable_testing()
 set(_run_root "${CMAKE_CURRENT_BINARY_DIR}/rime-english-recovery-run")
 set(_assert ${EpoCanva_Assert_Script})
 
-# FIXTURE_DIR and EXTRA_ARGS exist for the pilot cases and default to nothing, so every
-# case registered without them keeps the command line it was verified with -- the existing
-# 17 registrations are not re-worded, re-ordered or re-pathed by this change.
+# FIXTURE_DIR and EXTRA_ARGS exist for the pilot and spelling cases and default to nothing, so
+# every case registered without them keeps the command line it was verified with -- the
+# registrations that predate those groups are not re-worded, re-ordered or re-pathed.
 function(epocanva_add_case)
   cmake_parse_arguments(CASE "BASELINE_EXE"
                         "NAME;MODE;EXPECTED_EXIT;MARKER;MARKER_POLICY;LABEL;FIXTURE_DIR"
@@ -608,14 +629,86 @@ epocanva_add_case(
   MARKER_POLICY forbid
   LABEL     lexicon-failure-self-check-fail)
 
+# ------------------------------------------------------------------ spelling cases --
+# The P2.6 group, on tests/fixtures/english_spelling/ and its 16 controlled rows. Each gets
+# its own run root, and none of them takes the pilot data: the whole group runs with the
+# hand-made list, so a green spelling suite never depends on a generated artefact.
+#
+# 18. The gate table and the candidate list, one keystroke at a time: thirteen named states,
+#     suggestions and completions mutually exclusive, the "spell" label as the only thing a
+#     front end can see, the 3-suggestion budget inside the same 8-candidate page, the four
+#     admitted edits, the weight tie broken by ascending canonical text, three deletions that
+#     reach one row shown once, all three accepted case shapes, both length edges and just
+#     outside them, technical text and delimited forms refused, and BackSpace recomputing the
+#     menu instead of replaying it.
+epocanva_add_case(
+  NAME      recovery.spelling.suggestions_and_suppressions
+  MODE      spelling-suggestions
+  FIXTURE_DIR "${EpoCanva_English_Spelling_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     spelling-suggestions)
+
+# 19. Suggestions at the commit boundary: default Return keeps the raw text, default Space
+#     keeps it plus exactly one U+0020, a highlight is not an acceptance, an explicit
+#     selection commits the suggested row in the shape that was typed, the commit is consumed
+#     once, Escape leaves nothing, two sessions keep their own menus, and the next ordinary
+#     word still completes.
+epocanva_add_case(
+  NAME      recovery.spelling.commit_and_selection
+  MODE      spelling-commit
+  FIXTURE_DIR "${EpoCanva_English_Spelling_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     spelling-commit)
+
+# 20. The state that must never be folded into "no suggestions": the schema asked and there is
+#     no usable word list. Run against the schema the program derives at staging time, whose
+#     three-row list repeats its first row on line 3; the case asserts the candidate list AND
+#     the load counters AND the status name together, so a broken list cannot read as a healthy
+#     suggester that simply had nothing to say.
+epocanva_add_case(
+  NAME      recovery.spelling.negative_lexicon_unavailable
+  MODE      spelling-lexicon-unavailable
+  FIXTURE_DIR "${EpoCanva_English_Spelling_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     spelling-lexicon-unavailable)
+
+# 21. Control for the ranking: the right three suggestions in the wrong order. A menu check
+#     that compared only the set would keep passing, which is the degradation this catches.
+epocanva_add_case(
+  NAME      recovery.spelling.suite_can_fail_on_suggestion_ranking
+  MODE      spelling-ranking-self-check-fail
+  FIXTURE_DIR "${EpoCanva_English_Spelling_Fixture_Dir}"
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     spelling-ranking-self-check-fail)
+
+# 22. Control for the label column: claims the completion "heli -> helium" carries the
+#     suggestion label. If labels stopped separating the two kinds, every other case in the
+#     group would lose the only distinction the C API exposes -- so this claim must fail.
+epocanva_add_case(
+  NAME      recovery.spelling.suite_can_fail_on_labels
+  MODE      spelling-label-self-check-fail
+  FIXTURE_DIR "${EpoCanva_English_Spelling_Fixture_Dir}"
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     spelling-label-self-check-fail)
+
 # ------------------------------------------------------------------ helper cases --
 # The digest helper's own three cases. They start no engine and read no generated data, so
 # they are registered in BOTH configure modes -- which is the point: with the pilot switch off
 # there is still a green run that proves the CNG backend reproduces digests computed outside
-# this repository. Cases 18-20; the switch-on configure adds a twenty-first for the real word
+# this repository. Cases 23-25; the switch-on configure adds a twenty-sixth for the real word
 # list, inside the pilot block below.
 #
-# 18. The vectors: the empty file, FIPS 180-4's "abc" and 56-byte sample messages, the 55/56/57
+# 23. The vectors: the empty file, FIPS 180-4's "abc" and 56-byte sample messages, the 55/56/57
 #     padding edges, the 63/64/65 block edges, a full 0x00..0xFF ramp, and the helper's own
 #     chunk edges at 65,535/65,536/65,537 bytes -- 15 fixtures, each checked for the bytes on
 #     disk, a digest in the manifest's format, and equality with an expectation produced by
@@ -629,7 +722,7 @@ epocanva_add_sha256_case(
   MARKER_POLICY require
   LABEL     sha256-vectors)
 
-# 19. The failure kinds stay apart. An absent path and a directory are refused as open-failed
+# 24. The failure kinds stay apart. An absent path and a directory are refused as open-failed
 #     with NO digest (so neither can equal an expected value); a truncated copy and a same-length
 #     one-byte edit of an independent copy are readable files whose digests simply differ, which
 #     is the finding the identity check is made of; the four kinds are required to have four
@@ -643,7 +736,7 @@ epocanva_add_sha256_case(
   MARKER_POLICY require
   LABEL     sha256-negatives)
 
-# 20. The control that keeps cases 18 and 19 honest: the same verification path run against a
+# 25. The control that keeps cases 23 and 24 honest: the same verification path run against a
 #     deliberately wrong expectation for "abc" -- the real digest with its last character
 #     changed. Must exit 14 and must not print the marker; a vector case that could not fail
 #     would be indistinguishable from one that simply never compares anything.
@@ -659,7 +752,7 @@ epocanva_add_sha256_case(
 # Registered ONLY when EPOCANVA_ENGLISH_PILOT_LEXICON names a generated file that has
 # already passed the configure-time identity check above. With the option empty, none of
 # these names exists in CTest and nothing in the project asks for the data -- so the
-# default configure keeps exactly the 17 engine cases it had plus the 3 helper cases above,
+# default configure keeps exactly the 22 engine cases it had plus the 3 helper cases above,
 # and a machine without the pinned word list does not run a quietly-skipped pilot test, it
 # simply has no pilot test.
 #
@@ -796,8 +889,13 @@ set_tests_properties(
   recovery.lexicon.negative_illegal_word
   recovery.lexicon.negative_illegal_word_form
   recovery.lexicon.suite_can_fail_on_valid_data
+  recovery.spelling.suggestions_and_suppressions
+  recovery.spelling.commit_and_selection
+  recovery.spelling.negative_lexicon_unavailable
+  recovery.spelling.suite_can_fail_on_suggestion_ranking
+  recovery.spelling.suite_can_fail_on_labels
   PROPERTIES TIMEOUT 180
-             LABELS "librime;english;completion;case;token;space;lexicon;recovery")
+             LABELS "librime;english;completion;case;token;space;lexicon;spelling;recovery")
 
 # The wrapper's own timeout is one notch below the CTest TIMEOUT so a hung program is
 # reported by the wrapper (non-numeric result) before CTest kills the run.
@@ -810,6 +908,7 @@ message(STATUS "  english prefix       : ${Rime_Install_Prefix}")
 message(STATUS "  baseline prefix      : ${Baseline_Rime_Prefix}")
 message(STATUS "  diagnostics header   : ${EpoCanva_English_Header_Dir}")
 message(STATUS "  fixture dir          : ${EpoCanva_English_Fixture_Dir}")
+message(STATUS "  spelling fixture dir : ${EpoCanva_English_Spelling_Fixture_Dir}")
 message(STATUS "  assert wrapper       : ${EpoCanva_Assert_Script}")
 message(STATUS "  run root             : ${_run_root}")
 message(STATUS "  digest backend       : Windows CNG (bcrypt) through pilot_sha256.cc; bcrypt "
@@ -826,10 +925,11 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
                  "compiled in")
   message(STATUS "  pilot cases          : 6 registered (4 engine modes + 1 data check + "
                  "1 real-list digest)")
-  message(STATUS "  ctest total          : 26 = 17 pre-pilot engine cases + 4 pilot engine "
-                 "cases + 1 pilot data check + 4 helper cases")
+  message(STATUS "  ctest total          : 31 = 17 pre-spelling engine cases + 5 spelling "
+                 "engine cases + 4 pilot engine cases + 1 pilot data check + 4 helper cases")
 else()
   message(STATUS "  pilot lexicon        : not configured -- no pilot case is registered, "
                  "no generated data is required, no manifest is read")
-  message(STATUS "  ctest total          : 20 = 17 engine cases + 3 helper cases")
+  message(STATUS "  ctest total          : 25 = 22 engine cases (17 pre-spelling + 5 "
+                 "spelling) + 3 helper cases")
 endif()

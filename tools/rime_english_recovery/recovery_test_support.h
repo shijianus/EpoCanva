@@ -113,6 +113,11 @@ enum class Mode {
   kPilotAssertionSelfCheckFail,
   kPilotTruncatedRejected,
   kPilotMissingRejected,
+  kSpelling,
+  kSpellingCommit,
+  kSpellingLexiconUnavailable,
+  kSpellingSuggestionRankingSelfCheckFail,
+  kSpellingLabelSelfCheckFail,
 };
 
 // What RunHarness must stage before a mode runs. The two pilot refusal cases deliberately
@@ -121,6 +126,9 @@ enum class Mode {
 enum class StagePlan {
   kHandWrittenFixture,
   kPilotFixture,
+  // The spelling fixture plus the two files this program derives from it (the broken schema
+  // and its three-row duplicate word list), staged in this run's own directory.
+  kSpellingFixture,
   kNothing,
 };
 
@@ -237,6 +245,24 @@ inline constexpr char kStagedLexiconName[] = "lexicon/epocanva_test_lexicon.tsv"
 // of a report can be read as the 54-row list.
 inline constexpr char kPilotSchemaId[] = "epocanva_pilot_english";
 inline constexpr char kPilotStagedLexiconName[] = "lexicon/epocanva_pilot_lexicon.tsv";
+
+// --- the P2.6 spelling fixture ----------------------------------------------------
+// tests/fixtures/english_spelling/ holds ONE schema and ONE word list. The two generated
+// names below are derived from them by this program while staging, because the difference
+// from the original IS the assertion -- copying it into the fixture directory would turn a
+// checked fact into a convention (tests/fixtures/english_spelling/README.md section 8). The
+// row count is stated from the fixture rather than re-derived from the loader, so a loader
+// that dropped a row cannot agree with its own test.
+inline constexpr char kSpellingSchemaId[] = "epocanva_spell_english";
+inline constexpr char kSpellingBrokenSchemaId[] = "epocanva_spell_broken_english";
+inline constexpr char kSpellingFixtureSchemaYaml[] = "epocanva_spell_english.schema.yaml";
+inline constexpr char kSpellingBrokenSchemaYaml[] =
+    "epocanva_spell_broken_english.schema.yaml";
+inline constexpr char kSpellingFixtureLexicon[] = "lexicon_spell.tsv";
+inline constexpr char kSpellingStagedLexiconName[] = "lexicon/epocanva_spell_lexicon.tsv";
+inline constexpr char kSpellingBrokenStagedLexiconName[] =
+    "lexicon/epocanva_spell_lexicon_broken.tsv";
+inline constexpr long long kExpectedSpellingLexiconRows = 16;
 
 // The engine, the fixture and the accounting a mode is allowed to touch.
 struct Harness {
