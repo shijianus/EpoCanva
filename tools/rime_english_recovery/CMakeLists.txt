@@ -18,6 +18,13 @@
 # there. Every program also verifies at run time which module actually supplied
 # rime_get_api(), so the cross-injection cases below are not taken on trust.
 #
+# A THIRD executable, rime_english_recovery_sha256, is built from the digest helper plus its own
+# test file and links NEITHER rime.lib. pilot_sha256.cc is what the pilot data identity rests on,
+# so it gets cases that need no engine and cannot be excused by engine setup. That target is also
+# where bcrypt.lib is allowed to go: into the three test executables that compile pilot_sha256.cc
+# and nowhere else -- rime.dll, the engine and engine/languages/en keep no dependency on it. The
+# helper calls Windows CNG; this project makes no cross-platform claim about it.
+#
 # WHY THIS PROJECT EXISTS ALONGSIDE tools/rime_english_completion. The original
 # integration harness was one ~5,100 line main.cc and that file is gone (truncated on
 # 2026-10-19; it is committed empty in the snapshot so the loss is visible). This is a
@@ -156,6 +163,7 @@ foreach(_f
         "${CMAKE_CURRENT_SOURCE_DIR}/lexicon_failure_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/pilot_sha256.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/pilot_sha256.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/pilot_sha256_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/pilot_reference.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/pilot_reference.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/pilot_tests.h"
@@ -266,7 +274,12 @@ target_compile_definitions(rime_english_recovery PRIVATE ${_DEFINES})
 target_compile_options(rime_english_recovery PRIVATE ${_OPTIONS})
 target_include_directories(rime_english_recovery PRIVATE
   "${Eng_INCLUDE_DIR}" "${EpoCanva_English_Header_Dir}")
-target_link_libraries(rime_english_recovery PRIVATE "${Eng_IMPORT_LIB}")
+
+# bcrypt is the Windows CNG import library that pilot_sha256.cc resolves its SHA-256 calls
+# against, and it is listed on exactly the three targets below because exactly those three
+# compile that file. It is not required by rime.lib, it is not referenced anywhere under
+# engine/, and the product binary still computes no hash of its own.
+target_link_libraries(rime_english_recovery PRIVATE "${Eng_IMPORT_LIB}" bcrypt)
 set_target_properties(rime_english_recovery PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/english-engine")
 
@@ -275,15 +288,30 @@ target_compile_definitions(rime_english_recovery_baseline PRIVATE ${_DEFINES})
 target_compile_options(rime_english_recovery_baseline PRIVATE ${_OPTIONS})
 target_include_directories(rime_english_recovery_baseline PRIVATE
   "${Base_INCLUDE_DIR}" "${EpoCanva_English_Header_Dir}")
-target_link_libraries(rime_english_recovery_baseline PRIVATE "${Base_IMPORT_LIB}")
+target_link_libraries(rime_english_recovery_baseline PRIVATE "${Base_IMPORT_LIB}" bcrypt)
 set_target_properties(rime_english_recovery_baseline PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/baseline-engine")
 
+# The digest helper's own tests, with no engine in sight: two translation units, no rime.lib
+# and no rime.dll in its output directory. Everything it asserts is about bytes on disk, so it
+# is registered in BOTH configure modes -- with the pilot switch off it still has to digest the
+# vectors correctly, and the only thing the switch adds is the real word list case.
+add_executable(rime_english_recovery_sha256
+  pilot_sha256.cc
+  pilot_sha256_tests.cc)
+target_compile_definitions(rime_english_recovery_sha256 PRIVATE
+  _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(rime_english_recovery_sha256 PRIVATE ${_OPTIONS})
+target_link_libraries(rime_english_recovery_sha256 PRIVATE bcrypt)
+set_target_properties(rime_english_recovery_sha256 PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/sha256-helper")
+
 # The identity expectations the pilot modes check the file on disk against, taken from the
-# manifest read above and compiled in. Both executables get them because both compile the
-# same sources; only the english-linked one is registered with pilot cases. If the quoting
-# were lost the string literal would stop being a literal and the build would fail, which is
-# the loud outcome this file prefers over a mode that compares against an empty expectation.
+# manifest read above and compiled in. All three executables get them because all three
+# compile the helper; only the english-linked one is registered with engine pilot cases, and
+# only the helper test adds the real-word-list case. If the quoting were lost the string
+# literal would stop being a literal and the build would fail, which is the loud outcome this
+# file prefers over a mode that compares against an empty expectation.
 if(EPOCANVA_ENGLISH_PILOT_LEXICON)
   set(_pilot_defines
     "EPOCANVA_PILOT_EXPECTED_SHA256=\"${_pilot_sha}\""
@@ -293,6 +321,7 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
     "EPOCANVA_PILOT_PINNED_COMMIT=\"${_pilot_commit}\"")
   target_compile_definitions(rime_english_recovery PRIVATE ${_pilot_defines})
   target_compile_definitions(rime_english_recovery_baseline PRIVATE ${_pilot_defines})
+  target_compile_definitions(rime_english_recovery_sha256 PRIVATE ${_pilot_defines})
 endif()
 
 # Place the exact built rime.dll in each executable's own directory, so the load path is
@@ -350,6 +379,34 @@ function(epocanva_add_case)
       "-DMARKER_POLICY=${CASE_MARKER_POLICY}"
       "-DPASS_ARGS=--expect-dll;${exe_dir}/rime.dll;--fixture-dir;${CASE_FIXTURE_DIR};--run-root;${_run_root}/${CASE_LABEL};--mode;${CASE_MODE}${_extra}"
       -DTIMEOUT_SECONDS=120
+      -P ${_assert}
+  )
+endfunction()
+
+# The digest helper's program is registered with the SAME wrapper and the SAME judgement --
+# exact exit code plus marker policy -- and nothing about the engine, because it starts no
+# engine. Its arguments are --run-root and --mode, plus --pilot-lexicon for the one case that
+# reads the real word list.
+function(epocanva_add_sha256_case)
+  cmake_parse_arguments(CASE ""
+    "NAME;MODE;EXPECTED_EXIT;MARKER;MARKER_POLICY;LABEL;PILOT_LEXICON" "" ${ARGN})
+  if(NOT CASE_MARKER_POLICY)
+    set(CASE_MARKER_POLICY require)
+  endif()
+  set(_extra "")
+  if(CASE_PILOT_LEXICON)
+    set(_extra ";--pilot-lexicon;${CASE_PILOT_LEXICON}")
+  endif()
+  add_test(
+    NAME ${CASE_NAME}
+    COMMAND ${CMAKE_COMMAND}
+      -DEXE=$<TARGET_FILE:rime_english_recovery_sha256>
+      -DCASE=${CASE_LABEL}
+      -DEXPECTED_EXIT=${CASE_EXPECTED_EXIT}
+      "-DMARKER=${CASE_MARKER}"
+      "-DMARKER_POLICY=${CASE_MARKER_POLICY}"
+      "-DPASS_ARGS=--run-root;${_run_root}/${CASE_LABEL};--mode;${CASE_MODE}${_extra}"
+      -DTIMEOUT_SECONDS=60
       -P ${_assert}
   )
 endfunction()
@@ -551,14 +608,63 @@ epocanva_add_case(
   MARKER_POLICY forbid
   LABEL     lexicon-failure-self-check-fail)
 
+# ------------------------------------------------------------------ helper cases --
+# The digest helper's own three cases. They start no engine and read no generated data, so
+# they are registered in BOTH configure modes -- which is the point: with the pilot switch off
+# there is still a green run that proves the CNG backend reproduces digests computed outside
+# this repository. Cases 18-20; the switch-on configure adds a twenty-first for the real word
+# list, inside the pilot block below.
+#
+# 18. The vectors: the empty file, FIPS 180-4's "abc" and 56-byte sample messages, the 55/56/57
+#     padding edges, the 63/64/65 block edges, a full 0x00..0xFF ramp, and the helper's own
+#     chunk edges at 65,535/65,536/65,537 bytes -- 15 fixtures, each checked for the bytes on
+#     disk, a digest in the manifest's format, and equality with an expectation produced by
+#     python hashlib, GNU coreutils sha256sum and PowerShell Get-FileHash. The helper computed
+#     none of them.
+epocanva_add_sha256_case(
+  NAME      recovery.pilot_sha256.known_vectors
+  MODE      vectors
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     sha256-vectors)
+
+# 19. The failure kinds stay apart. An absent path and a directory are refused as open-failed
+#     with NO digest (so neither can equal an expected value); a truncated copy and a same-length
+#     one-byte edit of an independent copy are readable files whose digests simply differ, which
+#     is the finding the identity check is made of; the four kinds are required to have four
+#     different names; and in a pilot-configured build the compiled-in expectation is re-checked
+#     to be a well-formed 64-character digest, so an empty one cannot pass for it.
+epocanva_add_sha256_case(
+  NAME      recovery.pilot_sha256.negative_identity_kinds
+  MODE      identity-negatives
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     sha256-negatives)
+
+# 20. The control that keeps cases 18 and 19 honest: the same verification path run against a
+#     deliberately wrong expectation for "abc" -- the real digest with its last character
+#     changed. Must exit 14 and must not print the marker; a vector case that could not fail
+#     would be indistinguishable from one that simply never compares anything.
+epocanva_add_sha256_case(
+  NAME      recovery.pilot_sha256.suite_can_fail_on_wrong_vector
+  MODE      self-check-fail
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     sha256-self-check-fail)
+
 # ------------------------------------------------------------------ pilot cases --
 # Registered ONLY when EPOCANVA_ENGLISH_PILOT_LEXICON names a generated file that has
 # already passed the configure-time identity check above. With the option empty, none of
 # these names exists in CTest and nothing in the project asks for the data -- so the
-# default configure keeps exactly the 17 cases it had, and a machine without the pinned
-# word list does not run a quietly-skipped pilot test, it simply has no pilot test.
+# default configure keeps exactly the 17 engine cases it had plus the 3 helper cases above,
+# and a machine without the pinned word list does not run a quietly-skipped pilot test, it
+# simply has no pilot test.
 #
-# Four engine cases and one data case, each with its own run root and its own exit code:
+# Four engine cases, one data case and one helper case, each with its own run root and its own
+# exit code:
 # 0 = the trial ran and every reference comparison held, 14 = the group's falsification
 # control (a deliberately mis-ranked menu on real data), 22 = pre-validation refused the
 # data before the engine opened it. A crash, a missing DLL or a bad argument produces a
@@ -621,8 +727,9 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
 
   # The identity check that is not written by this recovery at all: the surviving P2.4
   # script re-hashes the file on disk against the manifest and re-checks the conversion
-  # report's own arithmetic. If my own digest implementation were wrong, the pilot modes
-  # would agree with each other and this case would still fail.
+  # report's own arithmetic, with CMake's own SHA-256. It is a third implementation next to
+  # CNG and next to whatever produced the manifest value, so a wrong backend cannot make this
+  # case and the pilot modes agree on something the manifest disagrees with.
   if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/english_pilot/assert_pilot_output.cmake")
     message(FATAL_ERROR
       "pilot: tests/english_pilot/assert_pilot_output.cmake is missing, so the generated "
@@ -636,6 +743,19 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
       -P ${CMAKE_CURRENT_SOURCE_DIR}/../../tests/english_pilot/assert_pilot_output.cmake
   )
 
+  # The real artefact through the new backend: the helper digests build/english-pilot's word
+  # list and compares it with the FULL value read out of the manifest at configure time, plus
+  # the manifest's byte count. No expectation here is produced by the thing under test, and
+  # nothing under build/english-pilot/ is opened for writing by this case.
+  epocanva_add_sha256_case(
+    NAME      recovery.pilot_sha256.real_lexicon_digest_matches_the_manifest
+    MODE      real-file
+    PILOT_LEXICON "${EPOCANVA_ENGLISH_PILOT_LEXICON}"
+    EXPECTED_EXIT 0
+    MARKER    "RESULT PASS"
+    MARKER_POLICY require
+    LABEL     sha256-real-lexicon)
+
   set_tests_properties(
     recovery.pilot.real_lexicon_reference_compared
     recovery.pilot.suite_can_fail_on_reference_ranking
@@ -646,7 +766,17 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
   set_tests_properties(
     recovery.pilot.output_matches_the_pinned_manifest
     PROPERTIES TIMEOUT 120 LABELS "english;recovery;pilot;data")
+  set_tests_properties(
+    recovery.pilot_sha256.real_lexicon_digest_matches_the_manifest
+    PROPERTIES TIMEOUT 120 LABELS "english;recovery;pilot;digest")
 endif()
+
+set_tests_properties(
+  recovery.pilot_sha256.known_vectors
+  recovery.pilot_sha256.negative_identity_kinds
+  recovery.pilot_sha256.suite_can_fail_on_wrong_vector
+  PROPERTIES TIMEOUT 120
+             LABELS "english;recovery;digest")
 
 set_tests_properties(
   recovery.completion.prefix_candidates_and_commit
@@ -682,6 +812,10 @@ message(STATUS "  diagnostics header   : ${EpoCanva_English_Header_Dir}")
 message(STATUS "  fixture dir          : ${EpoCanva_English_Fixture_Dir}")
 message(STATUS "  assert wrapper       : ${EpoCanva_Assert_Script}")
 message(STATUS "  run root             : ${_run_root}")
+message(STATUS "  digest backend       : Windows CNG (bcrypt) through pilot_sha256.cc; bcrypt "
+               "is linked to the 3 test executables that compile it, and to no library")
+message(STATUS "  helper cases         : 3 registered in BOTH modes (vectors, negative "
+               "identity kinds, falsification control)")
 if(EPOCANVA_ENGLISH_PILOT_LEXICON)
   list(LENGTH _pilot_defines _pilot_define_count)
   message(STATUS "  pilot lexicon        : ${EPOCANVA_ENGLISH_PILOT_LEXICON}")
@@ -690,8 +824,12 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
   message(STATUS "  pilot manifest       : ${EpoCanva_Pilot_Manifest}")
   message(STATUS "  pilot defines        : ${_pilot_define_count} identity expectations "
                  "compiled in")
-  message(STATUS "  pilot cases          : 5 registered (4 engine modes + 1 data check)")
+  message(STATUS "  pilot cases          : 6 registered (4 engine modes + 1 data check + "
+                 "1 real-list digest)")
+  message(STATUS "  ctest total          : 26 = 17 pre-pilot engine cases + 4 pilot engine "
+                 "cases + 1 pilot data check + 4 helper cases")
 else()
   message(STATUS "  pilot lexicon        : not configured -- no pilot case is registered, "
                  "no generated data is required, no manifest is read")
+  message(STATUS "  ctest total          : 20 = 17 engine cases + 3 helper cases")
 endif()

@@ -37,7 +37,8 @@
 | 空格组的可失败性 | 断言"高亮后空格提交了 `hello `"这一被禁止的行为，必须以 14 失败且无成功标记 | **已从新源码编译验证**（`recovery.space.suite_can_fail_on_highlight`，实测 `got "hel "`） | 同上控制组日志 |
 | 加载失败组必须能失败 | 把**合法**的 54 行夹具放到同一路径，再走同一条"期望加载失败"的验证路径：健康菜单断言必须通过，而三条加载诊断断言（`failures=1`、`entries=0`、状态名 `duplicate-word`）必须因与实测 `ok/54` 不符而失败，退出码 14 且无成功标记 | **已从新源码编译验证**（`recovery.lexicon.suite_can_fail_on_valid_data`，实测 16 checked / 3 failed，失败项名字逐条指名"deliberately claimed …"） | 新：`build/english-recovery/evidence-3b-control-r2.log` |
 | 一处实现观察（非本轮修复范围） | 重复词条的行号归因：`english_lexicon.cc:203-216` 在 `std::sort` **之后**相邻比对并报 `origin_line[order[i]]`，而 `std::sort` 不保证等值元素保持文件顺序，因此 `lexicon_bad_duplicate.tsv`（`hello` 在第 1 与第 3 行）报告的行号可能是 1 或 3；本轮实测为 3 | **未修改产品**：测试按夹具事实断言"行号 ∈ 重复对所处的两行"，并打印实测值；若希望行号归因确定，建议把重复检测改为按文件顺序比对（例如排序时携带原下标做 tie-break，或先线性扫一遍已见集合），属产品改动，等授权 | 观察来源：该文件源码；`build/english-recovery/evidence-3b-duplicate-r2.log` |
-| pilot 真实词表<br>新名 `recovery.pilot.real_lexicon_reference_compared`、`…suite_can_fail_on_reference_ranking`、`…truncated_data_refused_before_the_engine`、`…absent_data_refused_before_the_engine`、`…output_matches_the_pinned_manifest` | 在**真实词表**上跑同一套断言，且预期值不得来自被测实现：候选由独立的整表线性扫描参考实现（`pilot_reference.{h,cc}`：全表匹配 → weight 降序、同分按规范词 ASCII 升序 → 按输入形状渲染 → 与显示文本去重 → 截到 1+7）逐帧比对，它不 include 也不调用 `prefix_completer`/`english_case`/`english_token`/`english_lexicon`；查询集 28 行覆盖单字母、2/3 字母、长前缀、整词、无命中、`'`/`-` 尾随前缀、initial-capital、uppercase、混合与非法词形、邮箱/URL/Windows 路径/下划线/版本号；**数据身份是被验证的事实而非假设**：`build/english-pilot/epocanva_en_pilot.tsv` 实测 502,333 字节、SHA-256 `6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b`、42,356 行合法词条，与清单 `output.{sha256,size_bytes,line_count}` 逐项相等，来源 `alt12dicts/2of12full.txt` @ `7bbe293425d48a1210bf17aaf156b28ade5c2de1`；权重是 2..12 的**跨词典佐证档位**，`weights_are_corpus_frequency: false`，因此本 pilot 是 Alt12Dicts 单文件子集的本地试验，**不是** ESDB/SCOWL 35/50/60 尺寸变体导出，也不是语料频率 | **已从新源码编译验证**（正向 `recovery.pilot.real_lexicon_reference_compared` 实测 **868 条断言 0 失败**、`RESULT PASS`、exit 0；引擎 `entries=42356` 与被验证行数相等、`attempts=1 ok=1 fail=0 errline=0` 状态名 `ok`（数百键仍只读一次）；终局 `queries=211 with_index=211 rejected=86 orig=211 compl=737 cl=624 ci=71 cu=42 delimited=67 nomatch=14 mixed=1 notalpha=71 protected=71 illegal=14 nonascii=0 unsup=0 toolong=0 whole=211 part=0 spell=0`，`processor_key_events==注入键数 248`；`api.balance status 252/252 context 252/252 commit 5/5`，两 Session 销毁后 `translator_live=0 space_processor_live=0`；默认 Return 提交原文、显式选择提交参考实现排名第一的整词、`co-` 空格得 `co- `、选择后得整词+一个空格、`user@example.com ` 逐字节整串提交后下一个词恢复补全；耗时分布只打印不判定：`keys=248 min=1.0us med=4.1us p95=254.9us max=318.6us mean=42.2us`，单机单次，**不是基准测试**）。**三种拒绝种类彼此可区分**：exit 22 = 预校验在引擎打开任何文件前拒绝（`lexicon_load_attempts` 仍为 0，实测理由 `size-mismatch`、`file-absent`，另有手工 `digest-mismatch`）；exit 14 = 预校验通过、引擎真的加载了 42k 行、某条预期与实测不符（控制组实测 `[index 1]: got "practicable"`、`[index 2]: got "practical"`，37 checked / 2 failed）；exit 18 = 那条"应当拒绝"的断言本身没成立（用未编译进身份预期的构建跑同一模式实证，见 §3 批次 4）。配置层另有三重拒绝：路径非绝对 / 文件名与清单不符 / 字节数或 SHA-256 与清单不符一律 `FATAL_ERROR`，**绝不静默不注册**。开关关闭时 `ctest --show-only=json-v1` 仍为 **17** 条且不含任何 pilot 名，开启时为 **22** 条 | 新：`build/english-pilot-recovery/evidence-pilot-positive-r1.log`、`evidence-pilot-control-r1.log`、`evidence-pilot-truncated-r1.log`、`evidence-pilot-absent-r1.log`、`build/english-recovery/evidence-pilot-digest-control-r1.log`、`evidence-pilot-truncated-noexpectation-r1.log`；ctest 列表 `build/english-pilot-recovery/show-off-r1.json`(17)、`show-on-r1.json`(22)，运行结果 `ctest-on-pilotnew-r1.log`、`ctest-on-full-r1.log`(22/22)、`ctest-off-full-r1.log`(17/17)；身份三重独立印证：CMake `file(SHA256)`、`sha256sum`、本工程自实现的 `pilot_sha256.cc`（先用 FIPS 180-4 空串/`abc`/56 字节三向量验过）给出同一值；旧证据仅作历史：`build/p25-verify/evidence-pilot.log`；判据 §6.3、§7、`tests/fixtures/english_pilot/README.md` |
+| pilot 真实词表<br>新名 `recovery.pilot.real_lexicon_reference_compared`、`…suite_can_fail_on_reference_ranking`、`…truncated_data_refused_before_the_engine`、`…absent_data_refused_before_the_engine`、`…output_matches_the_pinned_manifest` | 在**真实词表**上跑同一套断言，且预期值不得来自被测实现：候选由独立的整表线性扫描参考实现（`pilot_reference.{h,cc}`：全表匹配 → weight 降序、同分按规范词 ASCII 升序 → 按输入形状渲染 → 与显示文本去重 → 截到 1+7）逐帧比对，它不 include 也不调用 `prefix_completer`/`english_case`/`english_token`/`english_lexicon`；查询集 28 行覆盖单字母、2/3 字母、长前缀、整词、无命中、`'`/`-` 尾随前缀、initial-capital、uppercase、混合与非法词形、邮箱/URL/Windows 路径/下划线/版本号；**数据身份是被验证的事实而非假设**：`build/english-pilot/epocanva_en_pilot.tsv` 实测 502,333 字节、SHA-256 `6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b`、42,356 行合法词条，与清单 `output.{sha256,size_bytes,line_count}` 逐项相等，来源 `alt12dicts/2of12full.txt` @ `7bbe293425d48a1210bf17aaf156b28ade5c2de1`；权重是 2..12 的**跨词典佐证档位**，`weights_are_corpus_frequency: false`，因此本 pilot 是 Alt12Dicts 单文件子集的本地试验，**不是** ESDB/SCOWL 35/50/60 尺寸变体导出，也不是语料频率 | **已从新源码编译验证**（正向 `recovery.pilot.real_lexicon_reference_compared` 实测 **868 条断言 0 失败**、`RESULT PASS`、exit 0；引擎 `entries=42356` 与被验证行数相等、`attempts=1 ok=1 fail=0 errline=0` 状态名 `ok`（数百键仍只读一次）；终局 `queries=211 with_index=211 rejected=86 orig=211 compl=737 cl=624 ci=71 cu=42 delimited=67 nomatch=14 mixed=1 notalpha=71 protected=71 illegal=14 nonascii=0 unsup=0 toolong=0 whole=211 part=0 spell=0`，`processor_key_events==注入键数 248`；`api.balance status 252/252 context 252/252 commit 5/5`，两 Session 销毁后 `translator_live=0 space_processor_live=0`；默认 Return 提交原文、显式选择提交参考实现排名第一的整词、`co-` 空格得 `co- `、选择后得整词+一个空格、`user@example.com ` 逐字节整串提交后下一个词恢复补全；耗时分布只打印不判定：`keys=248 min=1.0us med=4.1us p95=254.9us max=318.6us mean=42.2us`，单机单次，**不是基准测试**）。**三种拒绝种类彼此可区分**：exit 22 = 预校验在引擎打开任何文件前拒绝（`lexicon_load_attempts` 仍为 0，实测理由 `size-mismatch`、`file-absent`，另有手工 `digest-mismatch`）；exit 14 = 预校验通过、引擎真的加载了 42k 行、某条预期与实测不符（控制组实测 `[index 1]: got "practicable"`、`[index 2]: got "practical"`，37 checked / 2 failed）；exit 18 = 那条"应当拒绝"的断言本身没成立（用未编译进身份预期的构建跑同一模式实证，见 §3 批次 4）。配置层另有三重拒绝：路径非绝对 / 文件名与清单不符 / 字节数或 SHA-256 与清单不符一律 `FATAL_ERROR`，**绝不静默不注册**。开关关闭时 `ctest --show-only=json-v1` 仍为 **17** 条且不含任何 pilot 名，开启时为 **22** 条；批次 5 把摘要辅助自己的 3 条（开启时 4 条）也注册进来，因此现为 **20 / 26** 条，17 条引擎用例与 5 条 pilot 用例的名称、模式与判定一字未改 | 新：`build/english-pilot-recovery/evidence-pilot-positive-r1.log`、`evidence-pilot-control-r1.log`、`evidence-pilot-truncated-r1.log`、`evidence-pilot-absent-r1.log`、`build/english-recovery/evidence-pilot-digest-control-r1.log`、`evidence-pilot-truncated-noexpectation-r1.log`；ctest 列表 `build/english-pilot-recovery/show-off-r1.json`(17)、`show-on-r1.json`(22)，运行结果 `ctest-on-pilotnew-r1.log`、`ctest-on-full-r1.log`(22/22)、`ctest-off-full-r1.log`(17/17)；身份三重独立印证：CMake `file(SHA256)`、`sha256sum`、`pilot_sha256.cc`（批次 4 时为该工程自实现的 SHA-256，先用 FIPS 180-4 空串/`abc`/56 字节三向量验过；批次 5 起改为调用 Windows CNG，见下一行）给出同一值；旧证据仅作历史：`build/p25-verify/evidence-pilot.log`；判据 §6.3、§7、`tests/fixtures/english_pilot/README.md` |
+| 摘要辅助自身（测试工具，不是产品能力）<br>新名 `recovery.pilot_sha256.known_vectors`、`…negative_identity_kinds`、`…suite_can_fail_on_wrong_vector`、`…real_lexicon_digest_matches_the_manifest` | 身份校验依赖一个文件摘要，所以那个摘要的实现必须被单独检验，而且**期望值不得由被测实现产出**：空文件、`abc`、FIPS 180-4 的 56 字节样例句、55/56/57 填充边界、63/64/65 分组边界、整段 `0x00..0xFF` 二进制、以及被测实现的读块边界 65,535/65,536/65,537 字节共 15 个夹具，逐一与 python hashlib、GNU coreutils `sha256sum`、PowerShell `Get-FileHash` 三个外部实现算出的值比对；负向侧要求区分四种种类：文件缺失、目录（两者都必须报**打不开**且**不产出任何摘要**）、截断副本、同长度只改一字节（后两者必须报**摘要不同**而不是 I/O 失败）；控制组用一条故意写错的 `abc` 期望实证该组能失败 | **已从新源码编译验证**（批次 5：`pilot_sha256.cc` 的自实现 SHA-256 已删除，改为调用 **Windows CNG**（`bcrypt.dll` 的 `BCryptOpenAlgorithmProvider(SHA256)`/`CreateHash`/`HashData`/`FinishHash`，每个 NTSTATUS 都判、`BCryptGetProperty(HashDigestLength)` 必须恰好 32 字节否则拒绝渲染），二进制分块 64 KiB，句柄由三个 RAII 对象在任何返回路径上释放；实测 vectors **60 条断言 0 失败**、negatives **21 条 0 失败**、控制组 **2 checked / 1 failed** 且退出 14 无成功标记；真实 TSV 经 CNG 得 `6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b`（4 条断言 0 失败），与 `sha256sum`、配置期 CMake `file(SHA256)` 逐项相等。**范围声明**：`kReadFailed`/`kHashFailed` 两种分类在本轮**没有被运行时触发**（无故障注入），只在类型与命名上与之可区分；该辅助**只在 Windows 上成立**，本轮不宣称跨平台；身份固定也**不等于**来源作者签名验证） | 新：`build/english-recovery/cng-evidence-helper-vectors-r1.log`、`cng-evidence-helper-negatives-r1.log`、`cng-evidence-helper-control-r1.log`、`cng-evidence-helper-refusals-r1.log`（首轮，含我写错的 usage 串）、`cng-evidence-helper-refusals-r2.log`（最终二进制：守护名不符 6、未知模式 2、`--pilot-lexicon` 被不接收它的模式拒掉 2、相对路径被 `real-file` 拒掉 2、`…/rime-english-recovery-run/../x` 这种拼回去能过守护的写法同样被拒 6）、`build/english-pilot-recovery/cng-evidence-helper-realtsv-r1.log`、`cng-evidence-digest-mismatch-r1.log`（同长度改一字节的真实副本：`22 / digest-mismatch`、`0 failed assertion(s)`）、`cng-evidence-open-failed-r1.log`（ACL 拒绝读的真实副本：落到暂存层 `fixture.copy … Access is denied` 退出 6，仍不是 `digest-mismatch`）、`build/english-recovery/cng-evidence-imports-r1.log`（`dumpbin /IMPORTS`：`rime.dll` 只导入 `KERNEL32/USER32`，`bcrypt.dll` 只出现在三个测试可执行文件里）、`cng-ctest-off-r1/r2.log`(20/20)、`cng-ctest-on-r1/r2.log`(26/26)，最终一轮对着最终二进制重跑：`build/english-recovery/cng-ctest-off-final-r3.log`(20/20)、`build/english-pilot-recovery/cng-ctest-on-final-r3.log`(26/26)、`show-off-cng-r1.json`(20)、`show-on-cng-r1.json`(26) |
 | P2.6 拼写建议<br>`english.completion.spelling_suggestions_and_suppressions` | 逐键一帧报十三具名状态之一；建议与补全互斥；`spell` 注释列区分二者；预算 ≤3/菜单 ≤8；三种大小写；退格重算；双 Session；词表不可读必须报"加载失败" | **尚未恢复**。整段实现文本仍在 `EpoCanva-preserve-2026-10-19T1652/incident-evidence/build/p26-verify/patch_spell_mode.py`（约 840 行插入文本），**但外层骨架（模式枚举、参数校验、dispatch、`EnglishSurface`、候选注释列采集）不在其中**；且该脚本以截断式写法落盘，禁止执行 | 仅有事故前日志证据：`build/p26-verify/mode-spelling.log`、`timing.txt`；判据 `tests/fixtures/english_spelling/README.md` |
 | pilot-spelling 性能模式<br>`english.pilot.spelling_suggestion_cost_a_b_on_pilot_data` | 13 输入在开关两侧各跑一遍，逐键耗时分布，off 侧拼写计数零变化 | **原本就未完成**：补丁脚本崩溃于写入之前，该模式从未进入过任何一次绿色扫描（13/13 与 15/15 日志均无它）。它**不属于**事故前必须恢复的绿色基线 | `check_restored.py` 将其列为 FORBIDDEN；`patch_pilot_mode.py` 自述崩溃原因 |
 
@@ -57,6 +58,9 @@
 批次 3b = 四类词表**加载**失败 + 该组可失败性控制（17 条）；
 批次 4 = `pilot-lexicon` 真实词表 + 独立参考实现 + 数据身份三Kind拒绝（开关关闭仍 17 条，
 开启 22 条）。
+批次 5 = **只换测试工具的摘要后端**：删除 `pilot_sha256.cc` 的自实现 SHA-256，改为 Windows
+CNG，并给它单独建一个不启动引擎的可执行文件与 3/4 条用例（开关关闭 20 条，开启 26 条）。
+**产品、引擎、夹具、清单、判据一律未改动；`spelling` 仍未恢复。**
 
 待做：其余加载状态（空文件、空行、缺字段、多字段、权重非法/溢出、词太长）→
 `spelling`（先只读判定 `patch_spell_mode.py` 的插入文本，外层骨架由新工程补齐）→
@@ -146,3 +150,51 @@
     **数据规模**证据而不是 Unicode 输入证据；按键仍经 `RimeApi::process_key()`，不是 Windows
     TSF 宿主层验证；逐键耗时分布只打印、不判定，也不做任何拼写 A/B 或索引改写。
 11. `pilot-spelling` 仍是"原本就未完成"，本轮**未实现、未注册**；`spelling` 仍未恢复。
+
+### 批次 5 的几处披露（测试工具后端的替换，产品行为未改）
+
+1. **删除了自研 SHA-256**：`pilot_sha256.cc` 里的手写轮函数、`Ch/Maj/σ/Σ`、从素数根推导常数的
+   `BuildConstants()` 全部移除，不留备用自研实现，也不保留常量表。对外只留一个很小的文件摘要
+   接口：`Sha256FileDigest()` 返回 `{失败种类, 摘要十六进制, 命名细节}`，`Sha256HexOfFile()`
+   保持原签名与原语义（失败即空串），因此 `pilot_tests.cc` 只在"为什么失败"这一处变了。
+2. **失败种类不再合并**。批次 4 只有一个 `digest-unreadable`；现在 CNG 侧的失败按
+   `digest-open-failed / digest-read-failed / digest-hash-failed` 命名，`digest-mismatch`
+   只用于"读到了、算出了、值不同"。截断负向用例白名单仍只接受 `size-mismatch /
+   digest-mismatch / row-count-mismatch`，所以打开失败或哈希 API 失败**不可能**被它当成成功。
+3. **出错不产出摘要**：`CreateFileW` 失败、`ReadFile` 失败、任何一个 `BCrypt*` 返回错误、或
+   `BCryptGetProperty(HashDigestLength)` 不等于 32 字节，`hex` 一律为空——不会是全零、截断或
+   半成品，因此不可能与清单里的 64 位十六进制期望相等。
+4. **向量期望值来自被测实现之外**：15 个夹具的字节由程序按两条公式自己生成并写进本次运行的
+   scratch 目录（`tests/fixtures/` 与 `build/english-pilot/` 全程只读），而期望值由
+   python hashlib、GNU coreutils `sha256sum`、PowerShell `Get-FileHash` **三个互不相同的实现**
+   算出且彼此一致；本轮没有为向量测试再写一套算法。附带一条诚实记录：我凭记忆写出的 56 字节
+   样例句摘要尾部是**错的**（记成 `…6a7472a3`，实测 `…d419db06c1`），外部工具当场把它纠正了——
+   这正是 AGENTS.md §6 "不要凭记忆"的又一例，与批次 4 的教训同类。
+5. **负向结果各自实测**：同长度只改一字节的**独立副本**（第 1000 字节 `'1'→'0'`，长度仍
+   502,333）在正向模式上得 `22 / digest-mismatch` 且 `0 failed assertion(s)`，CNG 算出的
+   `4024e5ac…` 与 `sha256sum` 对同一副本的结果一致；缺失路径与目录都报 `open-failed`
+   （win32 error 2 / 5）且摘要为空；截断副本（65,537 的前 65,536 字节）报的是**另一个文件的合法
+   摘要**，即"读通了但身份不符"，不是 I/O 失败。真实词表在改动前后都仍是
+   `6e46587d…aae6b`，未被任何一步改写。
+6. **一处没能按预期落到摘要层的结果，如实记录**：我另建了一份"存在但拒绝读"的副本（对
+   build/ 内的独立副本自身施加 `icacls /deny`，跑完立即 `/remove:d` 复原并核对摘要=原值），
+   想让正向模式报 `digest-open-failed`；实际先被 `RunHarness` 的夹具暂存拦下，得
+   `fixture.copy … Access is denied`、**退出 6**，根本没走到摘要。结论是"打开失败被当成摘要
+   不匹配"在这条路径上不可能发生（它连 22 都到不了），但 `digest-open-failed` 这一分类目前
+   只有辅助层用例证明，引擎层没有触发过。
+7. **`kReadFailed` / `kHashFailed` 没有被运行时触发**：构造它们需要故障注入，本轮没有加注入
+   钩子，也没有为了让它们变绿而写第二套实现。二者只在类型、命名和"必然空摘要"这三点上被断言
+   与其他种类可区分；要真正实证，需要一个测试专用的读取/哈希失败钩子，属未做项。
+8. **bcrypt 的范围是查证过的，不是声明的**：`dumpbin /IMPORTS` 显示 `bcrypt.dll` 只出现在
+   `rime_english_recovery.exe`、`rime_english_recovery_baseline.exe`、
+   `rime_english_recovery_sha256.exe` 三个测试可执行文件里；`rime.dll`（english 与 baseline
+   两侧）仍只导入 `KERNEL32.dll / USER32.dll`，`engine/` 下 `grep -i bcrypt` 零命中。摘要辅助的
+   新可执行文件不导入 `rime.dll`，其输出目录里也没有 `rime.dll`。
+9. **不新增任何安全声明**：本轮把"我们自己实现的哈希"换成"操作系统提供的哈希"，改变的是实现
+   归属，身份契约不变——依旧是"该字节序列与该清单记录一致"。**它不是**对来源作者的签名验证，
+   也没有引入任何密钥、信任根或网络步骤（`sha256sum`/`Get-FileHash`/python 只在构建期用于**算
+   期望值**，运行时程序不启动任何外部 shell）。配置期继续用 CMake `file(SHA256)`，未改 TSV、
+   未改清单、未降低校验强度。
+10. **跨平台不宣称**：`pilot_sha256.cc` 现在直接依赖 Windows CNG，因此该辅助是 Windows-only；
+    本工程本来也只在 MSVC/x64 上配置（`CMakeLists.txt` 第 47-50 行的 `FATAL_ERROR`）。
+

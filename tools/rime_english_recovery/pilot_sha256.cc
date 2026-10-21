@@ -1,208 +1,217 @@
-// EpoCanva P2.4-recovery -- FIPS 180-4 SHA-256 over a file. See pilot_sha256.h for why the
-// harness needs it and for what its own correctness is checked against.
+// EpoCanva P2.4-recovery -- the file digest the pilot data identity check is built on,
+// computed by Windows CNG. See pilot_sha256.h for why the harness needs it, what its own
+// correctness is checked against, and which failure kinds are kept apart.
 #include "pilot_sha256.h"
 
+#include <windows.h>
+
+#include <bcrypt.h>
+
 #include <array>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
-#include <fstream>
+#include <string>
 #include <vector>
 
 namespace epocanva {
 namespace recovery {
 namespace {
 
-constexpr std::size_t kBlockSize = 64;
-constexpr std::size_t kReadChunk = 16384;
+// One ReadFile of at most this many bytes, fed straight into BCryptHashData. The file's size
+// never decides how much memory this helper holds.
+constexpr DWORD kChunkBytes = 65536;
 
-std::uint32_t Rotr(std::uint32_t x, unsigned n) {
-  return (x >> n) | (x << (32u - n));
+// SHA-256's output in bytes; the hex rendering doubles it. The value is not assumed -- it is
+// checked against what CNG reports for the hash object below.
+constexpr ULONG kDigestBytes = 32;
+
+std::string Win32Detail(const char* call, DWORD error) {
+  char buffer[128];
+  std::snprintf(buffer, sizeof(buffer), "%s failed with win32 error %lu (0x%08lx)", call,
+                static_cast<unsigned long>(error), static_cast<unsigned long>(error));
+  return std::string(buffer);
 }
 
-std::uint32_t Ch(std::uint32_t x, std::uint32_t y, std::uint32_t z) {
-  return (x & y) ^ (~x & z);
+std::string NtDetail(const char* call, NTSTATUS status) {
+  char buffer[128];
+  std::snprintf(buffer, sizeof(buffer), "%s returned NTSTATUS 0x%08lx", call,
+                static_cast<unsigned long>(status));
+  return std::string(buffer);
 }
 
-std::uint32_t Maj(std::uint32_t x, std::uint32_t y, std::uint32_t z) {
-  return (x & y) ^ (x & z) ^ (y & z);
-}
-
-std::uint32_t BSigma0(std::uint32_t x) { return Rotr(x, 2) ^ Rotr(x, 13) ^ Rotr(x, 22); }
-std::uint32_t BSigma1(std::uint32_t x) { return Rotr(x, 6) ^ Rotr(x, 11) ^ Rotr(x, 25); }
-std::uint32_t SSigma0(std::uint32_t x) { return Rotr(x, 7) ^ Rotr(x, 18) ^ (x >> 3); }
-std::uint32_t SSigma1(std::uint32_t x) { return Rotr(x, 17) ^ Rotr(x, 19) ^ (x >> 10); }
-
-// The round constants and the initial hash value are DERIVED here from the definitions in
-// FIPS 180-4 4.2.2 and 5.3.3 -- the first 32 bits of the fractional parts of the cube roots
-// and square roots of the first 64 and first 8 primes -- rather than typed out as literal
-// tables. A transcribed table is exactly the kind of bug that makes a hash agree with
-// nothing and stay undetected, so this file takes the two lines of definition over 128
-// numerals. The probe that checks this implementation against the published sample digests
-// is what proves the derivation, not the other way round.
-struct Constants {
-  std::uint32_t k[64];
-  std::uint32_t h0[8];
-};
-
-bool IsPrime(int n) {
-  if (n < 2) {
-    return false;
-  }
-  for (int d = 2; d * d <= n; ++d) {
-    if (n % d == 0) {
-      return false;
-    }
-  }
-  return true;
-}
-
-// First 32 bits of the fractional part of x. long double keeps 64 bits of mantissa, which
-// leaves 32 clear bits with room to spare for the two roots below.
-std::uint32_t FractionTop32(long double x) {
-  const long double frac = x - std::floor(x);
-  return static_cast<std::uint32_t>(std::floor(frac * 4294967296.0L));
-}
-
-Constants BuildConstants() {
-  Constants out;
-  int found = 0;
-  for (int n = 2; found < 64; ++n) {
-    if (!IsPrime(n)) {
-      continue;
-    }
-    out.k[found] = FractionTop32(std::cbrt(static_cast<long double>(n)));
-    if (found < 8) {
-      out.h0[found] = FractionTop32(std::sqrt(static_cast<long double>(n)));
-    }
-    ++found;
-  }
-  return out;
-}
-
-const Constants& ConstantsOnce() {
-  static const Constants kBuilt = BuildConstants();
-  return kBuilt;
-}
-
-
-void Transform(std::array<std::uint32_t, 8>* h, const std::uint8_t* block) {
-  std::uint32_t w[64];
-  for (int i = 0; i < 16; ++i) {
-    w[i] = (static_cast<std::uint32_t>(block[4 * i]) << 24) |
-           (static_cast<std::uint32_t>(block[4 * i + 1]) << 16) |
-           (static_cast<std::uint32_t>(block[4 * i + 2]) << 8) |
-           static_cast<std::uint32_t>(block[4 * i + 3]);
-  }
-  for (int i = 16; i < 64; ++i) {
-    w[i] = SSigma1(w[i - 2]) + w[i - 7] + SSigma0(w[i - 15]) + w[i - 16];
-  }
-  std::uint32_t a = (*h)[0], b = (*h)[1], c = (*h)[2], d = (*h)[3];
-  std::uint32_t e = (*h)[4], f = (*h)[5], g = (*h)[6], hh = (*h)[7];
-  for (int i = 0; i < 64; ++i) {
-        const std::uint32_t t1 = hh + BSigma1(e) + Ch(e, f, g) + ConstantsOnce().k[i] +
-                   w[i];
-    const std::uint32_t t2 = BSigma0(a) + Maj(a, b, c);
-    hh = g;
-    g = f;
-    f = e;
-    e = d + t1;
-    d = c;
-    c = b;
-    b = a;
-    a = t1 + t2;
-  }
-  (*h)[0] += a;
-  (*h)[1] += b;
-  (*h)[2] += c;
-  (*h)[3] += d;
-  (*h)[4] += e;
-  (*h)[5] += f;
-  (*h)[6] += g;
-  (*h)[7] += hh;
-}
-
-std::array<std::uint32_t, 8> InitialHash() {
-  std::array<std::uint32_t, 8> out;
-  for (int i = 0; i < 8; ++i) {
-    out[static_cast<std::size_t>(i)] = ConstantsOnce().h0[i];
-  }
-  return out;
-}
-
-// One-shot accumulator: bytes go in, the digest comes out, and only one block is buffered.
-class Sha256 {
+// Handles are released in exactly one place each -- the destructor -- so no early return on an
+// error path can leave one open. Nothing here is refcounted or shared: one file, one hash
+// object, one algorithm provider, all of them out of scope when the digest call returns.
+class ReadableFile {
  public:
-  void Update(const std::uint8_t* data, std::size_t len) {
-    total_ += len;
-    while (len > 0) {
-      const std::size_t take =
-          (kBlockSize - fill_ < len) ? kBlockSize - fill_ : len;
-      std::memcpy(buf_ + fill_, data, take);
-      fill_ += take;
-      data += take;
-      len -= take;
-      if (fill_ == kBlockSize) {
-        Transform(&h_, buf_);
-        fill_ = 0;
-      }
+  explicit ReadableFile(const std::wstring& path)
+      : handle_(CreateFileW(path.c_str(), GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
+  ~ReadableFile() {
+    if (is_open()) {
+      CloseHandle(handle_);
     }
   }
+  ReadableFile(const ReadableFile&) = delete;
+  ReadableFile& operator=(const ReadableFile&) = delete;
 
-  std::string Finish() {
-    const std::size_t pad_len =
-        (fill_ < 56) ? (56 - fill_) : (56 + kBlockSize - fill_);
-    std::vector<std::uint8_t> tail;
-    tail.push_back(0x80);
-    for (std::size_t i = 1; i < pad_len; ++i) {
-      tail.push_back(0x00);
-    }
-    const unsigned long long bits = total_ * 8ull;
-    for (int i = 7; i >= 0; --i) {
-      tail.push_back(static_cast<std::uint8_t>((bits >> (8 * i)) & 0xFFu));
-    }
-    Update(tail.data(), tail.size());
-    char hex[65];
-    for (int i = 0; i < 8; ++i) {
-      std::snprintf(hex + 8 * i, 9, "%08x", h_[static_cast<std::size_t>(i)]);
-    }
-    return std::string(hex, 64);
-  }
+  bool is_open() const { return handle_ != INVALID_HANDLE_VALUE; }
+  HANDLE get() const { return handle_; }
 
  private:
-  std::array<std::uint32_t, 8> h_ = InitialHash();
-  std::uint8_t buf_[kBlockSize] = {0};
-  std::size_t fill_ = 0;
-  unsigned long long total_ = 0;
+  HANDLE handle_ = INVALID_HANDLE_VALUE;
+};
+
+class AlgorithmProvider {
+ public:
+  AlgorithmProvider()
+      : status_(BCryptOpenAlgorithmProvider(&handle_, BCRYPT_SHA256_ALGORITHM, nullptr, 0)) {}
+  ~AlgorithmProvider() {
+    if (handle_ != nullptr) {
+      BCryptCloseAlgorithmProvider(handle_, 0);
+    }
+  }
+  AlgorithmProvider(const AlgorithmProvider&) = delete;
+  AlgorithmProvider& operator=(const AlgorithmProvider&) = delete;
+
+  NTSTATUS status() const { return status_; }
+  BCRYPT_ALG_HANDLE get() const { return handle_; }
+
+ private:
+  BCRYPT_ALG_HANDLE handle_ = nullptr;
+  NTSTATUS status_ = -1;  // negative until the open really ran
+};
+
+class HashObject {
+ public:
+  explicit HashObject(BCRYPT_ALG_HANDLE algorithm)
+      : status_(BCryptCreateHash(algorithm, &handle_, nullptr, 0, nullptr, 0, 0)) {}
+  ~HashObject() {
+    if (handle_ != nullptr) {
+      BCryptDestroyHash(handle_);
+    }
+  }
+  HashObject(const HashObject&) = delete;
+  HashObject& operator=(const HashObject&) = delete;
+
+  NTSTATUS status() const { return status_; }
+  BCRYPT_HASH_HANDLE get() const { return handle_; }
+
+ private:
+  BCRYPT_HASH_HANDLE handle_ = nullptr;
+  NTSTATUS status_ = -1;
 };
 
 }  // namespace
 
-std::string Sha256HexOfFile(const std::filesystem::path& file) {
-  std::ifstream in(file, std::ios::binary);
-  if (!in) {
-    return std::string();
+const char* DigestFailureName(DigestFailure failure) {
+  switch (failure) {
+    case DigestFailure::kNone:
+      return "none";
+    case DigestFailure::kOpenFailed:
+      return "open-failed";
+    case DigestFailure::kReadFailed:
+      return "read-failed";
+    case DigestFailure::kHashFailed:
+      return "hash-failed";
   }
-  Sha256 sha;
-  std::vector<char> chunk(kReadChunk);
+  return "unclassified";
+}
+
+FileDigest Sha256FileDigest(const std::filesystem::path& file) {
+  FileDigest out;
+
+  const ReadableFile handle(file.wstring());
+  if (!handle.is_open()) {
+    out.failure = DigestFailure::kOpenFailed;
+    out.detail = Win32Detail("CreateFileW", GetLastError());
+    return out;
+  }
+
+  const AlgorithmProvider algorithm;
+  if (!BCRYPT_SUCCESS(algorithm.status())) {
+    out.failure = DigestFailure::kHashFailed;
+    out.detail = NtDetail("BCryptOpenAlgorithmProvider(SHA256)", algorithm.status());
+    return out;
+  }
+
+  const HashObject hash(algorithm.get());
+  if (!BCRYPT_SUCCESS(hash.status())) {
+    out.failure = DigestFailure::kHashFailed;
+    out.detail = NtDetail("BCryptCreateHash", hash.status());
+    return out;
+  }
+
+  // The size CNG gives this particular hash object, read back rather than assumed: a provider
+  // that answered with anything other than 32 bytes would otherwise have its output rendered
+  // as a SHA-256 digest.
+  ULONG digest_bytes = 0;
+  ULONG returned_bytes = 0;
+  NTSTATUS status = BCryptGetProperty(hash.get(), BCRYPT_HASH_LENGTH,
+                                      reinterpret_cast<PUCHAR>(&digest_bytes),
+                                      static_cast<ULONG>(sizeof(digest_bytes)),
+                                      &returned_bytes, 0);
+  if (!BCRYPT_SUCCESS(status)) {
+    out.failure = DigestFailure::kHashFailed;
+    out.detail = NtDetail("BCryptGetProperty(HashDigestLength)", status);
+    return out;
+  }
+  if (returned_bytes != static_cast<ULONG>(sizeof(digest_bytes)) ||
+      digest_bytes != kDigestBytes) {
+    out.failure = DigestFailure::kHashFailed;
+    out.detail = "CNG reported a hash length of " + std::to_string(digest_bytes) +
+                 " bytes in " + std::to_string(returned_bytes) +
+                 " result bytes; this helper renders nothing but a 32-byte SHA-256";
+    return out;
+  }
+
+  std::vector<unsigned char> chunk(kChunkBytes);
+  unsigned long long fed_bytes = 0;
   for (;;) {
-    in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
-    const std::streamsize got = in.gcount();
-    if (got <= 0) {
-      break;
+    DWORD got = 0;
+    if (!ReadFile(handle.get(), chunk.data(), kChunkBytes, &got, nullptr)) {
+      out.failure = DigestFailure::kReadFailed;
+      out.detail = Win32Detail("ReadFile", GetLastError()) + " after " +
+                   std::to_string(fed_bytes) + " bytes";
+      return out;
     }
-    sha.Update(reinterpret_cast<const std::uint8_t*>(chunk.data()),
-               static_cast<std::size_t>(got));
-    if (static_cast<std::size_t>(got) < chunk.size()) {
-      break;  // a short read is the end of the file
+    if (got == 0) {
+      break;  // end of file
     }
+    status = BCryptHashData(hash.get(), chunk.data(), got, 0);
+    if (!BCRYPT_SUCCESS(status)) {
+      out.failure = DigestFailure::kHashFailed;
+      out.detail = NtDetail("BCryptHashData", status) + " on the block at byte " +
+                   std::to_string(fed_bytes);
+      return out;
+    }
+    fed_bytes += got;
   }
-  in.clear();
-  if (in.bad()) {
+
+  std::array<unsigned char, kDigestBytes> digest{};
+  status = BCryptFinishHash(hash.get(), digest.data(), kDigestBytes, 0);
+  if (!BCRYPT_SUCCESS(status)) {
+    out.failure = DigestFailure::kHashFailed;
+    out.detail = NtDetail("BCryptFinishHash", status);
+    return out;
+  }
+
+  char hex[2 * kDigestBytes + 1];
+  for (ULONG i = 0; i < kDigestBytes; ++i) {
+    std::snprintf(hex + 2 * i, sizeof(hex) - 2 * i, "%02x", static_cast<unsigned>(digest[i]));
+  }
+  out.hex.assign(hex, 2 * kDigestBytes);
+  out.failure = DigestFailure::kNone;
+  return out;
+}
+
+std::string Sha256HexOfFile(const std::filesystem::path& file) {
+  const FileDigest digest = Sha256FileDigest(file);
+  if (digest.failure != DigestFailure::kNone) {
     return std::string();
   }
-  return sha.Finish();
+  return digest.hex;
 }
 
 }  // namespace recovery

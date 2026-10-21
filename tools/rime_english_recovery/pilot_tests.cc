@@ -93,12 +93,16 @@ Preflight VerifyPilotData(const std::filesystem::path& tsv) {
                  std::to_string(static_cast<long long>(EPOCANVA_PILOT_EXPECTED_BYTES));
     return out;
   }
-  out.digest = Sha256HexOfFile(tsv);
-  if (out.digest.empty()) {
-    out.reason = "digest-unreadable";
-    out.detail = tsv.string();
+  // The three ways the digest can fail are reported as three reasons, none of which is
+  // digest-mismatch: an unreadable file is not evidence about WHICH file it is, and the
+  // negative cases below only accept an identity reason.
+  const FileDigest digest = Sha256FileDigest(tsv);
+  if (digest.failure != DigestFailure::kNone) {
+    out.reason = std::string("digest-") + DigestFailureName(digest.failure);
+    out.detail = digest.detail.empty() ? tsv.string() : digest.detail;
     return out;
   }
+  out.digest = digest.hex;
   if (out.digest != EPOCANVA_PILOT_EXPECTED_SHA256) {
     out.reason = "digest-mismatch";
     out.detail = "computed " + out.digest + "; the manifest expects " +
