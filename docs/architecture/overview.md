@@ -156,7 +156,7 @@ rime-adapter → librime (third_party, 仅此处可见)
 | 自有 rime 组件 | **已实现一个测试探针**（P1.4，`engine/rime_components/probe/`）：可达性见证，不含任何语言能力；接入形态见 `docs/adr/0004-compiled-in-rime-components.md` |
 | 无界面测试前端 | **已实现**（P1.2 生命周期冒烟、P1.3 按键回放、P1.4 组件可达性），全部只使用公开 C API |
 | epocanva_engine.h (C ABI) | 未实现 |
-| platform-win/tsf | 未实现 |
+| platform-win/tsf | **生命周期骨架已实现**（P3.1，落地目录 `platforms/windows/tsf/`）：`DllGetClassObject`/`DllCanUnloadNow`、`IClassFactory`（含 `LockServer`）、`ITfTextInputProcessorEx`，**不注册**（无 regsvr32、无 profile/category、无注册表写入）。按键 sink、preedit/组合、候选 UI、宿主文本编辑、C ABI 单位换算、librime/引擎接入**均未实现**；构建与验证见 `docs/windows/tsf-bootstrap.md` |
 | platform-android/ime | 未实现 |
 | engine-core / Session 协议 | 未实现 |
 | rime-adapter（本项目的引擎封装层） | 未实现——现有 `engine/rime_components/` 只是编译进引擎的组件，不是封装层 |

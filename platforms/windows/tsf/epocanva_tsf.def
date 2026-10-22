@@ -1,0 +1,21 @@
+; EpoCanva P3.1 -- exports of the unregistered TSF text service DLL.
+;
+; Exactly two exports, because exactly two behaviours exist in this round:
+;   DllGetClassObject  the COM class-object entry a host (or the test program, through
+;                      GetProcAddress) calls to reach IClassFactory
+;   DllCanUnloadNow    the unload verdict driven by platforms/windows/tsf/module_state.h
+;
+; Both are marked PRIVATE: they are entry points for GetProcAddress and for the COM
+; loader, and nothing is ever linked against an import library for this DLL (the
+; lifecycle program loads it by absolute path only). PRIVATE keeps them out of any
+; import library and is what the linker expects for hand-exported symbols like these
+; (LNK4104 otherwise); it does not affect GetProcAddress, which resolves them by name
+; from the export table either way.
+;
+; Deliberately ABSENT: DllRegisterServer and DllUnregisterServer. This round performs no
+; registry write, no profile registration and no category registration; an export that
+; does not exist cannot be handed to regsvr32 by accident. The lifecycle test asserts
+; both names are absent from this export table rather than trusting this comment.
+EXPORTS
+    DllCanUnloadNow     PRIVATE
+    DllGetClassObject   PRIVATE
