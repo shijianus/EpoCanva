@@ -903,6 +903,14 @@ bool ModeFromName(const std::string& name, Mode* out) {
     *out = Mode::kSpellingToggleSelfCheckFail;
     return true;
   }
+  if (name == "acceptance-semantics") {
+    *out = Mode::kAcceptanceSemantics;
+    return true;
+  }
+  if (name == "acceptance-self-check-fail") {
+    *out = Mode::kAcceptanceSelfCheckFail;
+    return true;
+  }
   return false;
 }
 
@@ -958,6 +966,10 @@ const char* ModeName(Mode mode) {
       return "spelling-toggle-ab";
     case Mode::kSpellingToggleSelfCheckFail:
       return "spelling-toggle-self-check-fail";
+    case Mode::kAcceptanceSemantics:
+      return "acceptance-semantics";
+    case Mode::kAcceptanceSelfCheckFail:
+      return "acceptance-self-check-fail";
   }
   return "?";
 }

@@ -185,6 +185,8 @@ foreach(_f
         "${CMAKE_CURRENT_SOURCE_DIR}/spelling_negative_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/spelling_toggle_tests.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/spelling_toggle_tests.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/acceptance_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/acceptance_tests.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/default.yaml"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/epocanva_spell_english.schema.yaml"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling/lexicon_spell.tsv"
@@ -293,6 +295,7 @@ set(_SOURCES
   spelling_commit_tests.cc
   spelling_negative_tests.cc
   spelling_toggle_tests.cc
+  acceptance_tests.cc
   pilot_sha256.cc
   pilot_reference.cc
   pilot_tests.cc)
@@ -588,6 +591,35 @@ epocanva_add_case(
   MARKER    "RESULT PASS"
   MARKER_POLICY forbid
   LABEL     space-self-check-fail)
+
+# 12b. The P3.1 acceptance matrix, on this fixture: a highlight alone commits nothing;
+#      Return at the default highlight (candidate 0 = the raw input) commits the raw input
+#      with no space; Return after a real highlight_candidate() move accepts the currently
+#      highlighted row; Space after a highlight-only still follows the P2.5 raw-input policy
+#      (case A); and after an explicit select_candidate() Return commits the selected text
+#      with no space while Space commits it plus one U+0020 (case B, unchanged). The
+#      highlight state is built only through RimeApi::highlight_candidate(), never with
+#      select_candidate().
+epocanva_add_case(
+  NAME      recovery.acceptance.enter_and_space_semantics
+  MODE      acceptance-semantics
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  MARKER_POLICY require
+  LABEL     acceptance-semantics)
+
+# 12c. The acceptance group's falsification control: it claims that Return after a
+#      highlight commits the raw input ("hel"), which rule 3 forbids -- the engine accepts
+#      the highlighted row ("help"). Must exit 14; otherwise a Return test that only
+#      checked "something was committed" would be indistinguishable from one that ignored
+#      the highlight.
+epocanva_add_case(
+  NAME      recovery.acceptance.suite_can_fail_on_highlight_return
+  MODE      acceptance-self-check-fail
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     acceptance-self-check-fail)
 
 # 13-16. The word-list LOAD failures. Each runs in its own process, against its own run
 #        root, with only the file at the path the schema names changed -- and each asserts
@@ -927,6 +959,8 @@ set_tests_properties(
   recovery.token.suite_can_fail_on_protected_text
   recovery.space.commit_and_multiword
   recovery.space.suite_can_fail_on_highlight
+  recovery.acceptance.enter_and_space_semantics
+  recovery.acceptance.suite_can_fail_on_highlight_return
   recovery.lexicon.negative_missing_file
   recovery.lexicon.negative_duplicate_entry
   recovery.lexicon.negative_illegal_word
@@ -940,7 +974,7 @@ set_tests_properties(
   recovery.spelling.feature_toggle_ab
   recovery.spelling.suite_can_fail_on_toggle_comparison
   PROPERTIES TIMEOUT 180
-             LABELS "librime;english;completion;case;token;space;lexicon;spelling;recovery")
+             LABELS "librime;english;completion;case;token;space;lexicon;spelling;recovery;acceptance")
 
 # The wrapper's own timeout is one notch below the CTest TIMEOUT so a hung program is
 # reported by the wrapper (non-numeric result) before CTest kills the run.
@@ -970,12 +1004,13 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
                  "compiled in")
   message(STATUS "  pilot cases          : 6 registered (4 engine modes + 1 data check + "
                  "1 real-list digest)")
-  message(STATUS "  ctest total          : 33 = 17 pre-spelling engine cases + 7 spelling "
-                 "engine cases (5 gate/commit/negative + 2 toggle) + 4 pilot engine cases + "
-                 "1 pilot data check + 4 helper cases")
+  message(STATUS "  ctest total          : 35 = 17 pre-spelling engine cases + 7 spelling "
+                 "engine cases + 2 acceptance engine cases (Enter/Space semantics + "
+                 "falsification control) + 4 pilot engine cases + 1 pilot data check + "
+                 "4 helper cases")
 else()
   message(STATUS "  pilot lexicon        : not configured -- no pilot case is registered, "
                  "no generated data is required, no manifest is read")
-  message(STATUS "  ctest total          : 27 = 24 engine cases (17 pre-spelling + 7 "
-                 "spelling) + 3 helper cases")
+  message(STATUS "  ctest total          : 29 = 26 engine cases (17 pre-spelling + 7 "
+                 "spelling + 2 acceptance) + 3 helper cases")
 endif()

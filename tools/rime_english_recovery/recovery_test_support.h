@@ -121,6 +121,8 @@ enum class Mode {
   kSpellingLabelSelfCheckFail,
   kSpellingToggleAb,
   kSpellingToggleSelfCheckFail,
+  kAcceptanceSemantics,
+  kAcceptanceSelfCheckFail,
 };
 
 // What RunHarness must stage before a mode runs. The two pilot refusal cases deliberately

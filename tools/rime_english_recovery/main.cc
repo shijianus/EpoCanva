@@ -13,6 +13,7 @@
 // assert_exit.cmake.
 #include <cstdio>
 
+#include "acceptance_tests.h"
 #include "case_tests.h"
 #include "completion_tests.h"
 #include "lexicon_failure_tests.h"
@@ -70,6 +71,9 @@ constexpr ModeEntry kModes[] = {
     {Mode::kSpellingToggleAb, epocanva::recovery::RunSpellingToggleAbMode},
     {Mode::kSpellingToggleSelfCheckFail,
      epocanva::recovery::RunSpellingToggleSelfCheckFailMode},
+    {Mode::kAcceptanceSemantics, epocanva::recovery::RunAcceptanceSemanticsMode},
+    {Mode::kAcceptanceSelfCheckFail,
+     epocanva::recovery::RunAcceptanceSelfCheckFailMode},
 };
 
 ModeFn FindMode(Mode mode) {
@@ -99,7 +103,8 @@ int main(int argc, char** argv) {
         "pilot-missing-rejected|spelling-suggestions|spelling-commit|"
         "spelling-lexicon-unavailable|spelling-ranking-self-check-fail|"
         "spelling-label-self-check-fail|spelling-toggle-ab|"
-        "spelling-toggle-self-check-fail]\n"
+        "spelling-toggle-self-check-fail|acceptance-semantics|"
+        "acceptance-self-check-fail]\n"
         "       the four pilot modes additionally require --pilot-lexicon <absolute path "
         "to the generated word list> and accept it and nothing else\n");
     epocanva::recovery::Fail(epocanva::recovery::kUsage, "arguments", error);

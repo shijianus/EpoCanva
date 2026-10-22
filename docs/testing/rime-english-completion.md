@@ -220,7 +220,7 @@ build/english-pilot-recovery/test/english-engine/rime_english_recovery.exe `
 产物一致性由第二条用例判定：`cmake -DMANIFEST=… -DOUT_DIR=… -P
 tests/english_pilot/assert_pilot_output.cmake`（见 §6.3）。
 
-## 5. CTest 用例（pilot 关闭 **27** 条 = 24 条引擎 + 3 条摘要辅助；pilot 开启 **33** 条）
+## 5. CTest 用例（pilot 关闭 **29** 条 = 26 条引擎 + 3 条摘要辅助；pilot 开启 **35** 条）
 
 前缀一律 `recovery.*`。判定口径对每条都相同：**精确整数退出码 + marker 策略**，由
 `tests/english_completion/assert_exit.cmake` 执行；**不使用 `WILL_FAIL`，也不使用
@@ -248,6 +248,8 @@ tests/english_pilot/assert_pilot_output.cmake`（见 §6.3）。
 | `recovery.token.suite_can_fail_on_protected_text` | english | `token-self-check-fail` | **14** | forbid |
 | `recovery.space.commit_and_multiword` | english | `space-commit` | 0 | require |
 | `recovery.space.suite_can_fail_on_highlight` | english | `space-self-check-fail` | **14** | forbid |
+| `recovery.acceptance.enter_and_space_semantics` | english | `acceptance-semantics` | 0 | require |
+| `recovery.acceptance.suite_can_fail_on_highlight_return` | english | `acceptance-self-check-fail` | **14** | forbid |
 | `recovery.lexicon.negative_missing_file` | english | `missing-lexicon` | 0 | require |
 | `recovery.lexicon.negative_duplicate_entry` | english | `bad-lexicon-duplicate` | 0 | require |
 | `recovery.lexicon.negative_illegal_word` | english | `bad-lexicon-illegal` | 0 | require |
@@ -259,6 +261,10 @@ tests/english_pilot/assert_pilot_output.cmake`（见 §6.3）。
 它们证明结果由实际加载的二进制决定，而不是由 `--mode` 字符串决定。
 每组末尾的 `suite_can_fail_*` 是"测试必须能失败"的实证（`AGENTS.md` §3）：
 它们各自断言一条夹具能证伪的行为，必须以 14 退出且不打印 marker。
+
+**接受语义组（`acceptance-semantics` / `acceptance-self-check-fail`，P3.1）**在 completion
+夹具上冻结 Enter 与空格的接受契约：高亮本身不提交；后续接受动作由按键语义决定
+（见 §6.5）。它的控制条故意声称"高亮后 Return 提交原文"，必须以 14 退出。
 
 ### 5.2 拼写建议组（`tests/fixtures/english_spelling/`，16 行受控词表，7 条）
 
@@ -539,6 +545,42 @@ Ctrl / Alt / Super / release 的空格一律不消费（`space_events_refused` +
 提交队列为空、`handled=False`）；
 两个 session 交替输入时**另一个 session 读回空**；
 选择之后、空格之前提交队列必须为空（这就是 `select_candidate` 不提交文本的运行侧证据）。
+
+## 6.5 `acceptance-semantics` 模式的判定口径（P3.1）
+
+**冻结的契约：高亮不提交；后续接受动作由按键语义决定。** 五条规则，逐条在 completion
+夹具上用真实按键与真实 `get_commit()` 验证：
+
+```
+1. 仅高亮（RimeApi::highlight_candidate）      → 无提交，组合不变，菜单不变
+2. 默认高亮在原文（候选 0 = 输入本身）+ Return → 提交原文（"hel"），无空格
+3. 高亮移到补全项 + Return                     → 提交当前高亮项（"help"），无空格
+4. 仅高亮 + Space                              → 仍走 P2.5 原文策略："hel "（case A）
+5. select_candidate 显式选择后                  → Return 提交所选文本（"hello"，无空格）；
+                                                  Space 提交所选文本加一个空格（"hello "，
+                                                  case B，维持现有行为）
+```
+
+三条依据都取自固定检出的真实源码，而不是本套测试的约定：
+
+- `highlight_candidate` 的 API 契约本身就是"highlight a selection without committing"
+  （`third_party/librime/src/rime_api.h:501-502`）。**高亮状态只能用
+  `highlight_candidate()` 构造**；`select_candidate()` 是另一个状态（置
+  `Segment::status`），不得用来冒充"仅高亮"。
+- `fluid_editor` 把 `XK_Return` 绑到 `Editor::CommitComposition`
+  （`src/rime/gear/editor.cc:176`）：先 `Context::ConfirmCurrentSelection()`
+  （`src/rime/context.cc:168`，把段状态置 `kSelected` 并按
+  `Segment::selected_index`——即当前高亮——取候选，`src/rime/segmentation.cc:51-53`
+  读它时**不**查询段状态），段随之关闭，再 `Context::Commit()`。
+- 空格由 EpoCanva 空格处理器先行决策（`engine/processors` 首位），它读的是段状态；
+  高亮不动段状态，所以"仅高亮"到不了 case B。
+
+产品引擎在本轮**零改动**：这五条是对现有行为的冻结与回归，不是重新设计——
+不把 Enter 与 Space 强行统一，也没有新增词库。
+
+控制条 `recovery.acceptance.suite_can_fail_on_highlight_return` 故意断言规则 3 的反面
+（"高亮后 Return 提交原文"），必须以 14 退出：一个只看"提交了点什么"的 Return 测试，
+与一个真正核对高亮项的测试，由此才可区分。
 
 ## 7. "词表没有每键重载"怎么读
 
