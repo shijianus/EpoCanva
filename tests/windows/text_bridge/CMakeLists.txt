@@ -10,15 +10,16 @@
 # server can be exercised. Here there is no DLL and no COM: the unit under test is a pure
 # function pair, so linking it is the honest coupling and there is no search-order risk.
 #
-# The three CTest cases judge through the repository's existing wrapper
+# The four CTest cases judge through the repository's existing wrapper
 # tests/english_completion/assert_exit.cmake (exact exit code + marker policy), the same
 # generic harness P3.1 reused. No new test framework, and no Windows rule added to any
 # English source file.
 
-if(NOT TARGET epocanva_text_encoding)
+if(NOT TARGET epocanva_text_boundary_map)
   message(FATAL_ERROR
     "tests/windows/text_bridge must be included from platforms/windows/text (the top-level "
-    "project that builds epocanva_text_encoding); it is not configurable alone.")
+    "project that builds epocanva_text_encoding and epocanva_text_boundary_map); it is not "
+    "configurable alone.")
 endif()
 
 add_executable(text_bridge main.cc)
@@ -26,7 +27,7 @@ target_compile_definitions(text_bridge PRIVATE
   _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(text_bridge PRIVATE
   /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
-target_link_libraries(text_bridge PRIVATE epocanva_text_encoding)
+target_link_libraries(text_bridge PRIVATE epocanva_text_boundary_map epocanva_text_encoding)
 
 enable_testing()
 
@@ -49,7 +50,24 @@ add_test(
     -P ${_text_assert}
 )
 
-# 2. The length guards: pure arithmetic on the int boundary the Win32 APIs impose, driven
+# 2. The boundary table: the exact table of "A U+1F600 e-acute" (UTF-8 offsets
+#    0,1,5,7 <-> UTF-16 offsets 0,1,3,4), two-way round trips for every legal boundary of
+#    every fixture, and refusal of out-of-range, inside-sequence and inside-surrogate-pair
+#    offsets with the caller's out-parameter left untouched.
+add_test(
+  NAME windows.text.boundary_map
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:text_bridge>
+    -DCASE=boundary-map
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--mode;boundary"
+    -DTIMEOUT_SECONDS=120
+    -P ${_text_assert}
+)
+
+# 3. The length guards: pure arithmetic on the int boundary the Win32 APIs impose, driven
 #    with INT_MAX, INT_MAX+1 and SIZE_MAX. No allocation and no invalid pointer is ever
 #    dereferenced -- the guard runs before the input is touched, and this case is what
 #    proves it does.
@@ -66,7 +84,7 @@ add_test(
     -P ${_text_assert}
 )
 
-# 3. The falsifiability control: one deliberately false claim (that a truncated UTF-8
+# 4. The falsifiability control: one deliberately false claim (that a truncated UTF-8
 #    sequence converts successfully) must exit 14 with no RESULT PASS. Without it, a green
 #    encoding run whose checks were all tautologies would be indistinguishable from this one.
 add_test(
@@ -83,10 +101,11 @@ add_test(
 )
 
 set_tests_properties(windows.text.encoding_strict
+                     windows.text.boundary_map
                      windows.text.length_guards
                      windows.text.suite_can_fail
   PROPERTIES TIMEOUT 180
-             LABELS "windows;text;utf8;utf16;encoding")
+             LABELS "windows;text;utf8;utf16;encoding;boundary")
 
-message(STATUS "  text_bridge cases    : 3 (encoding_strict, length_guards, "
+message(STATUS "  text_bridge cases    : 4 (encoding_strict, boundary_map, length_guards, "
                "suite_can_fail)")

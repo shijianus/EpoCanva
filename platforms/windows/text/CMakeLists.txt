@@ -1,4 +1,4 @@
-# EpoCanva P3.2 -- the Windows text encoding adapter layer.
+# EpoCanva P3.2 -- the Windows text encoding / boundary adapter layer.
 #
 # STANDALONE ON PURPOSE, following the precedent platforms/windows/tsf set in P3.1: this is
 # its own top-level project, configured with the VS 2022 generator into its own build
@@ -11,6 +11,8 @@
 #
 # WHAT IS BUILT HERE
 #   epocanva_text_encoding        the strict UTF-8 <-> UTF-16 conversions (text_encoding.*)
+#   epocanva_text_boundary_map    the byte-offset <-> code-unit-offset table
+#                                 (text_boundary_map.*, links the encoding library)
 #   text_bridge                   the verification program from
 #                                 tests/windows/text_bridge, with its named CTest cases
 #
@@ -56,6 +58,17 @@ target_compile_options(epocanva_text_encoding PRIVATE
 # PUBLIC: the headers state the unit contract, so every consumer compiles against the same
 # declarations and cannot invent an off-by-a-unit copy of them.
 target_include_directories(epocanva_text_encoding PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_library(epocanva_text_boundary_map STATIC
+  text_boundary_map.cc
+  text_boundary_map.h)
+target_compile_definitions(epocanva_text_boundary_map PRIVATE
+  _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_compile_options(epocanva_text_boundary_map PRIVATE
+  /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
+# The boundary map validates through the strict converter rather than re-deciding anything,
+# so the dependency is real and is expressed here rather than assumed.
+target_link_libraries(epocanva_text_boundary_map PUBLIC epocanva_text_encoding)
 
 # --- the verification program ---------------------------------------------------------
 # Included from this project so one configure builds the libraries and the tests, and so the

@@ -12,7 +12,9 @@
 // INDEPENDENT EXPECTATIONS. The fixtures are the ones the P3.2 brief names: empty, ASCII,
 // precomposed e-acute, "A U+1F600 e-acute", Chinese, "e + U+0301", an embedded NUL, several
 // supplementary-plane characters, the U+0080 lower bound and the U+10FFFF upper bound. Each
-// carries its expected byte list AND its expected code unit list.
+// carries its expected byte list AND its expected code unit list. The middle fixture's
+// offsets are the contract test: UTF-8 0,1,5,7 against UTF-16 0,1,3,4, with UTF-16 offset 2
+// (the low half of the emoji's surrogate pair) refused.
 //
 // ILLEGAL INPUT IS A RESULT, NOT A LOG LINE. Every rejected case asserts the status, that
 // the output is empty, and that a GetLastError value was carried out. The privacy rule is
@@ -22,6 +24,7 @@
 //
 // MODES
 //   encoding         the strict conversions, legal and illegal, both directions
+//   boundary         the boundary table: exact contents, two-way round trips, refusals
 //   guards           the int-range arithmetic, driven with INT_MAX / INT_MAX+1 / SIZE_MAX
 //                    (pure arithmetic: no allocation, and no bogus view is dereferenced --
 //                    the guarded calls use a null data pointer precisely so a missing guard
@@ -37,10 +40,13 @@
 #include <string>
 #include <vector>
 
+#include "text_boundary_map.h"
 #include "text_encoding.h"
 
 namespace {
 
+using epocanva::windows::text::BoundaryLookupStatus;
+using epocanva::windows::text::BuildUtf8BoundaryMap;
 using epocanva::windows::text::CheckUtf16InputCodeUnitLength;
 using epocanva::windows::text::CheckUtf8InputByteLength;
 using epocanva::windows::text::CheckUtf8OutputCapacityForUtf16CodeUnits;
@@ -49,13 +55,20 @@ using epocanva::windows::text::ConvertUtf16CodeUnitsToUtf8Bytes;
 using epocanva::windows::text::ConvertUtf8BytesToUtf16CodeUnits;
 using epocanva::windows::text::DescribeConversionStatus;
 using epocanva::windows::text::Utf16ConversionResult;
+using epocanva::windows::text::Utf8BoundaryMap;
+using epocanva::windows::text::Utf8BoundaryMapBuildResult;
 using epocanva::windows::text::Utf8ConversionResult;
+using epocanva::windows::text::Utf8Utf16Boundary;
 
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
 constexpr int kExitCheckFailed = 5;
 constexpr int kExitSelfCheckFailed = 14;
 
+// A value no legitimate offset can be (it is above INT_MAX, which bounds every offset this
+// layer accepts), seeded into every out-parameter that a refused lookup is expected NOT to
+// touch.
+constexpr std::size_t kSentinel = static_cast<std::size_t>(0xDEADBEEFu);
 // SIZE_MAX without depending on the macro's header: static_cast<size_t>(-1) is it.
 constexpr std::size_t kSizeMax = static_cast<std::size_t>(-1);
 
@@ -167,6 +180,10 @@ std::string StatusText(ConversionStatus status) {
   return std::string(DescribeConversionStatus(status));
 }
 
+std::string LookupStatusText(BoundaryLookupStatus status) {
+  return std::string(Utf8BoundaryMap::DescribeLookupStatus(status));
+}
+
 std::string GleText(DWORD os_error) {
   char buffer[32];
   std::snprintf(buffer, sizeof(buffer), "gle=%lu", static_cast<unsigned long>(os_error));
@@ -241,6 +258,59 @@ const InvalidUtf16Case kInvalidUtf16Cases[] = {
     {"high surrogate then BMP unit", {0xD83D, 0x0041}},
     {"BMP unit then lone low surrogate", {0x0041, 0xDE00}},
     {"high surrogate at end of run", {0x0041, 0xD83D}},
+};
+
+// --- the boundary fixtures -----------------------------------------------------------
+struct BoundaryCase {
+  const char* label;
+  Bytes utf8_bytes;
+  // The exact expected table: every legal boundary, in both units, ascending.
+  std::vector<Utf8Utf16Boundary> expected_table;
+  // Offsets strictly inside a multi-byte UTF-8 sequence: must be refused.
+  std::vector<std::size_t> interior_utf8_byte_offsets;
+  // Offsets strictly inside a surrogate pair: must be refused.
+  std::vector<std::size_t> interior_utf16_code_unit_offsets;
+};
+
+const BoundaryCase kBoundaryCases[] = {
+    {"empty", {}, {{0u, 0u}}, {}, {}},
+    {"A-B-C ascii",
+     {0x41, 0x42, 0x43},
+     {{0u, 0u}, {1u, 1u}, {2u, 2u}, {3u, 3u}},
+     {},
+     {}},
+    {"A U+1F600 e-acute",
+     {0x41, 0xF0, 0x9F, 0x98, 0x80, 0xC3, 0xA9},
+     // UTF-8 byte offsets 0,1,5,7 <-> UTF-16 code unit offsets 0,1,3,4: the offset lists the
+     // P3.2 brief states, transcribed by hand rather than computed.
+     {{0u, 0u}, {1u, 1u}, {5u, 3u}, {7u, 4u}},
+     {2u, 3u, 4u, 6u},  // inside the emoji's bytes 2..4 and inside e-acute's byte 6
+     {2u}},             // the low half of the emoji's surrogate pair
+    {"CJK U+4E2D U+6587",
+     {0xE4, 0xB8, 0xAD, 0xE6, 0x96, 0x87},
+     {{0u, 0u}, {3u, 1u}, {6u, 2u}},
+     {1u, 2u, 4u, 5u},
+     {}},
+    {"e + U+0301 decomposed",
+     {0x65, 0xCC, 0x81},
+     {{0u, 0u}, {1u, 1u}, {3u, 2u}},
+     {2u},
+     {}},  // every UTF-16 gap here is 1, so there is no interior code unit offset to refuse
+    {"A NUL B embedded",
+     {0x41, 0x00, 0x42},
+     {{0u, 0u}, {1u, 1u}, {2u, 2u}, {3u, 3u}},
+     {},
+     {}},
+    {"U+1D0DA A U+1F4A9 many supplementary",
+     {0xF0, 0x9D, 0x83, 0x9A, 0x41, 0xF0, 0x9F, 0x92, 0xA9},
+     {{0u, 0u}, {4u, 2u}, {5u, 3u}, {9u, 5u}},
+     {1u, 2u, 3u, 6u, 7u, 8u},
+     {1u, 4u}},
+    {"U+10FFFF four-byte upper bound",
+     {0xF4, 0x8F, 0xBF, 0xBF},
+     {{0u, 0u}, {4u, 2u}},
+     {1u, 2u, 3u},
+     {1u}},
 };
 
 // --- mode: encoding ------------------------------------------------------------------
@@ -417,6 +487,246 @@ int RunEncoding() {
   return FinishMode();
 }
 
+// --- mode: boundary ------------------------------------------------------------------
+void CheckTable(const BoundaryCase& fixture, const Utf8BoundaryMap& map) {
+  const std::string name = std::string(fixture.label) + ": ";
+  Check(map.boundary_count() == fixture.expected_table.size(),
+        name + "boundary count is the scalar value count + 1",
+        SizeText(map.boundary_count()) + " want " + SizeText(fixture.expected_table.size()));
+  bool table_exact = map.boundary_count() == fixture.expected_table.size();
+  std::string got_table;
+  std::string want_table;
+  for (std::size_t i = 0; i < map.boundaries().size(); ++i) {
+    char item[24];
+    std::snprintf(item, sizeof(item), "(%u,%u) ", map.boundaries()[i].utf8_byte_offset,
+                  map.boundaries()[i].utf16_code_unit_offset);
+    got_table += item;
+    if (i < fixture.expected_table.size()) {
+      std::snprintf(item, sizeof(item), "(%u,%u) ", fixture.expected_table[i].utf8_byte_offset,
+                    fixture.expected_table[i].utf16_code_unit_offset);
+      want_table += item;
+      if (map.boundaries()[i].utf8_byte_offset != fixture.expected_table[i].utf8_byte_offset ||
+          map.boundaries()[i].utf16_code_unit_offset !=
+              fixture.expected_table[i].utf16_code_unit_offset) {
+        table_exact = false;
+      }
+    } else {
+      table_exact = false;
+    }
+  }
+  Check(table_exact, name + "the whole boundary table equals the hand-written table",
+        got_table + " want " + want_table);
+  std::printf("[text]   evidence boundaries %-32s bytes=%s table=%s\n", fixture.label,
+              HexUtf8(fixture.utf8_bytes).c_str(), got_table.c_str());
+}
+
+void CheckBoundaryCase(const BoundaryCase& fixture) {
+  const Utf8BoundaryMapBuildResult built = BuildUtf8BoundaryMap(ToUtf8Bytes(fixture.utf8_bytes));
+  const std::string name = std::string(fixture.label) + ": ";
+  if (!built.ok()) {
+    Check(false, name + "boundary map build accepted the legal text",
+          StatusText(built.status) + ", " + built.diagnostic);
+    return;
+  }
+  Check(true, name + "boundary map build accepted the legal text", StatusText(built.status));
+  const Utf8BoundaryMap& map = built.boundary_map;
+  CheckTable(fixture, map);
+
+  Check(map.utf8_byte_length() == fixture.utf8_bytes.size(),
+        name + "utf8_byte_length() is in UTF-8 code units",
+        SizeText(map.utf8_byte_length()) + " want " + SizeText(fixture.utf8_bytes.size()));
+  Check(map.utf16_code_unit_length() == fixture.expected_table.back().utf16_code_unit_offset,
+        name + "utf16_code_unit_length() is in UTF-16 code units",
+        SizeText(map.utf16_code_unit_length()));
+
+  // Every legal boundary, both directions, and the composition of the two.
+  bool round_trips = true;
+  for (const Utf8Utf16Boundary& boundary : map.boundaries()) {
+    std::size_t units = kSentinel;
+    const BoundaryLookupStatus forth =
+        map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(boundary.utf8_byte_offset, &units);
+    if (forth != BoundaryLookupStatus::kMapped || units != boundary.utf16_code_unit_offset) {
+      round_trips = false;
+    }
+    std::size_t bytes = kSentinel;
+    const BoundaryLookupStatus back =
+        map.MapUtf16CodeUnitOffsetToUtf8ByteOffset(boundary.utf16_code_unit_offset, &bytes);
+    if (back != BoundaryLookupStatus::kMapped || bytes != boundary.utf8_byte_offset) {
+      round_trips = false;
+    }
+    // utf8 -> utf16 -> utf8 must land exactly where it started.
+    std::size_t bytes_again = kSentinel;
+    if (units != kSentinel) {
+      const BoundaryLookupStatus again =
+          map.MapUtf16CodeUnitOffsetToUtf8ByteOffset(units, &bytes_again);
+      if (again != BoundaryLookupStatus::kMapped || bytes_again != boundary.utf8_byte_offset) {
+        round_trips = false;
+      }
+    }
+  }
+  Check(round_trips, name + "every legal boundary round-trips in both directions",
+        round_trips ? "all mapped" : "see table above");
+
+  // The end offset is a legal boundary: the zero-length position at the end of the text.
+  {
+    std::size_t units = kSentinel;
+    const BoundaryLookupStatus at_end =
+        map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(map.utf8_byte_length(), &units);
+    Check(at_end == BoundaryLookupStatus::kMapped &&
+              units == map.utf16_code_unit_length(),
+          name + "the end offset maps (no clamp, no rounding needed to reach it)",
+          LookupStatusText(at_end) + " -> " + SizeText(units));
+  }
+
+  // Interior offsets: refused, with the reason named, and the out-parameter untouched.
+  bool interiors_refused = true;
+  std::string interior_detail;
+  for (const std::size_t offset : fixture.interior_utf8_byte_offsets) {
+    std::size_t sink = kSentinel;
+    const BoundaryLookupStatus status = map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(offset, &sink);
+    if (status != BoundaryLookupStatus::kInsideUtf8Sequence || sink != kSentinel) {
+      interiors_refused = false;
+      char item[48];
+      std::snprintf(item, sizeof(item), "byte %zu -> %s out=%s; ", offset,
+                    LookupStatusText(status).c_str(),
+                    sink == kSentinel ? "untouched" : "OVERWRITTEN");
+      interior_detail += item;
+    }
+  }
+  for (const std::size_t offset : fixture.interior_utf16_code_unit_offsets) {
+    std::size_t sink = kSentinel;
+    const BoundaryLookupStatus status =
+        map.MapUtf16CodeUnitOffsetToUtf8ByteOffset(offset, &sink);
+    if (status != BoundaryLookupStatus::kInsideUtf16SurrogatePair || sink != kSentinel) {
+      interiors_refused = false;
+      char item[48];
+      std::snprintf(item, sizeof(item), "unit %zu -> %s out=%s; ", offset,
+                    LookupStatusText(status).c_str(),
+                    sink == kSentinel ? "untouched" : "OVERWRITTEN");
+      interior_detail += item;
+    }
+  }
+  Check(interiors_refused,
+        name + "interior offsets refused, with the out-parameter left untouched",
+        interior_detail.empty() ? "all interior offsets refused as expected"
+                                : interior_detail.c_str());
+
+  // Out of range starts one past the end offset, in both units.
+  bool out_of_range_refused = true;
+  for (std::size_t extra = 1; extra <= 3; ++extra) {
+    std::size_t sink = kSentinel;
+    if (map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(map.utf8_byte_length() + extra, &sink) !=
+        BoundaryLookupStatus::kUtf8ByteOffsetOutOfRange) {
+      out_of_range_refused = false;
+    }
+    sink = kSentinel;
+    if (map.MapUtf16CodeUnitOffsetToUtf8ByteOffset(map.utf16_code_unit_length() + extra, &sink) !=
+        BoundaryLookupStatus::kUtf16CodeUnitOffsetOutOfRange) {
+      out_of_range_refused = false;
+    }
+  }
+  Check(out_of_range_refused, name + "offsets past the end are refused as out of range",
+        out_of_range_refused ? "refused" : "accepted something out of range");
+
+  // A null out-parameter is refused rather than written through.
+  {
+    const bool null_byte =
+        map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(0, nullptr) ==
+        BoundaryLookupStatus::kNullOutParameter;
+    const bool null_unit =
+        map.MapUtf16CodeUnitOffsetToUtf8ByteOffset(0, nullptr) ==
+        BoundaryLookupStatus::kNullOutParameter;
+    Check(null_byte && null_unit, name + "a null out-parameter is refused in both directions",
+          null_byte && null_unit ? "refused" : "written through");
+  }
+}
+
+int RunBoundary() {
+  std::printf("[text] mode boundary: the offset boundary table\n");
+
+  for (const BoundaryCase& fixture : kBoundaryCases) {
+    CheckBoundaryCase(fixture);
+  }
+
+  // The contract the brief names, as its own judgement: for "A U+1F600 e-acute" UTF-16
+  // offset 2 is the low half of the surrogate pair and must be refused, while 0,1,3,4 map.
+  {
+    const Utf8BoundaryMapBuildResult built =
+        BuildUtf8BoundaryMap(ToUtf8Bytes(Bytes{0x41, 0xF0, 0x9F, 0x98, 0x80, 0xC3, 0xA9}));
+    const Utf8BoundaryMap& map = built.boundary_map;
+    std::size_t sink = kSentinel;
+    Check(map.MapUtf16CodeUnitOffsetToUtf8ByteOffset(2u, &sink) ==
+              BoundaryLookupStatus::kInsideUtf16SurrogatePair &&
+              sink == kSentinel,
+          "A U+1F600 e-acute: UTF-16 offset 2 refused as inside a surrogate pair",
+          LookupStatusText(map.MapUtf16CodeUnitOffsetToUtf8ByteOffset(2u, &sink)));
+    sink = kSentinel;
+    Check(map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(4u, &sink) ==
+              BoundaryLookupStatus::kInsideUtf8Sequence &&
+              sink == kSentinel,
+          "A U+1F600 e-acute: UTF-8 offset 4 refused as inside the emoji's sequence",
+          LookupStatusText(map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(4u, &sink)));
+    sink = kSentinel;
+    Check(map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(6u, &sink) ==
+              BoundaryLookupStatus::kInsideUtf8Sequence &&
+              sink == kSentinel,
+          "A U+1F600 e-acute: UTF-8 offset 6 refused as inside e-acute's sequence",
+          LookupStatusText(map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(6u, &sink)));
+    std::size_t units = 0;
+    Check(map.MapUtf8ByteOffsetToUtf16CodeUnitOffset(5u, &units) ==
+              BoundaryLookupStatus::kMapped &&
+              units == 3u,
+          "A U+1F600 e-acute: UTF-8 offset 5 maps to UTF-16 offset 3",
+          SizeText(units));
+  }
+
+  // A default-constructed map IS the empty text's map: 0 <-> 0 legal, 1 refused.
+  {
+    const Utf8BoundaryMap empty;
+    std::size_t units = kSentinel;
+    std::size_t bytes = kSentinel;
+    Check(empty.boundary_count() == 1 && empty.utf8_byte_length() == 0 &&
+              empty.utf16_code_unit_length() == 0,
+          "an empty map holds exactly the 0<->0 boundary", SizeText(empty.boundary_count()));
+    Check(empty.MapUtf8ByteOffsetToUtf16CodeUnitOffset(0, &units) ==
+              BoundaryLookupStatus::kMapped &&
+          units == 0, "empty map: 0 UTF-8 bytes maps to 0 UTF-16 code units",
+          SizeText(units));
+    units = kSentinel;
+    Check(empty.MapUtf16CodeUnitOffsetToUtf8ByteOffset(0, &bytes) ==
+              BoundaryLookupStatus::kMapped &&
+          bytes == 0, "empty map: 0 UTF-16 code units maps to 0 UTF-8 bytes",
+          SizeText(bytes));
+    Check(empty.MapUtf8ByteOffsetToUtf16CodeUnitOffset(1, &units) ==
+              BoundaryLookupStatus::kUtf8ByteOffsetOutOfRange &&
+          units == kSentinel,
+          "empty map: offset 1 refused as out of range, out-parameter untouched",
+          SizeText(units));
+  }
+
+  // An illegal text produces NO map: the build refuses and the map it returns is the empty
+  // text's, so a caller cannot read a partial table built from half a rejected sequence.
+  {
+    const Utf8BoundaryMapBuildResult built = BuildUtf8BoundaryMap(ToUtf8Bytes(
+        Bytes{0x41, 0xE4, 0xB8}));  // "A" then a truncated three-byte sequence
+    Check(!built.ok() && built.status == ConversionStatus::kInvalidInput,
+          "a boundary map build over illegal UTF-8 is refused as invalid-input",
+          StatusText(built.status) + ", " + GleText(built.os_error));
+    Check(built.boundary_map.utf8_byte_length() == 0 &&
+              built.boundary_map.boundary_count() == 1,
+          "the refused build returns no partial table",
+          SizeText(built.boundary_map.boundary_count()) + " boundaries, " +
+              SizeText(built.boundary_map.utf8_byte_length()) + " bytes");
+    Check(!built.diagnostic.empty(), "the refused build carries a diagnostic",
+          built.diagnostic);
+    std::printf("[text]   evidence build-refusal bytes=%s status=%s (%s) diagnostic=%s\n",
+                HexUtf8(Bytes{0x41, 0xE4, 0xB8}).c_str(), StatusText(built.status).c_str(),
+                GleText(built.os_error).c_str(), built.diagnostic.c_str());
+  }
+
+  return FinishMode();
+}
+
 // --- mode: guards --------------------------------------------------------------------
 int RunGuards() {
   std::printf("[text] mode guards: the int-range arithmetic (no allocation, no deref)\n");
@@ -490,6 +800,13 @@ int RunGuards() {
     Check(!size_max_utf16.ok() && size_max_utf16.status == ConversionStatus::kInputTooLong,
           "SIZE_MAX UTF-16 length is refused, not wrapped", StatusText(size_max_utf16.status));
 
+    const Utf8BoundaryMapBuildResult built =
+        BuildUtf8BoundaryMap(std::string_view(nullptr, kSizeMax));
+    Check(!built.ok() && built.status == ConversionStatus::kInputTooLong &&
+              built.boundary_map.boundary_count() == 1,
+          "the boundary map builder refuses an out-of-range length with no table",
+          StatusText(built.status));
+
     std::printf("[text]   evidence guards INT_MAX=%d INT_MAX+1 refused=%s capacity bound=%zu\n",
                 INT_MAX, StatusText(too_long_utf8.status).c_str(), last_fit);
   }
@@ -522,12 +839,15 @@ int wmain(int argc, wchar_t** argv) {
     if (arg == L"--mode" && i + 1 < argc) {
       mode = argv[++i];
     } else {
-      std::printf("usage: text_bridge --mode encoding|guards|self-check-fail\n");
+      std::printf("usage: text_bridge --mode encoding|boundary|guards|self-check-fail\n");
       return kExitUsage;
     }
   }
   if (mode == L"encoding") {
     return RunEncoding();
+  }
+  if (mode == L"boundary") {
+    return RunBoundary();
   }
   if (mode == L"guards") {
     return RunGuards();
@@ -535,6 +855,6 @@ int wmain(int argc, wchar_t** argv) {
   if (mode == L"self-check-fail") {
     return RunSelfCheckFail();
   }
-  std::printf("usage: text_bridge --mode encoding|guards|self-check-fail\n");
+  std::printf("usage: text_bridge --mode encoding|boundary|guards|self-check-fail\n");
   return kExitUsage;
 }
