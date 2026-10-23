@@ -129,8 +129,9 @@ class RimeSession {
   // keysym (printable ASCII equals its code point) and `modifiers` is librime's own bit set.
   SessionKeyResult ProcessKeyOnce(int keysym, int modifiers);
 
-  // Exactly one RimeApi::select_candidate call. The controller checks the index against the
-  // last cached menu first; this method does not add a second policy layer.
+  // Exactly one RimeApi::select_candidate_on_current_page call. The index is relative to the
+  // current page, matching RimeContext.menu.candidates as copied into EngineState. The
+  // controller checks it against the last cached menu first; this method adds no policy.
   SessionSelectionResult SelectCandidateOnce(std::size_t candidate_index);
 
   // Read-only: get_status + get_context + get_input. It never calls get_commit, so evaluating

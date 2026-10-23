@@ -8,10 +8,17 @@
 #   epocanva_engine_text        P3.2's strict converter and boundary map, compiled from
 #                               ../text/text_encoding.cc and ../text/text_boundary_map.cc -- the
 #                               SAME sources, not a second codec.
+#   epocanva_engine_key_decisions  P3.3's pure rules, compiled from ../input/key_decision.cc
+#                               -- the SAME source and the same policy table, not a copy.
 #   epocanva_engine_bridge      rime_runtime.{h,cc}, rime_session.{h,cc},
-#                               engine_update.{h,cc}. It LOADS rime.dll by absolute path with
-#                               LoadLibraryExW + GetProcAddress; it does not link rime.lib and
-#                               therefore cannot accidentally bind to another build.
+#                               engine_update.{h,cc}, input_controller.{h,cc}. It LOADS
+#                               rime.dll by absolute path with LoadLibraryExW +
+#                               GetProcAddress; it does not link rime.lib and therefore cannot
+#                               accidentally bind to another build.
+#   epocanva_engine_keyboard_adapters  P3.3's snapshot and ToUnicodeEx adapter, compiled
+#                               from ../input/*.cc for the dispatch tests. Product controller
+#                               code does not call ToUnicodeEx; the test supplies the already
+#                               translated text.
 #   engine_bridge_tests         the verification program from tests/windows/engine_bridge.
 #
 # WHAT IS NOT BUILT HERE: no input method DLL, no TSF registration, no key sink, no host text
@@ -76,7 +83,17 @@ target_compile_options(epocanva_engine_text PRIVATE ${_bridge_options})
 target_include_directories(epocanva_engine_text PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/../text")
 
-# --- runtime, session and result copies ------------------------------------------------
+# --- P3.3's pure decisions, from their one source --------------------------------------
+add_library(epocanva_engine_key_decisions STATIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/../input/key_decision.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../input/key_decision.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../input/key_event.h")
+target_compile_definitions(epocanva_engine_key_decisions PRIVATE ${_bridge_definitions})
+target_compile_options(epocanva_engine_key_decisions PRIVATE ${_bridge_options})
+target_include_directories(epocanva_engine_key_decisions PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/../input")
+
+# --- runtime, session, result copies and the controller --------------------------------
 add_library(epocanva_engine_bridge STATIC
   rime_runtime.cc
   rime_runtime.h
@@ -84,7 +101,9 @@ add_library(epocanva_engine_bridge STATIC
   rime_session.cc
   rime_session.h
   engine_update.cc
-  engine_update.h)
+  engine_update.h
+  input_controller.cc
+  input_controller.h)
 target_compile_definitions(epocanva_engine_bridge PRIVATE ${_bridge_definitions})
 target_compile_options(epocanva_engine_bridge PRIVATE ${_bridge_options})
 target_include_directories(epocanva_engine_bridge
@@ -95,7 +114,24 @@ target_include_directories(epocanva_engine_bridge
 # PUBLIC: engine_update.h includes text_boundary_map.h, so every consumer compiles against
 # the identical P3.2 declarations. No rime.lib is linked: the API table arrives through
 # GetProcAddress at run time.
-target_link_libraries(epocanva_engine_bridge PUBLIC epocanva_engine_text)
+# PUBLIC: input_controller.h includes key_decision.h and engine_update.h, so consumers see
+# exactly the P3.3 rules and P3.2 text declarations this bridge was built against.
+target_link_libraries(epocanva_engine_bridge
+  PUBLIC epocanva_engine_text epocanva_engine_key_decisions)
+
+# --- P3.3's Windows adapter, for the dispatch tests only -------------------------------
+add_library(epocanva_engine_keyboard_adapters STATIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/../input/keyboard_state.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../input/keyboard_state.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../input/key_text_translation.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../input/key_text_translation.h")
+target_compile_definitions(epocanva_engine_keyboard_adapters PRIVATE ${_bridge_definitions})
+target_compile_options(epocanva_engine_keyboard_adapters PRIVATE ${_bridge_options})
+target_include_directories(epocanva_engine_keyboard_adapters PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/../input")
+target_link_libraries(epocanva_engine_keyboard_adapters
+  PUBLIC epocanva_engine_key_decisions
+  PRIVATE epocanva_engine_text user32)
 
 # --- test inputs: existing artefacts, never rebuilt here -------------------------------
 set(EPOCANVA_RIME_DLL

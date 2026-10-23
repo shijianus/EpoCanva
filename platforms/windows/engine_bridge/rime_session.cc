@@ -96,8 +96,8 @@ SessionSelectionResult RimeSession::SelectCandidateOnce(std::size_t candidate_in
   }
 
   impl_->core->counts.select_candidate_calls += 1;
-  const Bool accepted =
-      impl_->core->api->select_candidate(impl_->session_id, candidate_index);
+  const Bool accepted = impl_->core->api->select_candidate_on_current_page(
+      impl_->session_id, candidate_index);
   result.status = SessionSelectionStatus::kCallMade;
   result.engine_reported_accepted = accepted != False;
   return result;

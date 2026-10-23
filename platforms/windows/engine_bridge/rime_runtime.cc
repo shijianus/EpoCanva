@@ -210,7 +210,7 @@ std::string MissingBaseSlots(RimeApi* api) {
   EPOCANVA_SLOT(find_session);
   EPOCANVA_SLOT(destroy_session);
   EPOCANVA_SLOT(process_key);
-  EPOCANVA_SLOT(select_candidate);
+  EPOCANVA_SLOT(select_candidate_on_current_page);
   EPOCANVA_SLOT(get_context);
   EPOCANVA_SLOT(free_context);
   EPOCANVA_SLOT(get_status);
@@ -663,16 +663,22 @@ SessionCreateResult RimeRuntime::CreateSession(const std::string& schema_id) {
   // loader returns a Config whose LoadFromFile failed (src/rime/config/config_component.cc:
   // 178-195). The prepared-directory check is therefore explicit and comes first. The compiled
   // name is the one SchemaComponent asks for, schema_id + ".schema" + ".yaml"
-  // (src/rime/schema.cc:40-42), and ConfigFileUpdate writes it into staging_dir =
-  // <user>/build (src/rime/setup.cc:62-65).
+  // (src/rime/schema.cc:40-42). ConfigFileUpdate writes it into staging_dir = <user>/build
+  // (src/rime/setup.cc:62-65); the deployed resolver falls back to prebuilt_data_dir =
+  // <shared>/build (src/rime/service.cc:181-187).
   std::error_code ec;
-  const std::filesystem::path compiled_schema =
-      std::filesystem::path(core.user_data_dir_utf8) / "build" /
-      (schema_id + ".schema.yaml");
+  const std::filesystem::path compiled_name = schema_id + ".schema.yaml";
+  std::filesystem::path compiled_schema =
+      std::filesystem::path(core.user_data_dir_utf8) / "build" / compiled_name;
   if (!std::filesystem::is_regular_file(compiled_schema, ec) || ec) {
-    result.status = SessionCreateStatus::kSchemaUnavailable;
-    result.diagnostic = "the prepared user directory/build has no compiled schema for this id";
-    return result;
+    compiled_schema =
+        std::filesystem::path(core.shared_data_dir_utf8) / "build" / compiled_name;
+    if (!std::filesystem::is_regular_file(compiled_schema, ec) || ec) {
+      result.status = SessionCreateStatus::kSchemaUnavailable;
+      result.diagnostic =
+          "neither <user>/build nor <shared>/build has a compiled schema for this id";
+      return result;
+    }
   }
 
   RimeConfig config{};

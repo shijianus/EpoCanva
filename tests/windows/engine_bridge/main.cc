@@ -1,5 +1,5 @@
-// EpoCanva P3.4 -- runtime/session verification program (stage 1: runtime, sessions, result
-// copies and offset mapping). The controller cases are added in the second stage.
+// EpoCanva P3.4 -- runtime/session verification program plus the mode dispatch. The controller
+// cases live in controller_tests.cc; both files link the same bridge and share test_support.h.
 //
 // WHAT THIS JUDGES. The DLL that is actually loaded, the public slots it must provide, the
 // explicit base and English modules, one process-global initialize, independent sessions,
@@ -12,7 +12,6 @@
 #include <windows.h>
 
 #include <cstdint>
-#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -23,9 +22,12 @@
 #include "rime_runtime.h"
 #include "rime_session.h"
 #include "text_boundary_map.h"
+#include "test_support.h"
 #include "text_encoding.h"
 
-namespace {
+namespace epocanva {
+namespace tests {
+namespace engine_bridge {
 
 using epocanva::windows::engine::ApiCallCounts;
 using epocanva::windows::engine::CaptureEngineText;
@@ -39,7 +41,6 @@ using epocanva::windows::engine::DescribeSessionCommitStatus;
 using epocanva::windows::engine::DescribeSessionCreateStatus;
 using epocanva::windows::engine::DescribeSessionKeyStatus;
 using epocanva::windows::engine::DescribeSessionStateStatus;
-using epocanva::windows::engine::EngineState;
 using epocanva::windows::engine::EngineTextCapture;
 using epocanva::windows::engine::MapPreeditOffsets;
 using epocanva::windows::engine::PreeditOffsetMapping;
@@ -55,10 +56,9 @@ using epocanva::windows::engine::SessionCommitStatus;
 using epocanva::windows::engine::SessionCreateResult;
 using epocanva::windows::engine::SessionCreateStatus;
 using epocanva::windows::engine::SessionKeyStatus;
-using epocanva::windows::engine::SessionSelectionStatus;
+using epocanva::windows::engine::DeploymentOptions;
 using epocanva::windows::engine::SessionStateResult;
 using epocanva::windows::engine::SessionStateStatus;
-using epocanva::windows::engine::DeploymentOptions;
 
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
@@ -68,7 +68,7 @@ constexpr int kExitSelfCheckFailed = 14;
 int g_total = 0;
 int g_failed = 0;
 
-void Check(bool condition, const std::string& what, const std::string& got = std::string()) {
+void Check(bool condition, const std::string& what, const std::string& got) {
   ++g_total;
   if (condition) {
     std::printf("[engine-win] ok   %s\n", what.c_str());
@@ -168,15 +168,6 @@ int CountFilesBeneath(const std::filesystem::path& dir) {
   return count;
 }
 
-struct Options {
-  std::string mode;
-  std::filesystem::path rime_dll;
-  std::filesystem::path baseline_dll;
-  std::filesystem::path fixture_dir;
-  std::filesystem::path spelling_fixture_dir;
-  std::filesystem::path run_root;
-};
-
 bool ParseArgs(int argc, char** argv, Options* options, std::string* error) {
   for (int i = 1; i < argc; ++i) {
     const std::string name(argv[i]);
@@ -210,14 +201,16 @@ bool ParseArgs(int argc, char** argv, Options* options, std::string* error) {
     *error = "--mode is required";
     return false;
   }
-  if (options->mode == "runtime") {
+  if (options->mode == "runtime" || options->mode == "dispatch" ||
+      options->mode == "guards") {
     if (options->rime_dll.empty() || options->fixture_dir.empty() ||
         options->spelling_fixture_dir.empty() || options->run_root.empty()) {
-      *error = "runtime mode requires --rime-dll, --fixture-dir, "
+      *error = options->mode + " mode requires --rime-dll, --fixture-dir, "
                "--spelling-fixture-dir and --run-root";
       return false;
     }
-  } else if (options->mode != "state" && options->mode != "self-check-fail") {
+  } else if (options->mode != "state" && options->mode != "self-check-fail" &&
+             options->mode != "self-check-fail-dispatch") {
     *error = "unknown mode: " + options->mode;
     return false;
   }
@@ -409,6 +402,8 @@ void RunRuntimeMode(const Options& options) {
   }
 
   const RuntimeInfo info = runtime.Info();
+  std::printf("[engine-win] rime-dll %ls\n", info.loaded_dll_path.c_str());
+  std::printf("[engine-win] librime %s\n", info.librime_version.c_str());
   Check(info.initialized, "runtime reports initialized");
   Check(SamePath(std::filesystem::path(info.requested_dll_path), options.rime_dll),
         "requested DLL path is the one passed on the command line",
@@ -558,6 +553,16 @@ void RunRuntimeMode(const Options& options) {
         CountText(runtime.live_session_count()));
   Check(b.session->IsOpen(), "B remains open after the refused cross-thread Close");
 
+  const RuntimeShutdownStatus live_refused = runtime.Shutdown();
+  Check(live_refused == RuntimeShutdownStatus::kLiveSessionsRemain,
+        "Shutdown with live sessions is refused",
+        DescribeRuntimeShutdownStatus(live_refused));
+  Check(runtime.IsInitialized() && runtime.live_session_count() == 2,
+        "the refused Shutdown did not finalize or unload",
+        CountText(runtime.live_session_count()));
+  Check(a.session->IsOpen() && b.session->IsOpen(),
+        "both sessions remain usable after the refused Shutdown");
+
   Check(a.session->Close() == SessionCloseStatus::kOk, "A closes");
   Check(b.session->Close() == SessionCloseStatus::kOk, "B closes");
   Check(runtime.live_session_count() == 0, "no live sessions after both Close calls",
@@ -620,6 +625,15 @@ void RunRuntimeMode(const Options& options) {
     const RuntimeStartStatus status = dir.Start(bad);
     Check(status == RuntimeStartStatus::kInvalidOptions,
           "a missing shared directory is refused",
+          DescribeRuntimeStartStatus(status));
+  }
+  {
+    RimeRuntime non_ascii;
+    RuntimeOptions bad = BaseOptions(options, shared_dir, user_dir, log_dir);
+    bad.user_data_dir = options.run_root / L"\u00E9ngine-user";
+    const RuntimeStartStatus status = non_ascii.Start(bad);
+    Check(status == RuntimeStartStatus::kInvalidOptions,
+          "a non-ASCII engine directory is refused rather than guessed",
           DescribeRuntimeStartStatus(status));
   }
   {
@@ -830,12 +844,15 @@ void RunStateMode() {
 void RunSelfCheckFail() {
   Check(CaptureEngineText("\x80").ok(),
         "deliberately false: a lone continuation byte is accepted");
+}
+
+int FinishSelfCheck() {
   if (g_failed == 0) {
     std::printf("[engine-win] RESULT PASS (%d checks, 0 failed)\n", g_total);
-    return;
+    return kExitOk;
   }
   std::printf("[engine-win] RESULT FAIL (%d checks, %d failed)\n", g_total, g_failed);
-  std::exit(kExitSelfCheckFailed);
+  return kExitSelfCheckFailed;
 }
 
 int FinishRun() {
@@ -847,7 +864,11 @@ int FinishRun() {
   return kExitOk;
 }
 
-}  // namespace
+}  // namespace engine_bridge
+}  // namespace tests
+}  // namespace epocanva
+
+using namespace epocanva::tests::engine_bridge;
 
 int main(int argc, char** argv) {
   Options options;
@@ -855,7 +876,8 @@ int main(int argc, char** argv) {
   if (!ParseArgs(argc, argv, &options, &error)) {
     std::printf("engine_bridge_tests: %s\n", error.c_str());
     std::printf(
-        "usage: engine_bridge_tests --mode runtime|state|self-check-fail "
+        "usage: engine_bridge_tests --mode runtime|dispatch|guards|state|"
+        "self-check-fail|self-check-fail-dispatch "
         "[--rime-dll <abs> --baseline-dll <abs> --fixture-dir <dir> "
         "--spelling-fixture-dir <dir> --run-root <.../engine-bridge-run>]\n");
     return kExitUsage;
@@ -865,10 +887,22 @@ int main(int argc, char** argv) {
     RunRuntimeMode(options);
     return FinishRun();
   }
+  if (options.mode == "dispatch") {
+    RunDispatchMode(options);
+    return FinishRun();
+  }
+  if (options.mode == "guards") {
+    RunGuardsMode(options);
+    return FinishRun();
+  }
   if (options.mode == "state") {
     RunStateMode();
     return FinishRun();
   }
+  if (options.mode == "self-check-fail-dispatch") {
+    RunSelfCheckFailDispatch();
+    return FinishSelfCheck();
+  }
   RunSelfCheckFail();
-  return kExitSelfCheckFailed;
+  return FinishSelfCheck();
 }
