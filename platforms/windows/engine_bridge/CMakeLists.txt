@@ -179,6 +179,15 @@ add_subdirectory(
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/engine_bridge"
   "${CMAKE_CURRENT_BINARY_DIR}/engine_bridge")
 
+# --- P3.5: dedicated single-threaded executor over this bridge --------------------------
+# The executor links epocanva_engine_bridge; it does not recompile P3.2/P3.3 sources.
+add_subdirectory(
+  "${CMAKE_CURRENT_SOURCE_DIR}/../engine_executor"
+  "${CMAKE_CURRENT_BINARY_DIR}/engine_executor")
+add_subdirectory(
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/engine_executor"
+  "${CMAKE_CURRENT_BINARY_DIR}/engine_executor_tests")
+
 enable_testing()
 
 message(STATUS "epocanva_windows_engine_bridge summary")
