@@ -1,13 +1,19 @@
 // EpoCanva P3.1 -- the module-wide accounting behind DllCanUnloadNow.
 //
-// WHAT THIS KEEPS. Three facts and nothing else:
+// WHAT THIS KEEPS. Five facts:
 //   1. the HINSTANCE DllMain recorded (the only thing DllMain is allowed to do here),
 //   2. how many COM objects this DLL has alive (the class factory counts; every text
 //      service instance counts),
-//   3. how many LockServer(TRUE) locks are outstanding.
-// DllCanUnloadNow answers S_OK exactly when (2) and (3) are both zero -- the standard
-// in-proc server contract (the "server lock" of the COM local-server rules, applied to
-// an unregistered DLL that is only ever loaded by LoadLibrary).
+//   3. how many LockServer(TRUE) locks are outstanding,
+//   4. whether an engine start/run/stop/cleanup window is active (P3.6),
+//   5. whether that window ended in an unresolved failure (P3.6, one-way latch).
+// DllCanUnloadNow answers S_OK exactly when (2), (3) and (4) are zero and (5) is clear --
+// the standard in-proc server contract plus the engine lifetime guard.
+//
+// WHY THE ENGINE FLAGS ARE ATOMIC AND SEPARATE. DllCanUnloadNow runs on whatever thread COM
+// chooses and must not take the broker mutex, join a worker, initialise anything or touch
+// the engine. The broker updates these flags around the whole start/stop/cleanup window;
+// the unload decision is a bounded read of four counters.
 //
 // THREADING. The counters are touched by InterlockedIncrement/InterlockedDecrement so
 // the accounting holds whichever host thread creates, uses or releases the objects.
@@ -49,7 +55,21 @@ LONG ModuleAddLock();
 // (the caller-bug case above; the counter is left untouched so it cannot underflow).
 bool ModuleReleaseLock();
 
-// DllCanUnloadNow's whole decision: S_OK only when nothing is alive and nothing is locked.
+// Engine-host accounting (P3.6). g_host_active covers the entire engine start, run, stop and
+// executor-destruction window; g_host_failed is a terminal "cleanup did not end safely"
+// latch. Both are plain atomics so DllCanUnloadNow can read them without a lock, allocating,
+// initialising anything or touching the engine. The broker is the only writer.
+void ModuleSetHostActive(bool active);
+void ModuleSetHostFailed(bool failed);  // one-way latch; never cleared in a process lifetime
+LONG ModuleHostActiveFlag();
+LONG ModuleHostFailedFlag();
+
+// Read-only counters for the private test seam. No caller in the product path uses these.
+LONG ModuleLiveObjectCount();
+LONG ModuleServerLockCount();
+
+// DllCanUnloadNow's whole decision: S_OK only when nothing is alive, nothing is locked and
+// no engine start/stop/cleanup window or unresolved failure is outstanding.
 bool ModuleCanUnload();
 
 }  // namespace tsf

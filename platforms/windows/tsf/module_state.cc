@@ -13,6 +13,8 @@ HINSTANCE g_instance = nullptr;
 // family, so no other synchronisation is needed for the accounting itself.
 volatile LONG g_live_objects = 0;
 volatile LONG g_server_locks = 0;
+volatile LONG g_host_active = 0;
+volatile LONG g_host_failed = 0;
 
 }  // namespace
 
@@ -54,13 +56,34 @@ bool ModuleReleaseLock() {
   return true;
 }
 
+void ModuleSetHostActive(bool active) {
+  InterlockedExchange(&g_host_active, active ? 1 : 0);
+}
+
+void ModuleSetHostFailed(bool failed) {
+  if (failed) {
+    InterlockedExchange(&g_host_failed, 1);
+  }
+}
+
+LONG ModuleHostActiveFlag() { return g_host_active; }
+LONG ModuleHostFailedFlag() { return g_host_failed; }
+LONG ModuleLiveObjectCount() { return g_live_objects; }
+LONG ModuleServerLockCount() { return g_server_locks; }
+
 bool ModuleCanUnload() {
   // Both counters are read non-atomically here, but DllCanUnloadNow is only meaningful
   // when the caller has released everything it holds and no other thread of the same
   // host is mid-creation -- that sequencing is the COM contract of the call, not
   // something this function can enforce. Reading both counts as they are is exactly the
   // observable the test program judges.
-  return g_live_objects == 0 && g_server_locks == 0;
+  //
+  // The two engine-host flags are read as atomics and are never written by anything except
+  // the broker. g_host_active stays set from the first start attempt until the executor has
+  // been destroyed after a clean stop; g_host_failed is one-way. Neither check joins,
+  // initialises the engine, calls COM or performs file I/O.
+  return g_live_objects == 0 && g_server_locks == 0 && g_host_active == 0 &&
+         g_host_failed == 0;
 }
 
 }  // namespace tsf

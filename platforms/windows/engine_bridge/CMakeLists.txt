@@ -188,6 +188,14 @@ add_subdirectory(
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/engine_executor"
   "${CMAKE_CURRENT_BINARY_DIR}/engine_executor_tests")
 
+# --- P3.6: broker/lease tests over the production host source --------------------------
+# This target compiles platforms/windows/tsf/engine_host.cc and links the executor. It does
+# not build a DLL and does not link the TSF skeleton; the DLL binding follows in its own
+# commit. The real English rime.dll is used; there is no controlled engine backend here.
+add_subdirectory(
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_engine_host"
+  "${CMAKE_CURRENT_BINARY_DIR}/tsf_engine_host_tests")
+
 enable_testing()
 
 message(STATUS "epocanva_windows_engine_bridge summary")
