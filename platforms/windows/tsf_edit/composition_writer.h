@@ -12,20 +12,27 @@
 // SCOPE. It never writes outside its own composition range and never replaces the whole
 // document. Before every Update/Commit/Cancel it reads the composition range back and
 // compares it with the text this writer last wrote; a mismatch is refused
-// (kCompositionRangeMismatch) instead of deleting or replacing text it does not own.
+// (kCompositionRangeMismatch) instead of deleting or replacing text it does not own. The
+// only reads it performs are bounded: the collapsed selection, one code unit on each side of
+// the caret, and its own composition range. It never reads the document as a whole and never
+// reads anything to classify a failed write.
 //
 // UNITS. All offsets and lengths are UTF-16 code units (ACP). The caret is checked against
 // the plan's expected collapsed position and against a scalar-value boundary: a position in
 // the middle of a surrogate pair is refused before StartComposition. There is no clamp and no
 // grapheme claim.
 //
-// FAILURE. After a failed SetText the range is read back:
-//   * new text present  -> FailedAfterMutation, mutation_verified;
-//   * old text present  -> FailedBeforeMutation, mutation_verified;
-//   * unreadable        -> FailedAfterMutation, text_may_have_changed, not verified.
-// There is no rollback claim and no automatic replay. A failed Begin before mutation ends the
-// empty composition it created; a failed Update/Commit/Cancel keeps the composition alive so
-// the caller can cancel it.
+// FAILURE. A failed write call (SetText / InsertTextAtSelection) is kFailedPossiblyMutated:
+// the HRESULT is not mutation evidence in either direction, and no read-back is attempted,
+// because a TSF read-back returning the old text cannot prove the backing store is unchanged.
+// A write call that succeeded followed by a failed later step (EndComposition) is
+// kFailedAfterMutation, verified from the succeeded call itself. Either outcome latches an
+// uncertain state: every further plan is refused (kUncertainTextState) and the recorded
+// composition extent becomes unknown (-1), because the previous composition range can no
+// longer be trusted. There is no rollback claim and no automatic replay. A failed Begin ends
+// the composition it created as a separately recorded cleanup action
+// (cleanup_end_composition) without another SetText; a successful cleanup end does not mean
+// the plan was applied and never clears unknown text.
 //
 // LIFETIME. The held ITfComposition is released only by EndComposition success,
 // ReleaseHeldObjects, or the destructor. After a successful EndComposition the object is
@@ -52,6 +59,9 @@ struct CompositionWriteOutcome {
   EditRejectReason reason = EditRejectReason::kNone;
   HRESULT operation_hr = S_OK;
   HRESULT end_composition_hr = S_OK;
+  // True when EndComposition ran as failure cleanup inside a Begin, not as part of a normal
+  // Commit/Cancel. Success closes the composition object only; it is not an Applied claim.
+  bool cleanup_end_composition = false;
   LONG composition_start_utf16 = -1;
   LONG composition_length_utf16 = -1;
   bool text_may_have_changed = false;
@@ -75,6 +85,10 @@ class CompositionWriter {
   bool active() const;
   LONG composition_start_utf16() const { return composition_start_utf16_; }
   LONG composition_length_utf16() const { return composition_length_utf16_; }
+  // True once a write call failed or a post-write step failed: the backing text's exact
+  // state is no longer known. While set, Apply refuses every plan. Not cleared by anything
+  // except destruction; the recovery path is a new session.
+  bool HasUncertainOutcome() const { return uncertain_; }
 
   // Releases the held composition reference without calling EndComposition. Used when the
   // context is already gone or the session is closing; the document owner will terminate an
@@ -105,6 +119,7 @@ class CompositionWriter {
   std::wstring current_text_utf16_;
   LONG composition_start_utf16_ = -1;
   LONG composition_length_utf16_ = -1;
+  bool uncertain_ = false;
 };
 
 }  // namespace edit

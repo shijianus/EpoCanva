@@ -464,9 +464,11 @@ HRESULT STDMETHODCALLTYPE TestTextStore::SetText(DWORD flags, LONG start, LONG e
   if (cch > static_cast<ULONG>(kMaxLong) || !TextIsWellFormedUtf16(text, cch)) {
     return E_INVALIDARG;
   }
-  if (mutation_fault_ == MutationFault::kFailBeforeMutation) {
+  if (mutation_fault_ == MutationFault::kEFailWithoutMutation ||
+      mutation_fault_ == MutationFault::kEUnexpectedWithoutMutation) {
     ++counters_.set_text_failures;
-    return E_FAIL;
+    return mutation_fault_ == MutationFault::kEFailWithoutMutation ? E_FAIL
+                                                                   : E_UNEXPECTED;
   }
 
   const LONG old_end = end;
@@ -477,12 +479,12 @@ HRESULT STDMETHODCALLTYPE TestTextStore::SetText(DWORD flags, LONG start, LONG e
   change->acpOldEnd = old_end;
   change->acpNewEnd = new_end;
 
-  if (mutation_fault_ == MutationFault::kFailAfterMutation) {
+  if (mutation_fault_ == MutationFault::kEFailAfterMutation ||
+      mutation_fault_ == MutationFault::kEUnexpectedAfterMutation) {
     ++counters_.set_text_failures;
-    // E_UNEXPECTED is the test host's explicit partial-application signal: the backing text
-    // changed even though the call failed. TSF keeps its cached view of the old text, so a
-    // read-back through TSF cannot see this change; the layer must classify the signal.
-    return E_UNEXPECTED;
+    // The backing text changed even though the call reports failure. TSF keeps its cached
+    // view of the old text, so a read-back through TSF cannot see this change.
+    return mutation_fault_ == MutationFault::kEFailAfterMutation ? E_FAIL : E_UNEXPECTED;
   }
   return S_OK;
 }
@@ -548,9 +550,11 @@ HRESULT STDMETHODCALLTYPE TestTextStore::InsertTextAtSelection(DWORD flags, cons
     ++counters_.rejected_writes;
     return TS_E_NOLOCK;
   }
-  if (mutation_fault_ == MutationFault::kFailBeforeMutation) {
+  if (mutation_fault_ == MutationFault::kEFailWithoutMutation ||
+      mutation_fault_ == MutationFault::kEUnexpectedWithoutMutation) {
     ++counters_.set_text_failures;
-    return E_FAIL;
+    return mutation_fault_ == MutationFault::kEFailWithoutMutation ? E_FAIL
+                                                                   : E_UNEXPECTED;
   }
 
   ReplaceText(start, end, text, cch);
@@ -567,12 +571,12 @@ HRESULT STDMETHODCALLTYPE TestTextStore::InsertTextAtSelection(DWORD flags, cons
     *acp_end = start + static_cast<LONG>(cch);
   }
 
-  if (mutation_fault_ == MutationFault::kFailAfterMutation) {
+  if (mutation_fault_ == MutationFault::kEFailAfterMutation ||
+      mutation_fault_ == MutationFault::kEUnexpectedAfterMutation) {
     ++counters_.set_text_failures;
-    // E_UNEXPECTED is the test host's explicit partial-application signal: the backing text
-    // changed even though the call failed. TSF keeps its cached view of the old text, so a
-    // read-back through TSF cannot see this change; the layer must classify the signal.
-    return E_UNEXPECTED;
+    // The backing text changed even though the call reports failure. TSF keeps its cached
+    // view of the old text, so a read-back through TSF cannot see this change.
+    return mutation_fault_ == MutationFault::kEFailAfterMutation ? E_FAIL : E_UNEXPECTED;
   }
   return S_OK;
 }
@@ -796,6 +800,10 @@ HRESULT STDMETHODCALLTYPE TestTextStore::OnEndComposition(
     ITfCompositionView* composition) {
   (void)composition;
   ++counters_.composition_end_calls;
+  if (fail_composition_end_) {
+    ++counters_.composition_end_refusals;
+    return E_FAIL;
+  }
   return S_OK;
 }
 
@@ -816,6 +824,10 @@ void TestTextStore::SetRefuseWriteLocks(bool enabled) {
 
 void TestTextStore::SetRefuseCompositions(bool refuse) {
   refuse_compositions_ = refuse;
+}
+
+void TestTextStore::SetFailCompositionEnd(bool fail) {
+  fail_composition_end_ = fail;
 }
 
 std::wstring TestTextStore::text_utf16() const {

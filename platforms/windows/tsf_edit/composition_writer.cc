@@ -72,7 +72,8 @@ enum class TextMatch {
 };
 
 // Reads at most expected.size() + 1 code units from `range` and compares them. The +1 makes a
-// longer range differ rather than truncate to a false match.
+// longer range differ rather than truncate to a false match. This is the pre-write
+// verification of the writer's own composition range; it is never used to classify a failure.
 TextMatch ReadRangeText(ITfRange* range, TfEditCookie edit_cookie,
                         const std::wstring& expected, HRESULT* read_hr) {
   std::wstring buffer(expected.size() + 1, L'\0');
@@ -84,184 +85,6 @@ TextMatch ReadRangeText(ITfRange* range, TfEditCookie edit_cookie,
   }
   buffer.resize(got);
   return buffer == expected ? TextMatch::kMatches : TextMatch::kDiffers;
-}
-
-// Reads [start, start + length) from an arbitrary range by shifting a clone. The range's own
-// ACP extent says where the clone starts, so the two shifts move it onto the requested span.
-TextMatch ReadSpanFromRange(ITfRange* range, LONG start_utf16, LONG length_utf16,
-                            TfEditCookie edit_cookie, const std::wstring& expected) {
-  if (range == nullptr || start_utf16 < 0 || length_utf16 < 0) {
-    return TextMatch::kUnreadable;
-  }
-  ITfRangeACP* acp = nullptr;
-  if (FAILED(range->QueryInterface(IID_ITfRangeACP,
-                                   reinterpret_cast<void**>(&acp))) ||
-      acp == nullptr) {
-    return TextMatch::kUnreadable;
-  }
-  LONG anchor = 0;
-  LONG extent = 0;
-  const HRESULT extent_hr = acp->GetExtent(&anchor, &extent);
-  acp->Release();
-  if (FAILED(extent_hr) || anchor < 0 || extent < 0) {
-    return TextMatch::kUnreadable;
-  }
-  ITfRange* clone = nullptr;
-  if (FAILED(range->Clone(&clone)) || clone == nullptr) {
-    return TextMatch::kUnreadable;
-  }
-
-  const LONG start_delta = start_utf16 - anchor;
-  const LONG end_delta = (start_utf16 + length_utf16) - (anchor + extent);
-  // A collapsed range stays collapsed when its start is shifted, so shifting start first and
-  // then end would measure the end delta from the new start and overshoot. For a target at or
-  // after the range, move the end first; for a target wholly before it, move the start first.
-  const bool target_before = (start_utf16 + length_utf16) <= anchor;
-  LONG shifted = 0;
-  auto shift_start = [&]() -> bool {
-    if (start_delta == 0) {
-      return true;
-    }
-    const HRESULT shift_hr =
-        clone->ShiftStart(edit_cookie, start_delta, &shifted, nullptr);
-    return SUCCEEDED(shift_hr) && shifted == start_delta;
-  };
-  auto shift_end = [&]() -> bool {
-    if (end_delta == 0) {
-      return true;
-    }
-    shifted = 0;
-    const HRESULT shift_hr =
-        clone->ShiftEnd(edit_cookie, end_delta, &shifted, nullptr);
-    return SUCCEEDED(shift_hr) && shifted == end_delta;
-  };
-  const bool shifted_ok = target_before ? (shift_start() && shift_end())
-                                        : (shift_end() && shift_start());
-  if (!shifted_ok) {
-    clone->Release();
-    return TextMatch::kUnreadable;
-  }
-  HRESULT read_hr = S_OK;
-  const TextMatch match = ReadRangeText(clone, edit_cookie, expected, &read_hr);
-  clone->Release();
-  return match;
-}
-
-// Reads the document as one range ([GetStart, GetEnd)) and compares the requested slice. This
-// is the reliable read-back after a failed SetText: the composition range may not have moved,
-// and a collapsed start/selection range cannot be shifted into an arbitrary span without
-// re-anchoring. Bounded: a document above 1 Mi UTF-16 code units is reported unreadable rather
-// than copied without limit.
-TextMatch ReadWholeDocumentSpan(ITfContext* context, LONG start_utf16, LONG length_utf16,
-                                TfEditCookie edit_cookie,
-                                const std::wstring& expected) {
-  if (context == nullptr || start_utf16 < 0 || length_utf16 < 0) {
-    return TextMatch::kUnreadable;
-  }
-  ITfRange* start_range = nullptr;
-  ITfRange* end_range = nullptr;
-  if (FAILED(context->GetStart(edit_cookie, &start_range)) || start_range == nullptr) {
-    return TextMatch::kUnreadable;
-  }
-  if (FAILED(context->GetEnd(edit_cookie, &end_range)) || end_range == nullptr) {
-    start_range->Release();
-    return TextMatch::kUnreadable;
-  }
-  const HRESULT extend_hr =
-      start_range->ShiftEndToRange(edit_cookie, end_range, TF_ANCHOR_START);
-  end_range->Release();
-  if (FAILED(extend_hr)) {
-    start_range->Release();
-    return TextMatch::kUnreadable;
-  }
-
-  std::wstring document;
-  ULONG capacity = 256;
-  bool read_ok = false;
-  for (int attempt = 0; attempt < 14; ++attempt) {
-    std::wstring buffer(capacity, L'\0');
-    ULONG got = 0;
-    const HRESULT read_hr = start_range->GetText(edit_cookie, 0, buffer.data(),
-                                                 capacity, &got);
-    if (FAILED(read_hr)) {
-      break;
-    }
-    if (got < capacity) {
-      buffer.resize(got);
-      document = std::move(buffer);
-      read_ok = true;
-      break;
-    }
-    capacity *= 2;
-    if (capacity > (1u << 20)) {
-      break;
-    }
-  }
-  start_range->Release();
-  if (!read_ok) {
-    return TextMatch::kUnreadable;
-  }
-  const std::size_t start = static_cast<std::size_t>(start_utf16);
-  const std::size_t length = static_cast<std::size_t>(length_utf16);
-  if (start > document.size() || document.size() - start < length) {
-    return TextMatch::kUnreadable;
-  }
-  return document.compare(start, length, expected) == 0 ? TextMatch::kMatches
-                                                         : TextMatch::kDiffers;
-}
-
-// Reads [start, start + length) in the document, independently of where the composition
-// range currently sits. This is the read-back used after a failed SetText, because TSF does
-// not move the composition range when the store reports the failure: the range may still
-// describe the old (pre-mutation) extent while the document already holds the new text.
-// The document start range is tried first; the selection and finally the composition range
-// are fallbacks. A span that cannot be read is reported unreadable, never guessed.
-TextMatch CheckDocumentSpan(ITfContext* context, ITfComposition* composition,
-                            LONG start_utf16, LONG length_utf16,
-                            TfEditCookie edit_cookie, const std::wstring& expected) {
-  if (start_utf16 < 0 || length_utf16 < 0) {
-    return TextMatch::kUnreadable;
-  }
-  if (context != nullptr) {
-    const TextMatch whole =
-        ReadWholeDocumentSpan(context, start_utf16, length_utf16, edit_cookie, expected);
-    if (whole != TextMatch::kUnreadable) {
-      return whole;
-    }
-    ITfRange* start_range = nullptr;
-    if (SUCCEEDED(context->GetStart(edit_cookie, &start_range)) &&
-        start_range != nullptr) {
-      const TextMatch match = ReadSpanFromRange(start_range, start_utf16, length_utf16,
-                                                edit_cookie, expected);
-      start_range->Release();
-      if (match != TextMatch::kUnreadable) {
-        return match;
-      }
-    }
-    TF_SELECTION selection = {};
-    ULONG fetched = 0;
-    if (SUCCEEDED(context->GetSelection(edit_cookie, TF_DEFAULT_SELECTION, 1,
-                                        &selection, &fetched)) &&
-        fetched == 1 && selection.range != nullptr) {
-      const TextMatch match = ReadSpanFromRange(selection.range, start_utf16,
-                                                length_utf16, edit_cookie, expected);
-      selection.range->Release();
-      if (match != TextMatch::kUnreadable) {
-        return match;
-      }
-    }
-  }
-  if (composition != nullptr) {
-    ITfRange* composition_range = nullptr;
-    if (SUCCEEDED(composition->GetRange(&composition_range)) &&
-        composition_range != nullptr) {
-      const TextMatch match = ReadSpanFromRange(composition_range, start_utf16,
-                                                length_utf16, edit_cookie, expected);
-      composition_range->Release();
-      return match;
-    }
-  }
-  return TextMatch::kUnreadable;
 }
 
 bool ReadOneUnit(ITfRange* range, TfEditCookie edit_cookie, wchar_t* unit,
@@ -431,6 +254,16 @@ void CompositionWriter::ReleaseHeldObjects() {
 CompositionWriteOutcome CompositionWriter::Apply(const EditPlan& plan,
                                                  ITfContext* context,
                                                  TfEditCookie edit_cookie) {
+  if (uncertain_) {
+    // A previous write's effect on the backing text could not be confirmed. The recorded
+    // composition range and the cached last-written text are no longer trustworthy, so no
+    // further plan -- not even a Cancel -- is executed on this session. The caller recovers
+    // by closing this session and creating a new one.
+    CompositionWriteOutcome outcome;
+    outcome.status = EditStatus::kRejected;
+    outcome.reason = EditRejectReason::kUncertainTextState;
+    return outcome;
+  }
   if (composition_ != nullptr && CompositionExternallyTerminated()) {
     // The context owner terminated the composition. Do not call any method on the terminated
     // object and do not fall through to the no-preedit insert path.
@@ -560,22 +393,26 @@ CompositionWriteOutcome CompositionWriter::Begin(const EditPlan& plan,
   replaced.composition_start_utf16 = composition_start_utf16_;
   replaced.composition_length_utf16 = composition_length_utf16_;
   if (replaced.status == EditStatus::kFailedBeforeMutation ||
+      replaced.status == EditStatus::kFailedPossiblyMutated ||
       replaced.status == EditStatus::kFailedAfterMutation) {
-    // Begin failed. Whether the backing text changed or not, this call's composition is not a
-    // usable editing context: end it (without another SetText) and leave any mutated text in
-    // place. This is not a rollback and does not replay the insert. If ending fails, the
+    // Begin failed after the composition object existed. Whatever the backing text now holds,
+    // this composition is not a usable editing context: end it as a separate cleanup action,
+    // without another SetText. This is not a rollback, it does not replay the insert, and it
+    // never clears text whose current value is unknown. A successful cleanup end closes the
+    // composition object only; it does not make the plan Applied. If ending fails, the
     // reference stays held and composition_active says so.
     const HRESULT end_hr = EndOwnComposition(edit_cookie);
     replaced.end_composition_hr = end_hr;
+    replaced.cleanup_end_composition = true;
     if (FAILED(end_hr)) {
       replaced.composition_active = true;
     } else {
       replaced.composition_active = false;
       replaced.composition_start_utf16 = start;
+      // After kFailedPossiblyMutated the store's extent is unknown (-1): the failed write may
+      // or may not have landed. Only a failure that predates every write call can report 0.
       replaced.composition_length_utf16 =
-          replaced.status == EditStatus::kFailedAfterMutation
-              ? static_cast<LONG>(plan.text_utf16().size())
-              : 0;
+          replaced.status == EditStatus::kFailedBeforeMutation ? 0 : -1;
     }
   } else {
     replaced.composition_active = true;
@@ -619,13 +456,15 @@ CompositionWriteOutcome CompositionWriter::Commit(const EditPlan& plan,
     outcome.composition_start_utf16 = committed_start;
     outcome.composition_length_utf16 = committed_length;
     if (FAILED(end_hr)) {
-      // SetText succeeded; EndComposition failed. The text is committed, the composition
-      // may still exist. No rollback and no replay is attempted.
+      // SetText succeeded; EndComposition failed. The text change is known from the
+      // succeeded write call; the composition may still exist. No rollback and no replay is
+      // attempted, and the session becomes uncertain: further plans are refused.
       outcome.status = EditStatus::kFailedAfterMutation;
       outcome.reason = EditRejectReason::kEndCompositionFailed;
       outcome.text_may_have_changed = true;
       outcome.mutation_verified = true;
       outcome.composition_active = true;
+      uncertain_ = true;
       return outcome;
     }
     outcome.status = EditStatus::kApplied;
@@ -692,14 +531,17 @@ CompositionWriteOutcome CompositionWriter::Commit(const EditPlan& plan,
   }
   insert->Release();
   if (FAILED(hr)) {
-    // An insertion failure has no reliable independent span to read back; the result says
-    // the text may have changed and does not claim that it did not.
-    outcome.status = EditStatus::kFailedAfterMutation;
+    // The insertion call was issued and failed. Whether the store applied it is not
+    // observable through the HRESULT, and there is no owned range to verify against; the
+    // result claims a possible change and claims no knowledge, and the session becomes
+    // uncertain.
+    outcome.status = EditStatus::kFailedPossiblyMutated;
     outcome.reason = EditRejectReason::kInsertFailed;
     outcome.operation_hr = hr;
     outcome.text_may_have_changed = true;
     outcome.mutation_verified = false;
     outcome.composition_active = false;
+    uncertain_ = true;
     return outcome;
   }
   outcome.status = EditStatus::kApplied;
@@ -735,6 +577,7 @@ CompositionWriteOutcome CompositionWriter::Cancel(ITfContext* context,
     outcome.text_may_have_changed = true;
     outcome.mutation_verified = true;
     outcome.composition_active = true;
+    uncertain_ = true;
     return outcome;
   }
   outcome.status = EditStatus::kApplied;
@@ -745,6 +588,9 @@ CompositionWriteOutcome CompositionWriter::Cancel(ITfContext* context,
 CompositionWriteOutcome CompositionWriter::ReplaceCompositionText(
     ITfContext* context, const std::wstring& new_text, bool verify_current_text,
     TfEditCookie edit_cookie) {
+  // `context` is intentionally unused: after a failed write no context read can classify the
+  // failure, so this function never reads through the context again.
+  (void)context;
   CompositionWriteOutcome outcome;
   ITfRange* range = nullptr;
   HRESULT hr = composition_->GetRange(&range);
@@ -788,44 +634,19 @@ CompositionWriteOutcome CompositionWriter::ReplaceCompositionText(
     return outcome;  }
 
   range->Release();
+  // The write call was issued and failed. The HRESULT is not mutation evidence in either
+  // direction: a store may apply the text and then fail, or change nothing and fail, under
+  // any failure code including E_UNEXPECTED. A TSF read-back cannot resolve this -- after a
+  // failed write TSF may serve its cached pre-call text, so reading the old value back would
+  // prove nothing about the backing store -- so no read-back is attempted. The recorded
+  // range and text become unknown, and the only honest classification is "possibly mutated".
+  uncertain_ = true;
+  current_text_utf16_.clear();
+  composition_start_utf16_ = -1;
+  composition_length_utf16_ = -1;
+  outcome.status = EditStatus::kFailedPossiblyMutated;
+  outcome.reason = EditRejectReason::kSetTextFailed;
   outcome.operation_hr = hr;
-
-  // A store that partially applied the edit reports E_UNEXPECTED. TSF's cached text is still
-  // the old text in that case, so a read-back through TSF would wrongly say "unchanged"; the
-  // explicit signal is authoritative for the status, but the exact text is not claimed.
-  if (hr == E_UNEXPECTED) {
-    outcome.status = EditStatus::kFailedAfterMutation;
-    outcome.text_may_have_changed = true;
-    outcome.mutation_verified = false;
-    return outcome;
-  }
-
-  // The call failed. Determine whether the backing text changed despite the failure. TSF does
-  // not necessarily move the composition range when the store reports a failure, so the
-  // read-back targets the document span [composition_start, +new_text.size()) instead.
-  const TextMatch after = CheckDocumentSpan(
-      context, composition_, composition_start_utf16_,
-      static_cast<LONG>(new_text.size()), edit_cookie, new_text);
-  if (after == TextMatch::kMatches) {
-    outcome.status = EditStatus::kFailedAfterMutation;
-    outcome.text_may_have_changed = true;
-    outcome.mutation_verified = true;
-    current_text_utf16_ = new_text;
-    composition_length_utf16_ = static_cast<LONG>(new_text.size());
-    return outcome;
-  }
-  const TextMatch before = CheckDocumentSpan(
-      context, composition_, composition_start_utf16_,
-      static_cast<LONG>(current_text_utf16_.size()), edit_cookie,
-      current_text_utf16_);
-  if (before == TextMatch::kMatches) {
-    outcome.status = EditStatus::kFailedBeforeMutation;
-    outcome.text_may_have_changed = false;
-    outcome.mutation_verified = true;
-    return outcome;
-  }
-  // Neither state is readable: do not claim that nothing changed.
-  outcome.status = EditStatus::kFailedAfterMutation;
   outcome.text_may_have_changed = true;
   outcome.mutation_verified = false;
   return outcome;

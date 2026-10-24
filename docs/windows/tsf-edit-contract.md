@@ -1,7 +1,7 @@
 # EpoCanva P3.7 — controlled TSF edit contract
 
 This document records what the P3.7 composition/edit layer actually does, what it was verified
-against, and what it deliberately does not do. It is written after the code and the 24-case
+against, and what it deliberately does not do. It is written after the code and the 29-case
 suite, not from a planned design.
 
 ## 1. Scope and non-goals
@@ -16,9 +16,10 @@ In scope:
 * real composed-range edits through `ITfRange::SetText`, `ITfComposition::EndComposition` and
   `ITfInsertAtSelection::InsertTextAtSelection`;
 * identity/generation checks, input-permission refusal, read-only refusal, asynchronous lock
-  handling, stale-plan refusal, and explicit failure statuses;
-* 18 behavioural composition cases plus a composition falsifiability control, alongside
-  four host cases and a host falsifiability control (24 CTest cases in total).
+  handling, stale-plan refusal, and explicit failure statuses that distinguish *whether a
+  mutating call was issued* from *whether the text change is known*;
+* 23 behavioural composition cases plus a composition falsifiability control, alongside
+  four host cases and a host falsifiability control (29 CTest cases in total).
 
 Out of scope and **not claimed**:
 
@@ -129,16 +130,22 @@ interface is the one that belongs there.
 * `refuse_write_locks` (writable status, but every read/write lock request is refused);
 * `async_locks` (defer `RequestLock` to the message loop);
 * `refuse_compositions` (the owner composition sink sets `*pfOk = FALSE`);
-* `MutationFault`: `kFailBeforeMutation` returns `E_FAIL` after validation, with no text
-  change; `kFailAfterMutation` applies the change and returns `E_UNEXPECTED`.
+* `MutationFault`: four modes -- `kEFailWithoutMutation` and `kEFailAfterMutation`,
+  `kEUnexpectedWithoutMutation` and `kEUnexpectedAfterMutation` -- each stating what the
+  **host** really did (change nothing vs. change the text, and with which HRESULT);
+* `SetFailCompositionEnd`: the context owner's `OnEndComposition` returns `E_FAIL`.
 
-`E_UNEXPECTED` is the controlled store's explicit **partial-application signal**. It is not a
-TSF guarantee. It exists because TSF keeps its own cached view of the text: when the store
-mutates and returns a plain failure, TSF's ranges still read the old text, so the layer could
-not distinguish the two cases by read-back. The layer treats `E_UNEXPECTED` from the mutating
-call as "may have changed, not verified" (`FailedAfterMutation`, `mutation_verified = false`).
-A store that silently mutates and returns a plain `E_FAIL` is outside what this layer can
-distinguish; that limitation is recorded in section 9.
+These knobs are host truth only. They are not a protocol, and the product layer cannot read
+them: it observes only the HRESULT TSF hands it and the ranges TSF shows it. A mutating call
+that returns a failure HRESULT -- `E_FAIL` and `E_UNEXPECTED` alike -- is classified
+`FailedPossiblyMutated` (may have changed, not verified) in every mode, because no HRESULT
+value is mutation evidence in either direction. The four modes exist precisely so the tests
+can pair that one executor conclusion with different underlying realities: the two `E_FAIL`
+modes (and the two `E_UNEXPECTED` modes) produce identical executor results while the
+store's own text differs. TSF keeps its own cached view of the text, so after a store-side
+mutation that reports failure, a read-back through TSF still shows the old text; that is why
+a read-back can never upgrade `FailedPossiblyMutated` to "definitely unchanged", and the
+layer performs no read-back to classify failures at all.
 
 ### 3.5 Teardown and reference accounting
 
@@ -197,8 +204,12 @@ carries no plan.
 * its `phrSession` (`phr_session_hr`, `TF_S_ASYNC` `0x00040300` for a queued request);
 * `DoEditSession`'s HRESULT (`edit_session_hr`);
 * the first failing TSF operation HRESULT (`operation_hr`) and `EndComposition`'s HRESULT;
-* UTF-16 composition start/length;
-* `text_may_have_changed` / `mutation_verified`;
+* `cleanup_end_composition`: `EndComposition` ran as failure cleanup inside a `Begin`, not
+  as part of a normal Commit/Cancel;
+* UTF-16 composition start/length (`-1` = unknown, the only value after an unconfirmed
+  write);
+* `text_may_have_changed` / `mutation_verified` (`mutation_verified` is true only from a
+  write call that returned success -- never from a read-back);
 * `composition_active`, `lock_observed`, session id and plan identity/sequence.
 
 Status vocabulary:
@@ -206,11 +217,16 @@ Status vocabulary:
 | Status | Meaning |
 | --- | --- |
 | `Pending` | `TF_S_ASYNC`; waiting only, nothing applied |
-| `Applied` | the callback ran and the write succeeded |
-| `Rejected` | a precondition/policy refused before a TSF write |
-| `FailedBeforeMutation` | a TSF call failed and the text was verified unchanged |
-| `FailedAfterMutation` | a call failed after the text changed; no rollback claim |
+| `Applied` | the callback ran and every step, including the write, succeeded |
+| `Rejected` | a precondition/policy refused before any call that could change text |
+| `FailedBeforeMutation` | a TSF call failed while **no** call that could change text had been issued yet; a claim about the calls issued, not an observation of the store |
+| `FailedPossiblyMutated` | a write call was issued and failed; the backing text may or may not have changed; always `text_may_have_changed = true`, `mutation_verified = false` |
+| `FailedAfterMutation` | at least one write call succeeded and a later step of the same plan failed; the mutation is known from the succeeded call |
 | `Stale` | context identity/generation no longer matches; no write performed |
+
+No HRESULT is treated as mutation evidence. `E_UNEXPECTED` in particular carries no
+partial-application meaning here: it is one general failure among others, and a store may
+return it after changing nothing or after changing the text (both are tested).
 
 ## 5. Applying a plan
 
@@ -288,28 +304,60 @@ If `StartComposition` returns `S_OK` with a NULL composition (the documented con
 refusal), the layer returns `Rejected` (`CompositionRejected`) and writes no text. The host
 case `composition_rejected` shows `starts=1 refusals=1 ends=0 set_text_calls=0`.
 
-### 5.5 Read-back and partial failure
+### 5.5 Failure classification, read scope, and the uncertain state
 
-For an ordinary mutating-call failure, the writer reads the requested document span back
-through TSF: `ITfContext::GetStart`/`GetEnd`, `ITfRange::ShiftEndToRange(TF_ANCHOR_START)`,
-and `ITfRange::GetText`, then compares the UTF-16 slice. The read is bounded at 1 Mi UTF-16
-code units; a larger document is reported unreadable rather than copied without limit. If
-the slice is the old text, the result is `FailedBeforeMutation` with
-`mutation_verified = true`; if it is the new text, `FailedAfterMutation` verified; if it
-cannot be read, `FailedAfterMutation` with `text_may_have_changed = true` and
-`mutation_verified = false` (conservative, no "unchanged" claim).
+Classification is by **call occurrence only**, never by interpreting an HRESULT or by
+reading text back:
 
-`E_UNEXPECTED` is checked before the read-back and means "the store says it partially
-applied"; the result is `FailedAfterMutation`, `mutation_verified = false`.
+* a failure before any call that could change text was issued (selection read, boundary
+  check, `StartComposition`, range acquisition, the pre-write own-range verification) is
+  `FailedBeforeMutation`;
+* a write call (`ITfRange::SetText`, `ITfInsertAtSelection::InsertTextAtSelection`) that
+  returned a failure HRESULT is `FailedPossiblyMutated` -- whatever the code, including
+  `E_UNEXPECTED`. No classification read-back follows: after a failed write TSF may serve its
+  cached pre-call text, so reading the old value back would prove nothing about the backing
+  store;
+* a write call that succeeded followed by a failed later step (`EndComposition`) is
+  `FailedAfterMutation`, verified from the succeeded call itself.
 
-After a failed **Begin**, the layer ends its composition without another SetText and leaves
-any mutated text in place. This is not a rollback and does not replay the insert. Observed:
-`before_status=FailedBeforeMutation before_verified=1 after_status=FailedAfterMutation
-after_may_change=1 after_verified=0 mutations=1 end_calls=2`.
+Read scope is bounded and purposeful. The writer reads exactly: the collapsed selection,
+one code unit on each side of the caret (scalar-boundary check), and its own composition
+range before Update/Commit/Cancel (own-range verification, at most `last written length + 1`
+units). It never reads the document as a whole: the earlier revision's whole-document
+read-back (`GetStart`/`GetEnd` + `GetText`, capped at 1 Mi UTF-16 units) used to classify
+failed writes was removed -- it was a failure-classification use of `GetStart`/`GetEnd`, not
+a legitimate one, and both its "old text present ⇒ definitely unchanged" and
+"`E_UNEXPECTED` ⇒ definitely changed" conclusions were unsound. Observed on this build: a
+faulted `Begin` raises the store's `GetText` counter by exactly 1 (msctf serves part of the
+writer's two one-unit boundary probes from its cache); the failure cases assert that delta
+so a reintroduced read-back cannot pass silently.
 
-`EndComposition` failure after a successful SetText is implemented as
-`FailedAfterMutation` with `end_composition_hr` and no rollback/replay, but the host has no
-way to induce a TSF-side `EndComposition` failure; it is not covered by a test.
+After `FailedPossiblyMutated` or `FailedAfterMutation` the session latches an **uncertain
+state**: every further plan -- Update, Commit, Cancel, even a fresh Begin -- is refused with
+`Rejected`/`UncertainTextState` before any lock is requested, re-binding is refused, and the
+recorded composition extent becomes `-1` (the old composition range is no longer trusted).
+There is no automatic retry, no rollback, no replay, and no automatic re-synchronisation.
+The way out is `Close()` or destroying the session and creating a new one; `Close()` only
+releases references, it never issues a `SetText`, so it cannot clear text whose value is
+unknown. A failed `Begin` ends the composition it created as a **separately recorded
+cleanup action** (`cleanup_end_composition = true`, no further `SetText`): a successful
+cleanup end closes the composition object only and never means the plan was Applied.
+
+Observed (four modes, one executor conclusion):
+
+```text
+failure-efail-unchanged:      status=FailedPossiblyMutated op_hr=0x80004005 may_change=1 verified=0 host_mutations=0
+failure-efail-mutated:        status=FailedPossiblyMutated op_hr=0x80004005 may_change=1 verified=0 host_mutations=1
+failure-eunexpected-unchanged: status=FailedPossiblyMutated op_hr=0x8000FFFF may_change=1 verified=0 host_mutations=0
+failure-eunexpected-mutated:   status=FailedPossiblyMutated op_hr=0x8000FFFF may_change=1 verified=0 host_mutations=1
+```
+
+The executor results are identical across each pair while the host truths differ: that is
+the conservative conclusion the model requires. `SetText` success followed by
+`EndComposition` failure is implemented as `FailedAfterMutation` with
+`end_composition_hr` naming the second failure, but on this build no store-side fault can
+make msctf report an `EndComposition` failure (see 3.4 and 9.5), so that path is not
+covered by a test.
 
 ## 6. Identity, generation, permission, read-only
 
@@ -338,14 +386,20 @@ way to induce a TSF-side `EndComposition` failure; it is not covered by a test.
 * No automatic retry.
 * No rollback claim after a mutation.
 * No automatic replay of a commit.
-* `SetText` success + later step failure is `FailedAfterMutation` with the later HRESULT; the
-  text is not claimed to be reverted.
-* A failed Begin ends its composition; a failed Update/Commit/Cancel keeps the composition
-  reference (unless TSF terminated it) so the caller can decide. A later operation on a range
-  whose text no longer matches is refused rather than deleting unknown text.
+* No HRESULT is read as mutation evidence; no read-back is used to classify a failure.
+* `SetText`/`InsertTextAtSelection` failure is `FailedPossiblyMutated` (unknown, may have
+  changed) whatever the HRESULT. `SetText` success + later step failure is
+  `FailedAfterMutation` with the later HRESULT; the text is not claimed to be reverted.
+* After either of those outcomes the session is terminal for editing: every further plan is
+  refused with `UncertainTextState` before a lock is requested, re-binding is refused, and
+  recovery is a new session. `Close()` releases references only and clears no text.
+* A failed Begin ends its composition as a separately recorded cleanup
+  (`cleanup_end_composition`), never with another `SetText`; a successful cleanup end is not
+  an Applied claim. A later operation on a range whose text no longer matches is refused
+  rather than deleting unknown text.
 * Status counters (`applied`, `rejected`, `failed_before_mutation`,
-  `failed_after_mutation`, `stale`, `callbacks`, `locks_observed`) are recorded in
-  `CompositionEditSession::Snapshot()`.
+  `failed_possibly_mutated`, `failed_after_mutation`, `stale`, `callbacks`,
+  `locks_observed`) are recorded in `CompositionEditSession::Snapshot()`.
 
 ## 8. Verification
 
@@ -362,7 +416,7 @@ cmake --build build/p37-tsf-edit --config Release
 ctest --test-dir build/p37-tsf-edit -C Release --output-on-failure --no-tests=error
 ```
 
-Result: **100% tests passed, 0 failed out of 24** (local time 10.5 s). The 24 cases are:
+Result: **100% tests passed, 0 failed out of 29** (local time 17.7 s). The 29 cases are:
 
 ```text
 windows.tsf_edit.host_sync_edit
@@ -383,7 +437,12 @@ windows.tsf_edit.disconnected_rejected
 windows.tsf_edit.async_pending
 windows.tsf_edit.stale_generation
 windows.tsf_edit.two_contexts
-windows.tsf_edit.failure_before_after
+windows.tsf_edit.failure_efail_unchanged
+windows.tsf_edit.failure_efail_mutated
+windows.tsf_edit.failure_eunexpected_unchanged
+windows.tsf_edit.failure_eunexpected_mutated
+windows.tsf_edit.uncertain_state_refusal
+windows.tsf_edit.failure_write_then_step
 windows.tsf_edit.permission_denied_unknown
 windows.tsf_edit.composition_rejected
 windows.tsf_edit.resource_cleanup
@@ -412,7 +471,9 @@ claim, must exit 14, and must not print `RESULT PASS`.
 | 12 | async is Pending until the callback | `async_pending` |
 | 13 | generation change before callback → no write | `stale_generation` |
 | 14 | two contexts do not cross-talk | `two_contexts` |
-| 15 | failure before vs after mutation | `failure_before_after` |
+| 15 | one conservative conclusion across E_FAIL/E_UNEXPECTED x changed/unchanged host truths | `failure_efail_unchanged`, `failure_efail_mutated`, `failure_eunexpected_unchanged`, `failure_eunexpected_mutated` |
+| 15b | uncertain state refuses all plans, requests no lock, Close clears nothing | `uncertain_state_refusal` |
+| 15c | write succeeds then the owner refuses the composition end (propagation boundary) | `failure_write_then_step` |
 | 16 | denied/unknown permission writes nothing | `permission_denied_unknown` |
 | 17 | resources, sink, composition, context, ThreadMgr cleanup | `host_cleanup`, `resource_cleanup` |
 
@@ -432,7 +493,12 @@ evidence async-pending: pending_status=Pending final_status=Applied request_hr=0
 evidence stale-generation: status=Stale reason=NotBound mutations=0 composition_starts=0
 evidence read-only: reason=ReadOnlyContext request_locks_before=0 after=0 get_status_calls=1
 evidence write-lock-refused: reason=WriteLockRefused refusals_before=0 after=1 mutations=0
-evidence failure-before-after: before_status=FailedBeforeMutation before_verified=1 after_status=FailedAfterMutation after_may_change=1 after_verified=0 mutations=1 end_calls=2
+evidence failure-efail-unchanged: status=FailedPossiblyMutated op_hr=0x80004005 may_change=1 verified=0 cleanup_end=1 host_mutations=0 set_text_delta=1 get_text_delta=1
+evidence failure-efail-mutated: status=FailedPossiblyMutated op_hr=0x80004005 may_change=1 verified=0 cleanup_end=1 host_mutations=1 set_text_delta=1 get_text_delta=1
+evidence failure-eunexpected-unchanged: status=FailedPossiblyMutated op_hr=0x8000FFFF may_change=1 verified=0 cleanup_end=1 host_mutations=0 set_text_delta=1 get_text_delta=1
+evidence failure-eunexpected-mutated: status=FailedPossiblyMutated op_hr=0x8000FFFF may_change=1 verified=0 cleanup_end=1 host_mutations=1 set_text_delta=1 get_text_delta=1
+evidence uncertain-state: refusals=4 set_text_delta=0 lock_delta=0 get_text_delta=0 close_cleared=nothing
+evidence write-then-step: propagated=0 status=Applied end_hr=0x00000000 owner_refusals=1 host_mutations=2 note=EndComposition-failure-not-inducible-from-store
 evidence composition-rejected: reason=CompositionRejected starts=1 refusals=1 ends=0 set_text_calls=0
 evidence resource-cleanup: store_refs=0 live_stores=0 sink_before=1 sink_after_pop=0 addref=4 release=4 composition_ends=1
 ```
@@ -443,12 +509,20 @@ All from the current source tree, with new log tags (no log was overwritten):
 
 | Suite | Result |
 | --- | --- |
+| P3.7 full suite (`build/p37-tsf-edit`, Release) | 29/29 |
 | P3.1 TSF lifecycle (`build/windows-tsf/test`, Release) | 3/3 |
 | P3.2 text encoding/boundary (`build/windows-text/test`, Release) | 4/4 |
 | P3.3 input decisions/translation (`build/windows-input/test`, Release) | 5/5 |
 | P3.4–P3.6 bridge/executor/hosted/broker (`build/windows-engine-bridge/test`, Release) | 22/22 |
-| Root project infrastructure/English core (`build/vs2022-x64-debug`, Debug) | 8/8 |
-| Formal English entry (`tools/test_english_integration.ps1`, new build dir + tag) | 29/29 |
+| Root project infrastructure/English core (`build/vs2022-x64-debug`, Debug) | 7/8 -- see below |
+| Formal English entry (`tools/test_english_integration.ps1`, tag `fix-r1`) | 29/29 |
+
+The one root-suite failure is `english.core.spelling_cost_trial_on_pilot_lexicon`: its
+worst-single-call budget (25 ms, Debug build) measured 46.7–58.2 ms across a loaded and an
+isolated rerun. The failing executable is byte-identical to the one that passed this suite
+in the previous batch (file dated 2026-10-22; this batch recompiled zero translation units
+of it and touched no English-core source), so it is a machine-timing condition of this run,
+not a regression of this change. It is reported as a failure, not smoothed over.
 
 Formal English entry details: the project built is
 `tools/rime_english_recovery`; the EXEs are
@@ -456,8 +530,7 @@ Formal English entry details: the project built is
 `.../baseline-engine/rime_english_recovery_baseline.exe`, and
 `.../sha256-helper/rime_english_recovery_sha256.exe`. The script exported and cross-checked
 the CTest list against the `NAME` registrations in `CMakeLists.txt`; the actual count is 29
-(26 engine cases + 3 helper cases), with `-PilotLexicon` unset. The earlier `^english. 15/15`
-description is **not** used; the counts here come from this source and this generated list.
+(26 engine cases + 3 helper cases), with `-PilotLexicon` unset.
 
 ## 9. Unimplemented items and known limits
 
@@ -469,17 +542,25 @@ description is **not** used; the counts here come from this source and this gene
    round trip were not tested.
 4. **External composition termination** is detected via `ITfCompositionSink` but not exercised
    by a test. The host never terminates a composition from the owner side.
-5. **EndComposition failure after SetText** is implemented as `FailedAfterMutation` but cannot
-   be induced without a TSF-side fault seam, which this phase deliberately does not add.
-6. **A silent partial mutation with a plain `E_FAIL` cannot be observed through TSF.** TSF
-   keeps its cached text; the controlled host uses `E_UNEXPECTED` to declare partial
-   application. A store that mutates and lies with `E_FAIL` is outside this layer's
-   verification (the layer would read the old TSF text and classify `FailedBeforeMutation`).
-7. **Read-back is capped at 1 Mi UTF-16 code units.** Beyond that the layer reports
-   `FailedAfterMutation` unverified rather than reading an unbounded document.
-8. **Update/Commit/Cancel partial failure** keeps a possibly stale composition instead of
-   auto-ending it; a later operation detects the range mismatch and refuses. Only Begin
-   auto-ends its failed composition.
+5. **EndComposition failure after SetText** is implemented (`FailedAfterMutation`,
+   `end_composition_hr`, uncertain latch) but cannot be induced through real TSF from a text
+   store: on this build the context owner's `OnEndComposition` returning `E_FAIL` is
+   swallowed by msctf.dll (observed: `owner_refusals=1` while `EndComposition` returned
+   `S_OK`). `failure_write_then_step` pins that boundary; it flips to the real post-write
+   step-failure coverage automatically on a build that propagates the refusal. No universal
+   TSF fault framework was added to force it.
+6. **A silent partial mutation with a plain `E_FAIL` is now covered conservatively.** The
+   earlier revision classified it `FailedBeforeMutation` from a TSF read-back -- an unsound
+   "definitely unchanged" claim. The `failure_efail_mutated` case shows the layer now returns
+   the same `FailedPossiblyMutated` it returns for every failed write; what remains unknown
+   to the layer is only the host truth, which it deliberately does not claim to know.
+7. **No whole-document read-back exists any more.** The earlier 1 Mi-capped
+   `GetStart`/`GetEnd` read-back used to classify failed writes was removed; the writer's
+   only reads are the selection, two one-unit boundary probes, and its own composition range.
+8. **A partial write failure ends editing on that session.** `FailedPossiblyMutated` and
+   `FailedAfterMutation` latch an uncertain state that refuses every further plan and every
+   re-bind; there is no auto-end, no mismatch-based continuation, and no automatic
+   re-synchronisation. Recovery is a new session (see 5.5).
 9. **StartComposition with a NULL sink** is rejected by this msctf build despite the SDK
    documentation calling the sink optional; the layer always supplies one.
 10. **No grapheme editing**, no candidate window, no key handling, no automatic retry, no

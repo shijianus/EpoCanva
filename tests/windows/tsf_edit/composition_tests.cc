@@ -697,69 +697,264 @@ int RunTwoContexts() {
   return Finish();
 }
 
-// 15. SetText failure before and after the backing text changed.
-int RunFailureBeforeAfter() {
+// 15. Write-call failures: one executor conclusion across different host truths.
+//
+// Every sub-case below runs the same Begin("he") whose SetText the store fails. What the
+// HOST does differs -- change nothing vs. change the text, E_FAIL vs. E_UNEXPECTED -- but
+// nothing of that difference is observable through TSF, so the executor must return the same
+// conservative conclusion in all four: FailedPossiblyMutated, may-have-changed, unverified.
+// The store's own text (host truth, read only by the test) proves the two E_FAIL cases and
+// the two E_UNEXPECTED cases really differ underneath.
+//
+// The number of store-level GetText calls a faulted Begin may cause, observed on this build
+// (Windows 10.0.26200): 1. The writer issues two one-unit boundary probes through ITfRange,
+// but msctf serves part of them from its cache, so only one reaches the store. The writer's
+// only other reads (selection, own-range verification) are equally bounded, and the
+// classification path performs no read-back at all -- a reintroduced whole-document or
+// span read-back for failure classification would push the delta above this constant.
+constexpr std::uint64_t kFaultedBeginGetTextCalls = 1;
+
+struct WriteFailureExpectation {
+  MutationFault fault;
+  HRESULT write_hr;                 // the HRESULT the store returns from SetText
+  const wchar_t* host_text_after;   // host truth after the failed write
+  std::uint64_t host_mutations;     // host truth: backing mutations caused by the write
+  const char* label;
+};
+
+int RunWriteFailureCase(const WriteFailureExpectation& expectation) {
   Fixture fixture;
   if (!fixture.Init(Document(L"abcDEF", 3))) {
     return Finish();
   }
   TestTextStore* store = fixture.document->store();
+  const TestStoreDiagnostics before = StoreDiag(fixture);
 
-  store->SetMutationFault(MutationFault::kFailBeforeMutation);
-  const auto before_plan = PlanBegin(fixture, "he", 3);
-  if (!before_plan.has_value()) {
+  store->SetMutationFault(expectation.fault);
+  const auto begin = PlanBegin(fixture, "he", 3);
+  if (!begin.has_value()) {
     return Finish();
   }
-  const EditResult before = fixture.session->ApplySync(*before_plan);
-  ExpectStatus(before, EditStatus::kFailedBeforeMutation,
-               "a failure before mutation is classified as such");
-  Check(before.mutation_verified && !before.text_may_have_changed,
-        "read-back proved the text unchanged", "");
-  CheckText(fixture.document->text_utf16(), L"abcDEF", "the document is unchanged");
-  Check(!fixture.session->active_composition(),
-        "the empty composition was ended after the failed insert", "");
-  Check(fixture.document->diagnostics().composition_end_calls == 1,
-        "OnEndComposition was delivered", "");
-  Check(StoreDiag(fixture).text_mutations == 0, "no mutation occurred", "");
+  const EditResult result = fixture.session->ApplySync(*begin);
+  ExpectStatus(result, EditStatus::kFailedPossiblyMutated,
+               "a failed write call is classified as possibly mutated");
+  Check(result.reason == EditRejectReason::kSetTextFailed,
+        "the failed write names SetText",
+        DescribeEditRejectReason(result.reason));
+  CheckHr(result.operation_hr, expectation.write_hr,
+          "the store's HRESULT is preserved, not interpreted");
+  Check(result.text_may_have_changed && !result.mutation_verified,
+        "the result claims a possible change and no knowledge", "");
+  Check(result.cleanup_end_composition,
+        "the composition end inside the failed Begin is recorded as cleanup", "");
+  Check(!result.composition_active, "the cleanup end closed the composition object", "");
+  Check(result.composition_length_utf16 == -1,
+        "the composition extent is unknown after an unconfirmed write",
+        std::to_string(result.composition_length_utf16));
 
-  store->SetMutationFault(MutationFault::kFailAfterMutation);
-  const auto after_plan = PlanBegin(fixture, "he", 3);
-  if (!after_plan.has_value()) {
+  CheckText(fixture.document->text_utf16(), expectation.host_text_after,
+            "host truth after the failed write");
+  const TestStoreDiagnostics after = StoreDiag(fixture);
+  Check(after.text_mutations == before.text_mutations + expectation.host_mutations,
+        "host truth: the number of backing mutations",
+        std::to_string(after.text_mutations));
+  Check(after.set_text_calls == before.set_text_calls + 1,
+        "exactly one write call was issued (no retry)",
+        std::to_string(after.set_text_calls - before.set_text_calls));
+  Check(after.get_text_calls == before.get_text_calls + kFaultedBeginGetTextCalls,
+        "no classification read-back followed the failed write",
+        std::to_string(after.get_text_calls - before.get_text_calls));
+  CheckU64(fixture.document->diagnostics().composition_end_calls, 1,
+           "the cleanup end was delivered to the context owner");
+  const CompositionEditSessionDiagnostics session = fixture.session->Snapshot();
+  CheckU64(session.failed_possibly_mutated, 1, "one PossiblyMutated outcome was counted");
+
+  // The session is now terminal for editing, but this case leaves the refusal details to
+  // edit-uncertain-state; here only the counter evidence is recorded.
+  Evidence(expectation.label,
+           std::string("status=") + DescribeEditStatus(result.status) +
+               " op_hr=" + HrText(result.operation_hr) +
+               " may_change=" + (result.text_may_have_changed ? "1" : "0") +
+               " verified=" + (result.mutation_verified ? "1" : "0") +
+               " cleanup_end=" + (result.cleanup_end_composition ? "1" : "0") +
+               " host_mutations=" + std::to_string(after.text_mutations) +
+               " set_text_delta=1 get_text_delta=" +
+               std::to_string(after.get_text_calls - before.get_text_calls));
+  return Finish();
+}
+
+int RunFailEFailUnchanged() {
+  const WriteFailureExpectation expectation{
+      MutationFault::kEFailWithoutMutation, E_FAIL, L"abcDEF", 0,
+      "failure-efail-unchanged"};
+  return RunWriteFailureCase(expectation);
+}
+
+int RunFailEFailMutated() {
+  const WriteFailureExpectation expectation{
+      MutationFault::kEFailAfterMutation, E_FAIL, L"abcheDEF", 1,
+      "failure-efail-mutated"};
+  return RunWriteFailureCase(expectation);
+}
+
+int RunFailEUnexpectedUnchanged() {
+  const WriteFailureExpectation expectation{
+      MutationFault::kEUnexpectedWithoutMutation, E_UNEXPECTED, L"abcDEF", 0,
+      "failure-eunexpected-unchanged"};
+  return RunWriteFailureCase(expectation);
+}
+
+int RunFailEUnexpectedMutated() {
+  const WriteFailureExpectation expectation{
+      MutationFault::kEUnexpectedAfterMutation, E_UNEXPECTED, L"abcheDEF", 1,
+      "failure-eunexpected-mutated"};
+  return RunWriteFailureCase(expectation);
+}
+
+// 15b. After an unconfirmed write failure the session refuses everything and clears nothing.
+int RunUncertainStateRefusal() {
+  Fixture fixture;
+  if (!fixture.Init(Document(L"abcDEF", 3))) {
     return Finish();
   }
-  const EditResult after = fixture.session->ApplySync(*after_plan);
-  ExpectStatus(after, EditStatus::kFailedAfterMutation,
-               "a failure after mutation is classified as such");
-  Check(after.text_may_have_changed && !after.mutation_verified,
-        "the store's partial-application signal is recorded as an unverified change", "");
-  CheckText(fixture.document->text_utf16(), L"abcheDEF",
-            "the mutated text is present and not rolled back");
-  Check(!fixture.session->active_composition(),
-        "the partially applied composition is ended, leaving the mutated text", "");
-  Check(fixture.document->diagnostics().composition_end_calls == 2,
-        "both failed Begin attempts ended their composition",
-        std::to_string(fixture.document->diagnostics().composition_end_calls));
-  Check(StoreDiag(fixture).text_mutations == 1, "exactly one mutation occurred",
-        std::to_string(StoreDiag(fixture).text_mutations));
-
+  TestTextStore* store = fixture.document->store();
+  store->SetMutationFault(MutationFault::kEFailWithoutMutation);
+  const auto begin = PlanBegin(fixture, "he", 3);
+  if (!begin.has_value()) {
+    return Finish();
+  }
+  ExpectStatus(fixture.session->ApplySync(*begin), EditStatus::kFailedPossiblyMutated,
+               "the seeding failure is possibly mutated");
   store->SetMutationFault(MutationFault::kNone);
+  const TestStoreDiagnostics after_failure = StoreDiag(fixture);
+
+  const auto update = PlanUpdate(fixture, "x");
+  const auto commit = PlanCommit(fixture, "hello", 3);
   const auto cancel = PlanCancel(fixture);
-  if (!cancel.has_value()) {
+  const auto restart = PlanBegin(fixture, "z", 3);
+  if (!update.has_value() || !commit.has_value() || !cancel.has_value() ||
+      !restart.has_value()) {
     return Finish();
   }
-  ExpectRejected(fixture.session->ApplySync(*cancel), EditRejectReason::kNoComposition,
-                 "there is no composition left to cancel");
-  CheckText(fixture.document->text_utf16(), L"abcheDEF",
-            "no automatic rollback or replay happens after the partial failure");
-  Evidence("failure-before-after",
-           std::string("before_status=") + DescribeEditStatus(before.status) +
-               " before_verified=" + (before.mutation_verified ? "1" : "0") +
-               " after_status=" + DescribeEditStatus(after.status) +
-               " after_may_change=" + (after.text_may_have_changed ? "1" : "0") +
-               " after_verified=" + (after.mutation_verified ? "1" : "0") +
-               " mutations=" + std::to_string(StoreDiag(fixture).text_mutations) +
-               " end_calls=" +
-               std::to_string(fixture.document->diagnostics().composition_end_calls));
+  ExpectRejected(fixture.session->ApplySync(*update), EditRejectReason::kUncertainTextState,
+                 "Update after an unconfirmed failure is refused");
+  ExpectRejected(fixture.session->ApplySync(*commit), EditRejectReason::kUncertainTextState,
+                 "Commit after an unconfirmed failure is refused");
+  ExpectRejected(fixture.session->ApplySync(*cancel), EditRejectReason::kUncertainTextState,
+                 "Cancel after an unconfirmed failure is refused");
+  ExpectRejected(fixture.session->ApplySync(*restart),
+                 EditRejectReason::kUncertainTextState,
+                 "a fresh Begin after an unconfirmed failure is refused");
+  Check(!fixture.session->Bind(fixture.document->context(), fixture.document->context_id(),
+                               fixture.document->generation() + 1),
+        "re-binding an uncertain session is refused", "");
+
+  const TestStoreDiagnostics after_refusals = StoreDiag(fixture);
+  Check(after_refusals.set_text_calls == after_failure.set_text_calls,
+        "no write call followed the refusals (no retry, no replay)",
+        std::to_string(after_refusals.set_text_calls));
+  Check(after_refusals.request_lock_calls == after_failure.request_lock_calls,
+        "the refusals requested no lock at all",
+        std::to_string(after_refusals.request_lock_calls));
+  Check(after_refusals.get_text_calls == after_failure.get_text_calls,
+        "the refusals read nothing back", "");
+  CheckText(fixture.document->text_utf16(), L"abcDEF",
+            "the uncertain session left the text exactly as the host truth says");
+
+  fixture.session->Close();
+  CheckText(fixture.document->text_utf16(), L"abcDEF",
+            "Close cleared no text and ended no composition by itself");
+  const CompositionEditSessionDiagnostics closed = fixture.session->Snapshot();
+  Check(closed.rejected >= 4, "the four refusals were counted",
+        std::to_string(closed.rejected));
+  Evidence("uncertain-state",
+           "refusals=" + std::to_string(closed.rejected) +
+               " set_text_delta=0 lock_delta=0 get_text_delta=0 close_cleared=nothing");
+  return Finish();
+}
+
+// 15c. Write call succeeds, then a later controlled step is made to fail: SetText S_OK, then
+// the context owner refuses OnEndComposition. What this case observes is an empirical
+// property of the platform: on this build (Windows 10.0.26200) msctf.dll does NOT propagate
+// the owner's refusal to ITfComposition::EndComposition's caller, so the executor sees
+// success and reports Applied. That branch documents the exact boundary where coverage stops
+// -- the FailedAfterMutation-by-EndComposition path stays implemented but unverified through
+// real TSF. If a future build does propagate the refusal, the first branch runs and the case
+// becomes the real post-write-step-failure test: the mutation is known, the session latches
+// uncertain, and nothing is rolled back or replayed.
+int RunFailWriteThenStep() {
+  Fixture fixture;
+  if (!fixture.Init(Document(L"abcDEF", 3))) {
+    return Finish();
+  }
+  TestTextStore* store = fixture.document->store();
+  const auto begin = PlanBegin(fixture, "hel", 3);
+  const auto commit = PlanCommit(fixture, "hello", 3);
+  if (!begin.has_value() || !commit.has_value()) {
+    return Finish();
+  }
+  ExpectStatus(fixture.session->ApplySync(*begin), EditStatus::kApplied, "Begin hel applied");
+  store->SetFailCompositionEnd(true);
+  const TestStoreDiagnostics before = StoreDiag(fixture);
+
+  const EditResult result = fixture.session->ApplySync(*commit);
+  const TestStoreDiagnostics after = StoreDiag(fixture);
+  const auto document = fixture.document->diagnostics();
+  CheckU64(document.composition_end_refusals, 1,
+           "the context owner really refused the composition end");
+  Check(after.text_mutations == before.text_mutations + 1,
+        "the write call landed in the backing text exactly once",
+        std::to_string(after.text_mutations - before.text_mutations));
+  CheckText(fixture.document->text_utf16(), L"abchelloDEF",
+            "the written text is present exactly once either way");
+
+  if (FAILED(result.end_composition_hr)) {
+    // The platform propagated the later step's failure: this is the post-write-step case.
+    ExpectStatus(result, EditStatus::kFailedAfterMutation,
+                 "a succeeded write followed by a failed step is AfterMutation");
+    Check(result.reason == EditRejectReason::kEndCompositionFailed,
+          "the later step's failure is named",
+          DescribeEditRejectReason(result.reason));
+    Check(result.mutation_verified && result.text_may_have_changed,
+          "the mutation is known from the succeeded write call", "");
+    Check(result.composition_active, "the composition object is still held", "");
+    const auto update = PlanUpdate(fixture, "x");
+    const auto cancel = PlanCancel(fixture);
+    if (!update.has_value() || !cancel.has_value()) {
+      return Finish();
+    }
+    ExpectRejected(fixture.session->ApplySync(*update),
+                   EditRejectReason::kUncertainTextState,
+                   "Update after a failed commit step is refused");
+    ExpectRejected(fixture.session->ApplySync(*cancel),
+                   EditRejectReason::kUncertainTextState,
+                   "Cancel after a failed commit step is refused");
+    Check(StoreDiag(fixture).set_text_calls == after.set_text_calls,
+          "no further write call happened", "");
+    fixture.session->Close();
+    CheckText(fixture.document->text_utf16(), L"abchelloDEF",
+              "Close cleared none of the written text");
+    Evidence("write-then-step",
+             std::string("propagated=1 status=") + DescribeEditStatus(result.status) +
+                 " end_hr=" + HrText(result.end_composition_hr) +
+                 " host_mutations=" + std::to_string(after.text_mutations));
+    return Finish();
+  }
+
+  // Observed on this build: the refusal never reaches the executor. Everything it can
+  // observe says success, so Applied is the honest conclusion; the refusal count above is
+  // what proves the failing step really ran and really failed underneath.
+  CheckHr(result.end_composition_hr, S_OK,
+          "this msctf build swallows the owner's EndComposition refusal");
+  ExpectStatus(result, EditStatus::kApplied,
+               "the executor reports what the platform shows it");
+  Check(!result.composition_active, "the composition is ended as far as TSF reports", "");
+  Evidence("write-then-step",
+           std::string("propagated=0 status=") + DescribeEditStatus(result.status) +
+               " end_hr=" + HrText(result.end_composition_hr) +
+               " owner_refusals=" + std::to_string(document.composition_end_refusals) +
+               " host_mutations=" + std::to_string(after.text_mutations) +
+               " note=EndComposition-failure-not-inducible-from-store");
   return Finish();
 }
 
@@ -966,8 +1161,23 @@ int RunCompositionCase(const std::string& case_name) {
   if (case_name == "edit-two-contexts") {
     return RunTwoContexts();
   }
-  if (case_name == "edit-failure-before-after") {
-    return RunFailureBeforeAfter();
+  if (case_name == "edit-fail-efail-unchanged") {
+    return RunFailEFailUnchanged();
+  }
+  if (case_name == "edit-fail-efail-mutated") {
+    return RunFailEFailMutated();
+  }
+  if (case_name == "edit-fail-eunexpected-unchanged") {
+    return RunFailEUnexpectedUnchanged();
+  }
+  if (case_name == "edit-fail-eunexpected-mutated") {
+    return RunFailEUnexpectedMutated();
+  }
+  if (case_name == "edit-uncertain-state") {
+    return RunUncertainStateRefusal();
+  }
+  if (case_name == "edit-fail-write-then-step") {
+    return RunFailWriteThenStep();
   }
   if (case_name == "edit-permission-refused") {
     return RunPermissionRefused();

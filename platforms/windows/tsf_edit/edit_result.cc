@@ -15,6 +15,8 @@ const char* DescribeEditStatus(EditStatus status) {
       return "Rejected";
     case EditStatus::kFailedBeforeMutation:
       return "FailedBeforeMutation";
+    case EditStatus::kFailedPossiblyMutated:
+      return "FailedPossiblyMutated";
     case EditStatus::kFailedAfterMutation:
       return "FailedAfterMutation";
     case EditStatus::kStale:
@@ -81,10 +83,14 @@ const char* DescribeEditRejectReason(EditRejectReason reason) {
       return "RangeUnavailable";
     case EditRejectReason::kCompositionRangeMismatch:
       return "CompositionRangeMismatch";
+    case EditRejectReason::kSetTextFailed:
+      return "SetTextFailed";
     case EditRejectReason::kInsertFailed:
       return "InsertFailed";
     case EditRejectReason::kEndCompositionFailed:
       return "EndCompositionFailed";
+    case EditRejectReason::kUncertainTextState:
+      return "UncertainTextState";
     case EditRejectReason::kContextStatusFailed:
       return "ContextStatusFailed";
   }

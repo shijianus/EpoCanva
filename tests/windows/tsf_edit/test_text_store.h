@@ -34,10 +34,12 @@
 //     it is granted after the current OnLockGranted returns, per the Document Locks contract;
 //   * the lock exists only for the duration of OnLockGranted, exactly as documented.
 //
-// FAULT INJECTION. `MutationFault` belongs to this test host only. It lets a test make
-// SetText mutate the backing text and then return a failure, which is how the layer's
-// FailedBeforeMutation / FailedAfterMutation distinction is exercised. The product layer has
-// no test seam and no fault-injection callback.
+// FAULT INJECTION. `MutationFault` and `SetFailCompositionEnd` belong to this test host only.
+// They let a test pair one executor-visible outcome with different host truths (a write call
+// that failed after changing nothing vs. after changing the text; a later composition-end
+// refusal), which is how the conservative classification and the uncertain-state refusal are
+// exercised. The product layer has no test seam, no fault-injection callback, and no way to
+// read the backing text directly; it observes only what TSF shows it.
 #ifndef EPOCANVA_TESTS_WINDOWS_TSF_EDIT_TEST_TEXT_STORE_H_
 #define EPOCANVA_TESTS_WINDOWS_TSF_EDIT_TEST_TEXT_STORE_H_
 
@@ -63,15 +65,22 @@ enum class TestInputPermission {
   kUnknown,
 };
 
-// Test-only failure injected into SetText / InsertTextAtSelection.
+// Test-only failure injected into SetText / InsertTextAtSelection. Each value states what the
+// HOST really does (host truth). None of it is observable by the product layer: a mutating
+// call that returns any failure HRESULT -- E_FAIL or E_UNEXPECTED alike -- must be classified
+// as "possibly mutated", because the HRESULT is not mutation evidence in either direction.
+// These modes exist so the tests can prove exactly that, by pairing one executor conclusion
+// with two different host truths.
 enum class MutationFault {
   kNone = 0,
-  // The method validates everything, reports failure, and leaves the backing text untouched.
-  kFailBeforeMutation,
-  // The method applies the mutation, then reports failure with E_UNEXPECTED. There is no
-  // rollback. E_UNEXPECTED is this controlled store's explicit partial-application signal;
-  // a plain E_FAIL means the method changed nothing.
-  kFailAfterMutation,
+  // Validate everything, change nothing, return E_FAIL.
+  kEFailWithoutMutation,
+  // Apply the text, then return E_FAIL (no rollback).
+  kEFailAfterMutation,
+  // Validate everything, change nothing, return E_UNEXPECTED.
+  kEUnexpectedWithoutMutation,
+  // Apply the text, then return E_UNEXPECTED (no rollback).
+  kEUnexpectedAfterMutation,
 };
 
 struct TestStoreOptions {
@@ -125,6 +134,7 @@ struct TestStoreDiagnostics {
   std::uint64_t composition_start_calls = 0;
   std::uint64_t composition_update_calls = 0;
   std::uint64_t composition_end_calls = 0;
+  std::uint64_t composition_end_refusals = 0;
   std::uint64_t composition_refusals = 0;
   bool sink_advised = false;
   bool composition_sink_queried = false;
@@ -223,6 +233,11 @@ class TestTextStore final : public ITextStoreACP,
   void SetAsyncLocks(bool enabled);
   void SetRefuseWriteLocks(bool enabled);
   void SetRefuseCompositions(bool refuse);
+  // Makes the context owner's OnEndComposition return E_FAIL. Whether msctf.dll propagates
+  // that refusal to ITfComposition::EndComposition's caller is an empirical question this
+  // knob exists to answer; if it does not, a TSF-side EndComposition failure cannot be
+  // induced from a store and stays unverified.
+  void SetFailCompositionEnd(bool fail);
 
   // Called by the host's message loop. Grants a deferred lock if the document is free.
   // Returns true when a lock was actually granted.
@@ -279,6 +294,7 @@ class TestTextStore final : public ITextStoreACP,
 
   MutationFault mutation_fault_ = MutationFault::kNone;
   bool refuse_compositions_ = false;
+  bool fail_composition_end_ = false;
   bool composition_sink_queried_ = false;
 
   // Counters. The store lives on one STA thread; no test calls it concurrently.

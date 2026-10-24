@@ -126,6 +126,7 @@ TestDocumentDiagnostics TestDocument::diagnostics() const {
     result.composition_start_calls = result.store.composition_start_calls;
     result.composition_update_calls = result.store.composition_update_calls;
     result.composition_end_calls = result.store.composition_end_calls;
+    result.composition_end_refusals = result.store.composition_end_refusals;
     result.composition_refusals = result.store.composition_refusals;
     result.composition_sink_installed = result.store.composition_sink_queried;
   }

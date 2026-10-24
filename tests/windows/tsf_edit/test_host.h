@@ -71,6 +71,7 @@ struct TestDocumentDiagnostics {
   std::uint64_t composition_start_calls = 0;
   std::uint64_t composition_update_calls = 0;
   std::uint64_t composition_end_calls = 0;
+  std::uint64_t composition_end_refusals = 0;
   std::uint64_t composition_refusals = 0;
   bool composition_sink_installed = false;
   bool connected = true;

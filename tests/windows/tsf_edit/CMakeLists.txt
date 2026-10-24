@@ -84,7 +84,17 @@ epocanva_add_tsf_edit_case(windows.tsf_edit.disconnected_rejected edit-disconnec
 epocanva_add_tsf_edit_case(windows.tsf_edit.async_pending edit-async-pending)
 epocanva_add_tsf_edit_case(windows.tsf_edit.stale_generation edit-stale-generation)
 epocanva_add_tsf_edit_case(windows.tsf_edit.two_contexts edit-two-contexts)
-epocanva_add_tsf_edit_case(windows.tsf_edit.failure_before_after edit-failure-before-after)
+# The write-failure matrix: one conservative executor conclusion (FailedPossiblyMutated,
+# unverified) across four different host truths -- E_FAIL/E_UNEXPECTED x changed/unchanged.
+epocanva_add_tsf_edit_case(windows.tsf_edit.failure_efail_unchanged edit-fail-efail-unchanged)
+epocanva_add_tsf_edit_case(windows.tsf_edit.failure_efail_mutated edit-fail-efail-mutated)
+epocanva_add_tsf_edit_case(windows.tsf_edit.failure_eunexpected_unchanged edit-fail-eunexpected-unchanged)
+epocanva_add_tsf_edit_case(windows.tsf_edit.failure_eunexpected_mutated edit-fail-eunexpected-mutated)
+# After an unconfirmed write failure the session refuses every plan, requests no lock, and
+# Close() clears nothing.
+epocanva_add_tsf_edit_case(windows.tsf_edit.uncertain_state_refusal edit-uncertain-state)
+# SetText succeeds, then the context owner refuses the composition end.
+epocanva_add_tsf_edit_case(windows.tsf_edit.failure_write_then_step edit-fail-write-then-step)
 epocanva_add_tsf_edit_case(windows.tsf_edit.permission_denied_unknown edit-permission-refused)
 epocanva_add_tsf_edit_case(windows.tsf_edit.composition_rejected edit-composition-rejected)
 epocanva_add_tsf_edit_case(windows.tsf_edit.resource_cleanup edit-resource-cleanup)
@@ -137,7 +147,12 @@ set_tests_properties(
   windows.tsf_edit.async_pending
   windows.tsf_edit.stale_generation
   windows.tsf_edit.two_contexts
-  windows.tsf_edit.failure_before_after
+  windows.tsf_edit.failure_efail_unchanged
+  windows.tsf_edit.failure_efail_mutated
+  windows.tsf_edit.failure_eunexpected_unchanged
+  windows.tsf_edit.failure_eunexpected_mutated
+  windows.tsf_edit.uncertain_state_refusal
+  windows.tsf_edit.failure_write_then_step
   windows.tsf_edit.permission_denied_unknown
   windows.tsf_edit.composition_rejected
   windows.tsf_edit.resource_cleanup
@@ -147,4 +162,4 @@ set_tests_properties(
 
 message(STATUS "  tsf_edit host cases  : 5 (sync, async, unsupported surface, cleanup, "
                "can_fail)")
-message(STATUS "  tsf_edit composition : 19 (18 behavioural cases + can_fail)")
+message(STATUS "  tsf_edit composition : 24 (23 behavioural cases + can_fail)")

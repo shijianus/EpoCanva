@@ -32,7 +32,8 @@
 // bookkeeping and makes PendingResult()/Snapshot() safe to read after the callback ran.
 //
 // WHAT IS NOT HERE. No keyboard sink, no registration, no candidate UI, no worker thread, no
-// COM pointer in a plan, no automatic retry, no rollback claim.
+// COM pointer in a plan, no automatic retry, no rollback claim, and no continued editing
+// after a write whose effect could not be confirmed (see kUncertainTextState).
 #ifndef EPOCANVA_WINDOWS_TSF_EDIT_EDIT_SESSION_H_
 #define EPOCANVA_WINDOWS_TSF_EDIT_EDIT_SESSION_H_
 
@@ -77,6 +78,7 @@ struct CompositionEditSessionDiagnostics {
   std::uint64_t applied = 0;
   std::uint64_t rejected = 0;
   std::uint64_t failed_before_mutation = 0;
+  std::uint64_t failed_possibly_mutated = 0;
   std::uint64_t failed_after_mutation = 0;
 };
 

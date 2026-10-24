@@ -32,6 +32,9 @@ void RecordStatusLocked(CompositionEditSessionDiagnostics* counters, EditStatus 
     case EditStatus::kFailedBeforeMutation:
       ++counters->failed_before_mutation;
       break;
+    case EditStatus::kFailedPossiblyMutated:
+      ++counters->failed_possibly_mutated;
+      break;
     case EditStatus::kFailedAfterMutation:
       ++counters->failed_after_mutation;
       break;
@@ -227,6 +230,7 @@ class EditSessionCallback final : public ITfEditSession {
         result.reason = outcome.reason;
         result.operation_hr = outcome.operation_hr;
         result.end_composition_hr = outcome.end_composition_hr;
+        result.cleanup_end_composition = outcome.cleanup_end_composition;
         result.composition_start_utf16 = outcome.composition_start_utf16;
         result.composition_length_utf16 = outcome.composition_length_utf16;
         result.text_may_have_changed = outcome.text_may_have_changed;
@@ -316,7 +320,11 @@ bool CompositionEditSession::Bind(ITfContext* context, std::uint64_t context_id,
   bool accepted = false;
   {
     std::lock_guard<std::mutex> lock(state->mutex);
-    if (!state->closed && !state->has_pending && !state->writer.active()) {
+    // A session whose last write outcome could not be confirmed stays terminal: re-binding it
+    // (even to a different context) would silently continue editing around unknown text. The
+    // recovery path is a new CompositionEditSession.
+    if (!state->closed && !state->has_pending && !state->writer.active() &&
+        !state->writer.HasUncertainOutcome()) {
       previous = state->context;
       state->context = context;
       state->identity.context_id = context_id;
@@ -437,6 +445,15 @@ bool CompositionEditSession::Precheck(const EditPlan& plan, ITfContext** context
     if (plan.context().generation != state->identity.generation) {
       rejection->status = EditStatus::kStale;
       rejection->reason = EditRejectReason::kStaleGeneration;
+      RecordStatusLocked(&state->counters, rejection->status);
+      return false;
+    }
+    if (state->writer.HasUncertainOutcome()) {
+      // A previous write's effect on the backing text was never confirmed. No lock is
+      // requested and no plan (Update/Commit/Cancel/Begin alike) runs on this session again;
+      // the caller must Close() it and start a new one.
+      rejection->status = EditStatus::kRejected;
+      rejection->reason = EditRejectReason::kUncertainTextState;
       RecordStatusLocked(&state->counters, rejection->status);
       return false;
     }
