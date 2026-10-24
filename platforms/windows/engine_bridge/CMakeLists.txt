@@ -196,6 +196,17 @@ add_subdirectory(
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_engine_host"
   "${CMAKE_CURRENT_BINARY_DIR}/tsf_engine_host_tests")
 
+# --- P3.8: context coordinator over the executor and the P3.7 edit layer ----------------
+# The coordinator links the existing executor/bridge targets and the P3.7 edit sources; it
+# recompiles none of them. Its tests reuse the P3.7 controlled TSF host and the P3.5 test
+# scaffolding (fixtures, real ToUnicodeEx key helpers, controlled backend).
+add_subdirectory(
+  "${CMAKE_CURRENT_SOURCE_DIR}/../tsf_coordinator"
+  "${CMAKE_CURRENT_BINARY_DIR}/tsf_coordinator")
+add_subdirectory(
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_coordinator"
+  "${CMAKE_CURRENT_BINARY_DIR}/tsf_coordinator_tests")
+
 # --- P3.6: explicit hosted TEST DLL variant + TSF lifecycle verification ----------------
 # The DLL compiles the production TSF sources with the engine host enabled and a private
 # test seam. The product epocanva_tsf target and its export table are unchanged.
