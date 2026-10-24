@@ -1,10 +1,14 @@
-// EpoCanva P3.5 -- engine executor scheduling-layer verification entry point.
+// EpoCanva P3.5 -- engine executor verification program entry point.
 //
-// This stage verifies the executor with a controlled backend. The real-engine modes are added
-// together with the EngineExecutor real-backend verification; they are not registered here.
+// MODES
+//   scheduler        controlled backend; no rime.dll; scheduling/state/capacity/results
+//   engine           real English engine through EngineExecutor
+//   race             real engine + concurrent submissions racing Stop
+//   startup-failure  real runtime start failures and failed-initialization cleanup
+//   self-check-fail  falsifiability control; must exit 14 and print no RESULT PASS
 //
 // EXIT CODES: 0 pass; 2 usage; 5 a check failed; 14 the self-check-fail control's expected
-// failure. The program never prints live user text.
+// failure. The program never prints live user text; only fixed fixture characters appear.
 #include <cstdio>
 #include <string>
 
@@ -50,10 +54,35 @@ bool ParseArgs(int argc, char** argv, Options* options, std::string* error) {
     *error = "unknown argument: " + name;
     return false;
   }
+  if (options->mode.empty()) {
+    *error = "--mode is required";
+    return false;
+  }
   if (options->mode == "scheduler" || options->mode == "self-check-fail") {
     return true;
   }
-  *error = options->mode.empty() ? "--mode is required" : "unknown mode: " + options->mode;
+  if (options->mode == "engine" || options->mode == "race" ||
+      options->mode == "startup-failure") {
+    if (options->rime_dll.empty() || options->run_root.empty()) {
+      *error = options->mode + " mode requires --rime-dll and --run-root";
+      return false;
+    }
+    if (options->mode != "startup-failure" &&
+        (options->fixture_dir.empty() || options->spelling_fixture_dir.empty())) {
+      *error = options->mode +
+               " mode requires --fixture-dir and --spelling-fixture-dir";
+      return false;
+    }
+    if (options->mode == "startup-failure" &&
+        (options->fixture_dir.empty() || options->spelling_fixture_dir.empty())) {
+      *error =
+          "startup-failure mode requires --fixture-dir and --spelling-fixture-dir "
+          "for the fixture staging check";
+      return false;
+    }
+    return true;
+  }
+  *error = "unknown mode: " + options->mode;
   return false;
 }
 
@@ -90,13 +119,27 @@ int main(int argc, char** argv) {
   if (!ParseArgs(argc, argv, &options, &error)) {
     std::printf("engine_executor_tests: %s\n", error.c_str());
     std::printf(
-        "usage: engine_executor_tests --mode scheduler|self-check-fail "
-        "[--run-root <.../engine-executor-run>]\n");
+        "usage: engine_executor_tests --mode "
+        "scheduler|engine|race|startup-failure|self-check-fail "
+        "[--rime-dll <abs>] [--baseline-dll <abs>] [--fixture-dir <dir>] "
+        "[--spelling-fixture-dir <dir>] [--run-root <.../engine-executor-run>]\n");
     return 2;
   }
 
   if (options.mode == "scheduler") {
     RunSchedulerMode();
+    return FinishRun();
+  }
+  if (options.mode == "engine") {
+    RunEngineMode(options);
+    return FinishRun();
+  }
+  if (options.mode == "race") {
+    RunRaceMode(options);
+    return FinishRun();
+  }
+  if (options.mode == "startup-failure") {
+    RunStartupFailureMode(options);
     return FinishRun();
   }
   RunSelfCheckFail();
