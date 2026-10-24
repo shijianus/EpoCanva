@@ -26,6 +26,8 @@ add_executable(tsf_coordinator_tests
   coordinator_test_support.h
   coordination_tests.cc
   coordination_tests.h
+  real_engine_tests.cc
+  real_engine_tests.h
   "${_tsf_edit_tests_dir}/test_host.cc"
   "${_tsf_edit_tests_dir}/test_host.h"
   "${_tsf_edit_tests_dir}/test_text_store.cc"
@@ -142,6 +144,111 @@ add_test(
     "-DPASS_ARGS=--case;can-fail"
     -DTIMEOUT_SECONDS=120
     -P ${_coordinator_assert})
+
+# --- stage 2: the real English engine through the real TSF store ------------------------
+#
+# Each case gets its own recreated run root (PrepareRunRoot requires the leaf name
+# engine-executor-run), the fixed English fixtures and the already-built rime.dll named by
+# EPOCANVA_RIME_DLL. Nothing is rebuilt or fetched here.
+
+set(_coordinator_run_base "${CMAKE_CURRENT_BINARY_DIR}/run")
+set(_coordinator_engine_args
+  "--rime-dll;${EPOCANVA_RIME_DLL}"
+  "--fixture-dir;${EPOCANVA_ENGLISH_FIXTURE_DIR}"
+  "--spelling-fixture-dir;${EPOCANVA_SPELLING_FIXTURE_DIR}")
+
+function(epocanva_add_real_coordinator_case name case)
+  add_test(
+    NAME ${name}
+    COMMAND ${CMAKE_COMMAND}
+      -DEXE=$<TARGET_FILE:tsf_coordinator_tests>
+      -DCASE=${case}
+      -DEXPECTED_EXIT=0
+      "-DMARKER=RESULT PASS"
+      -DMARKER_POLICY=require
+      "-DPASS_ARGS=--case;${case};${_coordinator_engine_args};--run-root;${_coordinator_run_base}/${case}/engine-executor-run"
+      -DTIMEOUT_SECONDS=300
+      -P ${_coordinator_assert})
+endfunction()
+
+# 1. h -> he -> hel updates the composition step by step.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_compose_progress real-compose-progress)
+# 2. Return leaves exactly one "hel".
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_return_commit real-return-commit)
+# 3. Space leaves "hel " -- the word plus exactly one space.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_space_commit real-space-commit)
+# 4. Explicit "hello" acceptance then Space commits once, no duplicate word.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_candidate_commit real-candidate-commit)
+# 5. BackSpace shrinks the composition; Escape cancels only its own composition.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_backspace_escape real-backspace-escape)
+# 6. "hello world" between a prefix and a suffix; both survive verbatim.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_surrounding_text real-surrounding-text)
+# 7. Technical text (protected marks) stays verbatim end to end.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_technical_text real-technical-text)
+# 8. Unicode prefix and astral suffix are untouched by the English composition.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_unicode_affixes real-unicode-affixes)
+# 9. Repeated Evaluate submits nothing and touches nothing.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_evaluate_pure real-evaluate-pure)
+# 10. Busy: one in-flight work, the second submit refused, never executed twice.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_busy_reject real-busy-reject)
+# 11. Rebinding while the engine result is unconsumed: the old result writes nothing.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_rebind_pending real-rebind-pending)
+# 12. A generation change during an async edit: the old callback writes to neither doc.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_async_generation real-async-generation)
+# 13. Allowed -> Denied/Unknown at both re-verification points: no further edits.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_permission_flip real-permission-flip)
+# 14. Read-only, refused locks and a disconnected context are never Applied.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_refusals_not_applied real-refusals-not-applied)
+# 15. An unconfirmed write locks the coordinator down; same-context re-bind is refused.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_uncertain_lockdown real-uncertain-lockdown)
+# 16. Pumping after a terminal state writes and consumes nothing.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_pump_idempotent real-pump-idempotent)
+# 17. Close with pending engine work / a pending async edit: terminal, bounded, clean.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_close_pending real-close-pending)
+# 18. A destroyed context's queued callback path terminates boundedly, nothing written.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.real_destroyed_context real-destroyed-context)
+
+set_tests_properties(
+  windows.tsf_coordinator.real_compose_progress
+  windows.tsf_coordinator.real_return_commit
+  windows.tsf_coordinator.real_space_commit
+  windows.tsf_coordinator.real_candidate_commit
+  windows.tsf_coordinator.real_backspace_escape
+  windows.tsf_coordinator.real_surrounding_text
+  windows.tsf_coordinator.real_technical_text
+  windows.tsf_coordinator.real_unicode_affixes
+  windows.tsf_coordinator.real_evaluate_pure
+  windows.tsf_coordinator.real_busy_reject
+  windows.tsf_coordinator.real_rebind_pending
+  windows.tsf_coordinator.real_async_generation
+  windows.tsf_coordinator.real_permission_flip
+  windows.tsf_coordinator.real_refusals_not_applied
+  windows.tsf_coordinator.real_uncertain_lockdown
+  windows.tsf_coordinator.real_pump_idempotent
+  windows.tsf_coordinator.real_close_pending
+  windows.tsf_coordinator.real_destroyed_context
+  PROPERTIES TIMEOUT 360
+             LABELS "windows;tsf;coordinator;engine;english;real")
+
+message(STATUS "  tsf_coordinator stage-2 cases: 18 (real English engine, real TSF store)")
 
 set_tests_properties(
   windows.tsf_coordinator.conversion_pure

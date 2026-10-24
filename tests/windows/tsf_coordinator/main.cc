@@ -17,6 +17,7 @@
 
 #include "coordinator_test_support.h"
 #include "coordination_tests.h"
+#include "real_engine_tests.h"
 
 int main(int argc, char** argv) {
   std::string case_name;
@@ -32,6 +33,11 @@ int main(int argc, char** argv) {
       epocanva::tsf::coordinator::test::RunCoordinationCase(case_name);
   if (code >= 0) {
     return code;
+  }
+  const int real_code =
+      epocanva::tsf::coordinator::test::RunRealEngineCase(case_name, options);
+  if (real_code >= 0) {
+    return real_code;
   }
   std::printf("unknown case: %s\n", case_name.c_str());
   return epocanva::tsf::coordinator::test::kExitUsage;

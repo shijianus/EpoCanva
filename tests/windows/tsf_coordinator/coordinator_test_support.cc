@@ -143,16 +143,28 @@ bool CreateRealHarness(const Options& options, const char* leaf, RealHarness* ha
   }
   const auto controller_options = epocanva::windows::engine::ControllerOptions{
       true, epocanva::windows::input::InputPermission::kAllowed};
-  for (epocanva::windows::engine::ClientId* client : {&harness->client_a, &harness->client_b}) {
-    epocanva::windows::engine::RequestId request = executor_tests::SubmitCreateOrFail(
-        *harness->executor, "epocanva_test_english", controller_options, client,
-        "real engine client");
-    if (!request.valid()) {
-      return false;
-    }
-    executor_tests::TakeOrFail(*harness->executor, request, 30000, "real engine create");
+  epocanva::windows::engine::RequestId request = executor_tests::SubmitCreateOrFail(
+      *harness->executor, "epocanva_test_english", controller_options,
+      &harness->client_a, "real engine client");
+  if (!request.valid()) {
+    return false;
   }
+  executor_tests::TakeOrFail(*harness->executor, request, 30000, "real engine create");
   return true;
+}
+
+epocanva::windows::engine::ClientId AddRealClient(RealHarness* harness) {
+  epocanva::windows::engine::ClientId client{};
+  epocanva::windows::engine::RequestId add_request = executor_tests::SubmitCreateOrFail(
+      *harness->executor, "epocanva_test_english",
+      epocanva::windows::engine::ControllerOptions{
+          true, epocanva::windows::input::InputPermission::kAllowed},
+      &client, "real engine extra client");
+  if (!add_request.valid()) {
+    return client;
+  }
+  executor_tests::TakeOrFail(*harness->executor, add_request, 30000, "real engine extra");
+  return client;
 }
 
 DriveResult DriveToCompletion(ContextCoordinator& coordinator, TestHost& host,

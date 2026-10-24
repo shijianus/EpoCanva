@@ -79,12 +79,15 @@ bool CreateControlledHarness(ControlledHarness* harness);
 struct RealHarness {
   std::unique_ptr<EngineExecutor> executor;
   epocanva::windows::engine::ClientId client_a;
-  epocanva::windows::engine::ClientId client_b;
 };
 
 // Stages the fixed English fixtures, prepares the deployment, starts a real-engine
-// executor and creates two ready clients against the epocanva_test_english schema.
+// executor and creates one ready client against the epocanva_test_english schema.
 bool CreateRealHarness(const Options& options, const char* leaf, RealHarness* harness);
+
+// Creates one more engine client on demand (same schema). A second session starts with an
+// empty composition, which is what the re-binding cases need.
+epocanva::windows::engine::ClientId AddRealClient(RealHarness* harness);
 
 // --- driving -----------------------------------------------------------------------------
 
