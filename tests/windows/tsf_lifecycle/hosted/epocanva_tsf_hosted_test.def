@@ -1,0 +1,17 @@
+; EpoCanva P3.6 -- exports of the hosted TEST DLL variant.
+;
+; This is NOT the product DLL and not a registration mechanism. The two COM entry points are
+; the same ones the product DLL exports. The EpoCanvaTest* names are the private lifecycle
+; seam: fixed C/POD parameters only, no callbacks, no internal object access, no STL.
+; DllRegisterServer/DllUnregisterServer remain absent.
+EXPORTS
+    DllCanUnloadNow                     PRIVATE
+    DllGetClassObject                   PRIVATE
+    EpoCanvaTestSetEngineConfig         PRIVATE
+    EpoCanvaTestClearEngineConfig       PRIVATE
+    EpoCanvaTestGetDiagnostics          PRIVATE
+    EpoCanvaTestSetStartGate            PRIVATE
+    EpoCanvaTestSetStopGate             PRIVATE
+    EpoCanvaTestSetCleanupGate          PRIVATE
+    EpoCanvaTestSetForceCleanupFailure  PRIVATE
+    EpoCanvaTestLeaseDoubleRelease      PRIVATE

@@ -196,6 +196,13 @@ add_subdirectory(
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_engine_host"
   "${CMAKE_CURRENT_BINARY_DIR}/tsf_engine_host_tests")
 
+# --- P3.6: explicit hosted TEST DLL variant + TSF lifecycle verification ----------------
+# The DLL compiles the production TSF sources with the engine host enabled and a private
+# test seam. The product epocanva_tsf target and its export table are unchanged.
+add_subdirectory(
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_lifecycle/hosted"
+  "${CMAKE_CURRENT_BINARY_DIR}/tsf_lifecycle_hosted")
+
 enable_testing()
 
 message(STATUS "epocanva_windows_engine_bridge summary")

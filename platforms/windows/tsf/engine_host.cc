@@ -515,12 +515,8 @@ void EngineHostBroker::StopOnCaller() {
 #endif
 
   // The stop/join is over, but the executor object (and the host-active flag) still cover
-  // the cleanup window. The test can observe DllCanUnloadNow here.
-  if (!fatal) {
-    RunCleanupGate();
-  }
-
-  std::unique_ptr<engine::EngineExecutor> doomed;
+  // the cleanup window. Publish the final runtime report before the gate so a snapshot in
+  // that window sees the completed Shutdown while the executor is still owned.
   {
     std::lock_guard<std::mutex> guard(s.mutex);
     s.last_report = report;
@@ -531,6 +527,14 @@ void EngineHostBroker::StopOnCaller() {
     if (fatal) {
       ++s.stop_failures;
     }
+  }
+  if (!fatal) {
+    RunCleanupGate();
+  }
+
+  std::unique_ptr<engine::EngineExecutor> doomed;
+  {
+    std::lock_guard<std::mutex> guard(s.mutex);
     doomed = std::move(s.executor);
   }
   doomed.reset();

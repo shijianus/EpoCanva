@@ -1,11 +1,42 @@
-// EpoCanva P3.1 -- the text service implementation. See text_service.h for the
-// activation contract, the reactivation rule and the deliberate scope limits.
+// EpoCanva P3.6 -- the text service implementation. See text_service.h for the transactional
+// activation contract, the abnormal-destruction rule and the deliberate scope limits.
 #include "text_service.h"
+
+#include <new>
 
 #include "module_state.h"
 
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+#include "engine_host.h"
+#endif
+
 namespace epocanva {
 namespace tsf {
+
+namespace {
+
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+HRESULT LeaseFailureToHresult(EngineLeaseStatus status) {
+  switch (status) {
+    case EngineLeaseStatus::kAcquired:
+      return S_OK;
+    case EngineLeaseStatus::kStartFailed:
+    case EngineLeaseStatus::kCleanupFailed:
+      return E_FAIL;
+    case EngineLeaseStatus::kInternalFailure:
+      return E_OUTOFMEMORY;
+    case EngineLeaseStatus::kInvalidConfig:
+    case EngineLeaseStatus::kInvalidLease:
+    case EngineLeaseStatus::kStopping:
+    case EngineLeaseStatus::kFailed:
+    case EngineLeaseStatus::kConfigMismatch:
+      return E_UNEXPECTED;
+  }
+  return E_FAIL;
+}
+#endif
+
+}  // namespace
 
 EpoCanvaTextService::EpoCanvaTextService()
     : reference_count_(1),
@@ -17,10 +48,26 @@ EpoCanvaTextService::EpoCanvaTextService()
 }
 
 EpoCanvaTextService::~EpoCanvaTextService() {
-  // Defensive, not decorative: a caller that releases the last reference without
-  // Deactivating first must not strand a thread-manager reference. Deactivate() is the
-  // one cleanup path and it is idempotent by contract.
-  Deactivate();
+  ITfThreadMgr* thread_manager = nullptr;
+  {
+    std::lock_guard<std::mutex> guard(state_mutex_);
+    thread_manager = thread_manager_;
+    thread_manager_ = nullptr;
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+    if (engine_lease_.valid()) {
+      // Reaching here means Release() destroyed an active service without Deactivate().
+      // Never call StopAndJoin from this context: it may be the loader lock. Abandon makes
+      // DllCanUnloadNow permanently S_FALSE instead of hiding the violation behind a wait.
+      engine_lease_.Abandon();
+    }
+#endif
+    client_id_ = 0;
+    activation_flags_ = 0;
+    active_ = false;
+  }
+  if (thread_manager != nullptr) {
+    thread_manager->Release();
+  }
   ModuleReleaseObject();
 }
 
@@ -70,13 +117,30 @@ HRESULT STDMETHODCALLTYPE EpoCanvaTextService::Activate(ITfThreadMgr* thread_man
 }
 
 HRESULT STDMETHODCALLTYPE EpoCanvaTextService::Deactivate() {
-  if (thread_manager_ != nullptr) {
-    thread_manager_->Release();
+  ITfThreadMgr* thread_manager = nullptr;
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+  EngineLease lease;
+#endif
+  {
+    std::lock_guard<std::mutex> guard(state_mutex_);
+    thread_manager = thread_manager_;
     thread_manager_ = nullptr;
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+    lease = std::move(engine_lease_);
+#endif
+    client_id_ = 0;
+    activation_flags_ = 0;
+    active_ = false;
   }
-  client_id_ = 0;
-  activation_flags_ = 0;
-  active_ = false;
+
+  // The object mutex is not held here. Releasing the last lease stops and joins the
+  // executor; releasing the thread-manager reference is ordinary COM.
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+  (void)lease.Release();
+#endif
+  if (thread_manager != nullptr) {
+    thread_manager->Release();
+  }
   return S_OK;  // deactivating an inactive service is a successful no-op (documented)
 }
 
@@ -91,15 +155,60 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
   if (thread_manager == nullptr) {
     return E_INVALIDARG;
   }
-  // Reactivation contract: tear the previous activation down first (text_service.h).
-  // After this call thread_manager_ is always null, so the AddRef below can never
-  // double-hold a reference however many times a host re-activates.
-  Deactivate();
-  thread_manager_ = thread_manager;
-  thread_manager_->AddRef();
-  client_id_ = client_id;      // stored verbatim; see text_service.h for why
-  activation_flags_ = flags;   // recorded this phase; no flag changes behaviour yet
-  active_ = true;
+
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+  // Acquire the engine environment BEFORE touching the current activation. No mutation of
+  // this object happens on a failure, so a rejected Activate leaves the old activation
+  // intact. The configuration is copied into the broker; the path storage is not shared.
+  EngineLease new_lease;
+  try {
+    EngineHostConfig config;
+    if (!GetEngineHostConfig(&config)) {
+      return E_UNEXPECTED;
+    }
+    const EngineLeaseStatus status =
+        EngineHostBroker::Instance().Acquire(config, &new_lease);
+    if (status != EngineLeaseStatus::kAcquired) {
+      return LeaseFailureToHresult(status);
+    }
+  } catch (const std::bad_alloc&) {
+    return E_OUTOFMEMORY;
+  } catch (...) {
+    return E_FAIL;
+  }
+#endif
+
+  // Retain the new thread manager before releasing the old one. If both arguments name the
+  // same object, the AddRef below happens before the old Release, so no dangling reference
+  // is possible.
+  thread_manager->AddRef();
+
+  ITfThreadMgr* old_thread_manager = nullptr;
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+  EngineLease old_lease;
+#endif
+  {
+    std::lock_guard<std::mutex> guard(state_mutex_);
+    old_thread_manager = thread_manager_;
+    thread_manager_ = thread_manager;
+    client_id_ = client_id;      // stored verbatim; see text_service.h for why
+    activation_flags_ = flags;   // recorded this phase; no flag changes behaviour yet
+    active_ = true;
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+    old_lease = std::move(engine_lease_);
+    engine_lease_ = std::move(new_lease);
+#endif
+  }
+
+  // Both old resources are released after the successful commit, outside the object mutex.
+  // The new lease is already held, so releasing the old one cannot be the last lease of a
+  // successful reactivation.
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+  (void)old_lease.Release();
+#endif
+  if (old_thread_manager != nullptr) {
+    old_thread_manager->Release();
+  }
   return S_OK;
 }
 

@@ -1,43 +1,53 @@
-// EpoCanva P3.1 -- the text service object: ITfTextInputProcessorEx and nothing else.
+// EpoCanva P3.6 -- the text service object: ITfTextInputProcessorEx plus one engine lease.
 //
-// WHAT THIS OBJECT DOES. Exactly what the P3.1 brief scopes: parameter validation, the
-// thread-manager reference, the client id, the activated flag, and the matching cleanup.
-// Activate and ActivateEx share ONE internal path (ActivateInternal) -- Activate is
-// defined as ActivateEx(thread_manager, client_id, 0), which is the relationship the
-// pinned SDK headers state between the two (msctf.h: ITfTextInputProcessorEx adds
-// ActivateEx to ITfTextInputProcessor's Activate/Deactivate pair and nothing more).
+// WHAT THIS OBJECT DOES. It validates Activate/ActivateEx parameters, keeps a reference to
+// the activating ITfThreadMgr, remembers the client id and flags, and -- in the hosted build
+// -- holds one EngineLease from the process-wide EngineHostBroker. Activation is
+// transactional: the new thread-manager reference is taken first, the engine lease is
+// acquired second, and only when both succeeded are the old state, old reference and old
+// lease swapped out. A failed attempt leaves the previous activation untouched.
+//
+// REACTIVATION. Activating an already-active service acquires a new lease BEFORE dropping
+// the old one and AddRefs the new thread manager BEFORE releasing the old reference. The
+// same ITfThreadMgr pointer may therefore be passed again: its reference is incremented
+// first, so releasing the old reference can never leave a dangling pointer. The net lease
+// count and thread-manager reference count are unchanged after a successful reactivation.
+// Deactivating an inactive service remains a successful no-op.
+//
+// DEACTIVATE AND THE LAST LEASE. Deactivate moves the thread-manager reference and lease out
+// under the object's mutex, then releases them outside it. Releasing the last process lease
+// stops and joins the executor on this explicit caller thread. Deactivate is never called
+// from DllMain.
+//
+// ABNORMAL DESTRUCTION. If a host releases the last COM reference without Deactivate, the
+// destructor must not wait for the executor worker: that Release may be running under the
+// loader lock. It releases the thread-manager reference and calls EngineLease::Abandon(),
+// which gives up the lease without stopping or joining. The broker consequently stays
+// Failed for the rest of the process, DllCanUnloadNow stays S_FALSE, and the worker is ended
+// only by process exit. This is a defensive abnormal path, never the normal lifecycle; the
+// loader-lock behaviour of the ThreadMgr Release itself remains unverified and is recorded
+// in docs/windows/tsf-engine-lifetime-contract.md.
 //
 // WHAT THIS OBJECT DOES NOT DO, AND MUST NOT BE READ AS DOING. There is no key sink, no
 // keystroke handling, no edit session, no candidate window, no composition, no call into
-// librime, no IPC. ITfTextInputProcessor::Activate on a real TIP is where TSF hands the
-// service its thread manager and client id so it can advise sinks; this skeleton only
-// records those two facts. Nothing here types text, and a green activation test says
-// nothing about input capability -- it says the lifecycle arithmetic is right.
+// librime from a TSF thread, no IPC. Starting a Runtime and stopping it are the only engine
+// actions here; no client, controller or host text is created or modified. ItfThreadMgr and
+// ITfContext are never passed to the executor worker.
 //
-// NO REGISTRATION SIDE EFFECTS. Activate never touches the registry, the profile store
-// or the input-language list; it takes what the caller hands it. The P3.1 round is
-// explicitly unregistered, and the test program exercises this object through a
-// LoadLibrary'd DLL, never through regsvr32.
-//
-// THE REACTIVATION CONTRACT (ours to define, because TSF never issues this sequence
-// itself: activation and deactivation alternate 1:1). Activating an already-active
-// service runs the full Deactivate path first, then activates -- self-healing, never a
-// double-held thread-manager reference, never a leaked client id. Deactivating an
-// inactive service is a successful no-op. Both answers are pinned by the test program.
-//
-// TfClientId IS STORED VERBATIM. The pinned SDK header marks no value invalid
-// (msctf.h:1027 -- TfClientId is a plain DWORD with a uuid for marshalling only), so
-// validating it here would mean inventing a rule. The one invalid input the SDK's own
-// signature lets us detect -- a null ITfThreadMgr -- is rejected with E_INVALIDARG.
-//
-// THREADING. Reference counts use the Interlocked family (see module_state.h): a TSF
-// host may create, call and release the service from the threads it chooses, and the
-// object must stay arithmetically sound even though the skeleton's state itself is
-// meant to be touched from the activating apartment only.
+// THREADING. Reference counts use the Interlocked family. The activation fields are guarded
+// by state_mutex_ because Activate/Deactivate may be called from different host threads; no
+// COM or broker call is made while that mutex is held. The broker has its own mutex and
+// never calls back into a text service.
 #ifndef EPOCANVA_TSF_TEXT_SERVICE_H_
 #define EPOCANVA_TSF_TEXT_SERVICE_H_
 
 #include <msctf.h>
+
+#include <mutex>
+
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+#include "engine_host.h"
+#endif
 
 namespace epocanva {
 namespace tsf {
@@ -65,17 +75,21 @@ class EpoCanvaTextService : public ITfTextInputProcessorEx {
                                        TfClientId client_id, DWORD flags) override;
 
  private:
-  ~EpoCanvaTextService();  // Release()-only lifecycle; drops a held thread manager
+  ~EpoCanvaTextService();  // Release()-only lifecycle; never joins an engine worker
 
   // The one activation path both Activate and ActivateEx run.
   HRESULT ActivateInternal(ITfThreadMgr* thread_manager, TfClientId client_id,
                            DWORD flags);
 
+  std::mutex state_mutex_;  // guards every field below; held during no COM/broker call
   volatile LONG reference_count_;
   ITfThreadMgr* thread_manager_;  // AddRef'd while active, released by Deactivate
   TfClientId client_id_;
   DWORD activation_flags_;
   bool active_;
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+  EngineLease engine_lease_;  // one process-broker lease per activation
+#endif
 };
 
 }  // namespace tsf

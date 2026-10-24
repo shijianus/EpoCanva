@@ -1,5 +1,13 @@
 # Windows TSF 引导（P3.1）：不注册的 COM 生命周期骨架
 
+> **P3.6 补充（2026-10-24）**：本文描述的原骨架目标 `epocanva_tsf` 仍然存在，且仍然
+> **不链接引擎**；其 3 条 CTest 继续作为骨架回归。P3.6 另在
+> `build/windows-engine-bridge/test` 中构建显式的托管测试变体
+> `epocanva_tsf_hosted_test.dll`，它复用同一组 TSF 源文件并链接 P3.5 执行器，用私有
+> 测试接缝注入目录并验证 Broker/租约/卸载护栏。真实产品配置、部署与注册仍未完成。
+> 生命周期契约见 `docs/windows/tsf-engine-lifetime-contract.md`。本文下方“没有引擎接入”
+> 的表述只适用于原骨架目标，不适用于托管测试变体。
+
 本文档描述 `platforms/windows/tsf/` 这一层**当前实际是什么**、如何配置构建、如何验证，
 以及它**不是什么**。P3.1 的边界是生命周期与卸载判断；输入能力不在本轮范围内。
 
