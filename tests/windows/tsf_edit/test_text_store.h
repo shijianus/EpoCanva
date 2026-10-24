@@ -68,7 +68,9 @@ enum class MutationFault {
   kNone = 0,
   // The method validates everything, reports failure, and leaves the backing text untouched.
   kFailBeforeMutation,
-  // The method applies the mutation, then reports failure. There is no rollback.
+  // The method applies the mutation, then reports failure with E_UNEXPECTED. There is no
+  // rollback. E_UNEXPECTED is this controlled store's explicit partial-application signal;
+  // a plain E_FAIL means the method changed nothing.
   kFailAfterMutation,
 };
 
@@ -247,7 +249,6 @@ class TestTextStore final : public ITextStoreACP,
   // add a reference; it exists to distinguish "our references are gone" from "msctf still
   // holds a reference" during teardown.
   static long LastInstanceReferenceCount();
-  static TestStoreDiagnostics LastInstanceDiagnostics();
 
  private:
   bool HasReadLock() const;

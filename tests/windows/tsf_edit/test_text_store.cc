@@ -262,7 +262,13 @@ HRESULT TestTextStore::GrantLockNow(DWORD requested_flags, bool asynchronous) {
 }
 
 bool TestTextStore::GrantPendingLockFromMessage() {
-  if (sink_ == nullptr || lock_held_ || !pending_async_lock_) {
+  if (sink_ == nullptr || !pending_async_lock_) {
+    return false;
+  }
+  if (lock_held_) {
+    // The message was dispatched while another OnLockGranted was on the stack. Keep the
+    // request queued; GrantLockNow grants it as soon as the current lock ends.
+    queued_during_lock_ = true;
     return false;
   }
   const DWORD flags = pending_flags_;
@@ -473,7 +479,10 @@ HRESULT STDMETHODCALLTYPE TestTextStore::SetText(DWORD flags, LONG start, LONG e
 
   if (mutation_fault_ == MutationFault::kFailAfterMutation) {
     ++counters_.set_text_failures;
-    return E_FAIL;
+    // E_UNEXPECTED is the test host's explicit partial-application signal: the backing text
+    // changed even though the call failed. TSF keeps its cached view of the old text, so a
+    // read-back through TSF cannot see this change; the layer must classify the signal.
+    return E_UNEXPECTED;
   }
   return S_OK;
 }
@@ -560,7 +569,10 @@ HRESULT STDMETHODCALLTYPE TestTextStore::InsertTextAtSelection(DWORD flags, cons
 
   if (mutation_fault_ == MutationFault::kFailAfterMutation) {
     ++counters_.set_text_failures;
-    return E_FAIL;
+    // E_UNEXPECTED is the test host's explicit partial-application signal: the backing text
+    // changed even though the call failed. TSF keeps its cached view of the old text, so a
+    // read-back through TSF cannot see this change; the layer must classify the signal.
+    return E_UNEXPECTED;
   }
   return S_OK;
 }
@@ -855,13 +867,6 @@ long TestTextStore::LastInstanceReferenceCount() {
   return instance != nullptr ? instance->reference_count_.load() : 0;
 }
 
-TestStoreDiagnostics TestTextStore::LastInstanceDiagnostics() {
-  TestTextStore* instance = last_instance_.load();
-  if (instance == nullptr) {
-    return TestStoreDiagnostics{};
-  }
-  return instance->diagnostics();
-}
 
 // --- helpers --------------------------------------------------------------------------
 bool TestTextStore::TextIsWellFormedUtf16(const WCHAR* text, ULONG cch) const {

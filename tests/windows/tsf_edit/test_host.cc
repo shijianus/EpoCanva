@@ -70,20 +70,28 @@ bool TestDocument::Shutdown() {
   }
   shutdown_ = true;
   teardown_.was_connected = connected_;
+  if (store_ != nullptr) {
+    const TestStoreDiagnostics before_pop = store_->diagnostics();
+    teardown_.store_sink_advised = before_pop.sink_advised;
+    teardown_.composition_sink_installed = before_pop.composition_sink_queried;
+  }
   if (connected_ && document_manager_ != nullptr) {
     // TSF still knows the context and its composition sink here, so an active composition
     // ends through the real OnEndComposition notification instead of disappearing silently.
+    // Pop(TF_POPF_ALL) also releases every reference the context holds to the text store and
+    // the context-owner composition sink, which is why the count below drops to the host's
+    // own reference.
     teardown_.pop_hr = document_manager_->Pop(TF_POPF_ALL);
     connected_ = false;
   }
   if (store_ != nullptr) {
-    const TestStoreDiagnostics diagnostics = store_->diagnostics();
-    teardown_.store_sink_advised = diagnostics.sink_advised;
-    teardown_.composition_sink_installed = diagnostics.composition_sink_queried;
-    teardown_.store_references_before_release = diagnostics.reference_count;
-    if (diagnostics.sink_advised) {
-      // This is the application side of the sink contract: give the manager's sink back
-      // before the document and the store go away.
+    const TestStoreDiagnostics after_pop = store_->diagnostics();
+    teardown_.store_sink_advised_after_pop = after_pop.sink_advised;
+    teardown_.store_references_before_release = after_pop.reference_count;
+    teardown_.store_diagnostics_before_release = after_pop;
+    if (after_pop.sink_advised) {
+      // Normally Pop has already unadvised the manager sink. If it did not, the application
+      // side of the sink contract still gives it back before the store goes away.
       teardown_.sink_unadvise_hr = store_->ReleaseSinkAdvice() ? S_OK : E_FAIL;
     }
   }
@@ -132,11 +140,11 @@ bool TestDocument::Disconnect() {
   if (!connected_ || document_manager_ == nullptr) {
     return false;
   }
-  const HRESULT hr = document_manager_->Pop(TF_POPF_ALL);
-  if (SUCCEEDED(hr)) {
+  disconnect_result_ = document_manager_->Pop(TF_POPF_ALL);
+  if (SUCCEEDED(disconnect_result_)) {
     connected_ = false;
   }
-  return SUCCEEDED(hr);
+  return SUCCEEDED(disconnect_result_);
 }
 
 void TestDocument::SetRefuseCompositions(bool refuse) {
@@ -298,6 +306,7 @@ TestDocument* TestHost::CreateDocument(const TestDocumentOptions& options,
   std::unique_ptr<TestDocument> document(
       new TestDocument(thread_manager_, document_manager, context, store, context_id,
                        /*generation=*/1));
+  document->connected_ = true;  // the Push above succeeded
   TestDocument* borrowed = document.get();
   documents_.push_back(std::move(document));
   // SetFocus is not called here. ITfThreadMgr::SetFocus sets the input focus of the thread,
@@ -331,13 +340,6 @@ bool TestHost::PumpUntil(HANDLE event, DWORD timeout_ms) {
   }
 }
 
-void TestHost::PumpMessages() {
-  MSG message = {};
-  while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != 0) {
-    ::TranslateMessage(&message);
-    ::DispatchMessageW(&message);
-  }
-}
 
 void TestHost::DrainGrantMessages() {
   if (window_ == nullptr) {
@@ -428,7 +430,6 @@ void TestHost::Shutdown() {
   cleanup_.forced_store_sink_releases = TestTextStore::ForcedSinkReleaseCount();
   cleanup_.store_reference_count_after_shutdown =
       TestTextStore::LastInstanceReferenceCount();
-  cleanup_.store_diagnostics_after_shutdown = TestTextStore::LastInstanceDiagnostics();
 }
 
 int TestHost::LiveInstanceCount() {

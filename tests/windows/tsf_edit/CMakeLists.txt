@@ -16,8 +16,12 @@ endif()
 
 add_executable(tsf_edit_tests
   main.cc
+  composition_tests.cc
+  composition_tests.h
   test_host.cc
   test_host.h
+  test_support.cc
+  test_support.h
   test_text_store.cc
   test_text_store.h)
 target_compile_definitions(tsf_edit_tests PRIVATE
@@ -26,7 +30,7 @@ target_compile_options(tsf_edit_tests PRIVATE
   /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
 target_include_directories(tsf_edit_tests PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}")
-target_link_libraries(tsf_edit_tests PRIVATE ole32 uuid user32)
+target_link_libraries(tsf_edit_tests PRIVATE epocanva_tsf_edit ole32 uuid user32)
 
 enable_testing()
 
@@ -65,6 +69,39 @@ epocanva_add_tsf_edit_case(
 epocanva_add_tsf_edit_case(
   windows.tsf_edit.host_cleanup host-cleanup)
 
+# Composition-layer cases. Every edit below uses the real RequestEditSession/lock callback.
+epocanva_add_tsf_edit_case(windows.tsf_edit.lock_callback edit-lock-callback)
+epocanva_add_tsf_edit_case(windows.tsf_edit.update_replaces_composition edit-update-scope)
+epocanva_add_tsf_edit_case(windows.tsf_edit.commit_no_duplicate edit-commit-no-duplicate)
+epocanva_add_tsf_edit_case(windows.tsf_edit.cancel_only_own edit-cancel-only-own)
+epocanva_add_tsf_edit_case(windows.tsf_edit.ended_composition_unused edit-ended-composition)
+epocanva_add_tsf_edit_case(windows.tsf_edit.no_preedit_commit edit-no-preedit-commit)
+epocanva_add_tsf_edit_case(windows.tsf_edit.unicode_boundaries edit-unicode-boundaries)
+epocanva_add_tsf_edit_case(windows.tsf_edit.surrogate_offset_rejected edit-surrogate-offset)
+epocanva_add_tsf_edit_case(windows.tsf_edit.read_only_rejected edit-read-only)
+epocanva_add_tsf_edit_case(windows.tsf_edit.write_lock_refused edit-write-lock-refused)
+epocanva_add_tsf_edit_case(windows.tsf_edit.disconnected_rejected edit-disconnected)
+epocanva_add_tsf_edit_case(windows.tsf_edit.async_pending edit-async-pending)
+epocanva_add_tsf_edit_case(windows.tsf_edit.stale_generation edit-stale-generation)
+epocanva_add_tsf_edit_case(windows.tsf_edit.two_contexts edit-two-contexts)
+epocanva_add_tsf_edit_case(windows.tsf_edit.failure_before_after edit-failure-before-after)
+epocanva_add_tsf_edit_case(windows.tsf_edit.permission_denied_unknown edit-permission-refused)
+epocanva_add_tsf_edit_case(windows.tsf_edit.composition_rejected edit-composition-rejected)
+epocanva_add_tsf_edit_case(windows.tsf_edit.resource_cleanup edit-resource-cleanup)
+
+# The composition layer's falsifiability control.
+add_test(
+  NAME windows.tsf_edit.composition_can_fail
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:tsf_edit_tests>
+    -DCASE=edit-can-fail
+    -DEXPECTED_EXIT=14
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=forbid
+    "-DPASS_ARGS=--case;edit-can-fail"
+    -DTIMEOUT_SECONDS=180
+    -P ${_tsf_edit_assert})
+
 # 5. The falsifiability control: one deliberately false claim, expected exit 14 and no
 #    RESULT PASS. Without it, a suite whose checks were tautologies would look identical to
 #    a green one.
@@ -86,8 +123,28 @@ set_tests_properties(
   windows.tsf_edit.host_unsupported_surface
   windows.tsf_edit.host_cleanup
   windows.tsf_edit.host_can_fail
+  windows.tsf_edit.lock_callback
+  windows.tsf_edit.update_replaces_composition
+  windows.tsf_edit.commit_no_duplicate
+  windows.tsf_edit.cancel_only_own
+  windows.tsf_edit.ended_composition_unused
+  windows.tsf_edit.no_preedit_commit
+  windows.tsf_edit.unicode_boundaries
+  windows.tsf_edit.surrogate_offset_rejected
+  windows.tsf_edit.read_only_rejected
+  windows.tsf_edit.write_lock_refused
+  windows.tsf_edit.disconnected_rejected
+  windows.tsf_edit.async_pending
+  windows.tsf_edit.stale_generation
+  windows.tsf_edit.two_contexts
+  windows.tsf_edit.failure_before_after
+  windows.tsf_edit.permission_denied_unknown
+  windows.tsf_edit.composition_rejected
+  windows.tsf_edit.resource_cleanup
+  windows.tsf_edit.composition_can_fail
   PROPERTIES TIMEOUT 240
              LABELS "windows;tsf;edit;host;textstore;lock;async")
 
 message(STATUS "  tsf_edit host cases  : 5 (sync, async, unsupported surface, cleanup, "
                "can_fail)")
+message(STATUS "  tsf_edit composition : 19 (18 behavioural cases + can_fail)")

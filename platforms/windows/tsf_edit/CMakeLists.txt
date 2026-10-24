@@ -5,8 +5,12 @@
 # third_party. Its static CRT (/MT) matches the CRT the TSF DLL will carry, so the edit layer
 # built here can later be linked into epocanva_tsf without mixing two CRTs in one process.
 #
-# WHAT IS BUILT HERE (stage 1): the verification program tests/windows/tsf_edit, which owns
-# the controlled ITextStoreACP host. Stage 2 adds the edit layer library below.
+# WHAT IS BUILT HERE
+#   epocanva_tsf_edit   the immutable EditPlan, EditResult, CompositionWriter and
+#                       CompositionEditSession (the layer that will later be linked into the
+#                       TSF DLL), plus the P3.2 strict text conversion it reuses
+#   tsf_edit_tests      tests/windows/tsf_edit: the controlled ITextStoreACP host and the
+#                       composition-layer cases, all against the real TSF manager
 #
 # WHAT IS NOT BUILT HERE: no DLL, no registration export, no keyboard sink, no candidate UI,
 # no AdviseKeyEventSink, and no call into an external application. Nothing in this directory
@@ -36,6 +40,32 @@ if(NOT CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
 endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
+# The P3.2 text project deliberately refuses add_subdirectory, so its strict converter is
+# compiled from the same source file here instead of being reimplemented. This is the only
+# duplication: the API and implementation stay in platforms/windows/text.
+add_library(epocanva_tsf_edit STATIC
+  edit_plan.cc
+  edit_plan.h
+  edit_result.cc
+  edit_result.h
+  composition_writer.cc
+  composition_writer.h
+  edit_session.cc
+  edit_session.h
+  "${CMAKE_CURRENT_SOURCE_DIR}/../text/text_encoding.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../text/text_encoding.h")
+target_compile_definitions(epocanva_tsf_edit PRIVATE
+  _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_compile_options(epocanva_tsf_edit PRIVATE
+  /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
+target_include_directories(epocanva_tsf_edit PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(epocanva_tsf_edit PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../text")
+# uuid supplies the IID_ITfRangeACP / IID_ITfContextComposition / IID_ITfInsertAtSelection
+# definitions; ole32 supplies the COM entry points. No msctf.lib is linked.
+target_link_libraries(epocanva_tsf_edit PUBLIC ole32 uuid)
 
 set(EPOCANVA_TSF_EDIT_TOP_LEVEL ON)
 

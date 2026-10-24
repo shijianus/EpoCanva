@@ -18,12 +18,11 @@
 //                          geometry returns TS_E_NOLAYOUT, GetWnd/embedded/formatted text
 //                          return E_NOTIMPL, QueryInsertEmbedded reports FALSE, and the
 //                          attribute queries truthfully return zero attributes.
-//   host-cleanup           every documented teardown action happens: Pop(TF_POPF_ALL),
-//                          application-side UnadviseSink, release of the host's context/
-//                          document-manager/store references, ThreadMgr deactivation and
-//                          release, window destruction, CoUninitialize. The case also
-//                          records -- but does not disguise -- the references msctf itself
-//                          retains for the two interfaces it queried.
+//   host-cleanup           every documented teardown action happens: Pop(TF_POPF_ALL) (which
+//                          unadvises the store sink and releases the context's references),
+//                          the host's context/document-manager/store release, ThreadMgr
+//                          deactivation and release, window destruction, CoUninitialize. The
+//                          case asserts the store reference count reaches zero.
 //   host-can-fail          the falsifiability control: a deliberately false claim must exit
 //                          14 and must not print RESULT PASS.
 //
@@ -37,78 +36,27 @@
 #include <string>
 #include <utility>
 
+#include "composition_tests.h"
 #include "test_host.h"
+#include "test_support.h"
 #include "test_text_store.h"
 
 namespace {
 
+using epocanva::tsf::edit::test::Check;
+using epocanva::tsf::edit::test::CheckHr;
+using epocanva::tsf::edit::test::CheckText;
+using epocanva::tsf::edit::test::CheckU64;
+using epocanva::tsf::edit::test::Finish;
+using epocanva::tsf::edit::test::HrText;
+using epocanva::tsf::edit::test::kExitCheckFailed;
+using epocanva::tsf::edit::test::kExitOk;
+using epocanva::tsf::edit::test::kExitSelfCheckFailed;
+using epocanva::tsf::edit::test::kExitUsage;
 using epocanva::tsf::edit::test::TestDocument;
 using epocanva::tsf::edit::test::TestDocumentOptions;
 using epocanva::tsf::edit::test::TestHost;
 using epocanva::tsf::edit::test::TestTextStore;
-
-constexpr int kExitOk = 0;
-constexpr int kExitUsage = 2;
-constexpr int kExitCheckFailed = 5;
-constexpr int kExitSelfCheckFailed = 14;
-
-int g_total = 0;
-int g_failed = 0;
-
-std::string HrText(HRESULT hr) {
-  char buffer[24] = {};
-  std::snprintf(buffer, sizeof(buffer), "0x%08lX", static_cast<unsigned long>(hr));
-  return buffer;
-}
-
-void Check(bool condition, const std::string& what, const std::string& got) {
-  ++g_total;
-  if (condition) {
-    std::printf("[tsf-edit]   ok   %s\n", what.c_str());
-  } else {
-    ++g_failed;
-    std::printf("[tsf-edit]   FAIL %s  (got: %s)\n", what.c_str(), got.c_str());
-  }
-}
-
-void CheckHr(HRESULT hr, HRESULT want, const std::string& what) {
-  Check(hr == want, what, "hr=" + HrText(hr) + " want=" + HrText(want));
-}
-
-void CheckU64(std::uint64_t value, std::uint64_t minimum, const std::string& what) {
-  Check(value >= minimum, what,
-        std::to_string(value) + " (want >= " + std::to_string(minimum) + ")");
-}
-
-// Text is compared, never printed: a failure names lengths and the first differing UTF-16
-// offset, which is enough to debug without echoing document content.
-void CheckText(const std::wstring& actual, const std::wstring& expected,
-               const std::string& what) {
-  if (actual == expected) {
-    Check(true, what, "");
-    return;
-  }
-  std::size_t first_difference = 0;
-  const std::size_t shorter =
-      actual.size() < expected.size() ? actual.size() : expected.size();
-  while (first_difference < shorter &&
-         actual[first_difference] == expected[first_difference]) {
-    ++first_difference;
-  }
-  Check(false, what,
-        "length_utf16=" + std::to_string(actual.size()) + " expected=" +
-            std::to_string(expected.size()) + " first_diff_utf16=" +
-            std::to_string(first_difference));
-}
-
-int Finish() {
-  if (g_failed != 0) {
-    std::printf("[tsf-edit] RESULT FAIL (%d checks, %d failed)\n", g_total, g_failed);
-    return kExitCheckFailed;
-  }
-  std::printf("[tsf-edit] RESULT PASS (%d checks, %d failed)\n", g_total, g_failed);
-  return kExitOk;
-}
 
 // A minimal edit session used only to drive the host in stage 1. It uses TSF's own
 // ITfInsertAtSelection, so the text store is reached exactly as a text service would reach
@@ -381,12 +329,13 @@ int RunHostCleanup() {
   host->Shutdown();
   const auto& report = host->cleanup_report();
   const auto& teardown = document->teardown_record();
-  const auto& ledger = report.store_diagnostics_after_shutdown;
+  const auto& ledger = teardown.store_diagnostics_before_release;
   std::printf(
-      "[tsf-edit] teardown: pop=%s sink_unadvise=%s refs_before=%lu "
+      "[tsf-edit] teardown: pop=%s sink_before=%d sink_after_pop=%d refs_before=%lu "
       "refs_after_context=%lu refs_after_docmgr=%lu live_after_host_release=%d "
       "final_refs=%ld addref=%llu release=%llu qi_textstore=%llu qi_sink=%llu\n",
-      HrText(teardown.pop_hr).c_str(), HrText(teardown.sink_unadvise_hr).c_str(),
+      HrText(teardown.pop_hr).c_str(), teardown.store_sink_advised ? 1 : 0,
+      teardown.store_sink_advised_after_pop ? 1 : 0,
       static_cast<unsigned long>(teardown.store_references_before_release),
       static_cast<unsigned long>(teardown.store_references_after_context_release),
       static_cast<unsigned long>(teardown.store_references_after_document_manager_release),
@@ -411,15 +360,17 @@ int RunHostCleanup() {
         std::to_string(report.documents_created) + "/" +
             std::to_string(report.documents_destroyed));
   Check(report.all_documents_disconnected, "the document left the stack", "");
-  Check(report.all_contexts_released, "every ITfContext reference owned by the host was released",
-        "");
+  Check(report.all_contexts_released,
+        "every ITfContext reference owned by the host was released", "");
   Check(report.all_document_managers_released,
         "every ITfDocumentMgr reference owned by the host was released", "");
   Check(SUCCEEDED(teardown.pop_hr), "Pop(TF_POPF_ALL) succeeded",
         HrText(teardown.pop_hr));
   Check(teardown.store_sink_advised, "the manager had advised the store sink", "");
+  Check(!teardown.store_sink_advised_after_pop,
+        "Pop unadvised the manager sink", "");
   Check(SUCCEEDED(teardown.sink_unadvise_hr),
-        "the application unadvised the manager sink before teardown",
+        "no further application-side unadvise was needed",
         HrText(teardown.sink_unadvise_hr));
   Check(report.advised_store_sinks_alive == 0, "no advised store sink survived",
         std::to_string(report.advised_store_sinks_alive));
@@ -434,31 +385,30 @@ int RunHostCleanup() {
   Check(InsertTextSession::LiveCount() == 0, "no edit-session object survived teardown",
         std::to_string(InsertTextSession::LiveCount()));
 
-  // The host's own addref/release ledger: one construction reference, four AddRef calls
-  // (two interface queries plus two TSF-side stores) and three Releases. What remains is not
-  // a host reference; it is the pair of interface references msctf keeps for the text store
-  // and the composition sink. The case records that exact number so a regression in the
-  // host's own teardown would change it, and so the phase report cannot accidentally claim
-  // the store was destroyed in-process.
-  const std::uint64_t expected_addrefs = 4;
-  const std::uint64_t expected_releases = 3;
-  Check(ledger.addref_calls == expected_addrefs,
-        "AddRef ledger is the expected four calls",
-        std::to_string(ledger.addref_calls));
-  Check(ledger.release_calls == expected_releases,
-        "Release ledger is the expected three calls",
-        std::to_string(ledger.release_calls));
+  // Reference accounting. Pop released every TSF reference to the store; the only one left
+  // before the host releases it is the host's own, and releasing that destroys the object.
+  Check(teardown.store_references_before_release == 1,
+        "only the host's store reference remained after Pop",
+        std::to_string(teardown.store_references_before_release));
+  Check(teardown.store_references_after_context_release == 1 &&
+            teardown.store_references_after_document_manager_release == 1,
+        "context and document-manager release did not resurrect a TSF reference", "");
+  Check(teardown.store_live_after_host_release == 0,
+        "releasing the host reference destroyed the store",
+        std::to_string(teardown.store_live_after_host_release));
+  Check(report.store_instances_alive == 0, "no TestTextStore instance survived",
+        std::to_string(report.store_instances_alive));
+  Check(report.store_reference_count_after_shutdown == 0,
+        "the store reference count is zero after shutdown",
+        std::to_string(report.store_reference_count_after_shutdown));
+  Check(ledger.addref_calls == ledger.release_calls,
+        "AddRef and Release are balanced once the host reference is included",
+        std::to_string(ledger.addref_calls) + "/" +
+            std::to_string(ledger.release_calls));
   Check(ledger.qi_text_store_calls == 1 && ledger.qi_composition_sink_calls == 1,
         "msctf queried ITextStoreACP and the composition sink once each",
         std::to_string(ledger.qi_text_store_calls) + "/" +
             std::to_string(ledger.qi_composition_sink_calls));
-  Check(report.store_reference_count_after_shutdown == 2,
-        "the only remaining references are msctf's two interface references "
-        "(external retention, recorded)",
-        std::to_string(report.store_reference_count_after_shutdown));
-  Check(report.store_instances_alive == 1,
-        "the store object itself remains alive only because msctf retains it",
-        std::to_string(report.store_instances_alive));
 
   host.reset();
   Check(TestHost::LiveInstanceCount() == 0, "no TestHost instance survived", "");
@@ -498,6 +448,11 @@ int main(int argc, char** argv) {
   }
   if (case_name == "host-can-fail") {
     return RunSelfCheckFail();
+  }
+  const int composition_code =
+      epocanva::tsf::edit::test::RunCompositionCase(case_name);
+  if (composition_code >= 0) {
+    return composition_code;
   }
   std::printf("unknown case: %s\n", case_name.c_str());
   return kExitUsage;

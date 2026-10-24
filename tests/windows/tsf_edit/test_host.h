@@ -27,11 +27,12 @@
 //
 // TEARDOWN ORDER (documented because it is observable):
 //   drain queued grant messages -> Pop(TF_POPF_ALL) while TSF still holds the context ->
-//   application-side UnadviseSink -> release ITfContext -> release ITfDocumentMgr ->
-//   release the host's store reference -> ThreadMgr::Deactivate -> release ThreadMgr ->
-//   DestroyWindow -> CoUninitialize. The cleanup report records which of these actually
-//   happened, the host's addref/release ledger, and the references msctf retains afterwards.
-//   SetFocus is deliberately not used: this headless process has no thread input focus, and
+//   fallback application-side UnadviseSink if TSF left the sink advised -> release ITfContext
+//   -> release ITfDocumentMgr -> release the host's store reference -> ThreadMgr::Deactivate
+//   -> release ThreadMgr -> DestroyWindow -> CoUninitialize. Pop releases the context's
+//   references to the text store and the composition sink; the cleanup report records the
+//   host's addref/release ledger and the zero reference count that follows. SetFocus is
+//   deliberately not used: this headless process has no thread input focus, and
 //   RequestEditSession does not require it.
 #ifndef EPOCANVA_TESTS_WINDOWS_TSF_EDIT_TEST_HOST_H_
 #define EPOCANVA_TESTS_WINDOWS_TSF_EDIT_TEST_HOST_H_
@@ -82,11 +83,13 @@ struct TestDocumentTeardownRecord {
   HRESULT sink_unadvise_hr = S_OK;
   bool was_connected = false;
   bool store_sink_advised = false;
+  bool store_sink_advised_after_pop = false;
   bool composition_sink_installed = false;
   ULONG store_references_before_release = 0;
   ULONG store_references_after_context_release = 0;
   ULONG store_references_after_document_manager_release = 0;
   int store_live_after_host_release = 0;
+  TestStoreDiagnostics store_diagnostics_before_release;
 };
 
 struct TestHostCleanupReport {
@@ -112,7 +115,6 @@ struct TestHostCleanupReport {
   bool all_contexts_released = true;
   std::uint64_t document_managers_still_enumerated = 0;
   long store_reference_count_after_shutdown = 0;
-  TestStoreDiagnostics store_diagnostics_after_shutdown;
 };
 
 class TestDocument {
@@ -131,6 +133,7 @@ class TestDocument {
   std::uint64_t context_id() const { return context_id_; }
   std::uint64_t generation() const { return generation_; }
   bool connected() const { return connected_; }
+  HRESULT disconnect_result() const { return disconnect_result_; }
 
   TestDocumentDiagnostics diagnostics() const;
   const TestDocumentTeardownRecord& teardown_record() const { return teardown_; }
@@ -153,6 +156,7 @@ class TestDocument {
   std::uint64_t generation_ = 0;
   bool connected_ = false;
   bool shutdown_ = false;
+  HRESULT disconnect_result_ = S_OK;
   TestDocumentTeardownRecord teardown_;
 };
 
@@ -170,7 +174,6 @@ class TestHost {
   // Dispatch messages until `event` is signalled. Returns false on timeout. This is a real
   // message loop, not a sleep-poll loop.
   bool PumpUntil(HANDLE event, DWORD timeout_ms);
-  void PumpMessages();
 
   void Shutdown();
   bool shutdown() const { return shutdown_; }
