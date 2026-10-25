@@ -268,9 +268,15 @@ Verified on this machine with the probe and the real tests:
   `SetFocus` when the associated window receives focus. The SDK documentation states the
   manager does **not** increment `pdimNew`'s reference count; the caller must keep its own
   reference while associated and must release the returned `ppdimPrev`. The test's
-  association helper follows that rule; a visible window could not be created in this
-  automated session (`CreateWindowExW` returned NULL with error 0), so the association
-  path is recorded as environment-limited here.
+  association helper follows that rule. The P3.10 run reported that no visible window could
+  be created (`CreateWindowExW` returned NULL with error 0) and assumed an environment
+  limit. That assumption was wrong: the test window procedure called
+  `DefWindowProcW(window, message, 0, 0)`, discarding `wParam`/`lParam`. `DefWindowProcW`
+  needs the `CREATESTRUCT` passed in `lParam` for `WM_NCCREATE`, so the window procedure
+  effectively refused creation and `GetLastError` could remain 0. After forwarding both
+  parameters unchanged, the visible window is created and `AssociateFocus` succeeds. The
+  association path is therefore verified; the OnSetFocus notification remains
+  environment-limited.
 * The observer's `Pump` revalidation still switches to the new `GetFocus` document. The
   late-edit case uses that real state change and labels it as revalidation; it is not
   counted as an OnSetFocus notification.
@@ -395,8 +401,10 @@ evidence permission-requery: Allowed before the external edit; the re-bound coor
 
 1. **Real OnSetFocus delivery** is not verified in this environment. The automated case is
    skipped; `--interactive-focus` is the independent check. `AssociateFocus`'s reference
-   rule is taken from the SDK documentation and implemented, but a visible window could not
-   be created in the automated session.
+   rule is implemented, and a visible window plus a successful association are now
+   verified. The P3.10 note that said the window could not be created was a defect in the
+   test window procedure (it dropped the creation parameters), corrected after this
+   report; it was not an environment limitation.
 2. **`OnSetFocus(NULL)`** (focus lost with no document) was not produced by
    `ITfThreadMgr::SetFocus` or `Deactivate` here. The no-target path is covered by a real
    `OnUninitDocumentMgr`/`GetFocus` loss instead. A missed focus change is caught by Pump's

@@ -295,18 +295,21 @@ bool TestHost::Initialize(std::string* error) {
   window_class.hInstance = instance;
   window_class.lpszClassName = kHostWindowClass;
   const ATOM atom = ::RegisterClassExW(&window_class);
-  if (atom == 0 && ::GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+  const DWORD register_error = ::GetLastError();
+  if (atom == 0 && register_error != ERROR_CLASS_ALREADY_EXISTS) {
     if (error != nullptr) {
-      *error = "RegisterClassExW failed";
+      *error = "RegisterClassExW failed err=" + std::to_string(register_error);
     }
     return false;
   }
   window_class_registered_ = (atom != 0);
   window_ = ::CreateWindowExW(0, kHostWindowClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
                               nullptr, instance, nullptr);
+  // Capture immediately: nothing may run between the failing call and GetLastError.
+  const DWORD create_error = ::GetLastError();
   if (window_ == nullptr) {
     if (error != nullptr) {
-      *error = "CreateWindowExW(HWND_MESSAGE) failed";
+      *error = "CreateWindowExW(HWND_MESSAGE) failed err=" + std::to_string(create_error);
     }
     return false;
   }

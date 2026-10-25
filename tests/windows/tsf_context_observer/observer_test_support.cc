@@ -31,8 +31,12 @@ std::string HrText(HRESULT hr) {
   return buffer;
 }
 
-LRESULT CALLBACK TestWindowProc(HWND window, UINT message, WPARAM, LPARAM) {
-  return ::DefWindowProcW(window, message, 0, 0);
+LRESULT CALLBACK TestWindowProc(HWND window, UINT message, WPARAM wparam,
+                               LPARAM lparam) {
+  // The parameters must be forwarded unchanged. DefWindowProcW handles WM_NCCREATE
+  // from the CREATESTRUCT passed in lparam; replacing both parameters with zero makes
+  // window creation itself fail.
+  return ::DefWindowProcW(window, message, wparam, lparam);
 }
 
 class TestEditSession final : public ITfEditSession {
@@ -451,18 +455,21 @@ bool CreateVisibleTestWindow(HWND* window, std::string* error) {
   window_class.hInstance = instance;
   window_class.lpszClassName = kVisibleWindowClass;
   const ATOM atom = ::RegisterClassExW(&window_class);
-  if (atom == 0 && ::GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+  const DWORD register_error = ::GetLastError();
+  if (atom == 0 && register_error != ERROR_CLASS_ALREADY_EXISTS) {
     if (error != nullptr) {
-      *error = "RegisterClassExW failed err=" + std::to_string(::GetLastError());
+      *error = "RegisterClassExW failed err=" + std::to_string(register_error);
     }
     return false;
   }
   HWND created = ::CreateWindowExW(0, kVisibleWindowClass, L"EpoCanva P3.10 focus",
                                    WS_OVERLAPPEDWINDOW, 120, 120, 460, 180, nullptr,
                                    nullptr, instance, nullptr);
+  // Capture immediately: nothing may run between the failing call and GetLastError.
+  const DWORD create_error = ::GetLastError();
   if (created == nullptr) {
     if (error != nullptr) {
-      *error = "CreateWindowExW failed err=" + std::to_string(::GetLastError());
+      *error = "CreateWindowExW failed err=" + std::to_string(create_error);
     }
     return false;
   }
