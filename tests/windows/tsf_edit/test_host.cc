@@ -154,6 +154,59 @@ void TestDocument::SetRefuseCompositions(bool refuse) {
   }
 }
 
+void TestDocument::SetReadOnly(bool read_only) {
+  if (store_ != nullptr) {
+    store_->SetReadOnly(read_only);
+  }
+}
+
+void TestDocument::SetScopeAnswer(TestScopeAnswer answer, std::vector<long> scopes) {
+  if (store_ != nullptr) {
+    store_->SetScopeAnswer(answer, std::move(scopes));
+  }
+}
+
+HRESULT TestDocument::SetContextCompartment(REFGUID guid, TfClientId client,
+                                            LONG value) {
+  if (context_ == nullptr) {
+    return E_FAIL;
+  }
+  ITfCompartmentMgr* manager = nullptr;
+  HRESULT hr = context_->QueryInterface(IID_ITfCompartmentMgr,
+                                        reinterpret_cast<void**>(&manager));
+  if (FAILED(hr) || manager == nullptr) {
+    return FAILED(hr) ? hr : E_FAIL;
+  }
+  ITfCompartment* compartment = nullptr;
+  hr = manager->GetCompartment(guid, &compartment);
+  manager->Release();
+  if (FAILED(hr) || compartment == nullptr) {
+    return FAILED(hr) ? hr : E_FAIL;
+  }
+  VARIANT variant;
+  ::VariantInit(&variant);
+  variant.vt = VT_I4;
+  variant.lVal = value;
+  hr = compartment->SetValue(client, &variant);
+  compartment->Release();
+  return hr;
+}
+
+HRESULT TestDocument::ClearContextCompartment(REFGUID guid, TfClientId client) {
+  if (context_ == nullptr) {
+    return E_FAIL;
+  }
+  ITfCompartmentMgr* manager = nullptr;
+  HRESULT hr = context_->QueryInterface(IID_ITfCompartmentMgr,
+                                        reinterpret_cast<void**>(&manager));
+  if (FAILED(hr) || manager == nullptr) {
+    return FAILED(hr) ? hr : E_FAIL;
+  }
+  hr = manager->ClearCompartment(client, guid);
+  manager->Release();
+  return hr;
+}
+
 // --- TestHost -------------------------------------------------------------------------
 TestHost::TestHost() {
   ++live_instances_;
@@ -273,6 +326,9 @@ TestDocument* TestHost::CreateDocument(const TestDocumentOptions& options,
   store_options.async_locks = options.async_locks;
   store_options.refuse_write_locks = options.refuse_write_locks;
   store_options.refuse_compositions = options.refuse_compositions;
+  store_options.refuse_sync_locks = options.refuse_sync_locks;
+  store_options.scope_answer = options.scope_answer;
+  store_options.input_scopes = options.input_scopes;
   store_options.message_window = window_;
   store_options.grant_message = kGrantLockMessage;
 
@@ -338,6 +394,15 @@ bool TestHost::PumpUntil(HANDLE event, DWORD timeout_ms) {
     }
     // WAIT_TIMEOUT or WAIT_FAILED. The caller gets a failure, not a guessed completion.
     return false;
+  }
+}
+
+
+void TestHost::DispatchQueuedMessages() {
+  MSG message = {};
+  while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != 0) {
+    ::TranslateMessage(&message);
+    ::DispatchMessageW(&message);
   }
 }
 

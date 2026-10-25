@@ -46,10 +46,12 @@
 #include <windows.h>
 #include <msctf.h>
 #include <textstor.h>
+#include <inputscope.h>
 
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace epocanva {
 namespace tsf {
@@ -63,6 +65,19 @@ enum class TestInputPermission {
   kAllowed = 0,
   kDenied,
   kUnknown,
+};
+
+// How the store answers a GUID_PROP_INPUTSCOPE attribute request. This is the
+// application's side of the documented InputScope contract: a TSF-aware application
+// publishes the scope through ITextStoreACP::RequestSupportedAttrs /
+// RetrieveRequestedAttrs (TS_ATTRID == GUID_PROP_INPUTSCOPE), and msctf surfaces it to
+// a text service through ITfContext::GetAppProperty. The modes beyond kScopes exist so
+// a test can hand the product layer a context whose metadata is genuinely malformed.
+enum class TestScopeAnswer {
+  kNone = 0,   // publish no input scope; attribute queries answer nothing
+  kScopes,     // answer VT_UNKNOWN holding this store's ITfInputScope object
+  kWrongType,  // answer VT_I4 -- a contract-violating payload type
+  kFail,       // RetrieveRequestedAttrs returns E_FAIL after a matching request
 };
 
 // Test-only failure injected into SetText / InsertTextAtSelection. Each value states what the
@@ -94,6 +109,11 @@ struct TestStoreOptions {
   // Report a writable document (GetStatus) but refuse every read/write lock. This is a
   // separate observable from read_only: it tests the lock refusal path itself.
   bool refuse_write_locks = false;
+  // A busy application: every synchronous lock request is answered TS_E_SYNCHRONOUS
+  // (the documented "cannot be served now" answer of the Document Locks contract) and
+  // asynchronous ones are deferred through the message window like async_locks. A
+  // reader that first asks TF_ES_SYNC must fall back to TF_ES_ASYNC and wait.
+  bool refuse_sync_locks = false;
   // Refuse every composition through the context-owner composition sink. This is the real
   // TSF path: TSF queries the object passed to CreateContext for
   // ITfContextOwnerCompositionSink, and ITfContextComposition::StartComposition returns
@@ -101,6 +121,11 @@ struct TestStoreOptions {
   bool refuse_compositions = false;
   HWND message_window = nullptr;
   UINT grant_message = 0;
+  // InputScope metadata this application publishes through the real attribute path.
+  // kNone (the default) leaves the store attribute-free, which is what an ordinary
+  // field looks like from the property side.
+  TestScopeAnswer scope_answer = TestScopeAnswer::kNone;
+  std::vector<long> input_scopes;  // meaningful when scope_answer == kScopes
 };
 
 // Value-only snapshot. It contains no text, only lengths and counters, so a test can print it
@@ -131,6 +156,10 @@ struct TestStoreDiagnostics {
   std::uint64_t qi_unknown_calls = 0;
   std::uint64_t qi_text_store_calls = 0;
   std::uint64_t qi_composition_sink_calls = 0;
+  std::uint64_t request_supported_attrs_calls = 0;
+  std::uint64_t request_attrs_at_position_calls = 0;
+  std::uint64_t retrieve_requested_attrs_calls = 0;
+  std::uint64_t scope_answers_delivered = 0;
   std::uint64_t composition_start_calls = 0;
   std::uint64_t composition_update_calls = 0;
   std::uint64_t composition_end_calls = 0;
@@ -147,6 +176,41 @@ struct TestStoreDiagnostics {
   LONG selection_start_utf16 = 0;
   LONG selection_end_utf16 = 0;
   ULONG reference_count = 0;
+};
+
+// The application's ITfInputScope object for TestScopeAnswer::kScopes. It carries the
+// scope list the store currently publishes (the store updates it when a test flips the
+// metadata, so a query sees the configuration of its own moment). GetInputScopes hands
+// out a CoTaskMemAlloc'd copy -- the ownership rule the reader honours with
+// CoTaskMemFree. The auxiliary methods answer "no such data"; the product path never
+// calls them.
+class TestInputScope final : public ITfInputScope {
+ public:
+  TestInputScope();
+  ~TestInputScope();
+
+  TestInputScope(const TestInputScope&) = delete;
+  TestInputScope& operator=(const TestInputScope&) = delete;
+
+  void set_scopes(const std::vector<long>& scopes);
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override;
+  ULONG STDMETHODCALLTYPE AddRef() override;
+  ULONG STDMETHODCALLTYPE Release() override;
+
+  HRESULT STDMETHODCALLTYPE GetInputScopes(InputScope** scopes,
+                                           UINT* count) override;
+  HRESULT STDMETHODCALLTYPE GetPhrase(BSTR** phrases, UINT* count) override;
+  HRESULT STDMETHODCALLTYPE GetRegularExpression(BSTR* regexp) override;
+  HRESULT STDMETHODCALLTYPE GetSRGS(BSTR* srgs) override;
+  HRESULT STDMETHODCALLTYPE GetXML(BSTR* xml) override;
+
+  static int LiveInstanceCount();
+
+ private:
+  std::atomic<LONG> reference_count_;
+  std::vector<long> scopes_;
+  static std::atomic<int> live_instances_;
 };
 
 class TestTextStore final : public ITextStoreACP,
@@ -232,7 +296,17 @@ class TestTextStore final : public ITextStoreACP,
   void SetMutationFault(MutationFault fault);
   void SetAsyncLocks(bool enabled);
   void SetRefuseWriteLocks(bool enabled);
+  void SetRefuseSyncLocks(bool enabled);
   void SetRefuseCompositions(bool refuse);
+  // Flips the read-only bit this store reports through its real GetStatus. The
+  // read_only option seeds this at creation; the control exists so a test can change
+  // the document's real TSF state between one query and the next.
+  void SetReadOnly(bool read_only);
+  // Changes the InputScope metadata this application publishes. The next attribute
+  // query observes the new answer; an in-flight one keeps what it already read.
+  void SetScopeAnswer(TestScopeAnswer answer, std::vector<long> scopes);
+  // The read-only state the store currently reports.
+  bool read_only() const;
   // Makes the context owner's OnEndComposition return E_FAIL. Whether msctf.dll propagates
   // that refusal to ITfComposition::EndComposition's caller is an empirical question this
   // knob exists to answer; if it does not, a TSF-side EndComposition failure cannot be
@@ -296,6 +370,19 @@ class TestTextStore final : public ITextStoreACP,
   bool refuse_compositions_ = false;
   bool fail_composition_end_ = false;
   bool composition_sink_queried_ = false;
+
+  // Read-only state, seeded from options_ and flippable through SetReadOnly.
+  bool read_only_ = false;
+  // InputScope metadata: the answer mode, the published list and the object handed out
+  // through RetrieveRequestedAttrs. The object is owned by one reference from the store
+  // and released in the destructor; every reference a query took is returned by the
+  // reader's VariantClear.
+  TestScopeAnswer scope_answer_ = TestScopeAnswer::kNone;
+  std::vector<long> input_scopes_;
+  TestInputScope* scope_object_ = nullptr;
+  // Set by a Request*Attr* call whose filter covers GUID_PROP_INPUTSCOPE and consumed
+  // by the next RetrieveRequestedAttrs, per the staged-request shape of the contract.
+  bool pending_scope_query_ = false;
 
   // Counters. The store lives on one STA thread; no test calls it concurrently.
   TestStoreDiagnostics counters_;

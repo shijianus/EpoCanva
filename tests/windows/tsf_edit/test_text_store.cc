@@ -40,16 +40,21 @@ TestTextStore::TestTextStore(const TestStoreOptions& options)
     : reference_count_(1),
       options_(options),
       text_utf16_(options.initial_text_utf16),
-      refuse_compositions_(options.refuse_compositions) {
+      refuse_compositions_(options.refuse_compositions),
+      read_only_(options.read_only),
+      scope_answer_(options.scope_answer),
+      input_scopes_(options.input_scopes) {
   selection_.acpStart = options.initial_selection_start_utf16;
   selection_.acpEnd = options.initial_selection_end_utf16;
   selection_.style.ase = TS_AE_END;
   selection_.style.fInterimChar = FALSE;
+  scope_object_ = new TestInputScope();
+  scope_object_->set_scopes(input_scopes_);
 
   counters_.text_length_utf16 = static_cast<LONG>(text_utf16_.size());
   counters_.selection_start_utf16 = selection_.acpStart;
   counters_.selection_end_utf16 = selection_.acpEnd;
-  counters_.read_only = options_.read_only;
+  counters_.read_only = read_only_;
   counters_.async_locks = options_.async_locks;
   counters_.refuse_write_locks = options_.refuse_write_locks;
   ++live_instances_;
@@ -66,6 +71,10 @@ TestTextStore::~TestTextStore() {
     sink_unknown_ = nullptr;
     --live_advised_sinks_;
     ++forced_sink_releases_;
+  }
+  if (scope_object_ != nullptr) {
+    scope_object_->Release();
+    scope_object_ = nullptr;
   }
   if (last_instance_.load() == this) {
     last_instance_.store(nullptr);
@@ -177,7 +186,7 @@ HRESULT STDMETHODCALLTYPE TestTextStore::RequestLock(DWORD lock_flags, HRESULT* 
   // A read-only document, or a store configured to refuse write locks, refuses the write
   // request itself. The layer also checks ITfContext::GetStatus first; this is the second,
   // independent refusal point.
-  if (wants_write && (options_.read_only || options_.refuse_write_locks)) {
+  if (wants_write && (read_only_ || options_.refuse_write_locks)) {
     ++counters_.write_lock_refusals;
     ++counters_.rejected_writes;
     *session_hr = TS_E_READONLY;
@@ -198,6 +207,15 @@ HRESULT STDMETHODCALLTYPE TestTextStore::RequestLock(DWORD lock_flags, HRESULT* 
     pending_flags_ = lock_flags;
     queued_during_lock_ = true;
     *session_hr = TS_S_ASYNC;
+    return S_OK;
+  }
+
+  if (wants_sync && options_.refuse_sync_locks) {
+    // The busy-application observable: the document can currently serve no synchronous
+    // lock at all, which is exactly the state a synchronous reader must handle by
+    // falling back to an asynchronous request.
+    ++counters_.sync_lock_refusals;
+    *session_hr = TS_E_SYNCHRONOUS;
     return S_OK;
   }
 
@@ -321,7 +339,7 @@ HRESULT STDMETHODCALLTYPE TestTextStore::GetStatus(TS_STATUS* status) {
   if (status == nullptr) {
     return E_INVALIDARG;
   }
-  status->dwDynamicFlags = options_.read_only ? TS_SD_READONLY : 0;
+  status->dwDynamicFlags = read_only_ ? TS_SD_READONLY : 0;
   status->dwStaticFlags = 0;
   return S_OK;
 }
@@ -376,7 +394,7 @@ HRESULT STDMETHODCALLTYPE TestTextStore::SetSelection(
   if (selection == nullptr || count != 1) {
     return E_INVALIDARG;
   }
-  if (options_.read_only) {
+  if (read_only_) {
     return TS_E_READONLY;
   }
   if (!HasWriteLock()) {
@@ -445,7 +463,7 @@ HRESULT STDMETHODCALLTYPE TestTextStore::SetText(DWORD flags, LONG start, LONG e
   change->acpStart = 0;
   change->acpOldEnd = 0;
   change->acpNewEnd = 0;
-  if (options_.read_only) {
+  if (read_only_) {
     ++counters_.rejected_writes;
     return TS_E_READONLY;
   }
@@ -542,7 +560,7 @@ HRESULT STDMETHODCALLTYPE TestTextStore::InsertTextAtSelection(DWORD flags, cons
     return S_OK;
   }
 
-  if (options_.read_only) {
+  if (read_only_) {
     ++counters_.rejected_writes;
     return TS_E_READONLY;
   }
@@ -664,22 +682,49 @@ HRESULT STDMETHODCALLTYPE TestTextStore::InsertEmbeddedAtSelection(
   return E_NOTIMPL;
 }
 
+// --- ITextStoreACP attributes (the application's half of the InputScope contract) --------
+//
+// The staged-request shape of textstor.h: a Request*Attr* call records what is being
+// asked for, and the following RetrieveRequestedAttrs delivers it. This store supports
+// exactly one attribute, TS_ATTRID GUID_PROP_INPUTSCOPE, when a test configured a scope
+// answer; every other attribute (and every answer when scope_answer_ is kNone) yields
+// zero fetched values, which is the honest "this application publishes nothing" state
+// an ordinary field presents to a text service.
+
+namespace {
+
+// True when the attribute filter names GUID_PROP_INPUTSCOPE, or when it is absent (the
+// "all supported attributes" form).
+bool FilterWantsInputScope(ULONG filter_count, const TS_ATTRID* filter) {
+  if (filter == nullptr || filter_count == 0) {
+    return true;
+  }
+  for (ULONG index = 0; index < filter_count; ++index) {
+    if (filter[index] == GUID_PROP_INPUTSCOPE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
 HRESULT STDMETHODCALLTYPE TestTextStore::RequestSupportedAttrs(DWORD flags,
                                                                ULONG filter_count,
                                                                const TS_ATTRID* filter) {
   (void)flags;
-  (void)filter_count;
-  (void)filter;
-  return S_OK;  // no attributes are supported; RetrieveRequestedAttrs returns zero
+  ++counters_.request_supported_attrs_calls;
+  pending_scope_query_ = FilterWantsInputScope(filter_count, filter);
+  return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE TestTextStore::RequestAttrsAtPosition(
     LONG position, ULONG filter_count, const TS_ATTRID* filter, DWORD flags) {
   (void)position;
-  (void)filter_count;
-  (void)filter;
   (void)flags;
-  return S_OK;  // no attributes are supported
+  ++counters_.request_attrs_at_position_calls;
+  pending_scope_query_ = FilterWantsInputScope(filter_count, filter);
+  return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE TestTextStore::RequestAttrsTransitioningAtPosition(
@@ -688,7 +733,11 @@ HRESULT STDMETHODCALLTYPE TestTextStore::RequestAttrsTransitioningAtPosition(
   (void)filter_count;
   (void)filter;
   (void)flags;
-  return S_OK;  // no attributes are supported
+  // This store reports no transitions between attribute regions; the flag that wants
+  // only transitioning attributes therefore leaves nothing staged.
+  ++counters_.request_attrs_at_position_calls;
+  pending_scope_query_ = false;
+  return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE TestTextStore::FindNextAttrTransition(
@@ -710,13 +759,140 @@ HRESULT STDMETHODCALLTYPE TestTextStore::FindNextAttrTransition(
 HRESULT STDMETHODCALLTYPE TestTextStore::RetrieveRequestedAttrs(ULONG count,
                                                                 TS_ATTRVAL* attributes,
                                                                 ULONG* fetched) {
-  (void)count;
-  (void)attributes;
   if (fetched == nullptr) {
     return E_INVALIDARG;
   }
-  *fetched = 0;  // nothing was stored by the Request*Attr* calls
+  ++counters_.retrieve_requested_attrs_calls;
+  const bool staged = pending_scope_query_;
+  pending_scope_query_ = false;
+  *fetched = 0;
+  if (!staged || count == 0) {
+    return S_OK;  // nothing was asked for, or no room to answer
+  }
+  if (scope_answer_ == TestScopeAnswer::kFail) {
+    // A genuinely broken context owner: the attribute read fails after the request.
+    return E_FAIL;
+  }
+  if (scope_answer_ == TestScopeAnswer::kNone) {
+    return S_OK;  // this application publishes no input scope
+  }
+  attributes[0].idAttr = GUID_PROP_INPUTSCOPE;
+  attributes[0].dwOverlapId = 0;
+  ::VariantInit(&attributes[0].varValue);
+  if (scope_answer_ == TestScopeAnswer::kWrongType) {
+    // The documented payload for this property is VT_UNKNOWN holding ITfInputScope; a
+    // VT_I4 is a contract violation the product layer must refuse to interpret.
+    attributes[0].varValue.vt = VT_I4;
+    attributes[0].varValue.lVal = 4000;
+  } else {
+    attributes[0].varValue.vt = VT_UNKNOWN;
+    attributes[0].varValue.punkVal = scope_object_;
+    scope_object_->AddRef();
+  }
+  ++counters_.scope_answers_delivered;
+  *fetched = 1;
   return S_OK;
+}
+
+// --- TestInputScope ----------------------------------------------------------------------
+
+std::atomic<int> TestInputScope::live_instances_{0};
+
+TestInputScope::TestInputScope() : reference_count_(1), scopes_() {
+  ++live_instances_;
+}
+
+TestInputScope::~TestInputScope() {
+  --live_instances_;
+}
+
+void TestInputScope::set_scopes(const std::vector<long>& scopes) {
+  scopes_ = scopes;
+}
+
+HRESULT STDMETHODCALLTYPE TestInputScope::QueryInterface(REFIID riid, void** object) {
+  if (object == nullptr) {
+    return E_INVALIDARG;
+  }
+  *object = nullptr;
+  if (riid == IID_IUnknown || riid == IID_ITfInputScope) {
+    *object = static_cast<ITfInputScope*>(this);
+    AddRef();
+    return S_OK;
+  }
+  return E_NOINTERFACE;
+}
+
+ULONG STDMETHODCALLTYPE TestInputScope::AddRef() {
+  return static_cast<ULONG>(reference_count_.fetch_add(1) + 1);
+}
+
+ULONG STDMETHODCALLTYPE TestInputScope::Release() {
+  const LONG remaining = reference_count_.fetch_sub(1) - 1;
+  if (remaining == 0) {
+    delete this;
+  }
+  return static_cast<ULONG>(remaining);
+}
+
+HRESULT STDMETHODCALLTYPE TestInputScope::GetInputScopes(InputScope** scopes,
+                                                         UINT* count) {
+  if (scopes == nullptr || count == nullptr) {
+    return E_INVALIDARG;
+  }
+  *scopes = nullptr;
+  *count = 0;
+  if (scopes_.empty()) {
+    return S_OK;  // an explicitly empty scope list is a valid answer
+  }
+  InputScope* delivered =
+      static_cast<InputScope*>(::CoTaskMemAlloc(scopes_.size() * sizeof(InputScope)));
+  if (delivered == nullptr) {
+    return E_OUTOFMEMORY;
+  }
+  for (std::size_t index = 0; index < scopes_.size(); ++index) {
+    delivered[index] = static_cast<InputScope>(scopes_[index]);
+  }
+  *scopes = delivered;
+  *count = static_cast<UINT>(scopes_.size());
+  return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE TestInputScope::GetPhrase(BSTR** phrases, UINT* count) {
+  if (phrases == nullptr || count == nullptr) {
+    return E_INVALIDARG;
+  }
+  *phrases = nullptr;
+  *count = 0;
+  return E_NOTIMPL;  // no phrase-list data exists in this store
+}
+
+HRESULT STDMETHODCALLTYPE TestInputScope::GetRegularExpression(BSTR* regexp) {
+  if (regexp == nullptr) {
+    return E_INVALIDARG;
+  }
+  *regexp = nullptr;
+  return E_NOTIMPL;
+}
+
+HRESULT STDMETHODCALLTYPE TestInputScope::GetSRGS(BSTR* srgs) {
+  if (srgs == nullptr) {
+    return E_INVALIDARG;
+  }
+  *srgs = nullptr;
+  return E_NOTIMPL;
+}
+
+HRESULT STDMETHODCALLTYPE TestInputScope::GetXML(BSTR* xml) {
+  if (xml == nullptr) {
+    return E_INVALIDARG;
+  }
+  *xml = nullptr;
+  return E_NOTIMPL;
+}
+
+int TestInputScope::LiveInstanceCount() {
+  return live_instances_.load();
 }
 
 HRESULT STDMETHODCALLTYPE TestTextStore::GetActiveView(TsViewCookie* view) {
@@ -822,12 +998,33 @@ void TestTextStore::SetRefuseWriteLocks(bool enabled) {
   counters_.refuse_write_locks = enabled;
 }
 
+void TestTextStore::SetRefuseSyncLocks(bool enabled) {
+  options_.refuse_sync_locks = enabled;
+}
+
 void TestTextStore::SetRefuseCompositions(bool refuse) {
   refuse_compositions_ = refuse;
 }
 
 void TestTextStore::SetFailCompositionEnd(bool fail) {
   fail_composition_end_ = fail;
+}
+
+void TestTextStore::SetReadOnly(bool read_only) {
+  read_only_ = read_only;
+  counters_.read_only = read_only;
+}
+
+void TestTextStore::SetScopeAnswer(TestScopeAnswer answer, std::vector<long> scopes) {
+  scope_answer_ = answer;
+  input_scopes_ = std::move(scopes);
+  if (scope_object_ != nullptr) {
+    scope_object_->set_scopes(input_scopes_);
+  }
+}
+
+bool TestTextStore::read_only() const {
+  return read_only_;
 }
 
 std::wstring TestTextStore::text_utf16() const {
@@ -852,7 +1049,7 @@ TestStoreDiagnostics TestTextStore::diagnostics() const {
   copy.composition_sink_queried = composition_sink_queried_;
   copy.lock_held = lock_held_;
   copy.pending_async_lock = pending_async_lock_;
-  copy.read_only = options_.read_only;
+  copy.read_only = read_only_;
   copy.async_locks = options_.async_locks;
   copy.refuse_write_locks = options_.refuse_write_locks;
   copy.text_length_utf16 = static_cast<LONG>(text_utf16_.size());

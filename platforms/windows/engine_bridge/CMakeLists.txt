@@ -207,6 +207,17 @@ add_subdirectory(
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_coordinator"
   "${CMAKE_CURRENT_BINARY_DIR}/tsf_coordinator_tests")
 
+# --- P3.9: real input-permission resolution from TSF context metadata -------------------
+# The permission module is engine-free: pure classification plus the real
+# GetStatus/compartment/InputScope reads. Its tests reuse the P3.7 controlled TSF host
+# sources, exactly like the coordinator tests; they link no engine target.
+add_subdirectory(
+  "${CMAKE_CURRENT_SOURCE_DIR}/../tsf_context"
+  "${CMAKE_CURRENT_BINARY_DIR}/tsf_context")
+add_subdirectory(
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_context"
+  "${CMAKE_CURRENT_BINARY_DIR}/tsf_context_tests")
+
 # --- P3.6: explicit hosted TEST DLL variant + TSF lifecycle verification ----------------
 # The DLL compiles the production TSF sources with the engine host enabled and a private
 # test seam. The product epocanva_tsf target and its export table are unchanged.

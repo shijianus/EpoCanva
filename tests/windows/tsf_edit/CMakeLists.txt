@@ -15,6 +15,7 @@ if(NOT EPOCANVA_TSF_EDIT_TOP_LEVEL)
 endif()
 
 add_executable(tsf_edit_tests
+  inputscope_test_guids.cc
   main.cc
   composition_tests.cc
   composition_tests.h

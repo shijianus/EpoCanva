@@ -28,6 +28,7 @@ add_executable(tsf_coordinator_tests
   coordination_tests.h
   real_engine_tests.cc
   real_engine_tests.h
+  "${_tsf_edit_tests_dir}/inputscope_test_guids.cc"
   "${_tsf_edit_tests_dir}/test_host.cc"
   "${_tsf_edit_tests_dir}/test_host.h"
   "${_tsf_edit_tests_dir}/test_text_store.cc"

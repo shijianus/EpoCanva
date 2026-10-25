@@ -64,6 +64,14 @@ struct TestDocumentOptions {
   // then returns S_OK with a null composition object, which is the exact case the layer must
   // not fake.
   bool refuse_compositions = false;
+  // A busy application: every synchronous lock request is answered TS_E_SYNCHRONOUS
+  // (the documented "cannot be served now" answer of the Document Locks contract) and
+  // asynchronous ones are deferred through the message window like async_locks. A
+  // reader that first asks TF_ES_SYNC must fall back to TF_ES_ASYNC and wait.
+  bool refuse_sync_locks = false;
+  // InputScope metadata the document's store publishes through the real attribute path.
+  TestScopeAnswer scope_answer = TestScopeAnswer::kNone;
+  std::vector<long> input_scopes;
 };
 
 struct TestDocumentDiagnostics {
@@ -141,6 +149,19 @@ class TestDocument {
 
   bool Disconnect();
   void SetRefuseCompositions(bool refuse);
+  // Flips the document's real read-only state (the store's GetStatus answer).
+  void SetReadOnly(bool read_only);
+  // Changes the InputScope metadata the document's store publishes.
+  void SetScopeAnswer(TestScopeAnswer answer, std::vector<long> scopes);
+
+  // --- real application-side compartment writes -----------------------------------------
+  // The application owns its context's compartments (the predefined-compartments
+  // reference documents KEYBOARD_DISABLED and EMPTYCONTEXT as context-specific VT_I4
+  // values). These helpers drive the real path: QI the context for
+  // ITfCompartmentMgr, GetCompartment, ITfCompartment::SetValue / ClearCompartment
+  // with the host's own activated client id.
+  HRESULT SetContextCompartment(REFGUID guid, TfClientId client, LONG value);
+  HRESULT ClearContextCompartment(REFGUID guid, TfClientId client);
 
  private:
   friend class TestHost;
@@ -175,6 +196,11 @@ class TestHost {
   // Dispatch messages until `event` is signalled. Returns false on timeout. This is a real
   // message loop, not a sleep-poll loop.
   bool PumpUntil(HANDLE event, DWORD timeout_ms);
+
+  // Dispatches whatever messages are already queued (deferred lock grants included)
+  // without waiting for anything. Lets a test prove that a late callback publishes
+  // nothing after a termination.
+  void DispatchQueuedMessages();
 
   void Shutdown();
   bool shutdown() const { return shutdown_; }
