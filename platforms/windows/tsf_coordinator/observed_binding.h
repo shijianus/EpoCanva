@@ -3,7 +3,7 @@
 // WHAT THIS IS. A small adapter that turns the observer's three binding events into the
 // coordinator's operations:
 //
-//   OnTargetLost            -> ContextCoordinator::InvalidateBinding (release-only)
+//   OnTargetLost            -> ContextCoordinator::InvalidateBinding (logical retire only)
 //   OnTargetBound           -> a fresh engine client + ContextCoordinator::BindObserved
 //   OnOwnEditCompleted      -> ContextCoordinator::ObserveRealCaret
 //
@@ -24,10 +24,11 @@
 // pair that shares the registry cannot bind the same context by supplying another integer.
 //
 // NO WRITES FROM A NOTIFICATION. OnTargetLost may be called from inside
-// ITfTextEditSink::OnEndEdit. It only invalidates: session Invalidate/Close are
-// release-only, the permission source is abandoned (no TSF call), and no text operation is
-// issued. Binding and the read-only selection query happen in the observer's Pump, outside
-// the notification.
+// ITfTextEditSink::OnEndEdit. It only invalidates: the session is moved into the retirement
+// ledger, its pending plan is abandoned, the permission source is abandoned (no TSF call),
+// and no text operation is issued. The legal EndOwnedComposition cleanup and the engine
+// close happen in the host's Pump, outside the notification. Binding and the read-only
+// selection query happen in the observer's Pump, outside the notification.
 #ifndef EPOCANVA_WINDOWS_TSF_COORDINATOR_OBSERVED_BINDING_H_
 #define EPOCANVA_WINDOWS_TSF_COORDINATOR_OBSERVED_BINDING_H_
 

@@ -103,6 +103,14 @@ class CompositionEditSession {
   // kStale and the callback makes no TSF call.
   void Invalidate();
 
+  // Retirement entry. A pending accepted plan is made Stale without writing; from then on
+  // only an EndOwnedComposition plan for the SAME identity is accepted. The session stays
+  // bound so the writer's own composition can be ended through one legal edit session.
+  // Idempotent; has no effect after Close().
+  void BeginRetirement();
+  // True when this session's writer had an unconfirmed write. No cleanup plan may run.
+  bool HasUncertainOutcome() const;
+
   // Releases the held context/composition references. An active composition is released
   // without EndComposition (the document owner terminates it); the caller that requires a
   // clean end must apply a Cancel plan first. Idempotent.

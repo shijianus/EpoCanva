@@ -60,9 +60,10 @@ input::KeyEventSnapshot FixedEvent(std::uint32_t virtual_key) {
 }  // namespace
 
 // The host's fresh-client source for one observed binding. Every binding gets a new engine
-// session; the coordinator's invalidation path never continues an old composition. Old
-// clients are not closed here: the executor owns them and StopAndJoin closes them all. The
-// lab creates one client per focus change, which is bounded by the experiment session.
+// session; the coordinator's invalidation path never continues an old composition. The
+// coordinator checks admission before calling NextClient, then retires the client through the
+// executor on that binding's retirement; the close result is consumed by Pump. StopAndJoin is
+// the last-resort owner, not the normal release path.
 class LabSession::LabEngineClients final
     : public coordinator::ObservedEngineClients {
  public:
@@ -1042,6 +1043,11 @@ bool LabSession::ReadDocument(int index, LabDocumentSnapshot* snapshot) {
   snapshot->composition_start_calls = diagnostics.store.composition_start_calls;
   snapshot->composition_update_calls = diagnostics.store.composition_update_calls;
   snapshot->composition_end_calls = diagnostics.store.composition_end_calls;
+  ULONG compositions = 0;
+  if (document->context() != nullptr &&
+      SUCCEEDED(oct::CountCompositions(document->context(), &compositions))) {
+    snapshot->active_compositions = static_cast<std::uint32_t>(compositions);
+  }
   if (registry_ != nullptr) {
     context::ContextIdRecord record;
     if (registry_->Observe(document->context(), &record) ==
@@ -1125,6 +1131,7 @@ LabSnapshot LabSession::Snapshot() {
     snapshot.last_edit_reason = coordinator.last_edit_reason;
     snapshot.tracked_caret_utf16 = coordinator.tracked_caret_utf16;
     snapshot.composition_active = coordinator.composition_active;
+    snapshot.owned_composition_active = coordinator.owned_composition_active;
     snapshot.composition_start_utf16 = coordinator.composition_start_utf16;
     snapshot.composition_length_utf16 = coordinator.composition_length_utf16;
     snapshot.works_accepted = coordinator.works_accepted;

@@ -7,6 +7,10 @@
 //                  when no composition exists -- insert the committed text once at the
 //                  collapsed caret (the no-preedit commit path)
 //   Cancel         remove the text of the composition this writer started and end it
+//   EndOwnedComposition
+//                  end the composition this writer started WITHOUT SetText: the displayed
+//                  text stays as ordinary document text. Used only for retirement cleanup,
+//                  after the range was verified to hold exactly what this writer last wrote.
 //
 // WHAT A PLAN IS NOT. It contains no COM pointer, no ITfContext, no ITfRange, no edit
 // cookie and no reference to a worker thread. The executor may move/copy it freely; the
@@ -48,6 +52,7 @@ enum class EditOperation : std::uint8_t {
   kUpdatePreedit,
   kCommit,
   kCancel,
+  kEndOwnedComposition,
 };
 
 const char* DescribeEditOperation(EditOperation operation);
@@ -103,6 +108,9 @@ class EditPlan {
                                          std::int32_t selection_start_utf16,
                                          std::int32_t selection_end_utf16);
   static EditPlanBuildResult BuildCancel(ContextIdentity context);
+  // Retirement cleanup: no text, no caret. The writer verifies its own composition range
+  // against its last-written text and ends only that composition.
+  static EditPlanBuildResult BuildEndOwnedComposition(ContextIdentity context);
 
   EditOperation operation() const { return operation_; }
   ContextIdentity context() const { return context_; }

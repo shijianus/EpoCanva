@@ -21,9 +21,11 @@
 // revalidation, and the UI shows both.
 //
 // TEARDOWN. Clear both AssociateFocus associations (releasing the returned previous
-// managers), release the observer's sinks, close the coordinator, stop and join the
-// executor, release the registry/contexts and only then shut the TSF host down and destroy
-// the windows. The cleanup report is kept for the self-test after the objects are gone.
+// managers), release the observer's sinks, retire the current binding and pump the bounded
+// retirement ledger to terminal (consuming engine and close results), close the coordinator,
+// stop and join the executor, release the registry/contexts and only then shut the TSF host
+// down and destroy the windows. Never issues a commit, cancel or text clear during teardown.
+// The cleanup report is kept for the self-test after the objects are gone.
 #ifndef EPOCANVA_TOOLS_WINDOWS_TSF_LAB_LAB_SESSION_H_
 #define EPOCANVA_TOOLS_WINDOWS_TSF_LAB_LAB_SESSION_H_
 
@@ -82,6 +84,8 @@ struct LabDocumentSnapshot {
   std::uint64_t composition_start_calls = 0;
   std::uint64_t composition_update_calls = 0;
   std::uint64_t composition_end_calls = 0;
+  // Real enumeration of live ITfCompositionView objects on this document's context.
+  std::uint32_t active_compositions = 0;
 };
 
 struct LabSnapshot {
@@ -112,6 +116,8 @@ struct LabSnapshot {
   edit::EditRejectReason last_edit_reason = edit::EditRejectReason::kNone;
   LONG tracked_caret_utf16 = 0;
   bool composition_active = false;
+  // P3.12: the session's writer really owns a composition (authority), not the view mirror.
+  bool owned_composition_active = false;
   LONG composition_start_utf16 = -1;
   LONG composition_length_utf16 = 0;
   std::uint64_t works_accepted = 0;

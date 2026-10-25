@@ -441,6 +441,339 @@ int RunObservedRetireRoundtrip(const Options& options) {
   return Finish();
 }
 
+int RunObservedComposeRetirement(const Options& options) {
+  RealHarness harness;
+  if (!CreateRealHarness(options, "observed-compose-retirement", &harness)) {
+    return Finish();
+  }
+  ControlledObservedEnv env;
+  if (!WireObserved(&env, TestDocumentOptions{L"", 0, 0},
+                    "observed-compose-retirement")) {
+    return Finish();
+  }
+  TestDocument* doc_b = env.host->CreateDocument(TestDocumentOptions{}, &env.error);
+  Check(doc_b != nullptr, "compose-retirement: document B created", env.error);
+  if (doc_b == nullptr) {
+    return Finish();
+  }
+  if (!FinishWiring(&env, *harness.executor, "epocanva_test_english", 30000,
+                    "observed-compose-retirement")) {
+    return Finish();
+  }
+
+  const wchar_t letters[] = {L'h', L'e', L'l'};
+  const std::wstring expected[] = {L"h", L"he", L"hel"};
+  for (int index = 0; index < 3; ++index) {
+    const ex::TextKey key = Letter(letters[index]);
+    const DriveResult driven = TypeKeyAndDrive(
+        *env.coordinator, *env.host, *harness.executor, key.event, key.text,
+        "compose-retirement: letter");
+    CheckOutcome(driven.final_state, WorkOutcome::kApplied,
+                 "compose-retirement: letter applied");
+    CheckDocText(env.doc_a->text_utf16(), expected[index],
+                 "compose-retirement: the real composition progressed");
+  }
+  ULONG compositions = 0;
+  Check(SUCCEEDED(oct::CountCompositions(env.doc_a->context(), &compositions)) &&
+            compositions == 1,
+        "compose-retirement: TSF really has one live composition on A",
+        std::to_string(compositions));
+  const auto before = env.doc_a->diagnostics().store;
+  Check(before.composition_start_calls == 1 && before.composition_end_calls == 0,
+        "compose-retirement: A's composition is owned and open", "");
+
+  oct::FocusCallResult focus;
+  Check(oct::SetThreadFocus(*env.host, doc_b, &focus, &env.error),
+        "compose-retirement: real SetFocus moved to B", env.error);
+  const oct::ObserverDriveResult rebound =
+      oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(rebound.settled && env.coordinator->bound(),
+        "compose-retirement: the observer bound B",
+        oct::DescribeObserverSnapshot(rebound.final_state));
+  PumpRetirements(&env, *harness.executor, "compose-retirement: A to B");
+
+  CheckDocText(env.doc_a->text_utf16(), L"hel",
+               "compose-retirement: A keeps exactly the displayed text");
+  compositions = 99;
+  Check(SUCCEEDED(oct::CountCompositions(env.doc_a->context(), &compositions)) &&
+            compositions == 0,
+        "compose-retirement: the real TSF composition on A ended",
+        std::to_string(compositions));
+  const auto after = env.doc_a->diagnostics().store;
+  Check(after.composition_end_calls == 1,
+        "compose-retirement: the context owner observed exactly one end",
+        std::to_string(after.composition_end_calls));
+  Check(after.text_mutations == before.text_mutations &&
+            after.set_text_calls == before.set_text_calls,
+        "compose-retirement: finishing issued no SetText and added no text",
+        "mutations=" + std::to_string(after.text_mutations) +
+            " set_text=" + std::to_string(after.set_text_calls));
+  const CoordinatorSnapshot retired = env.coordinator->Snapshot();
+  Check(retired.retirement.last_cleanup_state == CleanupState::kFinished &&
+            retired.retirement.finished == 1 &&
+            retired.retirement.blocked == 0,
+        "compose-retirement: the cleanup is Finished, not Blocked",
+        DescribeSnapshot(retired));
+
+  const ex::TextKey x = Letter(L'x');
+  const DriveResult on_b = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                           *harness.executor, x.event, x.text,
+                                           "compose-retirement: B types");
+  CheckOutcome(on_b.final_state, WorkOutcome::kApplied,
+               "compose-retirement: B's input resumed after cleanup");
+  CheckDocText(doc_b->text_utf16(), L"x",
+               "compose-retirement: B holds only its own text");
+  CheckDocText(env.doc_a->text_utf16(), L"hel",
+               "compose-retirement: A was not touched by B");
+
+  // Returning to A starts a fresh composition after the preserved ordinary text.
+  Check(oct::SetThreadFocus(*env.host, env.doc_a, &focus, &env.error),
+        "compose-retirement: real SetFocus moved back to A", env.error);
+  const oct::ObserverDriveResult back =
+      oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(back.settled && env.coordinator->bound(),
+        "compose-retirement: the observer bound A again",
+        oct::DescribeObserverSnapshot(back.final_state));
+  PumpRetirements(&env, *harness.executor, "compose-retirement: B to A");
+  const ex::TextKey i = Letter(L'i');
+  const DriveResult again = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                            *harness.executor, i.event, i.text,
+                                            "compose-retirement: A types again");
+  CheckOutcome(again.final_state, WorkOutcome::kApplied,
+               "compose-retirement: the new composition applied");
+  CheckDocText(env.doc_a->text_utf16(), L"heli",
+               "compose-retirement: the new preedit followed the preserved text");
+  compositions = 0;
+  Check(SUCCEEDED(oct::CountCompositions(env.doc_a->context(), &compositions)) &&
+            compositions == 1,
+        "compose-retirement: A owns a new live composition",
+        std::to_string(compositions));
+  const engine::ClientUsage clients = harness.executor->clients();
+  Check(clients.created == 4 && clients.close_results_taken == 2,
+        "compose-retirement: one fresh client per binding, two reclaims consumed",
+        "created=" + std::to_string(clients.created) +
+            " closed_results=" + std::to_string(clients.close_results_taken));
+  Check(clients.live == 2,
+        "compose-retirement: live clients did not grow with the switches",
+        std::to_string(clients.live));
+  return Finish();
+}
+
+int RunObservedComposeRetirementReadOnly(const Options& options) {
+  RealHarness harness;
+  if (!CreateRealHarness(options, "observed-compose-readonly", &harness)) {
+    return Finish();
+  }
+  ControlledObservedEnv env;
+  if (!WireObserved(&env, TestDocumentOptions{L"", 0, 0},
+                    "observed-compose-readonly")) {
+    return Finish();
+  }
+  TestDocument* doc_b = env.host->CreateDocument(TestDocumentOptions{}, &env.error);
+  Check(doc_b != nullptr, "compose-readonly: document B created", env.error);
+  if (doc_b == nullptr) {
+    return Finish();
+  }
+  if (!FinishWiring(&env, *harness.executor, "epocanva_test_english", 30000,
+                    "observed-compose-readonly")) {
+    return Finish();
+  }
+  for (wchar_t letter : {L'h', L'e', L'l'}) {
+    const ex::TextKey key = Letter(letter);
+    TypeKeyAndDrive(*env.coordinator, *env.host, *harness.executor, key.event,
+                    key.text, "compose-readonly: letter");
+  }
+  CheckDocText(env.doc_a->text_utf16(), L"hel",
+               "compose-readonly: the composition holds hel");
+  const auto before = env.doc_a->diagnostics().store;
+  env.doc_a->SetReadOnly(true);
+
+  oct::FocusCallResult focus;
+  Check(oct::SetThreadFocus(*env.host, doc_b, &focus, &env.error),
+        "compose-readonly: real SetFocus moved to B", env.error);
+  const oct::ObserverDriveResult rebound =
+      oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(rebound.settled && env.coordinator->bound(),
+        "compose-readonly: the observer bound B",
+        oct::DescribeObserverSnapshot(rebound.final_state));
+  PumpRetirements(&env, *harness.executor, "compose-readonly");
+
+  const CoordinatorSnapshot retired = env.coordinator->Snapshot();
+  Check(retired.retirement.last_cleanup_state == CleanupState::kBlocked &&
+            retired.retirement.blocked == 1,
+        "compose-readonly: cleanup is explicitly Blocked, never Completed",
+        DescribeSnapshot(retired));
+  Check(retired.retirement.last_cleanup_block == CleanupBlockReason::kReadOnly ||
+            retired.retirement.last_cleanup_block ==
+                CleanupBlockReason::kPermissionDenied,
+        "compose-readonly: the block names the read-only/permission refusal",
+        DescribeCleanupBlockReason(retired.retirement.last_cleanup_block));
+  const auto after = env.doc_a->diagnostics().store;
+  Check(after.text_mutations == before.text_mutations &&
+            after.set_text_calls == before.set_text_calls,
+        "compose-readonly: no destructive cleanup wrote text",
+        "mutations=" + std::to_string(after.text_mutations) +
+            " set_text=" + std::to_string(after.set_text_calls));
+  CheckDocText(env.doc_a->text_utf16(), L"hel",
+               "compose-readonly: the displayed text was preserved");
+  env.doc_a->SetReadOnly(false);
+
+  // The blocked cleanup is terminal for admission: B is usable, and the block stays visible.
+  const ex::TextKey x = Letter(L'x');
+  const DriveResult on_b = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                           *harness.executor, x.event, x.text,
+                                           "compose-readonly: B types");
+  CheckOutcome(on_b.final_state, WorkOutcome::kApplied,
+               "compose-readonly: B's input resumed after the blocked cleanup");
+  CheckDocText(doc_b->text_utf16(), L"x",
+               "compose-readonly: B holds its own text");
+  Check(env.coordinator->Snapshot().retirement.last_cleanup_state ==
+            CleanupState::kBlocked,
+        "compose-readonly: the block is not cleared by later input", "");
+  return Finish();
+}
+
+int RunObservedComposeRetirementUncertain(const Options& options) {
+  RealHarness harness;
+  if (!CreateRealHarness(options, "observed-compose-uncertain", &harness)) {
+    return Finish();
+  }
+  ControlledObservedEnv env;
+  if (!WireObserved(&env, TestDocumentOptions{L"", 0, 0},
+                    "observed-compose-uncertain")) {
+    return Finish();
+  }
+  TestDocument* doc_b = env.host->CreateDocument(TestDocumentOptions{}, &env.error);
+  Check(doc_b != nullptr, "compose-uncertain: document B created", env.error);
+  if (doc_b == nullptr) {
+    return Finish();
+  }
+  if (!FinishWiring(&env, *harness.executor, "epocanva_test_english", 30000,
+                    "observed-compose-uncertain")) {
+    return Finish();
+  }
+  env.doc_a->store()->SetMutationFault(MutationFault::kEUnexpectedAfterMutation);
+  {
+    const ex::TextKey h = Letter(L'h');
+    const DriveResult driven = TypeKeyAndDrive(
+        *env.coordinator, *env.host, *harness.executor, h.event, h.text,
+        "compose-uncertain: unconfirmed write");
+    CheckOutcome(driven.final_state, WorkOutcome::kUncertain,
+                 "compose-uncertain: the write left the context Uncertain");
+  }
+  env.doc_a->store()->SetMutationFault(MutationFault::kNone);
+  const auto before = env.doc_a->diagnostics().store;
+
+  oct::FocusCallResult focus;
+  Check(oct::SetThreadFocus(*env.host, doc_b, &focus, &env.error),
+        "compose-uncertain: real SetFocus moved to B", env.error);
+  const oct::ObserverDriveResult rebound =
+      oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(rebound.settled && env.coordinator->bound(),
+        "compose-uncertain: the observer bound B",
+        oct::DescribeObserverSnapshot(rebound.final_state));
+  PumpRetirements(&env, *harness.executor, "compose-uncertain");
+
+  const CoordinatorSnapshot retired = env.coordinator->Snapshot();
+  Check(retired.retirement.last_cleanup_state == CleanupState::kBlocked &&
+            retired.retirement.last_cleanup_block ==
+                CleanupBlockReason::kUncertainTextState,
+        "compose-uncertain: cleanup is Blocked on the uncertain text state",
+        DescribeSnapshot(retired));
+  const auto after = env.doc_a->diagnostics().store;
+  Check(after.text_mutations == before.text_mutations &&
+            after.set_text_calls == before.set_text_calls,
+        "compose-uncertain: no cleanup call touched the unknown text",
+        "mutations=" + std::to_string(after.text_mutations) +
+            " set_text=" + std::to_string(after.set_text_calls));
+  Check(after.request_lock_calls == before.request_lock_calls,
+        "compose-uncertain: no cleanup edit session was even requested",
+        std::to_string(after.request_lock_calls - before.request_lock_calls));
+  Check(env.registry->IsUncertain(env.doc_a->context()),
+        "compose-uncertain: the real-context latch is still held", "");
+
+  const ex::TextKey x = Letter(L'x');
+  const DriveResult on_b = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                           *harness.executor, x.event, x.text,
+                                           "compose-uncertain: B types");
+  CheckOutcome(on_b.final_state, WorkOutcome::kApplied,
+               "compose-uncertain: B's input resumed on the independent document");
+  CheckDocText(doc_b->text_utf16(), L"x",
+               "compose-uncertain: only B received the key");
+  return Finish();
+}
+
+int RunObservedComposeExternalEdit(const Options& options) {
+  RealHarness harness;
+  if (!CreateRealHarness(options, "observed-compose-external", &harness)) {
+    return Finish();
+  }
+  ControlledObservedEnv env;
+  if (!WireObserved(&env, TestDocumentOptions{L"", 0, 0},
+                    "observed-compose-external")) {
+    return Finish();
+  }
+  if (!FinishWiring(&env, *harness.executor, "epocanva_test_english", 30000,
+                    "observed-compose-external")) {
+    return Finish();
+  }
+  for (wchar_t letter : {L'h', L'e', L'l'}) {
+    const ex::TextKey key = Letter(letter);
+    TypeKeyAndDrive(*env.coordinator, *env.host, *harness.executor, key.event,
+                    key.text, "compose-external: letter");
+  }
+  CheckDocText(env.doc_a->text_utf16(), L"hel",
+               "compose-external: the composition holds hel");
+
+  oct::ExternalEditResult edit;
+  Check(oct::RunExternalEdit(*env.host, env.doc_a, env.external,
+                             oct::ExternalEditMode::kInsertText, 0, 0, L"X",
+                             &edit, &env.error),
+        "compose-external: the real external insert ran", env.error);
+  const auto after_external = env.doc_a->diagnostics().store;
+  CheckDocText(env.doc_a->text_utf16(), L"Xhel",
+               "compose-external: the external text is next to the composition");
+
+  const oct::ObserverDriveResult rebound =
+      oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(rebound.settled && env.coordinator->bound(),
+        "compose-external: the observer re-bound the same document",
+        oct::DescribeObserverSnapshot(rebound.final_state));
+  PumpRetirements(&env, *harness.executor, "compose-external");
+
+  const auto after_retirement = env.doc_a->diagnostics().store;
+  Check(after_retirement.text_mutations == after_external.text_mutations &&
+            after_retirement.set_text_calls == after_external.set_text_calls,
+        "compose-external: retirement did not delete or rewrite any text",
+        "mutations=" + std::to_string(after_retirement.text_mutations) +
+            " set_text=" + std::to_string(after_retirement.set_text_calls));
+  CheckDocText(env.doc_a->text_utf16(), L"Xhel",
+               "compose-external: the existing text survived verbatim");
+  const CoordinatorSnapshot retired = env.coordinator->Snapshot();
+  Check(retired.retirement.last_cleanup_state == CleanupState::kFinished ||
+            retired.retirement.last_cleanup_state ==
+                CleanupState::kAlreadyOrdinary ||
+            retired.retirement.last_cleanup_state == CleanupState::kBlocked,
+        "compose-external: cleanup is explicit (Finished/AlreadyOrdinary/Blocked)",
+        DescribeSnapshot(retired));
+  if (retired.retirement.last_cleanup_state != CleanupState::kBlocked) {
+    ULONG compositions = 99;
+    Check(SUCCEEDED(oct::CountCompositions(env.doc_a->context(), &compositions)) &&
+              compositions == 0,
+          "compose-external: the old composition ended without touching the text",
+          std::to_string(compositions));
+  }
+  const ex::TextKey i = Letter(L'i');
+  const DriveResult typed = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                            *harness.executor, i.event, i.text,
+                                            "compose-external: new composition");
+  CheckOutcome(typed.final_state, WorkOutcome::kApplied,
+               "compose-external: the new binding types after the external edit");
+  CheckDocText(env.doc_a->text_utf16(), L"Xheli",
+               "compose-external: the new preedit followed the preserved text");
+  return Finish();
+}
+
 int RunObservedExternalSelection() {
   ControlledObservedEnv env;
   TestDocumentOptions options;
@@ -940,6 +1273,18 @@ int RunObservedBindingCase(const std::string& case_name, const Options& options)
   if (case_name == "observed-permission-requery") return RunObservedPermissionRequery();
   if (case_name == "observed-retire-roundtrip" && !options.rime_dll.empty()) {
     return RunObservedRetireRoundtrip(options);
+  }
+  if (case_name == "observed-compose-retirement" && !options.rime_dll.empty()) {
+    return RunObservedComposeRetirement(options);
+  }
+  if (case_name == "observed-compose-readonly" && !options.rime_dll.empty()) {
+    return RunObservedComposeRetirementReadOnly(options);
+  }
+  if (case_name == "observed-compose-uncertain" && !options.rime_dll.empty()) {
+    return RunObservedComposeRetirementUncertain(options);
+  }
+  if (case_name == "observed-compose-external" && !options.rime_dll.empty()) {
+    return RunObservedComposeExternalEdit(options);
   }
   if (case_name == "observed-real-compose" && !options.rime_dll.empty()) {
     return RunObservedRealComposeProgress(options);

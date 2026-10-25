@@ -117,6 +117,11 @@ epocanva_add_coordinator_case(
 epocanva_add_coordinator_case(
   windows.tsf_coordinator.retirement_queue_full retirement-queue-full)
 
+# 6c. A live composition whose cleanup needs a legal lock: the new binding is admitted but
+#     its input is Retiring until the old composition is finished; then it resumes.
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.retirement_compose_withheld retirement-compose-withheld)
+
 # 7. Invalidation while an async edit waits behind a deferred lock: the old callback
 #    refuses, neither document is written, the new binding works.
 epocanva_add_coordinator_case(
@@ -326,6 +331,23 @@ epocanva_add_real_coordinator_case(
 #     live.
 epocanva_add_real_coordinator_case(
   windows.tsf_coordinator.observed_retire_roundtrip observed-retire-roundtrip)
+# 21. P3.12: a live composition on A is finished (EndComposition without SetText) when the
+#     binding retires; the displayed text stays, the real composition enumeration drops to
+#     zero, and B's input resumes only after the cleanup is terminal.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.observed_compose_retirement observed-compose-retirement)
+# 22. P3.12: a read-only change blocks the composition cleanup explicitly; the displayed
+#     text is preserved, no destructive cleanup runs, and the block stays visible.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.observed_compose_readonly observed-compose-readonly)
+# 23. P3.12: an uncertain text state blocks cleanup without another TSF call; the real
+#     context latch stays held and the independent document remains usable.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.observed_compose_uncertain observed-compose-uncertain)
+# 24. P3.12: an external edit beside a live composition. Retirement must not delete or
+#     rewrite the text; the cleanup is Finished/AlreadyOrdinary or explicitly Blocked.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.observed_compose_external observed-compose-external)
 
 set_tests_properties(
   windows.tsf_coordinator.real_compose_progress
@@ -348,10 +370,14 @@ set_tests_properties(
   windows.tsf_coordinator.real_destroyed_context
   windows.tsf_coordinator.observed_real_compose
   windows.tsf_coordinator.observed_retire_roundtrip
+  windows.tsf_coordinator.observed_compose_retirement
+  windows.tsf_coordinator.observed_compose_readonly
+  windows.tsf_coordinator.observed_compose_uncertain
+  windows.tsf_coordinator.observed_compose_external
   PROPERTIES TIMEOUT 360
              LABELS "windows;tsf;coordinator;engine;english;real")
 
-message(STATUS "  tsf_coordinator stage-2 cases: 19 (real English engine, real TSF store)")
+message(STATUS "  tsf_coordinator stage-2 cases: 23 (real English engine, real TSF store)")
 
 set_tests_properties(
   windows.tsf_coordinator.conversion_pure
@@ -361,6 +387,7 @@ set_tests_properties(
   windows.tsf_coordinator.evaluate_pure
   windows.tsf_coordinator.engine_pending_invalidate
   windows.tsf_coordinator.retirement_queue_full
+  windows.tsf_coordinator.retirement_compose_withheld
   windows.tsf_coordinator.edit_pending_invalidate
   windows.tsf_coordinator.permission_change_queued
   windows.tsf_coordinator.permission_change_edit_pending

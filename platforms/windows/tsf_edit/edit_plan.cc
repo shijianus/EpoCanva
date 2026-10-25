@@ -75,6 +75,8 @@ const char* DescribeEditOperation(EditOperation operation) {
       return "Commit";
     case EditOperation::kCancel:
       return "Cancel";
+    case EditOperation::kEndOwnedComposition:
+      return "EndOwnedComposition";
   }
   return "UnknownOperation";
 }
@@ -193,6 +195,19 @@ EditPlanBuildResult EditPlan::BuildCancel(ContextIdentity context) {
                    "context id and generation must be non-zero");
   }
   EditPlan plan(EditOperation::kCancel, context, std::wstring(), -1, -1,
+                g_next_sequence.fetch_add(1) + 1);
+  EditPlanBuildResult result;
+  result.status = EditPlanStatus::kOk;
+  result.plan = std::move(plan);
+  return result;
+}
+
+EditPlanBuildResult EditPlan::BuildEndOwnedComposition(ContextIdentity context) {
+  if (!ValidIdentity(context)) {
+    return Failure(EditPlanStatus::kInvalidContextIdentity,
+                   "context id and generation must be non-zero");
+  }
+  EditPlan plan(EditOperation::kEndOwnedComposition, context, std::wstring(), -1, -1,
                 g_next_sequence.fetch_add(1) + 1);
   EditPlanBuildResult result;
   result.status = EditPlanStatus::kOk;

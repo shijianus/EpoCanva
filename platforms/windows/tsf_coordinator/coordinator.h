@@ -226,6 +226,7 @@ enum class CleanupBlockReason : std::uint8_t {
   kStale,
   kPlanBuildFailed,
   kRequestFailed,
+  kShutdown,  // terminal Close could not wait for a legal cleanup edit session
 };
 
 const char* DescribeCleanupState(CleanupState state);
@@ -264,7 +265,10 @@ struct RetirementSnapshot {
   bool admission_paused = false;
   std::uint32_t retiring_compositions = 0;
   std::uint64_t started = 0;
+  // Records fully dropped (close/result consumed AND cleanup terminal). `finished`,
+  // `already_ordinary` and `blocked` are its three cleanup outcomes.
   std::uint64_t completed = 0;
+  std::uint64_t finished = 0;
   std::uint64_t already_ordinary = 0;
   std::uint64_t blocked = 0;
   std::uint64_t close_requests = 0;
@@ -421,8 +425,10 @@ class ContextCoordinator {
   // --- non-blocking advance --------------------------------------------------------------
   // Advances a pending permission query whose real read session completed, takes a ready
   // engine result (once), converts it, submits the edit, and harvests an edit result
-  // whose completion event is already signalled. Never waits, never pumps messages,
-  // never blocks on the engine or a TSF lock.
+  // whose completion event is already signalled. It also advances the bounded retirement
+  // ledger: consumes old engine/close results, waits for an abandoned plan's Stale terminal,
+  // and submits the EndOwnedComposition cleanup outside every TSF notification. Never waits,
+  // never pumps messages, never blocks on the engine or a TSF lock.
   void Pump();
 
   // The completion facts a pending work item is waiting on; the host bounded-waits on
@@ -433,11 +439,12 @@ class ContextCoordinator {
   CoordinatorSnapshot Snapshot() const;
 
   // --- teardown --------------------------------------------------------------------------
-  // Terminal. Pending work becomes AbandonedStale, a ready-but-untaken engine result is
-  // consumed and discarded (an unready one is left for the executor's own stop drain --
-  // documented, not hidden), the permission query is abandoned, the session is
-  // invalidated, closed and destroyed. Never issues a text operation: cleanup never
-  // commits or cancels unknown text. Idempotent.
+  // Terminal. The current binding is moved into retirement, any ready engine/close result is
+  // consumed, and every remaining retirement record is reported through the closed-retirement
+  // snapshot (including a cleanup that could not be waited for, which is kBlocked/Shutdown,
+  // never Completed). The session is released without commits, cancels or text clearing.
+  // Idempotent. A host that wants a bounded, legal composition finish calls
+  // InvalidateBinding() and pumps the retirement ledger to terminal BEFORE Close().
   void Close();
 
  private:
@@ -461,11 +468,13 @@ class ContextCoordinator {
   bool RetirementPausesInput() const;
 
   // One retired binding. The ledger is fixed-capacity: a new binding is refused as
-  // kRetiring rather than growing it. `session` and `context` are only kept when a
-  // composition really has to be finished; the context owns its reference through the
-  // session. An engine request accepted before retirement is consumed once here, and a
-  // close request is submitted to the executor and its result consumed before the record
-  // is dropped.
+  // kRetiring rather than growing it. The context reference and the retirement-only session
+  // are kept until cleanup is decided, because only that session's writer can prove it still
+  // owns the composition; the session releases its own context reference at Close. An engine
+  // request accepted before retirement is consumed once here, and a close request is
+  // submitted to the executor and its result consumed before the record is dropped. A
+  // cleanup that cannot be performed becomes CleanupState::kBlocked with a named reason and
+  // is never reported as Finished.
   struct RetiringBinding {
     edit::ContextIdentity identity{};
     ITfContext* context = nullptr;  // owned coordinator reference
@@ -479,7 +488,6 @@ class ContextCoordinator {
     bool close_failed = false;
     CleanupState cleanup = CleanupState::kNone;
     CleanupBlockReason cleanup_block = CleanupBlockReason::kNone;
-    bool cleanup_submitted = false;
     bool cleanup_finished = false;
   };
   static constexpr std::size_t kRetirementCapacity = 2;
@@ -585,6 +593,7 @@ class ContextCoordinator {
   std::vector<RetiringBinding> retiring_;
   std::uint64_t retirements_started_ = 0;
   std::uint64_t retirements_completed_ = 0;
+  std::uint64_t retirements_finished_ = 0;
   std::uint64_t retirements_already_ordinary_ = 0;
   std::uint64_t retirements_blocked_ = 0;
   std::uint64_t retirement_close_requests_ = 0;

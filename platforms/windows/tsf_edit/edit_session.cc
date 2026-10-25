@@ -116,6 +116,10 @@ struct CompositionEditSession::State {
   ContextIdentity identity{};
   bool bound = false;
   bool closed = false;
+  bool retiring = false;
+  // Set when Retirement begins while a plan was already accepted. That plan must reach a
+  // terminal result (Stale) without writing, and only then may cleanup use a new session.
+  bool abandon_pending = false;
   InputPermission permission = InputPermission::kUnknown;
   CompositionEditSession::PermissionRecheck permission_recheck;
   CompositionWriter writer;
@@ -192,9 +196,20 @@ class EditSessionCallback final : public ITfEditSession {
       } else if (plan_.context().generation != state_->identity.generation) {
         stale = true;
         stale_reason = EditRejectReason::kStaleGeneration;
+      } else if (state_->abandon_pending &&
+                 session_id_ == state_->pending_session_id) {
+        // This accepted plan was abandoned by BeginRetirement. It reaches a normal Stale
+        // terminal (through the same publish path) and performs no TSF call.
+        stale = true;
+        stale_reason = EditRejectReason::kNotBound;
       } else if (state_->pending_session_id != session_id_) {
         stale = true;
         stale_reason = EditRejectReason::kStaleGeneration;
+      } else if (state_->retiring &&
+                 plan_.operation() != EditOperation::kEndOwnedComposition) {
+        // Only the retirement cleanup may run once the binding has been retired.
+        stale = true;
+        stale_reason = EditRejectReason::kNotBound;
       } else {
         permission = state_->permission;
         recheck = state_->permission_recheck;
@@ -275,6 +290,9 @@ class EditSessionCallback final : public ITfEditSession {
       result_ = result;
       done_ = true;
       if (state_->has_pending && state_->pending_session_id == session_id_) {
+        if (state_->abandon_pending) {
+          state_->abandon_pending = false;
+        }
         // Preserve the submission's request_hr / TF_S_ASYNC phrase in the final result: the
         // callback's own result carries the edit outcome, not the waiting phrase.
         result.request_hr = state_->pending_result.request_hr;
@@ -376,6 +394,27 @@ void CompositionEditSession::Invalidate() {
   }
 }
 
+void CompositionEditSession::BeginRetirement() {
+  const std::shared_ptr<State> state = state_;
+  std::lock_guard<std::mutex> lock(state->mutex);
+  if (state->closed) {
+    return;
+  }
+  state->retiring = true;
+  if (state->has_pending) {
+    // The accepted plan is not cancelled here: it must still reach one terminal result.
+    // The callback sees abandon_pending and returns Stale without any TSF call; cleanup
+    // waits for that terminal before submitting its own EndOwnedComposition session.
+    state->abandon_pending = true;
+  }
+}
+
+bool CompositionEditSession::HasUncertainOutcome() const {
+  const std::shared_ptr<State> state = state_;
+  std::lock_guard<std::mutex> lock(state->mutex);
+  return state->writer.HasUncertainOutcome();
+}
+
 void CompositionEditSession::Close() {
   const std::shared_ptr<State> state = state_;
   ITfContext* context = nullptr;
@@ -471,6 +510,14 @@ bool CompositionEditSession::Precheck(const EditPlan& plan, ITfContext** context
     if (plan.context().generation != state->identity.generation) {
       rejection->status = EditStatus::kStale;
       rejection->reason = EditRejectReason::kStaleGeneration;
+      RecordStatusLocked(&state->counters, rejection->status);
+      return false;
+    }
+    if (state->retiring &&
+        plan.operation() != EditOperation::kEndOwnedComposition) {
+      // A retired binding accepts no normal plan, even before any TSF call.
+      rejection->status = EditStatus::kStale;
+      rejection->reason = EditRejectReason::kNotBound;
       RecordStatusLocked(&state->counters, rejection->status);
       return false;
     }

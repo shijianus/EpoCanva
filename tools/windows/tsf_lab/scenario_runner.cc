@@ -565,17 +565,41 @@ bool ScenarioRunner::RunAbIsolation(std::string* detail) {
   if (!TypeText(0, "ab", detail)) {
     return false;
   }
-  if (!TypeKey(0, input::kVirtualKeyReturn, "A Return", detail)) {
+  // Leave A's composition UNCOMMITTED. The focus switch must end it while preserving the
+  // displayed text; it must not commit, cancel or duplicate "ab".
+  const LabSnapshot composed = session_.Snapshot();
+  if (!composed.owned_composition_active ||
+      composed.documents[0].active_compositions != 1) {
+    *detail = "A first pass: the live composition is not owned by the session "
+              "(owned=" + std::to_string(composed.owned_composition_active ? 1 : 0) +
+              " enum=" + std::to_string(composed.documents[0].active_compositions) + ")";
     return false;
   }
   if (!CheckTextEquals(0, before_a + L"ab", "A first pass", detail)) {
     return false;
   }
 
-  if (!PrepareDocument(1, detail)) {
+  if (!FocusDocument(1, detail)) {
     return false;
   }
-  const std::wstring before_b = session_.Snapshot().documents[1].text_utf16;
+  const LabSnapshot after_switch = session_.Snapshot();
+  if (!CheckTextEquals(0, before_a + L"ab", "A after the focus switch", detail)) {
+    return false;
+  }
+  if (after_switch.documents[0].active_compositions != 0) {
+    *detail = "A first pass: the real composition enumeration is still " +
+              std::to_string(after_switch.documents[0].active_compositions);
+    return false;
+  }
+  if (after_switch.retirement.finished <= composed.retirement.finished ||
+      after_switch.retirement.blocked != composed.retirement.blocked) {
+    *detail = "A first pass: cleanup was not Finished "
+              "(finished=" + std::to_string(composed.retirement.finished) + "->" +
+              std::to_string(after_switch.retirement.finished) +
+              " blocked=" + std::to_string(after_switch.retirement.blocked) + ")";
+    return false;
+  }
+  const std::wstring before_b = after_switch.documents[1].text_utf16;
   if (!TypeText(1, "cd", detail)) {
     return false;
   }
@@ -604,7 +628,8 @@ bool ScenarioRunner::RunAbIsolation(std::string* detail) {
   if (!CheckTextEquals(1, before_b + L"cd", "B unchanged by A", detail)) {
     return false;
   }
-  *detail = "A/B isolation complete: no cross-document write";
+  *detail = "A/B isolation complete: no cross-document write; A's uncommitted "
+            "composition ended with its text preserved";
   return true;
 }
 

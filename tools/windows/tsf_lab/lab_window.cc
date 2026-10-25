@@ -484,7 +484,8 @@ std::wstring LabWindow::BuildDocumentLine(int index,
           L" utf16 sel=" + std::to_wstring(document.selection_start_utf16) +
           L".." + std::to_wstring(document.selection_end_utf16) +
           L" read_only=" + (document.read_only ? L"1" : L"0") +
-          L" mutations=" + std::to_wstring(document.text_mutations);
+          L" mutations=" + std::to_wstring(document.text_mutations) +
+          L" comps=" + std::to_wstring(document.active_compositions);
   const bool current = snapshot.identity.context_id == document.context_id;
   if (current && snapshot.composition_active) {
     line += L" comp=on start=" +
@@ -634,6 +635,10 @@ std::wstring LabWindow::BuildStatusText() {
                  L" refused=" + std::to_wstring(snapshot.binding.binds_refused) +
                  L" blocked_uncertain=" +
                  std::to_wstring(snapshot.binding.binds_blocked_uncertain) +
+                 L" paused_retiring=" +
+                 std::to_wstring(snapshot.binding.binds_paused_retiring) +
+                 L" paused_busy=" +
+                 std::to_wstring(snapshot.binding.binds_paused_busy) +
                  L" losses=" + std::to_wstring(snapshot.binding.target_losses) +
                  L" invalidations=" +
                  std::to_wstring(snapshot.binding.invalidations) +
@@ -642,6 +647,44 @@ std::wstring LabWindow::BuildStatusText() {
                  L" last_bind=" +
                  WideAscii(coordinator::DescribeBindStatus(
                      snapshot.binding.last_bind_status)));
+  AppendLine(&text,
+             L"Retirement: live_clients=" +
+                 std::to_wstring(snapshot.client_usage.live) + L" (open=" +
+                 std::to_wstring(snapshot.client_usage.open) + L" closing=" +
+                 std::to_wstring(snapshot.client_usage.closing) + L" closed=" +
+                 std::to_wstring(snapshot.client_usage.closed) + L")" +
+                 L" retiring=" +
+                 std::to_wstring(snapshot.retirement.retiring_bindings) + L"/" +
+                 std::to_wstring(snapshot.retirement.capacity) +
+                 L" paused=" +
+                 (snapshot.retirement.admission_paused ? L"1" : L"0") +
+                 L" pending_close=" +
+                 std::to_wstring(
+                     snapshot.retirement.pending_close_request.value != 0 ? 1 : 0) +
+                 L" closes=" +
+                 std::to_wstring(snapshot.retirement.close_requests) + L"/" +
+                 std::to_wstring(snapshot.retirement.close_results_taken) +
+                 L" own_comp=" +
+                 (snapshot.owned_composition_active ? L"1" : L"0") +
+                 L" retiring_comp=" +
+                 std::to_wstring(snapshot.retirement.retiring_compositions));
+  AppendLine(&text,
+             L"  cleanup: last=" +
+                 WideAscii(coordinator::DescribeCleanupState(
+                     snapshot.retirement.last_cleanup_state)) +
+                 L"/" +
+                 WideAscii(coordinator::DescribeCleanupBlockReason(
+                     snapshot.retirement.last_cleanup_block)) +
+                 L" finished=" + std::to_wstring(snapshot.retirement.finished) +
+                 L" already_ordinary=" +
+                 std::to_wstring(snapshot.retirement.already_ordinary) +
+                 L" blocked=" + std::to_wstring(snapshot.retirement.blocked) +
+                 L" completed=" +
+                 std::to_wstring(snapshot.retirement.completed) + L"/" +
+                 std::to_wstring(snapshot.retirement.started) +
+                 L" slots=" +
+                 std::to_wstring(snapshot.capacity_usage.occupied) + L"/" +
+                 std::to_wstring(snapshot.capacity_usage.capacity));
   AppendLine(&text, L"");
   AppendLine(&text, L"Recent operations:");
   if (status_lines_.empty()) {

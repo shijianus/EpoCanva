@@ -282,6 +282,8 @@ CompositionWriteOutcome CompositionWriter::Apply(const EditPlan& plan,
       return Commit(plan, context, edit_cookie);
     case EditOperation::kCancel:
       return Cancel(context, edit_cookie);
+    case EditOperation::kEndOwnedComposition:
+      return FinishOwnedComposition(context, edit_cookie);
   }
   CompositionWriteOutcome outcome;
   outcome.status = EditStatus::kRejected;
@@ -582,6 +584,71 @@ CompositionWriteOutcome CompositionWriter::Cancel(ITfContext* context,
   }
   outcome.status = EditStatus::kApplied;
   outcome.composition_active = false;
+  return outcome;
+}
+
+CompositionWriteOutcome CompositionWriter::FinishOwnedComposition(
+    ITfContext* context, TfEditCookie edit_cookie) {
+  (void)context;
+  CompositionWriteOutcome outcome;
+  if (composition_ == nullptr) {
+    outcome.status = EditStatus::kRejected;
+    outcome.reason = EditRejectReason::kNoComposition;
+    return outcome;
+  }
+  if (CompositionExternallyTerminated()) {
+    ReleaseCompositionAndSink();
+    outcome.status = EditStatus::kRejected;
+    outcome.reason = EditRejectReason::kCompositionTerminated;
+    return outcome;
+  }
+
+  ITfRange* range = nullptr;
+  const HRESULT get_hr = composition_->GetRange(&range);
+  if (FAILED(get_hr) || range == nullptr) {
+    outcome.status = EditStatus::kFailedBeforeMutation;
+    outcome.reason = EditRejectReason::kRangeUnavailable;
+    outcome.operation_hr = get_hr;
+    return outcome;
+  }
+  HRESULT read_hr = S_OK;
+  const TextMatch match =
+      ReadRangeText(range, edit_cookie, current_text_utf16_, &read_hr);
+  range->Release();
+  if (match == TextMatch::kUnreadable) {
+    outcome.status = EditStatus::kFailedBeforeMutation;
+    outcome.reason = EditRejectReason::kRangeUnavailable;
+    outcome.operation_hr = read_hr;
+    return outcome;
+  }
+  if (match == TextMatch::kDiffers) {
+    // Someone else's text now occupies the range. Never delete or replace it, and never
+    // end a composition whose contents this writer can no longer vouch for.
+    outcome.status = EditStatus::kRejected;
+    outcome.reason = EditRejectReason::kCompositionRangeMismatch;
+    return outcome;
+  }
+
+  const LONG start_utf16 = composition_start_utf16_;
+  const LONG length_utf16 = composition_length_utf16_;
+  const HRESULT end_hr = EndOwnComposition(edit_cookie);
+  outcome.end_composition_hr = end_hr;
+  outcome.composition_start_utf16 = start_utf16;
+  outcome.composition_length_utf16 = length_utf16;
+  if (FAILED(end_hr)) {
+    // No text call was issued by this plan, so this is a failed-before-mutation edit even
+    // though the composition object may still exist. It must never be reported Applied.
+    outcome.status = EditStatus::kFailedBeforeMutation;
+    outcome.reason = EditRejectReason::kEndCompositionFailed;
+    outcome.operation_hr = end_hr;
+    outcome.composition_active = true;
+    return outcome;
+  }
+  // Success means only that the composition object was closed. The preedit text remains in
+  // the document as ordinary text; this plan did not write, commit, cancel or replace it.
+  outcome.status = EditStatus::kApplied;
+  outcome.composition_active = false;
+  outcome.text_may_have_changed = false;
   return outcome;
 }
 

@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -47,7 +48,7 @@ void PrintUsage() {
       "usage: tsf_lab [--rime-dll PATH] [--fixture-dir DIR]\n"
       "               [--spelling-fixture-dir DIR] [--run-root DIR]\n"
       "               [--schema ID] [--self-test [--case NAME]]\n"
-      "               [--screenshot FILE.bmp]\n"
+      "               [--screenshot FILE.bmp] [--screenshot-scenario N]\n"
       "\n"
       "interactive (default): opens the lab window. Click A or B for real Win32\n"
       "focus, then a fixed scenario button. Typed keys are ignored.\n"
@@ -55,15 +56,17 @@ void PrintUsage() {
       "--self-test --case window-lifecycle  hidden window creation/destruction\n"
       "--self-test --case scenarios         all nine scenarios + resource balance\n"
       "--self-test --case all               both (default)\n"
-      "--screenshot FILE.bmp                show the window, run scenario 1, render\n"
-      "                                     the window to BMP, then exit\n"
+      "--screenshot FILE.bmp                show the window, run scenario 1 (or\n"
+      "                                     --screenshot-scenario N), render the\n"
+      "                                     window to BMP, then exit\n"
+      "--screenshot-scenario N              scenario number 1..9 for the capture\n"
       "\n"
       "No input method is registered and no system keyboard sink is installed.\n");
 }
 
 bool ParseArgs(int argc, char** argv, LabConfig* config, bool* self_test,
                std::string* case_name, std::filesystem::path* screenshot,
-               bool* show_help) {
+               int* screenshot_scenario, bool* show_help) {
   config->rime_dll = EPOCANVA_LAB_DEFAULT_RIME_DLL;
   config->fixture_dir = EPOCANVA_LAB_DEFAULT_FIXTURE_DIR;
   config->spelling_fixture_dir = EPOCANVA_LAB_DEFAULT_SPELLING_FIXTURE_DIR;
@@ -93,6 +96,14 @@ bool ParseArgs(int argc, char** argv, LabConfig* config, bool* self_test,
       *case_name = argv[++index];
     } else if (std::strcmp(argument, "--screenshot") == 0 && index + 1 < argc) {
       *screenshot = argv[++index];
+    } else if (std::strcmp(argument, "--screenshot-scenario") == 0 &&
+               index + 1 < argc) {
+      const int scenario = std::atoi(argv[++index]);
+      if (scenario < 1 || scenario > 9) {
+        std::fprintf(stderr, "tsf_lab: --screenshot-scenario must be 1..9\n");
+        return false;
+      }
+      *screenshot_scenario = scenario;
     } else {
       std::fprintf(stderr, "tsf_lab: unknown or incomplete argument: %s\n",
                    argument);
@@ -157,8 +168,9 @@ int main(int argc, char** argv) {
   bool show_help = false;
   std::string case_name;
   std::filesystem::path screenshot;
+  int screenshot_scenario = 1;
   if (!ParseArgs(argc, argv, &config, &self_test, &case_name, &screenshot,
-                 &show_help)) {
+                 &screenshot_scenario, &show_help)) {
     PrintUsage();
     return 2;
   }
@@ -221,7 +233,8 @@ int main(int argc, char** argv) {
     PumpUiBriefly(window->hwnd());
     bool scenario_ok = true;
     if (window->runner() != nullptr) {
-      const auto result = window->runner()->Run(ScenarioId::kComposeHel);
+      const auto result = window->runner()->Run(
+          static_cast<ScenarioId>(screenshot_scenario));
       scenario_ok = result.ok();
       if (!result.ok()) {
         std::fprintf(stderr, "tsf_lab: screenshot scenario failed: %s\n",

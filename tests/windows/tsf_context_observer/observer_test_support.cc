@@ -492,6 +492,40 @@ HRESULT AssociateDocumentFocus(ITfThreadMgr* thread_manager, HWND window,
   return thread_manager->AssociateFocus(window, document_manager, previous);
 }
 
+HRESULT CountCompositions(ITfContext* context, ULONG* count) {
+  if (context == nullptr || count == nullptr) {
+    return E_INVALIDARG;
+  }
+  *count = 0;
+  ITfContextComposition* service = nullptr;
+  HRESULT hr = context->QueryInterface(IID_ITfContextComposition,
+                                       reinterpret_cast<void**>(&service));
+  if (FAILED(hr) || service == nullptr) {
+    return FAILED(hr) ? hr : E_NOINTERFACE;
+  }
+  IEnumITfCompositionView* enumerator = nullptr;
+  hr = service->EnumCompositions(&enumerator);
+  service->Release();
+  if (FAILED(hr) || enumerator == nullptr) {
+    return FAILED(hr) ? hr : E_NOINTERFACE;
+  }
+  for (;;) {
+    ITfCompositionView* view = nullptr;
+    ULONG fetched = 0;
+    const HRESULT next = enumerator->Next(1, &view, &fetched);
+    if (next != S_OK || fetched != 1) {
+      if (view != nullptr) {
+        view->Release();
+      }
+      break;
+    }
+    ++*count;
+    view->Release();
+  }
+  enumerator->Release();
+  return S_OK;
+}
+
 void ReleaseAssociatedDocumentManager(ITfDocumentMgr* document_manager) {
   if (document_manager != nullptr) {
     document_manager->Release();

@@ -16,6 +16,7 @@
 #include "engine_executor_internal.h"
 #include "coordination_tests.h"
 #include "engine_to_plan.h"
+#include "observer_test_support.h"
 
 namespace epocanva {
 namespace tsf {
@@ -27,6 +28,7 @@ namespace {
 namespace input = epocanva::windows::input;
 namespace engine = epocanva::windows::engine;
 namespace executor_tests = epocanva::tests::engine_executor;
+namespace oct = epocanva::tsf::context::test;
 
 engine::EngineState StateWithPreedit(const std::u16string& preedit) {
   engine::EngineState state;
@@ -663,6 +665,130 @@ int RunRetirementQueueFull() {
   return Finish();
 }
 
+// --- 6c. a withheld lock pauses the new binding until the old composition is finished -----
+
+int RunRetirementComposeWithheld() {
+  ControlledCase setup;
+  TestDocumentOptions options;
+  options.async_locks = true;
+  if (!SetupControlledCase(&setup, options, "retire-compose-withheld")) {
+    return Finish();
+  }
+  ContextCoordinator& coordinator = *setup.coordinator;
+
+  for (wchar_t letter : {L'h', L'e'}) {
+    const executor_tests::TextKey key = Letter(letter);
+    TypeKeyAndDrive(coordinator, *setup.host, *setup.harness.executor, key.event,
+                    key.text, "withheld: composition letter");
+  }
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "withheld: the composition holds he");
+  ULONG compositions = 0;
+  Check(SUCCEEDED(oct::CountCompositions(setup.document->context(), &compositions)) &&
+            compositions == 1,
+        "withheld: TSF really has one live composition",
+        std::to_string(compositions));
+
+  std::string error;
+  TestDocument* document_b = setup.host->CreateDocument(TestDocumentOptions{}, &error);
+  Check(document_b != nullptr, "withheld: second document created", error);
+  if (document_b == nullptr) {
+    return Finish();
+  }
+
+  setup.host->SetHoldGrantMessages(true);
+  const executor_tests::TextKey l = Letter(L'l');
+  WorkId held_id;
+  Check(coordinator.SubmitKey(l.event, l.text, &held_id) == SubmitStatus::kAccepted,
+        "withheld: the third letter was accepted", "");
+  const ULONGLONG deadline = ::GetTickCount64() + 20000;
+  CoordinatorSnapshot snapshot = coordinator.Snapshot();
+  while (snapshot.phase != WorkPhase::kEditPending) {
+    coordinator.Pump();
+    snapshot = coordinator.Snapshot();
+    if (snapshot.phase == WorkPhase::kIdle || ::GetTickCount64() >= deadline) {
+      break;
+    }
+    setup.harness.executor->WaitForResult(snapshot.engine_request,
+                                          std::chrono::milliseconds(50));
+  }
+  Check(snapshot.phase == WorkPhase::kEditPending,
+        "withheld: the third letter waits behind the held grant",
+        DescribeSnapshot(snapshot));
+  // Park the real grant message in the host without granting it. This fixes the order:
+  // the old accepted plan exists, its callback has not run, and the switch happens first.
+  setup.host->DispatchQueuedMessages();
+  Check(setup.host->held_grant_messages() >= 1,
+        "withheld: the old plan's grant is held by the host",
+        std::to_string(setup.host->held_grant_messages()));
+  const auto before_release = setup.document->diagnostics().store;
+  const std::wstring text_before_release = setup.document->text_utf16();
+
+  coordinator.InvalidateBinding();
+  coordinator.Pump();
+  snapshot = coordinator.Snapshot();
+  Check(snapshot.retirement.retiring_bindings == 1 &&
+            snapshot.retirement.retiring_compositions == 1,
+        "withheld: the retirement owns the live composition",
+        DescribeSnapshot(snapshot));
+  Check(snapshot.retirement.pending_edit_event != nullptr,
+        "withheld: the abandoned plan's terminal is still owed before cleanup",
+        DescribeSnapshot(snapshot));
+  Check(coordinator.Bind(document_b->context(), document_b->context_id(), 0,
+                         setup.harness.client_b) == BindStatus::kOk,
+        "withheld: B is admitted while the cleanup waits", "");
+  setup.permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
+  const executor_tests::TextKey z = Letter(L'z');
+  WorkId paused;
+  Check(coordinator.SubmitKey(z.event, z.text, &paused) == SubmitStatus::kRetiring,
+        "withheld: B's input is explicitly paused", "");
+  CheckDocText(setup.document->text_utf16(), text_before_release,
+               "withheld: the abandoned third letter did not reach A while paused");
+  compositions = 0;
+  Check(SUCCEEDED(oct::CountCompositions(setup.document->context(), &compositions)) &&
+            compositions == 1,
+        "withheld: A's composition is still the retirement's to finish",
+        std::to_string(compositions));
+
+  setup.host->SetHoldGrantMessages(false);
+  const std::size_t released = setup.host->ReleaseHeldGrantMessages();
+  Check(released >= 1, "withheld: the held grant was released",
+        std::to_string(released));
+  const DriveResult drained =
+      DriveToCompletion(coordinator, *setup.host, *setup.harness.executor, 20000);
+  Check(drained.completed && drained.final_state.retirement.retiring_bindings == 0,
+        "withheld: the cleanup reached a terminal state",
+        DescribeSnapshot(drained.final_state));
+  Check(drained.final_state.retirement.last_cleanup_state == CleanupState::kFinished,
+        "withheld: the composition was finished (not committed/cancelled)",
+        DescribeSnapshot(drained.final_state));
+  const auto after_release = setup.document->diagnostics().store;
+  Check(after_release.text_mutations == before_release.text_mutations &&
+            after_release.set_text_calls == before_release.set_text_calls,
+        "withheld: finishing changed no text",
+        "mutations=" + std::to_string(after_release.text_mutations) +
+            " set_text=" + std::to_string(after_release.set_text_calls));
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "withheld: A kept exactly the text that was displayed");
+  compositions = 0;
+  Check(SUCCEEDED(oct::CountCompositions(setup.document->context(), &compositions)) &&
+            compositions == 0,
+        "withheld: A's real composition ended after the lock was granted",
+        std::to_string(compositions));
+
+  const executor_tests::TextKey a = Letter(L'a');
+  const DriveResult typed = TypeKeyAndDrive(coordinator, *setup.host,
+                                            *setup.harness.executor, a.event, a.text,
+                                            "withheld: B types after cleanup");
+  CheckOutcome(typed.final_state, WorkOutcome::kApplied,
+               "withheld: B's input resumed");
+  CheckDocText(document_b->text_utf16(), L"a",
+               "withheld: only B received the resumed key");
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "withheld: A was not touched by B");
+  return Finish();
+}
+
 // --- 7. invalidation while the edit is pending (async store) ----------------------------
 
 int RunEditPendingInvalidate() {
@@ -720,9 +846,10 @@ int RunEditPendingInvalidate() {
         "edit-pending: the new binding is accepted at once", "");
   setup.permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
 
-  // The deferred grant now dispatches; the OLD callback must refuse (invalidated session)
-  // and write to neither document.
-  setup.host->PumpUntil(completion, 5000);
+  // The deferred grant now dispatches; the OLD callback is stale because BeginRetirement
+  // abandoned it, and it must write to neither document. It publishes no completion fact,
+  // so the host only dispatches the grant instead of waiting for an event that will not fire.
+  setup.host->DispatchQueuedMessages();
   const auto first = setup.document->diagnostics().store;
   Check(first.text_mutations == 0 && first.composition_start_calls == 0,
         "edit-pending: the old callback changed nothing in the old document", "");
@@ -1188,6 +1315,9 @@ int RunCoordinationCase(const std::string& case_name) {
   }
   if (case_name == "retirement-queue-full") {
     return RunRetirementQueueFull();
+  }
+  if (case_name == "retirement-compose-withheld") {
+    return RunRetirementComposeWithheld();
   }
   if (case_name == "edit-pending-invalidate") {
     return RunEditPendingInvalidate();

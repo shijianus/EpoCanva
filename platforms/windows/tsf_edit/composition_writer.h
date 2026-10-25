@@ -7,7 +7,12 @@
 //   Update   ITfRange::SetText over the composition range this writer owns;
 //   Commit   ITfRange::SetText with the committed text and ITfComposition::EndComposition,
 //            or ITfInsertAtSelection::InsertTextAtSelection when no composition exists;
-//   Cancel   ITfRange::SetText(empty) over its own composition and EndComposition.
+//   Cancel   ITfRange::SetText(empty) over its own composition and EndComposition;
+//   EndOwnedComposition
+//            verify the range still holds exactly what this writer last wrote, then call
+//            ITfComposition::EndComposition without any SetText. The displayed text stays
+//            in the document as ordinary text. This is the only retirement cleanup path and
+//            it never appends a commit, accepts a suggestion or clears unknown text.
 //
 // SCOPE. It never writes outside its own composition range and never replaces the whole
 // document. Before every Update/Commit/Cancel it reads the composition range back and
@@ -103,6 +108,10 @@ class CompositionWriter {
   CompositionWriteOutcome Commit(const EditPlan& plan, ITfContext* context,
                                  TfEditCookie edit_cookie);
   CompositionWriteOutcome Cancel(ITfContext* context, TfEditCookie edit_cookie);
+  // Ends this writer's composition only after re-reading its range and comparing it with
+  // current_text_utf16_. No text call is issued on any path.
+  CompositionWriteOutcome FinishOwnedComposition(ITfContext* context,
+                                                  TfEditCookie edit_cookie);
 
   CompositionWriteOutcome ReplaceCompositionText(ITfContext* context,
                                                  const std::wstring& new_text,

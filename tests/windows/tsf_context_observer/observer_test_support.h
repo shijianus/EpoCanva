@@ -90,6 +90,12 @@ class RecordingSink final : public ContextObserverSink {
 
 // --- external edits with a separate real client -----------------------------------------
 
+// Real TSF composition enumeration: ITfContext::QueryInterface(IID_ITfContextComposition)
+// -> EnumCompositions(). Returns the number of live composition views on this context. This
+// is the state evidence that distinguishes "no underline is drawn" from "the composition
+// really ended"; it is a read-only query and needs no edit cookie.
+HRESULT CountCompositions(ITfContext* context, ULONG* count);
+
 enum class ExternalEditMode {
   kSetCollapsedSelection = 0,
   kInsertText,

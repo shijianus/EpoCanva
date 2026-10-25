@@ -550,9 +550,9 @@ int RunRealAsyncGeneration(const Options& options) {
         "async-generation: the new binding is accepted at once", "");
   real.document = document_b;
 
-  // The deferred grant now dispatches; the OLD callback runs against an invalidated,
-  // closed session and must refuse before any TSF call.
-  real.host->PumpUntil(completion, 5000);
+  // The deferred grant now dispatches; the OLD callback is stale because BeginRetirement
+  // abandoned it and must refuse before any TSF call. It publishes no completion fact.
+  real.host->DispatchQueuedMessages();
   const auto first_store = real.document->diagnostics().store;
   Check(first_store.text_mutations == 0 && first_store.composition_start_calls == 0,
         "async-generation: the old callback changed nothing in the old document", "");
@@ -966,15 +966,17 @@ int RunRealClosePending(const Options& options) {
       return Finish();
     }
     const HANDLE completion = real.coordinator->EditCompletionEvent();
+    Check(completion != nullptr, "close-edit: completion event exposed", "");
     real.coordinator->Close();
     const CoordinatorSnapshot snapshot = real.coordinator->Snapshot();
     Check(snapshot.closed && snapshot.phase == WorkPhase::kIdle &&
               snapshot.outcome == WorkOutcome::kAbandonedStale,
           "close-edit: close terminalized the pending edit without waiting for the callback",
           DescribeSnapshot(snapshot));
-    // Bounded: the grant may dispatch later and the closed session's callback refuses it;
-    // whether the event fires or not, this wait ends.
-    real.host->PumpUntil(completion, 3000);
+    // BeginRetirement abandons the pending plan without signalling completion; dispatch the
+    // deferred grant so the stale callback runs (or proves it does not) without waiting on an
+    // event that is deliberately not set.
+    real.host->DispatchQueuedMessages();
     real.coordinator->Pump();
     const auto store = real.document->diagnostics().store;
     Check(store.text_mutations == 0 && store.composition_start_calls == 0,
