@@ -30,6 +30,9 @@
 cmake_minimum_required(VERSION 3.25)
 project(epocanva_windows_engine_bridge VERSION 0.1.0 LANGUAGES CXX)
 
+option(EPOCANVA_BUILD_TSF_LAB
+       "Build the optional visible TSF integration lab (not part of normal CTest)" OFF)
+
 if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   message(FATAL_ERROR
     "This project must be configured as its own top-level project so its CRT choice "
@@ -232,6 +235,16 @@ add_subdirectory(
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_lifecycle/hosted"
   "${CMAKE_CURRENT_BINARY_DIR}/tsf_lifecycle_hosted")
 
+# --- P3.11: the visible TSF integration lab ---------------------------------------------
+# OFF by default: a normal configure/build/test never opens an interactive window. The lab
+# reuses the targets above and the existing controlled TSF host sources; it registers no
+# input method and installs no keyboard sink.
+if(EPOCANVA_BUILD_TSF_LAB)
+  add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/windows/tsf_lab"
+    "${CMAKE_CURRENT_BINARY_DIR}/tsf_lab")
+endif()
+
 enable_testing()
 
 message(STATUS "epocanva_windows_engine_bridge summary")
@@ -242,3 +255,4 @@ message(STATUS "  MSVC runtime library : ${CMAKE_MSVC_RUNTIME_LIBRARY} (static C
 message(STATUS "  rime linkage         : none -- LoadLibraryExW(abs path) + GetProcAddress")
 message(STATUS "  registration         : none -- no DLL target, no registry write, no sink")
 message(STATUS "  deployment           : explicit one-shot preparation only; never per key/session")
+message(STATUS "  visible TSF lab      : ${EPOCANVA_BUILD_TSF_LAB} (explicit option; interactive, never in normal CTest)")
