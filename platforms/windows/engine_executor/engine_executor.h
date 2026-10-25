@@ -231,6 +231,25 @@ struct CapacityUsage {
   std::size_t completed_unconsumed = 0;
 };
 
+// Client lifecycle accounting. `live` counts clients that still own a real engine session:
+// accepted-but-not-created, open, and closing. `close_requests` counts accepted close
+// commands; `close_results_taken` counts the close results a caller really consumed. The two
+// differ while a close is queued, executing, or completed-but-unconsumed, which is the
+// evidence a host needs to prove it reclaimed every retired client rather than waiting for
+// StopAndJoin. These are counts only; no client identity or engine state is exposed.
+struct ClientUsage {
+  std::size_t created = 0;
+  std::size_t pending = 0;
+  std::size_t open = 0;
+  std::size_t closing = 0;
+  std::size_t closed = 0;
+  std::size_t failed = 0;
+  std::size_t live = 0;
+  std::uint64_t close_requests = 0;
+  std::uint64_t close_results_taken = 0;
+  std::uint64_t close_admission_refusals = 0;
+};
+
 // A value copy of what the worker saw. `api_counts` is captured on the worker during Stop,
 // because the bridge's counters are only safe to read from its owner thread. No borrowed
 // pointer is retained.
@@ -289,6 +308,8 @@ class EngineExecutor {
   TakeStatus TakeResult(RequestId request, CommandResult* result);
 
   CapacityUsage capacity() const;
+  // Client lifecycle counts. Reading them never waits and never consumes anything.
+  ClientUsage clients() const;
   ExecutorRuntimeReport RuntimeReport() const;
 
  private:

@@ -106,10 +106,16 @@ epocanva_add_coordinator_case(
 epocanva_add_coordinator_case(
   windows.tsf_coordinator.evaluate_pure evaluate-pure)
 
-# 6. Invalidation while the engine result is still owed: discard, no write to any document,
-#    Busy for a new binding until the discard completes.
+# 6. Invalidation while the engine result is still owed: the old binding retires, its result
+#    and close are consumed once, a new binding is admitted, and input pauses as Retiring
+#    until the retirement is terminal.
 epocanva_add_coordinator_case(
   windows.tsf_coordinator.engine_pending_invalidate engine-pending-invalidate)
+
+# 6b. QueueFull while retiring: the close is retried, not lost; the bounded ledger refuses
+#     a third binding as Retiring instead of creating more clients.
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.retirement_queue_full retirement-queue-full)
 
 # 7. Invalidation while an async edit waits behind a deferred lock: the old callback
 #    refuses, neither document is written, the new binding works.
@@ -315,6 +321,11 @@ epocanva_add_real_coordinator_case(
 #     engine. One generation, no target loss, the real caret after every own edit.
 epocanva_add_real_coordinator_case(
   windows.tsf_coordinator.observed_real_compose observed-real-compose)
+# 20. P3.12: A -> B -> A through the observer with no runtime restart. Each ended binding
+#     closes its engine client and consumes the close result; only the current client is
+#     live.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.observed_retire_roundtrip observed-retire-roundtrip)
 
 set_tests_properties(
   windows.tsf_coordinator.real_compose_progress
@@ -336,10 +347,11 @@ set_tests_properties(
   windows.tsf_coordinator.real_close_pending
   windows.tsf_coordinator.real_destroyed_context
   windows.tsf_coordinator.observed_real_compose
+  windows.tsf_coordinator.observed_retire_roundtrip
   PROPERTIES TIMEOUT 360
              LABELS "windows;tsf;coordinator;engine;english;real")
 
-message(STATUS "  tsf_coordinator stage-2 cases: 18 (real English engine, real TSF store)")
+message(STATUS "  tsf_coordinator stage-2 cases: 19 (real English engine, real TSF store)")
 
 set_tests_properties(
   windows.tsf_coordinator.conversion_pure
@@ -348,6 +360,7 @@ set_tests_properties(
   windows.tsf_coordinator.composition_progress_controlled
   windows.tsf_coordinator.evaluate_pure
   windows.tsf_coordinator.engine_pending_invalidate
+  windows.tsf_coordinator.retirement_queue_full
   windows.tsf_coordinator.edit_pending_invalidate
   windows.tsf_coordinator.permission_change_queued
   windows.tsf_coordinator.permission_change_edit_pending

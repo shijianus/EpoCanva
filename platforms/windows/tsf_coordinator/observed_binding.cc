@@ -55,6 +55,24 @@ void ObservedBindingController::OnTargetBound(ITfContext* context,
     ++diagnostics_.invalidations;
   }
 
+  // Admission BEFORE the host creates a client. A full retirement ledger must not leave an
+  // unused engine client behind; the explicit kRetiring/kBusy status is reported instead.
+  const BindStatus admitted = coordinator_.CheckBindingAdmission(
+      context, target.context_id, target.generation, target.caret_utf16);
+  if (admitted != BindStatus::kOk) {
+    if (admitted == BindStatus::kRetiring) {
+      ++diagnostics_.binds_paused_retiring;
+    } else if (admitted == BindStatus::kBusy) {
+      ++diagnostics_.binds_paused_busy;
+    } else if (admitted == BindStatus::kBlockedUncertain) {
+      ++diagnostics_.binds_blocked_uncertain;
+    } else {
+      ++diagnostics_.binds_refused;
+    }
+    diagnostics_.last_bind_status = admitted;
+    return;
+  }
+
   const engine::ClientId client = clients_.NextClient();
   ++diagnostics_.engine_clients_requested;
   if (!client.valid()) {

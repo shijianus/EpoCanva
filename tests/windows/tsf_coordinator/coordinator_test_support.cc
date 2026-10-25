@@ -79,6 +79,16 @@ std::string DescribeSnapshot(const CoordinatorSnapshot& snapshot) {
   text += " pqueries=" + std::to_string(snapshot.permission_queries_begun) + "/" +
           std::to_string(snapshot.permission_queries_completed);
   text += " prechecks=" + std::to_string(snapshot.permission_rechecks);
+  text += " owned_comp=" + std::to_string(snapshot.owned_composition_active ? 1 : 0);
+  text += " retiring=" + std::to_string(snapshot.retirement.retiring_bindings) +
+          "/" + std::to_string(snapshot.retirement.capacity);
+  text += " retire_paused=" + std::to_string(snapshot.retirement.admission_paused ? 1 : 0);
+  text += " retire_done=" + std::to_string(snapshot.retirement.completed) +
+          " blocked=" + std::to_string(snapshot.retirement.blocked) +
+          " close=" + std::to_string(snapshot.retirement.close_requests) + "/" +
+          std::to_string(snapshot.retirement.close_results_taken);
+  text += std::string(" cleanup=") +
+          DescribeCleanupState(snapshot.retirement.last_cleanup_state);
   return text;
 }
 
@@ -178,7 +188,10 @@ DriveResult DriveToCompletion(ContextCoordinator& coordinator, TestHost& host,
   for (;;) {
     coordinator.Pump();
     driven.final_state = coordinator.Snapshot();
-    if (driven.final_state.phase == WorkPhase::kIdle) {
+    const bool work_idle = driven.final_state.phase == WorkPhase::kIdle;
+    const bool retirements_idle =
+        driven.final_state.retirement.retiring_bindings == 0;
+    if (work_idle && retirements_idle) {
       driven.completed = true;
       return driven;
     }
@@ -188,16 +201,18 @@ DriveResult DriveToCompletion(ContextCoordinator& coordinator, TestHost& host,
     }
     const DWORD slice =
         static_cast<DWORD>(deadline - now < 200 ? deadline - now : 200);
-    if (driven.final_state.phase == WorkPhase::kEnginePending) {
+    if (!work_idle && driven.final_state.phase == WorkPhase::kEnginePending) {
       // No TSF edit is outstanding for this work item, so a bounded executor wait on this
       // STA cannot starve an edit callback; it only avoids a spin.
       executor.WaitForResult(driven.final_state.engine_request,
                              std::chrono::milliseconds(slice));
-    } else if (driven.final_state.phase == WorkPhase::kEditPending) {
+    } else if (!work_idle &&
+               driven.final_state.phase == WorkPhase::kEditPending) {
       // EditPending: dispatch the STA's messages until the edit's completion event (set
       // by the real callback, on success and refusal alike) is signalled.
       host.PumpUntil(coordinator.EditCompletionEvent(), slice);
-    } else {
+    } else if (!work_idle &&
+               driven.final_state.phase == WorkPhase::kPermissionPending) {
       // PermissionPending: dispatch the STA's messages until the real read session's
       // completion event is signalled (a manual test source releases this synchronously
       // through the cases' own driver, so this branch simply yields the slice).
@@ -205,6 +220,23 @@ DriveResult DriveToCompletion(ContextCoordinator& coordinator, TestHost& host,
       if (event != nullptr) {
         host.PumpUntil(event, slice);
       } else {
+        ::SleepEx(slice, TRUE);
+      }
+    } else {
+      // The current work item is idle but a retired binding is not terminal. Wait on the
+      // real fact retirement exposes: its cleanup edit, its close request, or its
+      // pre-retirement engine request. No sleep decides completion.
+      const RetirementSnapshot& retirement = driven.final_state.retirement;
+      if (retirement.pending_edit_event != nullptr) {
+        host.PumpUntil(retirement.pending_edit_event, slice);
+      } else if (retirement.pending_close_request.valid()) {
+        executor.WaitForResult(retirement.pending_close_request,
+                               std::chrono::milliseconds(slice));
+      } else if (retirement.pending_engine_request.valid()) {
+        executor.WaitForResult(retirement.pending_engine_request,
+                               std::chrono::milliseconds(slice));
+      } else {
+        host.DispatchQueuedMessages();
         ::SleepEx(slice, TRUE);
       }
     }

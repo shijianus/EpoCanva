@@ -124,6 +124,7 @@ struct EngineExecutor::Impl {
   WaitStatus Wait(RequestId request, std::chrono::milliseconds timeout);
   TakeStatus Take(RequestId request, CommandResult* result);
   CapacityUsage Capacity() const;
+  ClientUsage ClientCounts() const;
   ExecutorRuntimeReport Report() const;
 
   // --- worker-side helpers ---------------------------------------------------------------
@@ -164,6 +165,9 @@ struct EngineExecutor::Impl {
   std::uint64_t last_submitted_ = 0;
   std::uint64_t next_client_ = 1;
   std::uint64_t clients_created_ = 0;
+  std::uint64_t close_requests_ = 0;
+  std::uint64_t close_results_taken_ = 0;
+  std::uint64_t close_admission_refusals_ = 0;
 
   ExecutorRuntimeReport report_;
 };
@@ -471,6 +475,9 @@ SubmitStatus EngineExecutor::Impl::Submit(EngineCommand command, bool create,
 
   std::lock_guard<std::mutex> lock(mutex_);
   if (state_ != ExecutorState::kRunning) {
+    if (command.kind == CommandKind::kCloseClient) {
+      ++close_admission_refusals_;
+    }
     return SubmitStatus::kNotRunning;
   }
 
@@ -478,10 +485,16 @@ SubmitStatus EngineExecutor::Impl::Submit(EngineCommand command, bool create,
   if (!create) {
     const auto found = clients_.find(command.client);
     if (found == clients_.end()) {
+      if (command.kind == CommandKind::kCloseClient) {
+        ++close_admission_refusals_;
+      }
       return SubmitStatus::kClientUnknown;
     }
     if (found->second != ClientLifecycle::kPending &&
         found->second != ClientLifecycle::kOpen) {
+      if (command.kind == CommandKind::kCloseClient) {
+        ++close_admission_refusals_;
+      }
       return SubmitStatus::kClientNotOpen;
     }
     previous_client_state = found->second;
@@ -490,6 +503,9 @@ SubmitStatus EngineExecutor::Impl::Submit(EngineCommand command, bool create,
   // A closed client is always reported as such, even when the queue is also full: the close
   // admission rule is more specific than capacity pressure.
   if (occupied_ >= capacity_) {
+    if (command.kind == CommandKind::kCloseClient) {
+      ++close_admission_refusals_;
+    }
     return SubmitStatus::kQueueFull;
   }
 
@@ -527,11 +543,17 @@ SubmitStatus EngineExecutor::Impl::Submit(EngineCommand command, bool create,
       }
     }
     outstanding_.erase(request_id);
+    if (kind == CommandKind::kCloseClient) {
+      ++close_admission_refusals_;
+    }
     return SubmitStatus::kInternalFailure;
   }
 
   ++next_request_;
   last_submitted_ = request_id;
+  if (kind == CommandKind::kCloseClient) {
+    ++close_requests_;
+  }
   if (create) {
     ++next_client_;
     *client = ClientId{client_id};
@@ -592,6 +614,9 @@ TakeStatus EngineExecutor::Impl::Take(RequestId request, CommandResult* result) 
                ? TakeStatus::kNotReady
                : TakeStatus::kAlreadyTaken;
   }
+  if (found->second.kind == CommandKind::kCloseClient) {
+    ++close_results_taken_;
+  }
   *result = std::move(found->second);
   results_.erase(found);
   if (occupied_ > 0) {
@@ -608,6 +633,36 @@ CapacityUsage EngineExecutor::Impl::Capacity() const {
   usage.queued = queue_.size();
   usage.executing = executing_;
   usage.completed_unconsumed = results_.size();
+  return usage;
+}
+
+ClientUsage EngineExecutor::Impl::ClientCounts() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ClientUsage usage;
+  usage.created = static_cast<std::size_t>(clients_created_);
+  for (const auto& entry : clients_) {
+    switch (entry.second) {
+      case ClientLifecycle::kPending:
+        ++usage.pending;
+        break;
+      case ClientLifecycle::kOpen:
+        ++usage.open;
+        break;
+      case ClientLifecycle::kClosing:
+        ++usage.closing;
+        break;
+      case ClientLifecycle::kClosed:
+        ++usage.closed;
+        break;
+      case ClientLifecycle::kFailed:
+        ++usage.failed;
+        break;
+    }
+  }
+  usage.live = usage.pending + usage.open + usage.closing;
+  usage.close_requests = close_requests_;
+  usage.close_results_taken = close_results_taken_;
+  usage.close_admission_refusals = close_admission_refusals_;
   return usage;
 }
 
@@ -892,6 +947,7 @@ TakeStatus EngineExecutor::TakeResult(RequestId request, CommandResult* result) 
 }
 
 CapacityUsage EngineExecutor::capacity() const { return impl_->Capacity(); }
+ClientUsage EngineExecutor::clients() const { return impl_->ClientCounts(); }
 ExecutorRuntimeReport EngineExecutor::RuntimeReport() const { return impl_->Report(); }
 
 std::unique_ptr<EngineExecutor> EngineExecutorTestFactory::Create(

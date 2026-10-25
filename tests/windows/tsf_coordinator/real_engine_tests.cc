@@ -559,6 +559,12 @@ int RunRealAsyncGeneration(const Options& options) {
   CheckDocText(document_b->text_utf16(), L"",
                "async-generation: the old callback reached no new document");
 
+  const DriveResult retired = DriveToCompletion(
+      *real.coordinator, *real.host, *real.harness.executor, 30000);
+  Check(retired.completed && retired.final_state.retirement.retiring_bindings == 0,
+        "async-generation: the retired client's close was consumed",
+        DescribeSnapshot(retired.final_state));
+
   if (TypeLetter(real, L'a', "async-generation: type on the new binding")) {
     CheckDocText(document_b->text_utf16(), L"a",
                  "async-generation: only the new key reached the new document");
@@ -806,6 +812,11 @@ int RunRealUncertainLockdown(const Options& options) {
                                                  real.harness.client_a);
   Check(same == BindStatus::kBlockedUncertain,
         "uncertain: re-binding the same context is refused", DescribeBindStatus(same));
+  const DriveResult reclaimed = DriveToCompletion(
+      *real.coordinator, *real.host, *real.harness.executor, 30000);
+  Check(reclaimed.completed && reclaimed.final_state.retirement.retiring_bindings == 0,
+        "uncertain: the old client was reclaimed without touching the context",
+        DescribeSnapshot(reclaimed.final_state));
   const std::uint64_t works_before = real.coordinator->Snapshot().works_accepted;
 
   // A different context is a different document and works normally.
@@ -885,25 +896,54 @@ int RunRealClosePending(const Options& options) {
               real.coordinator->Snapshot().engine_results_taken ==
                   snapshot.engine_results_taken,
           "close-engine: pumping a closed coordinator consumes nothing", "");
-    // The engine result is either already discarded by Close (slot free) or still owed to
-    // the executor; both are honest, and the slot accounting says which. If it is owed, it
-    // is still executing: a bounded wait for its readiness, then the one take.
-    const engine::CapacityUsage capacity = real.harness.executor->capacity();
-    if (capacity.occupied == 1) {
+    // Close retires the binding: it submits a close for the client and reports any request
+    // whose result it could not consume yet. Both the unconsumed dispatch (if any) and the
+    // close request are named in the closed-retirement snapshot; the host bounded-waits and
+    // consumes them once.
+    const RetirementSnapshot pending = snapshot.retirement;
+    Check(pending.pending_engine_request == request ||
+              pending.pending_engine_request.value == 0,
+          "close-engine: the unconsumed dispatch is named, or was already taken", "");
+    if (pending.pending_engine_request.valid()) {
       engine::CommandResult leftover;
       engine::WaitStatus wait = engine::WaitStatus::kTimedOut;
-      for (int attempt = 0; attempt < 200 && wait != engine::WaitStatus::kReady; ++attempt) {
-        wait = real.harness.executor->WaitForResult(request, std::chrono::milliseconds(50));
+      for (int attempt = 0; attempt < 200 &&
+                              wait != engine::WaitStatus::kReady; ++attempt) {
+        wait = real.harness.executor->WaitForResult(
+            pending.pending_engine_request, std::chrono::milliseconds(50));
       }
-      Check(real.harness.executor->TakeResult(request, &leftover) ==
+      Check(real.harness.executor->TakeResult(pending.pending_engine_request,
+                                              &leftover) ==
                 engine::TakeStatus::kTaken,
-            "close-engine: the leftover result is taken once by the host", "");
+            "close-engine: the leftover dispatch result is taken once by the host", "");
       Check(leftover.kind == engine::CommandKind::kDispatch,
             "close-engine: it is the dispatched key command", "");
-    } else {
-      Check(capacity.occupied == 0, "close-engine: the slot was already released",
-            std::to_string(capacity.occupied));
     }
+    if (pending.pending_close_request.valid()) {
+      engine::CommandResult closed;
+      engine::WaitStatus wait = engine::WaitStatus::kTimedOut;
+      for (int attempt = 0; attempt < 200 &&
+                              wait != engine::WaitStatus::kReady; ++attempt) {
+        wait = real.harness.executor->WaitForResult(
+            pending.pending_close_request, std::chrono::milliseconds(50));
+      }
+      Check(real.harness.executor->TakeResult(pending.pending_close_request,
+                                              &closed) ==
+                engine::TakeStatus::kTaken,
+            "close-engine: the close result is taken once by the host", "");
+      Check(closed.kind == engine::CommandKind::kCloseClient && closed.ok(),
+            "close-engine: the close result is a successful client close", "");
+    }
+    Check(real.harness.executor->capacity().occupied == 0,
+          "close-engine: every result slot is released",
+          std::to_string(real.harness.executor->capacity().occupied));
+    const engine::ClientUsage clients = real.harness.executor->clients();
+    Check(clients.live == 0, "close-engine: no live engine client remains",
+          std::to_string(clients.live));
+    Check(clients.close_requests == clients.close_results_taken,
+          "close-engine: every accepted close result was consumed",
+          std::to_string(clients.close_requests) + "/" +
+              std::to_string(clients.close_results_taken));
     CheckDocText(real.document->text_utf16(), L"",
                  "close-engine: the document was never written");
   }

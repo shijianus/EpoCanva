@@ -138,10 +138,6 @@ bool CheckCleanupReports(LabSession* session) {
         "resource balance: initialize/finalize are paired",
         "initialize=" + std::to_string(runtime.runtime_info.initialize_calls) +
             " finalize=" + std::to_string(runtime.runtime_info.finalize_calls));
-  Check(runtime.clients_created == runtime.clients_closed,
-        "resource balance: every engine client was closed",
-        std::to_string(runtime.clients_created) + " vs " +
-            std::to_string(runtime.clients_closed));
   Check(runtime.client_close_failures == 0,
         "resource balance: no client close failed");
   Check(runtime.live_sessions_after_cleanup == 0,
@@ -184,6 +180,29 @@ bool CheckCleanupReports(LabSession* session) {
         std::to_string(cleanup.store_reference_count_after_shutdown));
 
   const LabSnapshot snapshot = session->Snapshot();
+  Check(snapshot.retire_drain_complete && !snapshot.retire_drain_timed_out,
+        "resource balance: the retirement drain completed before StopAndJoin",
+        "complete=" + std::to_string(snapshot.retire_drain_complete ? 1 : 0) +
+            " timed_out=" + std::to_string(snapshot.retire_drain_timed_out ? 1 : 0));
+  Check(snapshot.retirement.retiring_bindings == 0,
+        "resource balance: no retiring binding remained",
+        std::to_string(snapshot.retirement.retiring_bindings));
+  Check(snapshot.client_usage_after_drain.live == 0,
+        "resource balance: no live engine client remained before StopAndJoin",
+        std::to_string(snapshot.client_usage_after_drain.live));
+  Check(snapshot.client_usage_after_drain.created ==
+            snapshot.client_usage_after_drain.closed,
+        "resource balance: every created engine client reached the closed state",
+        std::to_string(snapshot.client_usage_after_drain.created) + " vs " +
+            std::to_string(snapshot.client_usage_after_drain.closed));
+  Check(snapshot.capacity_after_drain.occupied == 0,
+        "resource balance: no executor result slot remained occupied",
+        std::to_string(snapshot.capacity_after_drain.occupied));
+  Check(snapshot.client_usage_after_drain.close_requests ==
+            snapshot.client_usage_after_drain.close_results_taken,
+        "resource balance: every accepted close result was consumed",
+        std::to_string(snapshot.client_usage_after_drain.close_requests) + "/" +
+            std::to_string(snapshot.client_usage_after_drain.close_results_taken));
   for (int index = 0; index < 2; ++index) {
     Check(snapshot.association_cleared[index],
           std::string("resource balance: association ") +

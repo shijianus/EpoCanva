@@ -337,8 +337,20 @@ void LabSession::Shutdown() {
   ClearAssociations();
 
   if (coordinator_ != nullptr) {
+    // Retire the current binding explicitly and consume its engine result/close before
+    // StopAndJoin. The observer is already shut down and the associations are cleared, so
+    // this drain cannot rebind anything.
+    coordinator_->InvalidateBinding();
+    DrainRetirementsBeforeStop();
+    retirement_cache_ = coordinator_->Snapshot().retirement;
     coordinator_->Close();
     coordinator_.reset();
+  }
+  if (executor_ != nullptr) {
+    client_usage_cache_ = executor_->clients();
+    capacity_cache_ = executor_->capacity();
+    client_usage_after_drain_ = client_usage_cache_;
+    capacity_after_drain_ = capacity_cache_;
   }
   clients_.reset();
   if (executor_ != nullptr) {
@@ -395,6 +407,60 @@ void LabSession::ClearAssociations() {
       association_previous_released_[index] = true;
     }
     associated_[index] = false;
+  }
+}
+
+void LabSession::DispatchOnly() {
+  MSG message = {};
+  while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != 0) {
+    ::TranslateMessage(&message);
+    ::DispatchMessageW(&message);
+  }
+}
+
+void LabSession::DrainRetirementsBeforeStop() {
+  retire_drain_complete_ = false;
+  retire_drain_timed_out_ = false;
+  const DWORD timeout =
+      config_.step_timeout_ms == 0 ? 30000 : config_.step_timeout_ms;
+  if (PumpRetirementsUntilIdle(timeout)) {
+    retire_drain_complete_ = true;
+  } else {
+    retire_drain_timed_out_ = true;
+  }
+}
+
+bool LabSession::PumpRetirementsUntilIdle(DWORD timeout_ms) {
+  if (coordinator_ == nullptr || executor_ == nullptr) {
+    return true;
+  }
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  for (;;) {
+    coordinator_->Pump();
+    const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
+    if (snapshot.retirement.retiring_bindings == 0) {
+      return true;
+    }
+    if (::GetTickCount64() >= deadline) {
+      return false;
+    }
+    const coordinator::RetirementSnapshot& retirement = snapshot.retirement;
+    if (retirement.pending_edit_event != nullptr) {
+      HANDLE event = retirement.pending_edit_event;
+      ::MsgWaitForMultipleObjects(1, &event, FALSE, 20, QS_ALLINPUT);
+      DispatchOnly();
+    } else if (retirement.pending_close_request.valid()) {
+      executor_->WaitForResult(retirement.pending_close_request,
+                               std::chrono::milliseconds(20));
+      DispatchOnly();
+    } else if (retirement.pending_engine_request.valid()) {
+      executor_->WaitForResult(retirement.pending_engine_request,
+                               std::chrono::milliseconds(20));
+      DispatchOnly();
+    } else {
+      ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+      DispatchOnly();
+    }
   }
 }
 
@@ -597,6 +663,19 @@ bool LabSession::WaitForRebind(int index, std::uint64_t minimum_generation,
     const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
     if (snapshot.bound && snapshot.identity.context_id == record.context_id &&
         snapshot.identity.generation >= minimum_generation) {
+      // A binding is not "ready" while the previous binding still owes a close or a
+      // composition cleanup: input would be answered kRetiring. Wait on the real
+      // completion facts, bounded by the same focus timeout.
+      const ULONGLONG now = ::GetTickCount64();
+      const DWORD remaining =
+          now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+      if (!PumpRetirementsUntilIdle(remaining)) {
+        if (error != nullptr) {
+          *error = "the binding was admitted but the previous binding's retirement "
+                   "did not reach a terminal state";
+        }
+        return false;
+      }
       return true;
     }
     if (registry_->IsUncertain(documents_[index]->context())) {
@@ -991,6 +1070,20 @@ LabSnapshot LabSession::Snapshot() {
   snapshot.last_bind_path = last_bind_path_;
   snapshot.engine_clients_created =
       clients_ != nullptr ? clients_->created() : engine_clients_created_cache_;
+  if (executor_ != nullptr) {
+    snapshot.client_usage = executor_->clients();
+    snapshot.capacity_usage = executor_->capacity();
+  } else {
+    snapshot.client_usage = client_usage_cache_;
+    snapshot.capacity_usage = capacity_cache_;
+  }
+  snapshot.retirement = coordinator_ != nullptr
+                            ? coordinator_->Snapshot().retirement
+                            : retirement_cache_;
+  snapshot.retire_drain_complete = retire_drain_complete_;
+  snapshot.retire_drain_timed_out = retire_drain_timed_out_;
+  snapshot.client_usage_after_drain = client_usage_after_drain_;
+  snapshot.capacity_after_drain = capacity_after_drain_;
   snapshot.engine_state_valid = engine_state_valid_;
   snapshot.engine_state = engine_state_;
   snapshot.engine_error =

@@ -34,6 +34,7 @@ namespace {
 namespace ctx = epocanva::tsf::context;
 namespace oct = epocanva::tsf::context::test;
 namespace ex = epocanva::tests::engine_executor;
+namespace input = epocanva::windows::input;
 
 using epocanva::windows::engine::ClientId;
 using epocanva::windows::engine::CommandResult;
@@ -215,6 +216,25 @@ bool FinishWiring(ControlledObservedEnv* env, EngineExecutor& executor,
   return env->coordinator->bound();
 }
 
+// A rebind is admitted while the old binding retires. Input on the new binding is kRetiring
+// until that retirement is terminal; these cases drive it with the real completion facts and
+// then assert the new binding is usable. This is the replacement for the old "old clients are
+// only closed at StopAndJoin" behaviour.
+void PumpRetirements(ControlledObservedEnv* env, EngineExecutor& executor,
+                     const char* label) {
+  (void)executor;
+  const DriveResult driven =
+      DriveToCompletion(*env->coordinator, *env->host, executor, 30000);
+  Check(driven.completed && driven.final_state.retirement.retiring_bindings == 0,
+        std::string(label) + ": the retirement ledger is terminal",
+        DescribeSnapshot(driven.final_state));
+  Check(driven.final_state.retirement.close_requests ==
+            driven.final_state.retirement.close_results_taken,
+        std::string(label) + ": this coordinator consumed every close result it submitted",
+        std::to_string(driven.final_state.retirement.close_requests) + "/" +
+            std::to_string(driven.final_state.retirement.close_results_taken));
+}
+
 // --- cases --------------------------------------------------------------------------------
 
 int RunObservedBindAndType() {
@@ -310,6 +330,117 @@ int RunObservedRealComposeProgress(const Options& options) {
   return Finish();
 }
 
+int RunObservedRetireRoundtrip(const Options& options) {
+  RealHarness harness;
+  if (!CreateRealHarness(options, "observed-retire-roundtrip", &harness)) {
+    return Finish();
+  }
+  ControlledObservedEnv env;
+  if (!WireObserved(&env, TestDocumentOptions{L"", 0, 0},
+                    "observed-retire-roundtrip")) {
+    return Finish();
+  }
+  TestDocument* doc_b = env.host->CreateDocument(TestDocumentOptions{}, &env.error);
+  Check(doc_b != nullptr, "retire-roundtrip: document B created", env.error);
+  if (doc_b == nullptr) {
+    return Finish();
+  }
+  if (!FinishWiring(&env, *harness.executor, "epocanva_test_english", 30000,
+                    "observed-retire-roundtrip")) {
+    return Finish();
+  }
+
+  auto type_commit = [&](wchar_t first, wchar_t second, const char* label) {
+    const ex::TextKey one = Letter(first);
+    const ex::TextKey two = Letter(second);
+    TypeKeyAndDrive(*env.coordinator, *env.host, *harness.executor, one.event,
+                    one.text, std::string(label) + " first");
+    TypeKeyAndDrive(*env.coordinator, *env.host, *harness.executor, two.event,
+                    two.text, std::string(label) + " second");
+    const input::KeyEventSnapshot enter =
+        ex::MakeKeyEvent(0x0D, false, false, false, false);
+    input::KeyText no_text;
+    no_text.status = input::KeyTextStatus::kNoText;
+    return TypeKeyAndDrive(*env.coordinator, *env.host, *harness.executor, enter,
+                           no_text, std::string(label) + " Return");
+  };
+  auto switch_to = [&](TestDocument* document, const char* label) {
+    oct::FocusCallResult focus;
+    Check(oct::SetThreadFocus(*env.host, document, &focus, &env.error),
+          std::string(label) + ": real SetFocus", env.error);
+    const oct::ObserverDriveResult driven =
+        oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+    Check(driven.settled && env.coordinator->bound(),
+          std::string(label) + ": the observer re-bound",
+          oct::DescribeObserverSnapshot(driven.final_state));
+    PumpRetirements(&env, *harness.executor, label);
+    const CoordinatorSnapshot now = env.coordinator->Snapshot();
+    Check(now.identity.context_id ==
+              [&]() {
+                ContextIdRecord record;
+                env.registry->Observe(document->context(), &record);
+                return record.context_id;
+              }(),
+          std::string(label) + ": the bound identity is the focused document", "");
+    const engine::ClientUsage clients = harness.executor->clients();
+    // One pre-created harness client plus the current observed binding. The count must not
+    // grow with the number of switches.
+    Check(clients.live == 2,
+          std::string(label) +
+              ": exactly the harness client plus the current binding are live",
+          std::to_string(clients.live));
+    Check(clients.close_requests == clients.close_results_taken,
+          std::string(label) + ": every close result was consumed",
+          std::to_string(clients.close_requests) + "/" +
+              std::to_string(clients.close_results_taken));
+  };
+
+  const DriveResult first = type_commit(L'a', L'b', "retire-roundtrip: A first");
+  CheckOutcome(first.final_state, WorkOutcome::kApplied,
+               "retire-roundtrip: A's committed text applied");
+  CheckDocText(env.doc_a->text_utf16(), L"ab",
+               "retire-roundtrip: A holds the committed text");
+
+  switch_to(doc_b, "retire-roundtrip: A to B");
+  CheckDocText(env.doc_a->text_utf16(), L"ab",
+               "retire-roundtrip: A keeps its text across the switch");
+  const DriveResult second = type_commit(L'c', L'd', "retire-roundtrip: B first");
+  CheckOutcome(second.final_state, WorkOutcome::kApplied,
+               "retire-roundtrip: B's committed text applied");
+  CheckDocText(doc_b->text_utf16(), L"cd",
+               "retire-roundtrip: B holds only its text");
+
+  switch_to(env.doc_a, "retire-roundtrip: B to A");
+  const DriveResult third = type_commit(L'e', L'f', "retire-roundtrip: A second");
+  CheckOutcome(third.final_state, WorkOutcome::kApplied,
+               "retire-roundtrip: A's second text applied");
+  CheckDocText(env.doc_a->text_utf16(), L"abef",
+               "retire-roundtrip: A's old text was not replaced");
+  CheckDocText(doc_b->text_utf16(), L"cd",
+               "retire-roundtrip: B was not touched by the return");
+  Check(harness.executor->RuntimeReport().runtime_info.initialize_calls == 1,
+        "retire-roundtrip: no runtime restart across the round trip",
+        std::to_string(
+            harness.executor->RuntimeReport().runtime_info.initialize_calls));
+
+  const engine::ClientUsage clients = harness.executor->clients();
+  Check(clients.created == 4,
+        "retire-roundtrip: one harness client plus one fresh client per binding",
+        std::to_string(clients.created));
+  Check(clients.close_requests == 2 &&
+            clients.close_results_taken == 2,
+        "retire-roundtrip: both ended bindings' close results were consumed",
+        std::to_string(clients.close_requests) + "/" +
+            std::to_string(clients.close_results_taken));
+  Check(clients.live == 2,
+        "retire-roundtrip: the live count stayed constant across three bindings",
+        std::to_string(clients.live));
+  Check(env.controller->Snapshot().binds_ok == 3,
+        "retire-roundtrip: three observed bindings",
+        std::to_string(env.controller->Snapshot().binds_ok));
+  return Finish();
+}
+
 int RunObservedExternalSelection() {
   ControlledObservedEnv env;
   TestDocumentOptions options;
@@ -342,6 +473,7 @@ int RunObservedExternalSelection() {
   Check(rebound.settled && env.coordinator->bound(),
         "observed-sel: the observer re-bound the context",
         oct::DescribeObserverSnapshot(rebound.final_state));
+  PumpRetirements(&env, *env.harness.executor, "observed-sel");
   const CoordinatorSnapshot after = env.coordinator->Snapshot();
   Check(after.identity.context_id == first.context_id &&
             after.identity.generation == first.generation + 1,
@@ -397,6 +529,7 @@ int RunObservedExternalText() {
       oct::PumpUntilSettled(*env.observer, *env.host, 20000);
   Check(rebound.settled && env.coordinator->bound(),
         "observed-text: the observer re-bound", "");
+  PumpRetirements(&env, *env.harness.executor, "observed-text");
   const CoordinatorSnapshot after = env.coordinator->Snapshot();
   Check(after.identity.generation == first.generation + 1,
         "observed-text: a new generation", "");
@@ -468,6 +601,8 @@ int RunObservedLatePermission() {
         "late-permission: B is the bound context", "");
   Check(env.coordinator->Snapshot().permission == edit::InputPermission::kUnknown,
         "late-permission: B starts at the safe Unknown verdict", "");
+
+  PumpRetirements(&env, *env.harness.executor, "late-permission");
 
   // Now let A's real read session complete, late.
   env.host->DispatchQueuedMessages();
@@ -584,6 +719,14 @@ int RunObservedLateEdit() {
   Check(env.doc_a->diagnostics().store.write_lock_grants == 0,
         "late-edit: A's write lock is still ungranted after the switch", "");
   const ex::TextKey a = Letter(L'a');
+  WorkId paused_id;
+  const SubmitStatus paused = env.coordinator->SubmitKey(a.event, a.text, &paused_id);
+  Check(paused == SubmitStatus::kRetiring,
+        "late-edit: B's input is explicitly paused while A's binding retires",
+        DescribeSubmitStatus(paused));
+  Check(!paused_id.valid(), "late-edit: the paused key created no work item", "");
+  PumpRetirements(&env, *env.harness.executor, "late-edit");
+
   const auto before_b = doc_b->diagnostics().store;
   std::printf(
       "[coordinator-win] evidence late-edit: before B type "
@@ -722,6 +865,7 @@ int RunObservedUncertainAcrossCoordinator() {
     rebound = oct::PumpUntilSettled(*env.observer, *env.host, 20000);
     Check(rebound.settled && env.coordinator->bound(),
           "uncertain-swap: the independent document binds", "");
+    PumpRetirements(&env, *env.harness.executor, "uncertain-swap: independent");
     const ex::TextKey a = Letter(L'a');
     const DriveResult typed = TypeKeyAndDrive(*env.coordinator, *env.host,
                                               *env.harness.executor, a.event,
@@ -763,6 +907,7 @@ int RunObservedPermissionRequery() {
       oct::PumpUntilSettled(*env.observer, *env.host, 20000);
   Check(rebound.settled && env.coordinator->bound(),
         "permission-requery: the observer re-bound", "");
+  PumpRetirements(&env, *env.harness.executor, "permission-requery");
   Check(env.coordinator->Snapshot().permission == edit::InputPermission::kUnknown,
         "permission-requery: the new binding did not carry the old Allowed verdict",
         edit::DescribeInputPermission(env.coordinator->Snapshot().permission));
@@ -793,6 +938,9 @@ int RunObservedBindingCase(const std::string& case_name, const Options& options)
   if (case_name == "observed-late-edit") return RunObservedLateEdit();
   if (case_name == "observed-uncertain-swap") return RunObservedUncertainAcrossCoordinator();
   if (case_name == "observed-permission-requery") return RunObservedPermissionRequery();
+  if (case_name == "observed-retire-roundtrip" && !options.rime_dll.empty()) {
+    return RunObservedRetireRoundtrip(options);
+  }
   if (case_name == "observed-real-compose" && !options.rime_dll.empty()) {
     return RunObservedRealComposeProgress(options);
   }

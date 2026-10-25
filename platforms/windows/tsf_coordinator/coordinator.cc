@@ -54,6 +54,8 @@ const char* DescribeBindStatus(BindStatus status) {
       return "AlreadyBound";
     case BindStatus::kBusy:
       return "Busy";
+    case BindStatus::kRetiring:
+      return "Retiring";
     case BindStatus::kClosed:
       return "Closed";
     case BindStatus::kBlockedUncertain:
@@ -72,6 +74,8 @@ const char* DescribeSubmitStatus(SubmitStatus status) {
       return "Busy";
     case SubmitStatus::kNotBound:
       return "NotBound";
+    case SubmitStatus::kRetiring:
+      return "Retiring";
     case SubmitStatus::kClosed:
       return "Closed";
     case SubmitStatus::kPermissionDenied:
@@ -188,6 +192,52 @@ const char* DescribeRejectCause(RejectCause cause) {
   return "UnknownRejectCause";
 }
 
+const char* DescribeCleanupState(CleanupState state) {
+  switch (state) {
+    case CleanupState::kNone:
+      return "None";
+    case CleanupState::kPending:
+      return "Pending";
+    case CleanupState::kFinished:
+      return "Finished";
+    case CleanupState::kAlreadyOrdinary:
+      return "AlreadyOrdinary";
+    case CleanupState::kBlocked:
+      return "Blocked";
+  }
+  return "UnknownCleanupState";
+}
+
+const char* DescribeCleanupBlockReason(CleanupBlockReason reason) {
+  switch (reason) {
+    case CleanupBlockReason::kNone:
+      return "None";
+    case CleanupBlockReason::kPermissionDenied:
+      return "PermissionDenied";
+    case CleanupBlockReason::kPermissionUnknown:
+      return "PermissionUnknown";
+    case CleanupBlockReason::kReadOnly:
+      return "ReadOnly";
+    case CleanupBlockReason::kContextDisconnected:
+      return "ContextDisconnected";
+    case CleanupBlockReason::kUncertainTextState:
+      return "UncertainTextState";
+    case CleanupBlockReason::kRangeMismatch:
+      return "RangeMismatch";
+    case CleanupBlockReason::kLockRefused:
+      return "LockRefused";
+    case CleanupBlockReason::kEndCompositionFailed:
+      return "EndCompositionFailed";
+    case CleanupBlockReason::kStale:
+      return "Stale";
+    case CleanupBlockReason::kPlanBuildFailed:
+      return "PlanBuildFailed";
+    case CleanupBlockReason::kRequestFailed:
+      return "RequestFailed";
+  }
+  return "UnknownCleanupBlockReason";
+}
+
 ContextCoordinator::ContextCoordinator(engine::EngineExecutor& executor,
                                        TfClientId tsf_client_id,
                                        context::PermissionSource& permission_source)
@@ -224,6 +274,37 @@ bool ContextCoordinator::AttachContextRegistry(context::ContextRegistry* registr
   }
   registry_ = registry;
   return true;
+}
+
+BindStatus ContextCoordinator::CheckBindingAdmission(
+    ITfContext* context, std::uint64_t context_id, std::uint64_t generation,
+    LONG initial_caret_utf16) const {
+  if (context == nullptr || context_id == 0 || generation == 0 ||
+      initial_caret_utf16 < 0) {
+    return BindStatus::kInvalidRequest;
+  }
+  if (closed_) {
+    return BindStatus::kClosed;
+  }
+  if (bound_) {
+    return BindStatus::kAlreadyBound;
+  }
+  // The ledger is the only bounded resource binding creates. A full ledger means "do not
+  // create another client yet", not "drop an old cleanup on the floor".
+  if (retiring_.size() >= kRetirementCapacity) {
+    return BindStatus::kRetiring;
+  }
+  if (phase_ != WorkPhase::kIdle) {
+    return BindStatus::kBusy;
+  }
+  if (RegistryBlocks(context)) {
+    return BindStatus::kBlockedUncertain;
+  }
+  if (uncertain_blocked_context_id_ != 0 &&
+      uncertain_blocked_context_id_ == context_id) {
+    return BindStatus::kBlockedUncertain;
+  }
+  return BindStatus::kOk;
 }
 
 bool ContextCoordinator::RegistryBlocks(ITfContext* context) const {
@@ -267,6 +348,9 @@ BindStatus ContextCoordinator::BindImpl(ITfContext* context,
   }
   if (bound_) {
     return BindStatus::kAlreadyBound;
+  }
+  if (retiring_.size() >= kRetirementCapacity) {
+    return BindStatus::kRetiring;
   }
   if (phase_ != WorkPhase::kIdle) {
     // A previous work item's engine result is still outstanding; single flight means the
@@ -329,7 +413,8 @@ void ContextCoordinator::InvalidateBinding() {
   if (phase_ == WorkPhase::kEditPending || phase_ == WorkPhase::kPermissionPending) {
     EndWork(WorkOutcome::kAbandonedStale, RejectCause::kNone);
   } else if (phase_ == WorkPhase::kEnginePending) {
-    // The engine result, when it becomes ready, is consumed once and discarded.
+    // The engine result, when it becomes ready, is consumed once and discarded by the
+    // retirement path. Its request moves with the binding below.
     work_abandoned_ = true;
     outcome_ = WorkOutcome::kAbandonedStale;
     cause_ = RejectCause::kNone;
@@ -338,22 +423,181 @@ void ContextCoordinator::InvalidateBinding() {
   observed_caret_pending_ = false;
   // A permission read session that is still queued publishes nothing from now on.
   permission_source_.Abandon();
-  if (session_ != nullptr) {
-    session_->Invalidate();
-    session_->Close();
-    session_.reset();
+  RetireCurrentBinding();
+}
+
+// --- retirement ---------------------------------------------------------------------------
+
+bool ContextCoordinator::RetirementPausesInput() const {
+  return !retiring_.empty();
+}
+
+void ContextCoordinator::RetireCurrentBinding() {
+  RetiringBinding record;
+  record.identity = identity_;
+  record.client = engine_client_;
+  if (phase_ == WorkPhase::kEnginePending && engine_request_.valid()) {
+    record.engine_request = engine_request_;
+    record.engine_result_pending = true;
   }
-  if (bound_context_ != nullptr) {
-    bound_context_->Release();
-    bound_context_ = nullptr;
+  record.context = bound_context_;
+  record.session = std::move(session_);
+  bound_context_ = nullptr;
+  engine_client_ = engine::ClientId{};
+
+  // The old binding stops accepting input immediately. In this step the session is closed
+  // without a TSF write; its pending plan is invalidated so a late callback cannot write.
+  // (The composition-finishing step replaces this release with a verified end.)
+  if (record.session != nullptr) {
+    record.session->Invalidate();
+    record.session->Close();
+    record.session.reset();
   }
+  if (record.context != nullptr) {
+    record.context->Release();
+    record.context = nullptr;
+  }
+
+  phase_ = WorkPhase::kIdle;
+  work_kind_ = WorkKind::kNone;
+  work_abandoned_ = false;
+  engine_request_ = engine::RequestId{};
   bound_ = false;
   identity_ = edit::ContextIdentity{};
-  engine_client_ = engine::ClientId{};
   view_ = LocalDocumentView{};
   // NeedsResync / UnsupportedShape describe the engine view of one binding; an explicit
   // invalidation is the documented way out of them. The uncertain block is not cleared
   // here: it belongs to the context's document, whose text state is still unknown.
+
+  if (!record.client.valid() && !record.engine_result_pending) {
+    return;
+  }
+  if (retiring_.size() >= kRetirementCapacity) {
+    // Unreachable while binding admission honours the same capacity. If it ever happens,
+    // never grow the ledger: account the reclamation as unresolved rather than pretending
+    // it finished. StopAndJoin still owns the actual engine cleanup.
+    ++retirement_unresolved_engine_results_;
+    return;
+  }
+  retiring_.push_back(std::move(record));
+  ++retirements_started_;
+}
+
+void ContextCoordinator::PumpRetirements() {
+  for (auto record = retiring_.begin(); record != retiring_.end();) {
+    if (record->engine_result_pending) {
+      engine::CommandResult discarded;
+      const engine::TakeStatus taken =
+          executor_.TakeResult(record->engine_request, &discarded);
+      if (taken == engine::TakeStatus::kTaken) {
+        record->engine_result_pending = false;
+        ++engine_results_taken_;
+        ++retirement_engine_results_discarded_;
+      } else if (taken != engine::TakeStatus::kNotReady) {
+        // Already taken or unknown: there is nothing left to consume, but this is not a
+        // clean retirement and must stay visible.
+        record->engine_result_pending = false;
+        ++retirement_unresolved_engine_results_;
+      }
+    }
+
+    if (!record->close_terminal) {
+      if (!record->close_requested) {
+        engine::RequestId request;
+        const engine::SubmitStatus submitted =
+            record->client.valid()
+                ? executor_.TryCloseClient(record->client, &request)
+                : engine::SubmitStatus::kClientUnknown;
+        switch (submitted) {
+          case engine::SubmitStatus::kAccepted:
+            record->close_requested = true;
+            record->close_request = request;
+            ++retirement_close_requests_;
+            break;
+          case engine::SubmitStatus::kQueueFull:
+            // Retry from the next Pump. The record is the bound; nothing is dropped.
+            ++retirement_close_queue_full_retries_;
+            break;
+          case engine::SubmitStatus::kClientUnknown:
+          case engine::SubmitStatus::kClientNotOpen:
+            // The executor has already closed or failed this client; no request exists.
+            record->close_terminal = true;
+            break;
+          case engine::SubmitStatus::kNotRunning:
+          case engine::SubmitStatus::kInternalFailure:
+          case engine::SubmitStatus::kInvalidRequest:
+          default:
+            // The executor cannot accept a close. StopAndJoin remains the last-resort
+            // owner; this retirement is reported unresolved, never as reclaimed.
+            record->close_terminal = true;
+            record->close_failed = true;
+            ++retirement_unresolved_close_requests_;
+            break;
+        }
+      } else {
+        engine::CommandResult closed;
+        const engine::TakeStatus taken =
+            executor_.TakeResult(record->close_request, &closed);
+        if (taken == engine::TakeStatus::kTaken) {
+          record->close_terminal = true;
+          ++retirement_close_results_;
+          if (!closed.ok()) {
+            record->close_failed = true;
+            ++retirement_close_failures_;
+          }
+        } else if (taken != engine::TakeStatus::kNotReady) {
+          record->close_terminal = true;
+          record->close_failed = true;
+          ++retirement_unresolved_close_requests_;
+        }
+      }
+    }
+
+    // Step 1 has no TSF cleanup to finish, so a consumed close and engine result end the
+    // record. Step 2 adds the composition cleanup condition here.
+    if (!record->engine_result_pending && record->close_terminal) {
+      ++retirements_completed_;
+      record = retiring_.erase(record);
+      continue;
+    }
+    ++record;
+  }
+}
+
+RetirementSnapshot ContextCoordinator::BuildRetirementSnapshot() const {
+  RetirementSnapshot snapshot;
+  snapshot.retiring_bindings = retiring_.size();
+  snapshot.capacity = kRetirementCapacity;
+  snapshot.started = retirements_started_;
+  snapshot.completed = retirements_completed_;
+  snapshot.already_ordinary = retirements_already_ordinary_;
+  snapshot.blocked = retirements_blocked_;
+  snapshot.close_requests = retirement_close_requests_;
+  snapshot.close_results_taken = retirement_close_results_;
+  snapshot.close_failures = retirement_close_failures_;
+  snapshot.close_queue_full_retries = retirement_close_queue_full_retries_;
+  snapshot.engine_results_discarded = retirement_engine_results_discarded_;
+  snapshot.unresolved_close_requests = retirement_unresolved_close_requests_;
+  snapshot.unresolved_engine_results = retirement_unresolved_engine_results_;
+  snapshot.last_cleanup_state = last_cleanup_state_;
+  snapshot.last_cleanup_block = last_cleanup_block_;
+  for (const RetiringBinding& record : retiring_) {
+    if (snapshot.pending_engine_request.value == 0 &&
+        record.engine_result_pending) {
+      snapshot.pending_engine_request = record.engine_request;
+    }
+    if (snapshot.pending_close_request.value == 0 &&
+        record.close_requested && !record.close_terminal) {
+      snapshot.pending_close_request = record.close_request;
+    }
+    if (record.cleanup == CleanupState::kPending) {
+      snapshot.admission_paused = true;
+      if (record.session != nullptr && record.session->HasPending()) {
+        snapshot.pending_edit_event = record.session->CompletionEvent();
+      }
+    }
+  }
+  return snapshot;
 }
 
 // --- permission --------------------------------------------------------------------------
@@ -479,6 +723,12 @@ SubmitStatus ContextCoordinator::SubmitKey(const input::KeyEventSnapshot& event,
   if (!bound_) {
     return SubmitStatus::kNotBound;
   }
+  if (RetirementPausesInput()) {
+    // A previous binding still owes an engine result, a close, or a TSF cleanup. This is a
+    // fact about the host, not about this key: nothing was processed and nothing is dropped
+    // silently; the status and the snapshot name the pause.
+    return SubmitStatus::kRetiring;
+  }
   SubmitStatus blocked = SubmitStatus::kAccepted;
   if (GateBlocksSubmit(&blocked)) {
     return blocked;
@@ -549,6 +799,9 @@ SubmitStatus ContextCoordinator::SubmitCandidate(std::size_t candidate_index, Wo
   }
   if (!bound_) {
     return SubmitStatus::kNotBound;
+  }
+  if (RetirementPausesInput()) {
+    return SubmitStatus::kRetiring;
   }
   SubmitStatus blocked = SubmitStatus::kAccepted;
   if (GateBlocksSubmit(&blocked)) {
@@ -678,6 +931,10 @@ void ContextCoordinator::Pump() {
   if (closed_) {
     return;
   }
+  // Retired bindings advance first: their engine results and close results are consumed
+  // here, outside every TSF notification, and their cleanup edit sessions are submitted
+  // here too. This is independent of the current binding's work item.
+  PumpRetirements();
 
   if (phase_ == WorkPhase::kPermissionPending) {
     AdvancePermissionStage();
@@ -1048,11 +1305,38 @@ void ContextCoordinator::DiscardPendingEngineResult() {
 
 // --- close -------------------------------------------------------------------------------
 
+void ContextCoordinator::CloseRetirementResources(RetiringBinding* record) {
+  if (record == nullptr) {
+    return;
+  }
+  if (record->session != nullptr) {
+    // Terminal release only. This never ends a composition, commits, cancels or clears
+    // text; a composition that could not be finished is reported through cleanup_block.
+    record->session->Close();
+    record->session.reset();
+  }
+  if (record->context != nullptr) {
+    record->context->Release();
+    record->context = nullptr;
+  }
+}
+
 void ContextCoordinator::Close() {
   if (closed_) {
     return;
   }
-  if (phase_ == WorkPhase::kEnginePending) {
+  if (bound_) {
+    if (phase_ == WorkPhase::kEditPending ||
+        phase_ == WorkPhase::kPermissionPending) {
+      EndWork(WorkOutcome::kAbandonedStale, RejectCause::kNone);
+    } else if (phase_ == WorkPhase::kEnginePending) {
+      work_abandoned_ = true;
+      outcome_ = WorkOutcome::kAbandonedStale;
+      cause_ = RejectCause::kNone;
+    }
+    permission_source_.Abandon();
+    RetireCurrentBinding();
+  } else if (phase_ == WorkPhase::kEnginePending) {
     outcome_ = WorkOutcome::kAbandonedStale;
     DiscardPendingEngineResult();
   } else if (phase_ == WorkPhase::kEditPending ||
@@ -1064,11 +1348,55 @@ void ContextCoordinator::Close() {
   permission_source_.Abandon();
   pending_permission_ = PendingPermissionWork{};
   observed_caret_pending_ = false;
-  if (session_ != nullptr) {
-    session_->Invalidate();
-    session_->Close();
-    session_.reset();
+
+  // Give the executor one synchronous chance to publish each outstanding result, then
+  // consume everything that is ready. Anything still outstanding is reported, not hidden:
+  // StopAndJoin remains the terminal owner of the engine session.
+  PumpRetirements();
+  for (RetiringBinding& record : retiring_) {
+    if (record.engine_result_pending) {
+      engine::CommandResult discarded;
+      if (executor_.TakeResult(record.engine_request, &discarded) ==
+          engine::TakeStatus::kTaken) {
+        ++engine_results_taken_;
+        ++retirement_engine_results_discarded_;
+        record.engine_result_pending = false;
+      }
+    }
+    if (!record.close_terminal && !record.close_requested &&
+        record.client.valid()) {
+      engine::RequestId request;
+      if (executor_.TryCloseClient(record.client, &request) ==
+          engine::SubmitStatus::kAccepted) {
+        record.close_requested = true;
+        record.close_request = request;
+        ++retirement_close_requests_;
+      }
+    }
+    if (!record.close_terminal && record.close_requested) {
+      engine::CommandResult closed;
+      if (executor_.TakeResult(record.close_request, &closed) ==
+          engine::TakeStatus::kTaken) {
+        record.close_terminal = true;
+        ++retirement_close_results_;
+        if (!closed.ok()) {
+          record.close_failed = true;
+          ++retirement_close_failures_;
+        }
+      }
+    }
+    if (record.engine_result_pending) {
+      ++retirement_unresolved_engine_results_;
+    }
+    if (!record.close_terminal) {
+      ++retirement_unresolved_close_requests_;
+    }
+    CloseRetirementResources(&record);
   }
+  closed_retirement_ = BuildRetirementSnapshot();
+  retiring_.clear();
+
+  session_.reset();
   if (bound_context_ != nullptr) {
     bound_context_->Release();
     bound_context_ = nullptr;
@@ -1133,6 +1461,9 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.pumps = pumps_;
   snapshot.observed_caret_updates = observed_caret_updates_;
   snapshot.observed_caret_applied = observed_caret_applied_;
+  snapshot.owned_composition_active =
+      session_ != nullptr && session_->active_composition();
+  snapshot.retirement = closed_ ? closed_retirement_ : BuildRetirementSnapshot();
   return snapshot;
 }
 

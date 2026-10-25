@@ -10,12 +10,14 @@
 // It owns no TSF session, no text and no policy beyond that mapping. It must run on the
 // same STA as the observer and the coordinator.
 //
-// FRESH ENGINE CLIENT PER BINDING. The coordinator's InvalidateBinding discards the engine
-// side of the old binding; the host must rebuild the engine client. ObservedEngineClients is
-// the host-provided source of that client (the tests implement it over the executor).
-// A client is requested for every OnTargetBound, so an external edit can never continue an
-// old engine composition at a new caret. The controller does not close the old client: the
-// executor owns it and the host decides its lifetime.
+// FRESH ENGINE CLIENT PER BINDING. The coordinator's InvalidateBinding moves the old binding
+// into its bounded retirement ledger; the host must rebuild the engine client. ObservedEngine
+// Clients is the host-provided source of that client (the tests implement it over the
+// executor). Admission is checked BEFORE NextClient(), so a full retirement ledger refuses
+// the binding as kRetiring without creating another client. A client is requested for every
+// admitted OnTargetBound, so an external edit can never continue an old engine composition
+// at a new caret. Once bound, the executor closes that client on retirement and the close
+// result is consumed by the coordinator's Pump; StopAndJoin is not the only owner.
 //
 // UNCERTAIN ACROSS CONTROLLERS. The controller attaches the shared ContextRegistry to the
 // coordinator. The latch is keyed by the real ITfContext, so a new controller/coordinator
@@ -77,6 +79,8 @@ class ObservedBindingController final : public context::ContextObserverSink {
     std::uint64_t binds_refused = 0;
     std::uint64_t binds_blocked_uncertain = 0;
     std::uint64_t binds_busy_retried = 0;
+    std::uint64_t binds_paused_retiring = 0;
+    std::uint64_t binds_paused_busy = 0;
     std::uint64_t invalidations = 0;
     std::uint64_t own_edit_updates = 0;
     std::uint64_t own_edits_stale = 0;

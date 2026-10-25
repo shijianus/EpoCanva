@@ -129,6 +129,18 @@ struct LabSnapshot {
   std::uint64_t engine_clients_created = 0;
   std::string engine_error;
 
+  // P3.12: the executor's live-client accounting and the coordinator's bounded retirement
+  // ledger. These are the facts the UI and the self-test assert instead of inferring client
+  // lifetime from StopAndJoin.
+  engine::ClientUsage client_usage;
+  engine::CapacityUsage capacity_usage;
+  coordinator::RetirementSnapshot retirement;
+  // Recorded by Shutdown after the explicit drain and before StopAndJoin.
+  bool retire_drain_complete = false;
+  bool retire_drain_timed_out = false;
+  engine::ClientUsage client_usage_after_drain;
+  engine::CapacityUsage capacity_after_drain;
+
   bool engine_state_valid = false;
   engine::EngineState engine_state;
   // "notification", "revalidation", "initial-adoption", or "none".
@@ -235,6 +247,12 @@ class LabSession {
   bool StartExecutor(std::string* error);
   bool AssociateDocuments(std::string* error);
   void ClearAssociations();
+  // Retires the current binding (if any) and advances the coordinator's retirement ledger
+  // with real completion facts, bounded by the configured step timeout. Called during
+  // Shutdown after the observer is gone, so it can never rebind.
+  void DrainRetirementsBeforeStop();
+  bool PumpRetirementsUntilIdle(DWORD timeout_ms);
+  void DispatchOnly();
   bool IsTsfFocused(int index);
   bool ReadDocument(int index, LabDocumentSnapshot* snapshot);
   bool PumpUntilEvent(HANDLE event, DWORD timeout_ms, bool* cancelled);
@@ -244,6 +262,13 @@ class LabSession {
   std::array<HWND, 2> document_windows_{};
   std::array<edit::test::TestDocument*, 2> documents_{};
   std::uint64_t engine_clients_created_cache_ = 0;
+  engine::ClientUsage client_usage_cache_{};
+  engine::CapacityUsage capacity_cache_{};
+  coordinator::RetirementSnapshot retirement_cache_{};
+  bool retire_drain_complete_ = false;
+  bool retire_drain_timed_out_ = false;
+  engine::ClientUsage client_usage_after_drain_{};
+  engine::CapacityUsage capacity_after_drain_{};
 
   std::unique_ptr<edit::test::TestHost> host_;
   std::unique_ptr<engine::EngineExecutor> executor_;

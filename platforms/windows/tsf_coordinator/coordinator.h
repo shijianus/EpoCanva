@@ -26,12 +26,21 @@
 // means neither that input reached the engine nor that text was applied, and promises
 // nothing about a future pfEaten.
 //
-// GATES, IN DOCUMENTED ORDER (Submit): closed -> busy -> not-bound -> blocked latch
-// (uncertain / needs-resync / unsupported shape) -> permission (Denied, then Unknown,
-// resolved from the real context metadata; a query that must go async parks the work in
-// kPermissionPending instead of refusing) -> local engine-candidate evaluation ->
-// executor admission. A Busy answer outranks a permission answer because the
-// single-flight rule is a fact about the coordinator itself.
+// GATES, IN DOCUMENTED ORDER (Submit): closed -> busy -> not-bound -> retiring (a previous
+// binding still owes a result/close/cleanup) -> blocked latch (uncertain / needs-resync /
+// unsupported shape) -> permission (Denied, then Unknown, resolved from the real context
+// metadata; a query that must go async parks the work in kPermissionPending instead of
+// refusing) -> local engine-candidate evaluation -> executor admission. A Busy answer
+// outranks a permission answer because the single-flight rule is a fact about the
+// coordinator itself.
+//
+// RETIREMENT IS BOUNDED AND EXPLICIT. InvalidateBinding moves the old binding into a
+// fixed-capacity ledger (kRetirementCapacity). The old client is closed through the executor
+// and its close result is consumed; an engine request accepted before retirement is taken
+// once and discarded. A new binding is admitted only when the ledger has room, and input on
+// a new binding is kRetiring until every retirement is terminal. If a cleanup cannot be
+// performed (permission, read-only, range mismatch, uncertain text), it is reported as
+// CleanupBlocked -- never as Completed -- and nothing is written to guess.
 //
 // LIFECYCLE OF ONE WORK ITEM.
 //   Idle --Submit--> PermissionPending (only when the real query went async)
@@ -101,6 +110,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "context_registry.h"
 #include "edit_plan.h"
@@ -132,6 +142,7 @@ enum class BindStatus : std::uint8_t {
   kOk = 0,
   kAlreadyBound,     // the current binding must be invalidated first
   kBusy,             // an engine result of a previous work item is still being discarded
+  kRetiring,         // the bounded retirement ledger is full; no client may be created
   kClosed,
   kBlockedUncertain, // this context is locked down after an unconfirmed write
   kInvalidRequest,   // null context, zero context id, invalid client or negative caret
@@ -141,6 +152,7 @@ enum class SubmitStatus : std::uint8_t {
   kAccepted = 0,
   kBusy,
   kNotBound,
+  kRetiring,               // a retired binding's cleanup/close is not terminal yet
   kClosed,
   kPermissionDenied,
   kPermissionUnknown,
@@ -188,6 +200,37 @@ enum class CoordinatorGate : std::uint8_t {
   kBlockedUnsupportedShape,
 };
 
+// State of one retired binding's TSF-side cleanup. kPending means a cleanup edit session
+// exists and the new binding's input admission is paused. kFinished and kAlreadyOrdinary
+// are terminal successes; kBlocked is a reported failure and is never called Completed.
+enum class CleanupState : std::uint8_t {
+  kNone = 0,
+  kPending,
+  kFinished,
+  kAlreadyOrdinary,
+  kBlocked,
+};
+
+// Why a retired binding's composition could not be finished. These name only the refusal;
+// no document text or field identity is carried.
+enum class CleanupBlockReason : std::uint8_t {
+  kNone = 0,
+  kPermissionDenied,
+  kPermissionUnknown,
+  kReadOnly,
+  kContextDisconnected,
+  kUncertainTextState,
+  kRangeMismatch,
+  kLockRefused,
+  kEndCompositionFailed,
+  kStale,
+  kPlanBuildFailed,
+  kRequestFailed,
+};
+
+const char* DescribeCleanupState(CleanupState state);
+const char* DescribeCleanupBlockReason(CleanupBlockReason reason);
+
 // Why a work item ended kRejected or kNeedsResync. The P3.7 EditStatus/EditRejectReason
 // of the edit side are carried separately in the snapshot; this enumerates only the
 // coordinator's own refusals.
@@ -211,6 +254,34 @@ const char* DescribeWorkPhase(WorkPhase phase);
 const char* DescribeWorkOutcome(WorkOutcome outcome);
 const char* DescribeCoordinatorGate(CoordinatorGate gate);
 const char* DescribeRejectCause(RejectCause cause);
+
+// Value-only state of the bounded retirement ledger. It carries statuses, counts and the
+// outstanding request ids a host may bounded-wait on -- never text or a COM pointer.
+struct RetirementSnapshot {
+  std::size_t retiring_bindings = 0;
+  std::size_t capacity = 0;
+  // True while any retired binding is still Pending; new input is refused as kRetiring.
+  bool admission_paused = false;
+  std::uint32_t retiring_compositions = 0;
+  std::uint64_t started = 0;
+  std::uint64_t completed = 0;
+  std::uint64_t already_ordinary = 0;
+  std::uint64_t blocked = 0;
+  std::uint64_t close_requests = 0;
+  std::uint64_t close_results_taken = 0;
+  std::uint64_t close_failures = 0;
+  std::uint64_t close_queue_full_retries = 0;
+  std::uint64_t engine_results_discarded = 0;
+  std::uint64_t unresolved_close_requests = 0;
+  std::uint64_t unresolved_engine_results = 0;
+  CleanupState last_cleanup_state = CleanupState::kNone;
+  CleanupBlockReason last_cleanup_block = CleanupBlockReason::kNone;
+  // The first outstanding request of any retiring binding, for bounded host waiting.
+  engine::RequestId pending_engine_request{};
+  engine::RequestId pending_close_request{};
+  // A cleanup edit session's completion fact, when one is waiting for its lock.
+  HANDLE pending_edit_event = nullptr;
+};
 
 // Value-only state for assertions and text-free logging.
 struct CoordinatorSnapshot {
@@ -255,6 +326,10 @@ struct CoordinatorSnapshot {
   bool context_uncertain_blocked = false;
   std::uint64_t observed_caret_updates = 0;
   std::uint64_t observed_caret_applied = 0;
+  // P3.12: whether the current binding's session really owns a live TSF composition
+  // (writer authority, not the view mirror), and the retirement ledger.
+  bool owned_composition_active = false;
+  RetirementSnapshot retirement;
 };
 
 class ContextCoordinator {
@@ -292,6 +367,15 @@ class ContextCoordinator {
                           std::uint64_t generation, LONG initial_caret_utf16,
                           engine::ClientId engine_client);
 
+  // Admission probe for the host's client source. It performs every structural and state
+  // check BindObserved performs, but creates nothing. The host calls it BEFORE creating a
+  // fresh engine client, so a full retirement ledger (kRetiring) can never leave an unused
+  // client behind. A kOk answer is not a reservation; BindObserved must still be called on
+  // the same STA thread and repeats the checks.
+  BindStatus CheckBindingAdmission(ITfContext* context, std::uint64_t context_id,
+                                   std::uint64_t generation,
+                                   LONG initial_caret_utf16) const;
+
   // Attaches the registry that owns the real context identities/latch. Must be called
   // while unbound and before Close(); returns false (and changes nothing) otherwise. The
   // registry must outlive the coordinator.
@@ -304,14 +388,12 @@ class ContextCoordinator {
   // caller must have matched the binding identity/generation.
   void ObserveRealCaret(LONG caret_utf16);
 
-  // Invalidates the current binding: the P3.7 session is invalidated (its generation
-  // bumps, pending plans of the old binding become Stale) and released, the permission
-  // source is abandoned (a late read-session callback publishes nothing) and the held
-  // context reference is released. A pending work item is terminal immediately as
-  // AbandonedStale; an engine result that arrives later is consumed once and discarded,
-  // never applied to any context. Clears the NeedsResync/UnsupportedShape blocks (the
-  // document text is known); the Uncertain block stays with its context id. Idempotent
-  // when not bound.
+  // Invalidates the current binding: it stops being typeable immediately, its pending work
+  // item is terminal as AbandonedStale, and the binding is moved into the bounded retirement
+  // ledger. Retirement closes the engine client through the executor (its result is taken
+  // once) and, when the session owns a composition, finishes that composition through a
+  // separate legal edit session driven by Pump(). No TSF write happens inside this call, so
+  // it remains safe from OnTargetLost/OnEndEdit. Idempotent when not bound.
   void InvalidateBinding();
 
   bool bound() const { return bound_; }
@@ -375,6 +457,43 @@ class ContextCoordinator {
   };
 
   bool GateBlocksSubmit(SubmitStatus* status) const;
+  // True while a retired binding has not reached a terminal retirement state.
+  bool RetirementPausesInput() const;
+
+  // One retired binding. The ledger is fixed-capacity: a new binding is refused as
+  // kRetiring rather than growing it. `session` and `context` are only kept when a
+  // composition really has to be finished; the context owns its reference through the
+  // session. An engine request accepted before retirement is consumed once here, and a
+  // close request is submitted to the executor and its result consumed before the record
+  // is dropped.
+  struct RetiringBinding {
+    edit::ContextIdentity identity{};
+    ITfContext* context = nullptr;  // owned coordinator reference
+    std::unique_ptr<edit::CompositionEditSession> session;
+    engine::ClientId client{};
+    engine::RequestId engine_request{};
+    bool engine_result_pending = false;
+    engine::RequestId close_request{};
+    bool close_requested = false;
+    bool close_terminal = false;
+    bool close_failed = false;
+    CleanupState cleanup = CleanupState::kNone;
+    CleanupBlockReason cleanup_block = CleanupBlockReason::kNone;
+    bool cleanup_submitted = false;
+    bool cleanup_finished = false;
+  };
+  static constexpr std::size_t kRetirementCapacity = 2;
+
+  void RetireCurrentBinding();
+  // Advances every retirement record without writing inside a TSF notification: submits a
+  // close and a composition-finish plan, consumes one engine result and one close result,
+  // and drops a record only when both are consumed and cleanup is terminal.
+  void PumpRetirements();
+  void ResolveRetirementCleanup(RetiringBinding& record,
+                                const edit::EditResult& result);
+  void FinishRetirement(RetiringBinding& record);
+  RetirementSnapshot BuildRetirementSnapshot() const;
+  void CloseRetirementResources(RetiringBinding* record);
   // Shared implementation of Bind/BindObserved. The generation is supplied by the caller;
   // BindObserved's comes from the registry, Bind's from generation_counter_.
   BindStatus BindImpl(ITfContext* context, std::uint64_t context_id,
@@ -460,6 +579,26 @@ class ContextCoordinator {
   edit::EditRejectReason last_edit_reason_ = edit::EditRejectReason::kNone;
 
   LocalDocumentView view_;
+
+  // Fixed-capacity retirement ledger. It holds only already-invalidated bindings, so it can
+  // never be used to continue typing into them.
+  std::vector<RetiringBinding> retiring_;
+  std::uint64_t retirements_started_ = 0;
+  std::uint64_t retirements_completed_ = 0;
+  std::uint64_t retirements_already_ordinary_ = 0;
+  std::uint64_t retirements_blocked_ = 0;
+  std::uint64_t retirement_close_requests_ = 0;
+  std::uint64_t retirement_close_results_ = 0;
+  std::uint64_t retirement_close_failures_ = 0;
+  std::uint64_t retirement_close_queue_full_retries_ = 0;
+  std::uint64_t retirement_engine_results_discarded_ = 0;
+  std::uint64_t retirement_unresolved_close_requests_ = 0;
+  std::uint64_t retirement_unresolved_engine_results_ = 0;
+  CleanupState last_cleanup_state_ = CleanupState::kNone;
+  CleanupBlockReason last_cleanup_block_ = CleanupBlockReason::kNone;
+  // Request ids still outstanding when Close() ran. The coordinator is terminal, but the
+  // host can bounded-wait and consume these from the executor; they are not forgotten.
+  RetirementSnapshot closed_retirement_{};
 
   std::uint64_t works_accepted_ = 0;
   std::uint64_t engine_results_taken_ = 0;

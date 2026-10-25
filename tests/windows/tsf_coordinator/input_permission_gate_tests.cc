@@ -585,6 +585,11 @@ int RunEngineRanEditRefused() {
     Check(bound == BindStatus::kOk,
           "engine-ran-edit-refused: the rebuilt binding is accepted",
           DescribeBindStatus(bound));
+    const DriveResult retired = DriveToCompletion(
+        *setup.coordinator, *setup.host, *setup.harness.executor, 20000);
+    Check(retired.completed && retired.final_state.retirement.retiring_bindings == 0,
+          "engine-ran-edit-refused: the old client's close was consumed",
+          DescribeSnapshot(retired.final_state));
     TestDocument* old_document = setup.document;
     setup.document = document_b;
     const DriveResult fresh = TypeLetter(setup, L'a', "engine-ran-edit-refused: fresh");
@@ -679,6 +684,11 @@ int RunGenerationChange() {
         context::DescribePermissionQueryStatus(setup.permission->Status()));
   Check(setup.harness.backend->dispatch_calls() == 0,
         "generation: the late old callback dispatched nothing", "");
+  const DriveResult retired = DriveToCompletion(
+      *setup.coordinator, *setup.host, *setup.harness.executor, 20000);
+  Check(retired.completed && retired.final_state.retirement.retiring_bindings == 0,
+        "generation: the retired client's close was consumed",
+        DescribeSnapshot(retired.final_state));
 
   TestDocumentOptions second_options;
   second_options.scope_answer = TestScopeAnswer::kScopes;

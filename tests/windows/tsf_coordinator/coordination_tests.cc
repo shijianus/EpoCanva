@@ -309,8 +309,8 @@ int RunBindAndGates() {
             decision.reason == input::KeyDecisionReason::kEngineNotReady,
         "evaluate: unbound evaluation is pass-through (engine not ready)", "");
   Check(coordinator.Bind(setup.document->context(), setup.document->context_id(), 0,
-                         setup.harness.client_a) == BindStatus::kOk,
-        "bind: re-bind after invalidation", "");
+                         setup.harness.client_b) == BindStatus::kOk,
+        "bind: re-bind after invalidation uses a fresh client", "");
   Check(coordinator.identity().generation == 2, "bind: the generation increased", "");
   Check(coordinator.Snapshot().permission == edit::InputPermission::kUnknown,
         "bind: re-bind resets permission to Unknown", "");
@@ -472,38 +472,56 @@ int RunEnginePendingInvalidate() {
         "engine-pending: the work is engine-pending", "");
 
   coordinator.InvalidateBinding();
+  coordinator.Pump();  // submits the old client's close and observes the owed result
   CoordinatorSnapshot snapshot = coordinator.Snapshot();
   Check(snapshot.outcome == WorkOutcome::kAbandonedStale,
         "engine-pending: invalidation terminalizes the work as AbandonedStale",
         DescribeSnapshot(snapshot));
-  Check(snapshot.phase == WorkPhase::kEnginePending,
-        "engine-pending: the engine result is still owed (discard pending)", "");
-  const BindStatus busy_bind = coordinator.Bind(
+  Check(snapshot.phase == WorkPhase::kIdle,
+        "engine-pending: the work item is terminal immediately", "");
+  Check(snapshot.retirement.retiring_bindings == 1,
+        "engine-pending: the old binding is in the bounded retirement ledger",
+        DescribeSnapshot(snapshot));
+  Check(snapshot.retirement.pending_engine_request.valid(),
+        "engine-pending: the old engine result is still owed by the ledger", "");
+  Check(snapshot.retirement.close_requests == 1,
+        "engine-pending: a close was submitted for the old client", "");
+
+  const BindStatus admitted = coordinator.Bind(
       document_b->context(), document_b->context_id(), 0, setup.harness.client_b);
-  Check(busy_bind == BindStatus::kBusy,
-        "engine-pending: a new binding waits for the discard", DescribeBindStatus(busy_bind));
+  Check(admitted == BindStatus::kOk,
+        "engine-pending: the new binding is admitted while the old retires",
+        DescribeBindStatus(admitted));
+  setup.permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
+  const executor_tests::TextKey x = Letter(L'x');
+  WorkId paused_id;
+  const SubmitStatus paused = coordinator.SubmitKey(x.event, x.text, &paused_id);
+  Check(paused == SubmitStatus::kRetiring,
+        "engine-pending: input is explicitly paused by the retirement",
+        DescribeSubmitStatus(paused));
+  Check(!paused_id.valid(), "engine-pending: a paused key created no work item", "");
 
   backend->ReleaseDispatches();
   const DriveResult driven =
       DriveToCompletion(coordinator, *setup.host, *setup.harness.executor, 20000);
-  Check(driven.completed, "engine-pending: the discard completed",
+  Check(driven.completed, "engine-pending: the discard and close completed",
         DescribeSnapshot(driven.final_state));
-  Check(driven.final_state.outcome == WorkOutcome::kAbandonedStale,
-        "engine-pending: the old result was consumed once and discarded", "");
   Check(driven.final_state.engine_results_taken == 1,
         "engine-pending: exactly one engine result was taken", "");
+  Check(driven.final_state.retirement.engine_results_discarded == 1,
+        "engine-pending: the old result was discarded exactly once", "");
+  Check(driven.final_state.retirement.close_requests == 1 &&
+            driven.final_state.retirement.close_results_taken == 1,
+        "engine-pending: the close request and its result were both consumed",
+        DescribeSnapshot(driven.final_state));
+  Check(driven.final_state.retirement.retiring_bindings == 0,
+        "engine-pending: the retirement ledger is empty again", "");
   CheckDocText(setup.document->text_utf16(), L"",
                "engine-pending: the old document was never written");
   CheckDocText(document_b->text_utf16(), L"",
                "engine-pending: the new document was never written by the old result");
 
-  // A fresh binding on the second document works normally afterwards.
-  const BindStatus bound = coordinator.Bind(document_b->context(),
-                                            document_b->context_id(), 0,
-                                            setup.harness.client_b);
-  Check(bound == BindStatus::kOk, "engine-pending: re-bind after discard",
-        DescribeBindStatus(bound));
-  setup.permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
+  // The fresh binding works normally once retirement is terminal.
   const executor_tests::TextKey a = Letter(L'a');
   const DriveResult typed = TypeKeyAndDrive(coordinator, *setup.host,
                                             *setup.harness.executor, a.event, a.text,
@@ -514,6 +532,134 @@ int RunEnginePendingInvalidate() {
                "engine-pending: only the new key reached the new document");
   CheckDocText(setup.document->text_utf16(), L"",
                "engine-pending: the old document stayed untouched");
+  return Finish();
+}
+
+// --- 6b. a full executor queue does not lose a retirement --------------------------------
+
+int RunRetirementQueueFull() {
+  std::string error;
+  auto host = TestHost::Create(&error);
+  Check(host != nullptr, "retire-queue: host created", error);
+  if (host == nullptr) {
+    return Finish();
+  }
+  TestDocumentOptions options;
+  TestDocument* doc_a = host->CreateDocument(options, &error);
+  TestDocument* doc_b = host->CreateDocument(options, &error);
+  Check(doc_a != nullptr && doc_b != nullptr, "retire-queue: two documents created",
+        error);
+  if (doc_a == nullptr || doc_b == nullptr) {
+    return Finish();
+  }
+
+  auto* backend = new executor_tests::ControlledBackend();
+  engine::ExecutorOptions executor_options;
+  executor_options.capacity = 1;  // one slot: a held dispatch fills it completely
+  auto executor = engine::EngineExecutorTestFactory::Create(
+      executor_options, std::unique_ptr<engine::EngineBackend>(backend));
+  Check(executor->Start() == engine::StartStatus::kOk, "retire-queue: executor started",
+        "");
+  engine::ClientId client_a{};
+  engine::ClientId client_b{};
+  engine::ClientId client_c{};
+  for (engine::ClientId* client : {&client_a, &client_b, &client_c}) {
+    engine::RequestId create = executor_tests::SubmitCreateOrFail(
+        *executor, "controlled",
+        engine::ControllerOptions{true, input::InputPermission::kAllowed}, client,
+        "retire-queue client");
+    if (!create.valid()) {
+      return Finish();
+    }
+    executor_tests::TakeOrFail(*executor, create, 10000, "retire-queue create");
+  }
+
+  ManualPermissionSource permission;
+  permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
+  ContextCoordinator coordinator(*executor, host->client_id(), permission);
+  Check(coordinator.Bind(doc_a->context(), doc_a->context_id(), 0, client_a) ==
+            BindStatus::kOk,
+        "retire-queue: bound to A", "");
+
+  backend->HoldDispatches();
+  const executor_tests::TextKey h = Letter(L'h');
+  WorkId id;
+  Check(coordinator.SubmitKey(h.event, h.text, &id) == SubmitStatus::kAccepted,
+        "retire-queue: the held dispatch was accepted", "");
+  Check(coordinator.Snapshot().phase == WorkPhase::kEnginePending,
+        "retire-queue: the dispatch occupies the only slot", "");
+
+  coordinator.InvalidateBinding();
+  coordinator.Pump();
+  CoordinatorSnapshot snapshot = coordinator.Snapshot();
+  Check(snapshot.retirement.retiring_bindings == 1,
+        "retire-queue: A is in the retirement ledger", DescribeSnapshot(snapshot));
+  Check(snapshot.retirement.close_requests == 0 &&
+            snapshot.retirement.close_queue_full_retries >= 1,
+        "retire-queue: the close was not lost; it is retried after QueueFull",
+        DescribeSnapshot(snapshot));
+  Check(snapshot.retirement.pending_engine_request.valid(),
+        "retire-queue: the owed engine result is still named", "");
+
+  Check(coordinator.Bind(doc_b->context(), doc_b->context_id(), 0, client_b) ==
+            BindStatus::kOk,
+        "retire-queue: B is admitted while A retires", "");
+  const executor_tests::TextKey z = Letter(L'z');
+  WorkId paused;
+  Check(coordinator.SubmitKey(z.event, z.text, &paused) == SubmitStatus::kRetiring,
+        "retire-queue: B's input is explicitly paused", "");
+
+  // A second quick switch fills the ledger. Admission now refuses a third binding
+  // explicitly instead of creating another client.
+  coordinator.InvalidateBinding();
+  coordinator.Pump();
+  snapshot = coordinator.Snapshot();
+  Check(snapshot.retirement.retiring_bindings == 2,
+        "retire-queue: the ledger is full and bounded",
+        DescribeSnapshot(snapshot));
+  Check(coordinator.CheckBindingAdmission(doc_a->context(), doc_a->context_id(), 1, 0) ==
+            BindStatus::kRetiring,
+        "retire-queue: a full ledger refuses admission as Retiring", "");
+  Check(coordinator.Bind(doc_a->context(), doc_a->context_id(), 0, client_c) ==
+            BindStatus::kRetiring,
+        "retire-queue: Bind refuses without dropping an old retirement", "");
+
+  backend->ReleaseDispatches();
+  const DriveResult drained =
+      DriveToCompletion(coordinator, *host, *executor, 20000);
+  Check(drained.completed && drained.final_state.retirement.retiring_bindings == 0,
+        "retire-queue: both retirements became terminal",
+        DescribeSnapshot(drained.final_state));
+  Check(drained.final_state.retirement.started == 2 &&
+            drained.final_state.retirement.completed == 2,
+        "retire-queue: two started, two completed retirements",
+        DescribeSnapshot(drained.final_state));
+  Check(drained.final_state.retirement.close_requests == 2 &&
+            drained.final_state.retirement.close_results_taken == 2,
+        "retire-queue: both close requests and both results were consumed",
+        DescribeSnapshot(drained.final_state));
+  Check(drained.final_state.retirement.engine_results_discarded == 1,
+        "retire-queue: the pre-retirement engine result was consumed once", "");
+  const engine::ClientUsage clients = executor->clients();
+  Check(clients.created == 3 && clients.closed == 2 && clients.live == 1,
+        "retire-queue: the ledger did not create an unbounded client set",
+        "created=" + std::to_string(clients.created) +
+            " closed=" + std::to_string(clients.closed) +
+            " live=" + std::to_string(clients.live));
+
+  Check(coordinator.Bind(doc_a->context(), doc_a->context_id(), 0, client_c) ==
+            BindStatus::kOk,
+        "retire-queue: a new binding is admitted after the ledger drains", "");
+  const executor_tests::TextKey a = Letter(L'a');
+  const DriveResult typed =
+      TypeKeyAndDrive(coordinator, *host, *executor, a.event, a.text,
+                      "retire-queue: new binding types");
+  CheckOutcome(typed.final_state, WorkOutcome::kApplied,
+               "retire-queue: the new binding works");
+  CheckDocText(doc_a->text_utf16(), L"a",
+               "retire-queue: only the new key reached the document");
+  coordinator.Close();
+  host->Shutdown();
   return Finish();
 }
 
@@ -583,6 +729,12 @@ int RunEditPendingInvalidate() {
   Check(first.request_lock_calls >= 1, "edit-pending: the grant really was dispatched", "");
   CheckDocText(document_b->text_utf16(), L"",
                "edit-pending: the old callback reached no new document");
+
+  const DriveResult retired =
+      DriveToCompletion(coordinator, *setup.host, *setup.harness.executor, 20000);
+  Check(retired.completed && retired.final_state.retirement.retiring_bindings == 0,
+        "edit-pending: the retired client's close was consumed",
+        DescribeSnapshot(retired.final_state));
 
   const executor_tests::TextKey a = Letter(L'a');
   const DriveResult typed = TypeKeyAndDrive(coordinator, *setup.host,
@@ -814,6 +966,15 @@ int RunNeedsResyncFaultCase() {
     return Finish();
   }
   executor_tests::TakeOrFail(*executor, create, 10000, "needs-resync create");
+  engine::ClientId client_b{};
+  engine::RequestId create_b = executor_tests::SubmitCreateOrFail(
+      *executor, "controlled",
+      engine::ControllerOptions{true, input::InputPermission::kAllowed}, &client_b,
+      "needs-resync second client");
+  if (!create_b.valid()) {
+    return Finish();
+  }
+  executor_tests::TakeOrFail(*executor, create_b, 10000, "needs-resync create b");
 
   ManualPermissionSource permission;
   permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
@@ -846,10 +1007,16 @@ int RunNeedsResyncFaultCase() {
   Check(coordinator.SubmitCandidate(0, &second) == SubmitStatus::kBlockedNeedsResync,
         "needs-resync: candidate submits are refused too", "");
 
-  // An explicit invalidation is the documented way out; the same document re-binds.
+  // An explicit invalidation is the documented way out; the same document re-binds with a
+  // fresh engine client after the retired one's close has been consumed.
   coordinator.InvalidateBinding();
-  Check(coordinator.Bind(document->context(), document->context_id(), 0, client) ==
-            BindStatus::kOk,
+  const DriveResult retired =
+      DriveToCompletion(coordinator, *host, *executor, 20000);
+  Check(retired.completed && retired.final_state.retirement.retiring_bindings == 0,
+        "needs-resync: the old client was reclaimed before the re-bind",
+        DescribeSnapshot(retired.final_state));
+  Check(coordinator.Bind(document->context(), document->context_id(), 0,
+                         client_b) == BindStatus::kOk,
         "needs-resync: re-bind after invalidation", "");
   const DriveResult next =
       TypeKeyAndDrive(coordinator, *host, *executor, e.event, e.text, "needs-resync: next");
@@ -898,8 +1065,17 @@ int RunClosePendingWork() {
                          setup.harness.client_a) == BindStatus::kClosed,
         "close-pending: bind after close is refused", "");
 
-  // The held dispatch completes after Close; its result was intentionally left to the
-  // executor (documented): the capacity slot shows it, and the test then takes it once.
+  // The held dispatch completes after Close. Close also submitted a close for the retired
+  // client; both requests and both results are reported through the closed-retirement
+  // snapshot instead of being forgotten.
+  const RetirementSnapshot pending = snapshot.retirement;
+  Check(pending.pending_engine_request == request,
+        "close-pending: the unconsumed dispatch request is reported", "");
+  Check(pending.pending_close_request.valid(),
+        "close-pending: the close request is reported", "");
+  Check(pending.unresolved_engine_results >= 1 &&
+            pending.unresolved_close_requests >= 1,
+        "close-pending: the leftovers are counted honestly, not hidden", "");
   backend->ReleaseDispatches();
   engine::CommandResult result;
   engine::WaitStatus wait = engine::WaitStatus::kTimedOut;
@@ -908,16 +1084,41 @@ int RunClosePendingWork() {
   }
   Check(wait == engine::WaitStatus::kReady, "close-pending: the leftover result completed",
         "");
+  engine::WaitStatus close_wait = engine::WaitStatus::kTimedOut;
+  for (int attempt = 0; attempt < 200 &&
+                          close_wait != engine::WaitStatus::kReady; ++attempt) {
+    close_wait = setup.harness.executor->WaitForResult(
+        pending.pending_close_request, std::chrono::milliseconds(50));
+  }
+  Check(close_wait == engine::WaitStatus::kReady,
+        "close-pending: the close result completed", "");
   const engine::CapacityUsage before_take = setup.harness.executor->capacity();
-  Check(before_take.occupied == 1,
-        "close-pending: the untaken result still occupies one slot (honest accounting)",
+  Check(before_take.occupied == 2,
+        "close-pending: dispatch and close occupy two slots (honest accounting)",
         std::to_string(before_take.occupied));
   Check(setup.harness.executor->TakeResult(request, &result) == engine::TakeStatus::kTaken,
-        "close-pending: the host takes the leftover result once", "");
+        "close-pending: the host takes the dispatch result once", "");
+  engine::CommandResult close_result;
+  Check(setup.harness.executor->TakeResult(pending.pending_close_request,
+                                           &close_result) ==
+            engine::TakeStatus::kTaken,
+        "close-pending: the host takes the close result once", "");
   Check(setup.harness.executor->capacity().occupied == 0,
-        "close-pending: the slot is released", "");
+        "close-pending: both slots are released", "");
   Check(result.kind == engine::CommandKind::kDispatch,
         "close-pending: the leftover result is the dispatched key command", "");
+  Check(close_result.kind == engine::CommandKind::kCloseClient &&
+            close_result.ok(),
+        "close-pending: the close result is a successful client close", "");
+  const engine::ClientUsage clients = setup.harness.executor->clients();
+  Check(clients.close_requests == 1 && clients.close_results_taken == 1,
+        "close-pending: one close request and one consumed close result",
+        std::to_string(clients.close_requests) + "/" +
+            std::to_string(clients.close_results_taken));
+  Check(clients.closed == 1 && clients.live == 1,
+        "close-pending: the bound client is closed; only the harness's unused client is live",
+        "closed=" + std::to_string(clients.closed) +
+            " live=" + std::to_string(clients.live));
   CheckDocText(setup.document->text_utf16(), L"",
                "close-pending: the document was never written");
   return Finish();
@@ -984,6 +1185,9 @@ int RunCoordinationCase(const std::string& case_name) {
   }
   if (case_name == "engine-pending-invalidate") {
     return RunEnginePendingInvalidate();
+  }
+  if (case_name == "retirement-queue-full") {
+    return RunRetirementQueueFull();
   }
   if (case_name == "edit-pending-invalidate") {
     return RunEditPendingInvalidate();
