@@ -248,6 +248,13 @@ enforcement claim. Cleanup of the possibly-mutated text is deliberately not atte
 auto-commit, no auto-cancel of unknown text (P3.7's session is the terminal for editing
 there, and this layer adds no second one).
 
+**P3.10 extension.** With a `ContextRegistry` attached (`AttachContextRegistry` /
+`BindObserved`), the latch is additionally recorded against the bound context's real
+canonical IUnknown identity. Replacing the coordinator object while the registry lives does
+not clear it, and a caller-supplied integer id cannot bypass it; only destroying the
+registry does. The paragraph above describes a coordinator **without** a registry. See
+[`context-observer-contract.md`](context-observer-contract.md) sections 4 and 8.
+
 `NeedsResync` (engine observation unusable, or an edit refused after the engine ran —
 engine command faulted, permission changed, read-only/lock refusal, disconnected context)
 and `UnsupportedShape` (commit + preedit in one observation) block normal input the same
@@ -414,9 +421,15 @@ and the falsifiability control `can_fail`.
 7. One engine client's composition state survives a coordinator rebinding (the engine
    session is the host's); the tests bind a fresh client for a fresh document, and
    same-client continuation across bindings is not modelled. After a `NeedsResync` or
-   `AbandonedStale` engine/host divergence, the host must rebuild the engine client.
+   `AbandonedStale` engine/host divergence, the host must rebuild the engine client. The
+   P3.10 `ObservedBindingController` does exactly that: it requests a fresh client for
+   every observer-published binding.
 8. The caret mirror starts from the host-asserted bind-time caret and is maintained only
-   from applied edits; external caret movement is not tracked.
+   from applied edits; external caret movement is not tracked. This is the manual `Bind`
+   path. With the P3.10 observer attached, an external selection/text change invalidates the
+   binding and a fresh read-only selection snapshot establishes the new caret; an own edit's
+   real `ecReadOnly` caret is reconciled over the plan-derived mirror. See
+   [`context-observer-contract.md`](context-observer-contract.md).
 9. `InputScope` is application-provided metadata, not a security boundary. An `Allowed`
    verdict means no known blocking metadata was observed; it does not prove a field is
    safe, and absence of `IS_PASSWORD` is not evidence of a non-password field.

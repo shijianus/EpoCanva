@@ -102,6 +102,7 @@
 #include <memory>
 #include <optional>
 
+#include "context_registry.h"
 #include "edit_plan.h"
 #include "edit_result.h"
 #include "edit_session.h"
@@ -249,6 +250,11 @@ struct CoordinatorSnapshot {
   // Callback-time real-metadata rechecks the P3.7 session performed before writing.
   std::uint64_t permission_rechecks = 0;
   std::uint64_t pumps = 0;
+  // P3.10: the registry's latch for the bound real context, and the real-caret
+  // reconciliations accepted/applied from OnEndEdit.
+  bool context_uncertain_blocked = false;
+  std::uint64_t observed_caret_updates = 0;
+  std::uint64_t observed_caret_applied = 0;
 };
 
 class ContextCoordinator {
@@ -270,8 +276,33 @@ class ContextCoordinator {
   // context is AddRef'd for the binding's duration. The permission cache starts Unknown
   // (the safe refusal) for every new binding; the first work item resolves it from real
   // metadata.
+  //
+  // This entry point exists for controlled unit cases. It assigns the generation itself;
+  // the product integration path is BindObserved(), whose id and generation come from the
+  // observer's ContextRegistry.
   BindStatus Bind(ITfContext* context, std::uint64_t context_id,
                   LONG initial_caret_utf16, engine::ClientId engine_client);
+
+  // The real integration path (P3.10): `context_id` and `generation` are the values the
+  // ContextRegistry assigned for this real context and binding attempt; `initial_caret_utf16`
+  // is a selection offset (UTF-16 code units) the observer read with a real read-only
+  // cookie. Rejects a zero generation. When a registry is attached, the uncertain latch is
+  // checked against the REAL context pointer, so a caller-supplied integer cannot bypass it.
+  BindStatus BindObserved(ITfContext* context, std::uint64_t context_id,
+                          std::uint64_t generation, LONG initial_caret_utf16,
+                          engine::ClientId engine_client);
+
+  // Attaches the registry that owns the real context identities/latch. Must be called
+  // while unbound and before Close(); returns false (and changes nothing) otherwise. The
+  // registry must outlive the coordinator.
+  bool AttachContextRegistry(context::ContextRegistry* registry);
+
+  // Reconciles the caret mirror with a real selection read (OnEndEdit's ecReadOnly,
+  // collapsed, UTF-16 code units). Applied immediately when no work item is in flight and
+  // at the work item's terminal otherwise; the plan-derived caret stays the mirror until
+  // then. Negative values are ignored (no clamp). Only the current binding is updated; the
+  // caller must have matched the binding identity/generation.
+  void ObserveRealCaret(LONG caret_utf16);
 
   // Invalidates the current binding: the P3.7 session is invalidated (its generation
   // bumps, pending plans of the old binding become Stale) and released, the permission
@@ -344,6 +375,14 @@ class ContextCoordinator {
   };
 
   bool GateBlocksSubmit(SubmitStatus* status) const;
+  // Shared implementation of Bind/BindObserved. The generation is supplied by the caller;
+  // BindObserved's comes from the registry, Bind's from generation_counter_.
+  BindStatus BindImpl(ITfContext* context, std::uint64_t context_id,
+                      std::uint64_t generation, LONG initial_caret_utf16,
+                      engine::ClientId engine_client,
+                      bool use_internal_generation);
+  // True when the bound/requested real context is latched Uncertain in the registry.
+  bool RegistryBlocks(ITfContext* context) const;
   // Begins a real permission query for the current binding. Returns false when the
   // source refuses structurally (the caller refuses the work).
   bool StartPermissionQuery();
@@ -374,6 +413,9 @@ class ContextCoordinator {
   engine::EngineExecutor& executor_;
   TfClientId tsf_client_id_;
   context::PermissionSource& permission_source_;
+  // Optional P3.10 identity/latch owner; not owned. Consulted by both bind paths and by
+  // the submit gate with the REAL context pointer.
+  context::ContextRegistry* registry_ = nullptr;
 
   bool bound_ = false;
   bool closed_ = false;
@@ -398,6 +440,16 @@ class ContextCoordinator {
   std::uint64_t work_generation_ = 0;
   engine::RequestId engine_request_{};
   bool work_abandoned_ = false;
+  // A real caret read from OnEndEdit, waiting for the work item's terminal. Applied only
+  // on Applied/NoEdit; cleared by a new work item or a binding change.
+  bool observed_caret_pending_ = false;
+  LONG observed_caret_utf16_ = 0;
+  // True only while SubmitEditPlan is inside session_->ApplyAsync. A synchronous edit's
+  // OnEndEdit arrives during that call while phase_ may still be Idle; the real caret must
+  // wait for the plan-derived view update instead of being overwritten by it.
+  bool submitting_edit_ = false;
+  std::uint64_t observed_caret_updates_ = 0;
+  std::uint64_t observed_caret_applied_ = 0;
   // The work item parked in kPermissionPending: the submitted key/candidate, or the
   // engine observation held for its apply-time re-verification.
   PendingPermissionWork pending_permission_;

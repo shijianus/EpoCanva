@@ -50,7 +50,9 @@ add_library(epocanva_tsf_coordinator STATIC
   coordinator.h
   coordinator.cc
   engine_to_plan.h
-  engine_to_plan.cc)
+  engine_to_plan.cc
+  observed_binding.h
+  observed_binding.cc)
 target_compile_definitions(epocanva_tsf_coordinator PRIVATE
   _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(epocanva_tsf_coordinator PRIVATE

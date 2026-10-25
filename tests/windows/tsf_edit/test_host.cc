@@ -310,6 +310,8 @@ bool TestHost::Initialize(std::string* error) {
     }
     return false;
   }
+  ::SetWindowLongPtrW(window_, GWLP_USERDATA,
+                      reinterpret_cast<LONG_PTR>(this));
   cleanup_.window_created = true;
 
   HRESULT hr = ::CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER,
@@ -487,7 +489,7 @@ void TestHost::DispatchQueuedMessages() {
 
 
 void TestHost::DrainGrantMessages() {
-  if (window_ == nullptr) {
+  if (window_ == nullptr || hold_grant_messages_) {
     return;
   }
   MSG message = {};
@@ -502,12 +504,40 @@ void TestHost::DrainGrantMessages() {
   }
 }
 
+void TestHost::SetHoldGrantMessages(bool hold) {
+  hold_grant_messages_ = hold;
+}
+
+std::size_t TestHost::ReleaseHeldGrantMessages() {
+  std::size_t granted = 0;
+  for (TestTextStore* store : held_grant_messages_) {
+    if (store != nullptr) {
+      store->GrantPendingLockFromMessage();
+      store->Release();
+      ++granted;
+    }
+  }
+  held_grant_messages_.clear();
+  return granted;
+}
+
 void TestHost::Shutdown() {
   if (shutdown_) {
     return;
   }
   shutdown_ = true;
   cleanup_.shutdown_called = true;
+
+  // A held grant is deliberately NOT granted during teardown: granting it would run a
+  // callback that the test chose to keep late. Only the message's store reference is
+  // returned; the contexts are popped below and terminate their queued sessions.
+  hold_grant_messages_ = false;
+  for (TestTextStore* store : held_grant_messages_) {
+    if (store != nullptr) {
+      store->Release();
+    }
+  }
+  held_grant_messages_.clear();
 
   // A queued grant runs while every document is still on its stack, so teardown never
   // destroys a store with a message reference pointing at it.
@@ -588,7 +618,15 @@ LRESULT CALLBACK TestHost::WindowProc(HWND window, UINT message, WPARAM wparam,
                                        LPARAM lparam) {
   if (message == kGrantLockMessage) {
     TestTextStore* store = reinterpret_cast<TestTextStore*>(lparam);
+    TestHost* host = reinterpret_cast<TestHost*>(
+        ::GetWindowLongPtrW(window, GWLP_USERDATA));
     if (store != nullptr) {
+      if (host != nullptr && host->hold_grant_messages_) {
+        // Dispatched but not granted: the host owns the message's store reference until
+        // ReleaseHeldGrantMessages() (or teardown).
+        host->held_grant_messages_.push_back(store);
+        return 0;
+      }
       store->GrantPendingLockFromMessage();
       store->Release();  // the posted message owned one reference
     }

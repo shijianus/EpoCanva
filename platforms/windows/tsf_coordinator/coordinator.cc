@@ -202,6 +202,60 @@ ContextCoordinator::~ContextCoordinator() { Close(); }
 BindStatus ContextCoordinator::Bind(ITfContext* context, std::uint64_t context_id,
                                     LONG initial_caret_utf16,
                                     engine::ClientId engine_client) {
+  return BindImpl(context, context_id, /*generation=*/0, initial_caret_utf16,
+                  engine_client, /*use_internal_generation=*/true);
+}
+
+BindStatus ContextCoordinator::BindObserved(ITfContext* context,
+                                            std::uint64_t context_id,
+                                            std::uint64_t generation,
+                                            LONG initial_caret_utf16,
+                                            engine::ClientId engine_client) {
+  if (generation == 0) {
+    return BindStatus::kInvalidRequest;
+  }
+  return BindImpl(context, context_id, generation, initial_caret_utf16, engine_client,
+                  /*use_internal_generation=*/false);
+}
+
+bool ContextCoordinator::AttachContextRegistry(context::ContextRegistry* registry) {
+  if (registry == nullptr || closed_ || bound_) {
+    return false;
+  }
+  registry_ = registry;
+  return true;
+}
+
+bool ContextCoordinator::RegistryBlocks(ITfContext* context) const {
+  if (registry_ == nullptr || context == nullptr) {
+    return false;
+  }
+  // The real context pointer is the key; an integer id supplied by a caller has no
+  // influence on this check.
+  return registry_->IsUncertain(context);
+}
+
+void ContextCoordinator::ObserveRealCaret(LONG caret_utf16) {
+  if (!bound_ || closed_ || caret_utf16 < 0) {
+    return;
+  }
+  ++observed_caret_updates_;
+  if (phase_ == WorkPhase::kIdle && !submitting_edit_) {
+    view_.caret_utf16 = caret_utf16;
+    ++observed_caret_applied_;
+    observed_caret_pending_ = false;
+    return;
+  }
+  observed_caret_pending_ = true;
+  observed_caret_utf16_ = caret_utf16;
+}
+
+BindStatus ContextCoordinator::BindImpl(ITfContext* context,
+                                        std::uint64_t context_id,
+                                        std::uint64_t generation,
+                                        LONG initial_caret_utf16,
+                                        engine::ClientId engine_client,
+                                        bool use_internal_generation) {
   // Argument validation precedes the state checks: a structurally invalid request is
   // invalid regardless of the coordinator's current state.
   if (context == nullptr || context_id == 0 || !engine_client.valid() ||
@@ -219,13 +273,20 @@ BindStatus ContextCoordinator::Bind(ITfContext* context, std::uint64_t context_i
     // new binding cannot accept work until it has been discarded.
     return BindStatus::kBusy;
   }
+  // The latch is keyed by the REAL context identity when a registry is attached, so the
+  // same context cannot be re-bound under a different integer id.
+  if (RegistryBlocks(context)) {
+    return BindStatus::kBlockedUncertain;
+  }
   if (uncertain_blocked_context_id_ != 0 &&
       uncertain_blocked_context_id_ == context_id) {
     return BindStatus::kBlockedUncertain;
   }
 
   session_ = std::make_unique<edit::CompositionEditSession>(tsf_client_id_);
-  const std::uint64_t generation = ++generation_counter_;
+  if (use_internal_generation) {
+    generation = ++generation_counter_;
+  }
   if (!session_->Bind(context, context_id, generation)) {
     session_.reset();
     return BindStatus::kInvalidRequest;
@@ -250,6 +311,7 @@ BindStatus ContextCoordinator::Bind(ITfContext* context, std::uint64_t context_i
   outcome_ = WorkOutcome::kNone;
   cause_ = RejectCause::kNone;
   work_kind_ = WorkKind::kNone;
+  observed_caret_pending_ = false;
   // Every new binding starts from the safe refusal; the first work item replaces it with
   // a verdict resolved from the real context metadata.
   CachePermission(context::PermissionState::kUnknown);
@@ -273,6 +335,7 @@ void ContextCoordinator::InvalidateBinding() {
     cause_ = RejectCause::kNone;
   }
   pending_permission_ = PendingPermissionWork{};
+  observed_caret_pending_ = false;
   // A permission read session that is still queued publishes nothing from now on.
   permission_source_.Abandon();
   if (session_ != nullptr) {
@@ -357,6 +420,12 @@ input::KeyDecision ContextCoordinator::Evaluate(const input::KeyEventSnapshot& e
 // --- submit ------------------------------------------------------------------------------
 
 bool ContextCoordinator::GateBlocksSubmit(SubmitStatus* status) const {
+  // The real-context latch outranks the integer-keyed member: it is keyed by the context
+  // the binding actually holds, so it cannot be bypassed by a different id.
+  if (RegistryBlocks(bound_context_)) {
+    *status = SubmitStatus::kBlockedUncertain;
+    return true;
+  }
   if (uncertain_blocked_context_id_ != 0 &&
       uncertain_blocked_context_id_ == identity_.context_id) {
     *status = SubmitStatus::kBlockedUncertain;
@@ -381,6 +450,7 @@ void ContextCoordinator::FinishWorkLedger(WorkKind kind) {
   work_id_ = next_work_id_++;
   work_generation_ = identity_.generation;
   work_abandoned_ = false;
+  observed_caret_pending_ = false;
   pending_plan_.reset();
   last_edit_status_ = edit::EditStatus::kRejected;
   last_edit_reason_ = edit::EditRejectReason::kNone;
@@ -814,7 +884,9 @@ void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision) {
 
   ++plans_submitted_;
   pending_plan_ = std::move(built.plan);
+  submitting_edit_ = true;
   const EditResult applied = session_->ApplyAsync(pending_plan_.value());
+  submitting_edit_ = false;
   if (applied.pending()) {
     phase_ = WorkPhase::kEditPending;
     return;
@@ -924,6 +996,16 @@ void ContextCoordinator::EndWork(WorkOutcome outcome, RejectCause cause) {
   phase_ = WorkPhase::kIdle;
   work_kind_ = WorkKind::kNone;
   work_abandoned_ = false;
+  // The real caret read during our own edit wins over the plan-derived mirror, but only
+  // when the work item really applied (or the document already matched). For a divergence
+  // or abandonment the binding is blocked/invalid and no caret is invented.
+  if (observed_caret_pending_) {
+    if (outcome == WorkOutcome::kApplied || outcome == WorkOutcome::kNoEdit) {
+      view_.caret_utf16 = observed_caret_utf16_;
+      ++observed_caret_applied_;
+    }
+    observed_caret_pending_ = false;
+  }
   pending_permission_ = PendingPermissionWork{};
 }
 
@@ -938,6 +1020,11 @@ void ContextCoordinator::EnterNeedsResync(const char* why, RejectCause cause) {
 
 void ContextCoordinator::EnterUncertainLockdown() {
   uncertain_blocked_context_id_ = identity_.context_id;
+  // Record the latch against the real context identity so a replacement coordinator
+  // sharing the registry cannot clear or bypass it with another integer id.
+  if (registry_ != nullptr && bound_context_ != nullptr) {
+    registry_->MarkUncertain(bound_context_);
+  }
   outcome_ = WorkOutcome::kUncertain;
   cause_ = RejectCause::kNone;
   phase_ = WorkPhase::kIdle;
@@ -976,6 +1063,7 @@ void ContextCoordinator::Close() {
   // immediately and never waits for a callback that may never run.
   permission_source_.Abandon();
   pending_permission_ = PendingPermissionWork{};
+  observed_caret_pending_ = false;
   if (session_ != nullptr) {
     session_->Invalidate();
     session_->Close();
@@ -997,10 +1085,14 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   CoordinatorSnapshot snapshot;
   snapshot.bound = bound_;
   snapshot.closed = closed_;
+  const bool registry_blocked = RegistryBlocks(bound_context_);
+  snapshot.context_uncertain_blocked =
+      registry_blocked ||
+      (uncertain_blocked_context_id_ != 0 &&
+       uncertain_blocked_context_id_ == identity_.context_id);
   if (closed_) {
     snapshot.gate = CoordinatorGate::kOpen;
-  } else if (uncertain_blocked_context_id_ != 0 &&
-             uncertain_blocked_context_id_ == identity_.context_id) {
+  } else if (snapshot.context_uncertain_blocked) {
     snapshot.gate = CoordinatorGate::kBlockedUncertain;
   } else if (outcome_ == WorkOutcome::kNeedsResync) {
     snapshot.gate = CoordinatorGate::kBlockedNeedsResync;
@@ -1034,10 +1126,13 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.edits_stale = edits_stale_;
   snapshot.permission_queries_begun = permission_queries_begun_;
   snapshot.permission_queries_completed = permission_queries_completed_;
+  snapshot.permission_rechecks = 0;
   if (session_ != nullptr) {
     snapshot.permission_rechecks = session_->Snapshot().permission_rechecks;
   }
   snapshot.pumps = pumps_;
+  snapshot.observed_caret_updates = observed_caret_updates_;
+  snapshot.observed_caret_applied = observed_caret_applied_;
   return snapshot;
 }
 

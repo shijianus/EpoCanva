@@ -19,6 +19,8 @@ endif()
 
 set(_tsf_edit_tests_dir "${CMAKE_CURRENT_LIST_DIR}/../tsf_edit")
 set(_executor_tests_dir "${CMAKE_CURRENT_LIST_DIR}/../engine_executor")
+# P3.10: the external-edit and focus helpers are shared with the observer suite.
+set(_observer_tests_dir "${CMAKE_CURRENT_LIST_DIR}/../tsf_context_observer")
 
 add_executable(tsf_coordinator_tests
   main.cc
@@ -28,8 +30,12 @@ add_executable(tsf_coordinator_tests
   coordination_tests.h
   input_permission_gate_tests.cc
   input_permission_gate_tests.h
+  observer_binding_tests.cc
+  observer_binding_tests.h
   real_engine_tests.cc
   real_engine_tests.h
+  "${_observer_tests_dir}/observer_test_support.cc"
+  "${_observer_tests_dir}/observer_test_support.h"
   "${_tsf_edit_tests_dir}/inputscope_test_guids.cc"
   "${_tsf_edit_tests_dir}/test_host.cc"
   "${_tsf_edit_tests_dir}/test_host.h"
@@ -51,6 +57,7 @@ target_include_directories(tsf_coordinator_tests PRIVATE
   # directory). Quote-includes inside the reused .cc files resolve to their own directory
   # first, so having both suites' directories on the path cannot redirect them.
   "${_tsf_edit_tests_dir}"
+  "${_observer_tests_dir}"
   # tests/windows -- so "engine_executor/test_support.h" is unambiguous even though both
   # suites have a file named test_support.h.
   "${CMAKE_CURRENT_LIST_DIR}/..")
@@ -190,6 +197,39 @@ set_tests_properties(
   PROPERTIES TIMEOUT 240
              LABELS "windows;tsf;coordinator;permission;metadata;real")
 
+# --- P3.10: coordinator driven by the real context observer ----------------------------
+#
+# The bindings in these cases come from ObservedBindingController, not from a direct
+# Bind() call. External selection/text changes are real read/write edit sessions with a
+# distinct real TfClientId. The engine is the controlled backend, so engine-call counts are
+# direct; the permission source is the production real-metadata source.
+
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.observed_bind_and_type observed-bind-and-type)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.observed_external_selection observed-external-selection)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.observed_external_text observed-external-text)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.observed_late_permission observed-late-permission)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.observed_late_edit observed-late-edit)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.observed_uncertain_swap observed-uncertain-swap)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.observed_permission_requery observed-permission-requery)
+
+set_tests_properties(
+  windows.tsf_coordinator.observed_bind_and_type
+  windows.tsf_coordinator.observed_external_selection
+  windows.tsf_coordinator.observed_external_text
+  windows.tsf_coordinator.observed_late_permission
+  windows.tsf_coordinator.observed_late_edit
+  windows.tsf_coordinator.observed_uncertain_swap
+  windows.tsf_coordinator.observed_permission_requery
+  PROPERTIES TIMEOUT 300
+             LABELS "windows;tsf;coordinator;observer;context;generation")
+
 # --- stage 2: the real English engine through the real TSF store ------------------------
 #
 # Each case gets its own recreated run root (PrepareRunRoot requires the leaf name
@@ -271,6 +311,11 @@ epocanva_add_real_coordinator_case(
 epocanva_add_real_coordinator_case(
   windows.tsf_coordinator.real_destroyed_context real-destroyed-context)
 
+# 19. P3.10: h -> he -> hel through the observer-created binding and the real English
+#     engine. One generation, no target loss, the real caret after every own edit.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.observed_real_compose observed-real-compose)
+
 set_tests_properties(
   windows.tsf_coordinator.real_compose_progress
   windows.tsf_coordinator.real_return_commit
@@ -290,6 +335,7 @@ set_tests_properties(
   windows.tsf_coordinator.real_pump_idempotent
   windows.tsf_coordinator.real_close_pending
   windows.tsf_coordinator.real_destroyed_context
+  windows.tsf_coordinator.observed_real_compose
   PROPERTIES TIMEOUT 360
              LABELS "windows;tsf;coordinator;engine;english;real")
 

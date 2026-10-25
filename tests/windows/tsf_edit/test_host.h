@@ -224,6 +224,15 @@ class TestHost {
   // nothing after a termination.
   void DispatchQueuedMessages();
 
+  // P3.10 test-only ordering control: when enabled, a deferred lock-grant message is
+  // dispatched by the message loop but NOT granted; the host holds the store reference
+  // until ReleaseHeldGrantMessages(). This makes "the store request reached TSF, the lock
+  // is still pending, and a focus/top-context switch happens first" a fixed order rather
+  // than a race. P3.7/P3.8/P3.9 tests leave it disabled.
+  void SetHoldGrantMessages(bool hold);
+  std::size_t ReleaseHeldGrantMessages();
+  std::size_t held_grant_messages() const { return held_grant_messages_.size(); }
+
   void Shutdown();
   bool shutdown() const { return shutdown_; }
   const TestHostCleanupReport& cleanup_report() const { return cleanup_; }
@@ -246,6 +255,9 @@ class TestHost {
   bool shutdown_ = false;
   std::uint64_t next_context_id_ = 0;
   std::vector<std::unique_ptr<TestDocument>> documents_;
+  bool hold_grant_messages_ = false;
+  // Each entry owns the store reference the posted message carried.
+  std::vector<TestTextStore*> held_grant_messages_;
   TestHostCleanupReport cleanup_;
 
   static std::atomic<int> live_instances_;

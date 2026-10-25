@@ -18,6 +18,7 @@
 #include "coordinator_test_support.h"
 #include "coordination_tests.h"
 #include "input_permission_gate_tests.h"
+#include "observer_binding_tests.h"
 #include "real_engine_tests.h"
 
 int main(int argc, char** argv) {
@@ -44,6 +45,11 @@ int main(int argc, char** argv) {
       epocanva::tsf::coordinator::test::RunRealEngineCase(case_name, options);
   if (real_code >= 0) {
     return real_code;
+  }
+  const int observed_code =
+      epocanva::tsf::coordinator::test::RunObservedBindingCase(case_name, options);
+  if (observed_code >= 0) {
+    return observed_code;
   }
   std::printf("unknown case: %s\n", case_name.c_str());
   return epocanva::tsf::coordinator::test::kExitUsage;
