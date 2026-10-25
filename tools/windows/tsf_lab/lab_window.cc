@@ -597,7 +597,10 @@ std::wstring LabWindow::BuildStatusText() {
                              ? L"advised"
                              : L"not-advised"));
   AppendLine(&text,
-             std::wstring(L"Thread focus: IsThreadFocus=") +
+             std::wstring(L"Thread focus (live query, not the last refusal): policy=") +
+                 WideAscii(context::DescribeThreadFocusPolicy(
+                     snapshot.observer.thread_focus_policy)) +
+                 L" IsThreadFocus=" +
                  (snapshot.observer.thread_focus_query_value ? L"1" : L"0") +
                  L" query=" +
                  (snapshot.observer.thread_focus_query_ok ? L"ok" : L"failed") +
@@ -606,6 +609,10 @@ std::wstring LabWindow::BuildStatusText() {
                  L" source=" +
                  WideAscii(context::DescribeThreadFocusEvidence(
                      snapshot.observer.last_thread_focus_evidence)) +
+                 L" win32_checks=" +
+                 std::to_wstring(snapshot.observer.win32_thread_focus_checks) +
+                 L" win32_accepts=" +
+                 std::to_wstring(snapshot.observer.win32_thread_focus_accepts) +
                  L" notify_set=" +
                  std::to_wstring(snapshot.observer.thread_focus_set_notifications) +
                  L" notify_kill=" +
@@ -666,13 +673,39 @@ std::wstring LabWindow::BuildStatusText() {
                      L" target=" +
                      WideAscii(context::DescribeTargetRevalidationStatus(
                          snapshot.last_target_revalidation.status)) +
+                     L" failure_stage=" +
+                     WideAscii(context::DescribeTargetFailureStage(
+                         snapshot.last_target_revalidation.failure_stage)) +
                      L" source=" +
                      WideAscii(context::DescribeThreadFocusEvidence(
                          snapshot.last_target_revalidation
                              .thread_focus_evidence)) +
                      L" query_hr=" +
                      WideAscii(HrText(
-                         snapshot.last_target_revalidation.query_hr)));
+                         snapshot.last_target_revalidation.query_hr)) +
+                     L" tf_bool=" +
+                     (snapshot.last_target_revalidation.evidence
+                              .thread_focus_query_ok
+                          ? (snapshot.last_target_revalidation.evidence
+                                     .thread_focus
+                                 ? L"valid(1)"
+                                 : L"valid(0)")
+                          : L"invalid") +
+                     L" win32=" +
+                     (snapshot.last_target_revalidation.evidence
+                              .win32_thread_focus
+                          ? L"1"
+                          : L"0") +
+                     L" get_focus=" +
+                     WideAscii(HrText(snapshot.last_target_revalidation.evidence
+                                          .get_focus_hr)) +
+                     L" get_top=" +
+                     WideAscii(HrText(snapshot.last_target_revalidation.evidence
+                                          .get_top_hr)) +
+                     L" registry=" +
+                     WideAscii(context::DescribeContextRegistryStatus(
+                         snapshot.last_target_revalidation.evidence
+                             .registry_status)));
     }
     AppendLine(&text,
                L"Target guard: checks=" +

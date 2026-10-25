@@ -60,10 +60,15 @@ class TestTargetRevalidator final : public context::TargetRevalidator {
     result_.status = context::TargetRevalidationStatus::kOk;
   }
 
-  void SetStatus(context::TargetRevalidationStatus status, HRESULT query_hr = S_OK) {
+  void SetStatus(context::TargetRevalidationStatus status, HRESULT query_hr = S_OK,
+                 context::TargetFailureStage stage =
+                     context::TargetFailureStage::kNone) {
     result_.status = status;
     result_.query_hr = query_hr;
+    result_.failure_stage = stage;
+    result_.evidence = context::TargetEvidence{};
   }
+  void SetResult(const context::TargetRevalidation& result) { result_ = result; }
   void SetWriteAllowed(bool allowed) { write_state_->allowed.store(allowed); }
   std::uint64_t calls() const { return calls_; }
   std::uint64_t write_checks() const { return write_state_->checks.load(); }

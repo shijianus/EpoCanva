@@ -148,13 +148,17 @@ ContextDropReason ReasonForSelection(SelectionReadStatus status) {
 // --- shared state -------------------------------------------------------------------------
 
 struct ContextObserver::State {
-  State(ContextRegistry& registry, TfClientId own_client_id)
+  State(ContextRegistry& registry, TfClientId own_client_id,
+        ThreadFocusPolicy thread_focus_policy)
       : registry(&registry),
         own_client_id(own_client_id),
+        policy(thread_focus_policy),
         reader(new SelectionReader(own_client_id)) {}
 
   ContextRegistry* registry = nullptr;
   TfClientId own_client_id = 0;
+  // Explicit construction-time policy. StrictTsf never probes or accepts a Win32 window.
+  ThreadFocusPolicy policy = ThreadFocusPolicy::kStrictTsf;
   std::unique_ptr<SelectionReader> reader;
 
   ContextObserverSink* sink = nullptr;
@@ -281,8 +285,9 @@ struct ContextObserver::State {
   }
 
   // Reads the real thread-focus facts every time a decision needs them. IsThreadFocus is
-  // the TSF statement; the Win32 focus window is recorded separately and is only used when
-  // the TSF query does not confirm focus. Neither is inferred from GetFocus.
+  // the TSF statement. A Win32 focus window is probed only under the explicitly requested
+  // lab fallback policy; strict mode neither reads nor accepts it. Neither source is
+  // inferred from GetFocus.
   void ReadThreadFocusFacts() {
     thread_focus_query_ok = false;
     thread_focus_query_value = false;
@@ -303,15 +308,17 @@ struct ContextObserver::State {
     }
 
     win32_thread_focus = false;
-    ++counters.win32_thread_focus_checks;
-    GUITHREADINFO info = {};
-    info.cbSize = sizeof(info);
-    if (::GetGUIThreadInfo(::GetCurrentThreadId(), &info) != FALSE &&
-        info.hwndFocus != nullptr) {
-      DWORD process_id = 0;
-      const DWORD thread_id =
-          ::GetWindowThreadProcessId(info.hwndFocus, &process_id);
-      win32_thread_focus = thread_id == ::GetCurrentThreadId();
+    if (policy == ThreadFocusPolicy::kLabWin32Fallback) {
+      ++counters.win32_thread_focus_checks;
+      GUITHREADINFO info = {};
+      info.cbSize = sizeof(info);
+      if (::GetGUIThreadInfo(::GetCurrentThreadId(), &info) != FALSE &&
+          info.hwndFocus != nullptr) {
+        DWORD process_id = 0;
+        const DWORD thread_id =
+            ::GetWindowThreadProcessId(info.hwndFocus, &process_id);
+        win32_thread_focus = thread_id == ::GetCurrentThreadId();
+      }
     }
 
     if (thread_focus_notice == ThreadFocusNotice::kSet) {
@@ -337,6 +344,8 @@ struct ContextObserver::State {
         expected_context_id == 0 || expected_generation == 0) {
       result.status = closed ? TargetRevalidationStatus::kClosed
                              : TargetRevalidationStatus::kQueryFailed;
+      result.failure_stage = closed ? TargetFailureStage::kNone
+                                    : TargetFailureStage::kInvalidRequest;
       result.query_hr = closed ? S_OK : E_INVALIDARG;
       ++counters.target_revalidations;
       ++counters.target_revalidation_failures;
@@ -346,62 +355,54 @@ struct ContextObserver::State {
 
     ReadThreadFocusFacts();
     TargetEvidence evidence;
+    evidence.policy = policy;
     evidence.thread_focus_query_ok = thread_focus_query_ok;
     evidence.thread_focus = thread_focus_query_value;
+    evidence.thread_focus_query_hr = thread_focus_query_hr;
     evidence.win32_thread_focus = win32_thread_focus;
     evidence.thread_focus_notification_set =
         thread_focus_notice == ThreadFocusNotice::kSet;
     evidence.thread_focus_notification_kill =
         thread_focus_notice == ThreadFocusNotice::kKill;
 
-    HRESULT first_failure = S_OK;
     ITfDocumentMgr* focus = nullptr;
-    const HRESULT focus_hr = thread_mgr->GetFocus(&focus);
-    if (FAILED(focus_hr)) {
-      first_failure = focus_hr;
+    evidence.get_focus_hr = thread_mgr->GetFocus(&focus);
+    if (SUCCEEDED(evidence.get_focus_hr) && focus != nullptr) {
+      evidence.has_document_manager = true;
+      ITfContext* top = nullptr;
+      evidence.get_top_hr = focus->GetTop(&top);
+      if (SUCCEEDED(evidence.get_top_hr) && top != nullptr) {
+        evidence.has_top_context = true;
+        evidence.top_context_matches = TargetContextsEqual(top, expected);
+      }
+      if (top != nullptr) {
+        top->Release();
+      }
     }
     if (focus != nullptr) {
-      if (SUCCEEDED(focus_hr)) {
-        evidence.has_document_manager = true;
-        ITfContext* top = nullptr;
-        const HRESULT top_hr = focus->GetTop(&top);
-        if (FAILED(top_hr)) {
-          if (first_failure == S_OK) {
-            first_failure = top_hr;
-          }
-        } else if (top != nullptr) {
-          evidence.has_top_context = true;
-          evidence.top_context_matches = TargetContextsEqual(top, expected);
-        }
-        if (top != nullptr) {
-          top->Release();
-        }
-      }
       focus->Release();
     }
 
-    ContextIdRecord record;
-    ContextRegistryStatus registry_status = ContextRegistryStatus::kClosed;
     if (registry != nullptr) {
-      registry_status = registry->Observe(expected, &record);
-    }
-    if (registry_status == ContextRegistryStatus::kOk) {
-      evidence.observed_context_id = record.context_id;
-      evidence.observed_generation = record.generation;
-      evidence.registry_identity_matches =
-          record.context_id == expected_context_id;
-      evidence.registry_generation_matches =
-          record.generation == expected_generation;
-    } else if (first_failure == S_OK) {
-      first_failure = E_FAIL;
+      ContextIdRecord record;
+      evidence.registry_status = registry->Observe(expected, &record);
+      evidence.registry_query_ok =
+          evidence.registry_status == ContextRegistryStatus::kOk;
+      if (evidence.registry_query_ok) {
+        evidence.observed_context_id = record.context_id;
+        evidence.observed_generation = record.generation;
+        evidence.registry_identity_matches =
+            record.context_id == expected_context_id;
+        evidence.registry_generation_matches =
+            record.generation == expected_generation;
+      }
     }
 
     result = EvaluateTargetEvidence(evidence);
-    if (result.status == TargetRevalidationStatus::kQueryFailed &&
-        first_failure == S_OK) {
-      first_failure = E_FAIL;
+    if (result.ok() &&
+        result.thread_focus_evidence == ThreadFocusEvidence::kWin32ThreadFocus) {
+      ++counters.win32_thread_focus_accepts;
     }
-    result.query_hr = first_failure;
     ++counters.target_revalidations;
     if (!result.ok()) {
       ++counters.target_revalidation_failures;
@@ -1080,8 +1081,9 @@ class ObserverComSink final : public ITfThreadMgrEventSink,
 
 // --- ContextObserver ----------------------------------------------------------------------
 
-ContextObserver::ContextObserver(ContextRegistry& registry, TfClientId own_client_id)
-    : state_(std::make_shared<State>(registry, own_client_id)) {
+ContextObserver::ContextObserver(ContextRegistry& registry, TfClientId own_client_id,
+                                 ThreadFocusPolicy thread_focus_policy)
+    : state_(std::make_shared<State>(registry, own_client_id, thread_focus_policy)) {
   auto* com_sink = new ObserverComSink(state_);
   state_->sink_unknown =
       static_cast<IUnknown*>(static_cast<ITfThreadMgrEventSink*>(com_sink));
@@ -1177,6 +1179,7 @@ ContextObserverSnapshot ContextObserver::Snapshot() const {
       state_->thread_focus_sink_advise_failed;
   snapshot.has_top_context = state_->top_context != nullptr;
   snapshot.last_bind_evidence = state_->last_bind_evidence;
+  snapshot.thread_focus_policy = state_->policy;
   snapshot.thread_focus_query_ok = state_->thread_focus_query_ok;
   snapshot.thread_focus_query_value = state_->thread_focus_query_value;
   snapshot.thread_focus_query_hr = state_->thread_focus_query_hr;

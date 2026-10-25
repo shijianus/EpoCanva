@@ -76,8 +76,8 @@ bool SubscribeAndBind(CaseEnv* env, TestDocument* document, const char* label,
     return false;
   }
   env->registry = std::make_unique<ContextRegistry>(8);
-  env->observer = std::make_unique<ContextObserver>(*env->registry,
-                                                    env->host->client_id());
+  env->observer = std::make_unique<ContextObserver>(
+      *env->registry, env->host->client_id(), ThreadFocusPolicy::kStrictTsf);
   if (!env->observer->Subscribe(env->host->thread_manager_for_test(), &env->sink,
                                 &env->error)) {
     Check(false, std::string(label) + ": subscribed to the real sinks", env->error);
@@ -695,8 +695,8 @@ int RunShutdownLateRead() {
     return Finish();
   }
   env.registry = std::make_unique<ContextRegistry>(8);
-  env.observer = std::make_unique<ContextObserver>(*env.registry,
-                                                   env.host->client_id());
+  env.observer = std::make_unique<ContextObserver>(
+      *env.registry, env.host->client_id(), ThreadFocusPolicy::kStrictTsf);
   Check(env.observer->Subscribe(env.host->thread_manager_for_test(), &env.sink,
                                 &env.error),
         "shutdown-late: subscribed", env.error);
@@ -773,7 +773,8 @@ int RunResourceBalance() {
   for (int cycle = 0; cycle < 3; ++cycle) {
     ContextRegistry registry(8);
     RecordingSink sink;
-    ContextObserver observer(registry, host->client_id());
+    ContextObserver observer(registry, host->client_id(),
+                             ThreadFocusPolicy::kStrictTsf);
     FocusCallResult focus;
     Check(SetThreadFocus(*host, doc_a, &focus, nullptr),
           "balance: focus A", "");
@@ -843,15 +844,19 @@ int RunCanFail() {
 // the real observer-backed cases call Revalidate() against the live manager separately.
 int RunTargetEvidencePure() {
   TargetEvidence evidence;
+  evidence.policy = ThreadFocusPolicy::kStrictTsf;
   evidence.thread_focus_query_ok = true;
   evidence.thread_focus = true;
+  evidence.thread_focus_query_hr = S_OK;
 
   TargetRevalidation result = EvaluateTargetEvidence(evidence);
   Check(result.status == TargetRevalidationStatus::kNoDocumentManager,
         "target-evidence: no document manager",
         DescribeTargetRevalidationStatus(result.status));
-  Check(!result.evidence.has_document_manager,
-        "target-evidence: the missing document manager is in the evidence", "");
+  Check(result.failure_stage == TargetFailureStage::kNone &&
+            result.query_hr == S_OK,
+        "target-evidence: a successful empty GetFocus is not a query failure",
+        DescribeTargetFailureStage(result.failure_stage));
 
   evidence.has_document_manager = true;
   result = EvaluateTargetEvidence(evidence);
@@ -860,6 +865,8 @@ int RunTargetEvidencePure() {
         DescribeTargetRevalidationStatus(result.status));
 
   evidence.has_top_context = true;
+  evidence.registry_query_ok = true;
+  evidence.registry_status = ContextRegistryStatus::kOk;
   evidence.top_context_matches = false;
   result = EvaluateTargetEvidence(evidence);
   Check(result.status == TargetRevalidationStatus::kContextMismatch,
@@ -907,8 +914,14 @@ int RunTargetEvidencePure() {
   evidence.thread_focus_notification_kill = false;
   evidence.win32_thread_focus = true;
   result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kThreadFocusUnconfirmed,
+        "target-evidence: strict TSF never silently uses the Win32 fallback",
+        DescribeTargetRevalidationStatus(result.status));
+
+  evidence.policy = ThreadFocusPolicy::kLabWin32Fallback;
+  result = EvaluateTargetEvidence(evidence);
   Check(result.status == TargetRevalidationStatus::kOk,
-        "target-evidence: real Win32 thread focus is an accepted revalidation",
+        "target-evidence: the explicit lab policy accepts real Win32 thread focus",
         DescribeTargetRevalidationStatus(result.status));
   Check(result.thread_focus_evidence ==
             ThreadFocusEvidence::kWin32ThreadFocus,
@@ -920,6 +933,206 @@ int RunTargetEvidencePure() {
   Check(result.thread_focus_evidence == ThreadFocusEvidence::kNotificationSet,
         "target-evidence: a set notification is reported as a notification",
         DescribeThreadFocusEvidence(result.thread_focus_evidence));
+  return Finish();
+}
+
+// P3.13-R2 pure table for query-failure classification and the explicit fallback policy.
+// These are synthetic facts: no TSF call and no notification is made here.
+int RunTargetPolicyPure() {
+  auto good = [] {
+    TargetEvidence evidence;
+    evidence.policy = ThreadFocusPolicy::kStrictTsf;
+    evidence.thread_focus_query_ok = true;
+    evidence.thread_focus = true;
+    evidence.thread_focus_query_hr = S_OK;
+    evidence.has_document_manager = true;
+    evidence.get_focus_hr = S_OK;
+    evidence.has_top_context = true;
+    evidence.get_top_hr = S_OK;
+    evidence.top_context_matches = true;
+    evidence.registry_query_ok = true;
+    evidence.registry_status = ContextRegistryStatus::kOk;
+    evidence.registry_identity_matches = true;
+    evidence.registry_generation_matches = true;
+    return evidence;
+  };
+  auto current = [](const TargetRevalidation& result) {
+    return result.status == TargetRevalidationStatus::kOk &&
+           result.failure_stage == TargetFailureStage::kNone &&
+           result.query_hr == S_OK;
+  };
+
+  TargetEvidence evidence = good();
+  TargetRevalidation result = EvaluateTargetEvidence(evidence);
+  Check(current(result) &&
+            result.thread_focus_evidence == ThreadFocusEvidence::kQuerySet,
+        "target-policy: strict TSF accepts a successful TRUE query",
+        DescribeThreadFocusEvidence(result.thread_focus_evidence));
+  Check(std::string(DescribeThreadFocusPolicy(evidence.policy)) == "strict-tsf",
+        "target-policy: the strict policy has its own source label", "");
+
+  // IsThreadFocus itself fails. The BOOL is invalid and the real HRESULT is preserved.
+  evidence = good();
+  evidence.thread_focus_query_ok = false;
+  evidence.thread_focus = false;
+  evidence.thread_focus_query_hr = E_ACCESSDENIED;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kQueryFailed &&
+            result.failure_stage == TargetFailureStage::kThreadFocusQuery &&
+            result.query_hr == E_ACCESSDENIED,
+        "target-policy: a failed IsThreadFocus is a query failure at its real stage",
+        DescribeTargetFailureStage(result.failure_stage));
+  Check(!result.evidence.thread_focus_query_ok &&
+            result.thread_focus_evidence == ThreadFocusEvidence::kNone,
+        "target-policy: a failed focus query has no valid BOOL or source", "");
+
+  // The same failure cannot be rescued by a Win32 window, even in the lab policy.
+  evidence.policy = ThreadFocusPolicy::kLabWin32Fallback;
+  evidence.win32_thread_focus = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kQueryFailed &&
+            result.failure_stage == TargetFailureStage::kThreadFocusQuery &&
+            result.query_hr == E_ACCESSDENIED,
+        "target-policy: the lab fallback never auto-allows a failed query",
+        DescribeTargetRevalidationStatus(result.status));
+
+  // The query succeeded and answered FALSE. Strict mode refuses; the lab policy may accept
+  // a real Win32 window, and only there.
+  evidence = good();
+  evidence.thread_focus = false;
+  evidence.thread_focus_query_hr = S_FALSE;
+  evidence.win32_thread_focus = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kThreadFocusUnconfirmed &&
+            result.failure_stage == TargetFailureStage::kNone &&
+            result.query_hr == S_OK &&
+            result.thread_focus_evidence == ThreadFocusEvidence::kNone,
+        "target-policy: strict TSF refuses a successful FALSE BOOL without fallback",
+        DescribeTargetRevalidationStatus(result.status));
+  Check(result.evidence.thread_focus_query_ok &&
+            !result.evidence.thread_focus,
+        "target-policy: the valid FALSE BOOL is kept in the evidence", "");
+
+  evidence.policy = ThreadFocusPolicy::kLabWin32Fallback;
+  evidence.win32_thread_focus = false;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kThreadFocusUnconfirmed,
+        "target-policy: lab fallback without a Win32 window still refuses",
+        DescribeTargetRevalidationStatus(result.status));
+
+  evidence.win32_thread_focus = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(current(result) &&
+            result.thread_focus_evidence == ThreadFocusEvidence::kWin32ThreadFocus,
+        "target-policy: lab fallback accepts the labelled Win32 revalidation",
+        DescribeThreadFocusEvidence(result.thread_focus_evidence));
+  Check(std::string(DescribeThreadFocusPolicy(evidence.policy)) ==
+            "lab-win32-fallback",
+        "target-policy: the fallback source label is not renamed", "");
+
+  // A failed GetFocus is an API failure, not an empty target.
+  evidence = good();
+  evidence.has_document_manager = false;
+  evidence.get_focus_hr = E_FAIL;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kQueryFailed &&
+            result.failure_stage == TargetFailureStage::kGetFocus &&
+            result.query_hr == E_FAIL,
+        "target-policy: a failed GetFocus is a query failure",
+        DescribeTargetFailureStage(result.failure_stage));
+
+  // A successful GetFocus with no manager is a normal empty state.
+  evidence.get_focus_hr = S_OK;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kNoDocumentManager &&
+            result.failure_stage == TargetFailureStage::kNone &&
+            result.query_hr == S_OK,
+        "target-policy: GetFocus success with no manager is not an error",
+        DescribeTargetRevalidationStatus(result.status));
+
+  // A failed GetTop is a query failure; success with no top is an empty state.
+  evidence = good();
+  evidence.has_top_context = false;
+  evidence.get_top_hr = HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kQueryFailed &&
+            result.failure_stage == TargetFailureStage::kGetTop &&
+            result.query_hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE),
+        "target-policy: a failed GetTop keeps its real HRESULT",
+        DescribeTargetFailureStage(result.failure_stage));
+  evidence.get_top_hr = S_OK;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kNoTopContext &&
+            result.failure_stage == TargetFailureStage::kNone &&
+            result.query_hr == S_OK,
+        "target-policy: GetTop success with no top is not an error",
+        DescribeTargetRevalidationStatus(result.status));
+
+  // The registry answered with a non-Ok status: identity was never established.
+  evidence = good();
+  evidence.registry_query_ok = false;
+  evidence.registry_status = ContextRegistryStatus::kCapacityExceeded;
+  evidence.registry_identity_matches = false;
+  evidence.registry_generation_matches = false;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kQueryFailed &&
+            result.failure_stage == TargetFailureStage::kRegistry &&
+            result.query_hr == E_FAIL,
+        "target-policy: a registry refusal is a query failure, not a mismatch",
+        DescribeTargetFailureStage(result.failure_stage));
+  Check(result.evidence.registry_status ==
+            ContextRegistryStatus::kCapacityExceeded,
+        "target-policy: the registry status is preserved", "");
+
+  evidence = good();
+  evidence.registry_generation_matches = false;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kGenerationMismatch &&
+            result.failure_stage == TargetFailureStage::kNone &&
+            result.query_hr == S_OK,
+        "target-policy: a real generation mismatch is not a query failure",
+        DescribeTargetRevalidationStatus(result.status));
+
+  evidence = good();
+  evidence.top_context_matches = false;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kContextMismatch &&
+            result.failure_stage == TargetFailureStage::kNone &&
+            result.query_hr == S_OK,
+        "target-policy: a real top-context mismatch is not a query failure",
+        DescribeTargetRevalidationStatus(result.status));
+
+  // A kill notification is decisive even when the live query failed; the query failure
+  // stays visible in evidence.
+  evidence = good();
+  evidence.thread_focus_query_ok = false;
+  evidence.thread_focus = false;
+  evidence.thread_focus_query_hr = E_ACCESSDENIED;
+  evidence.thread_focus_notification_kill = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kThreadFocusLost &&
+            result.thread_focus_evidence == ThreadFocusEvidence::kNotificationKill &&
+            result.failure_stage == TargetFailureStage::kNone,
+        "target-policy: a kill notification decides focus loss",
+        DescribeTargetRevalidationStatus(result.status));
+  Check(result.evidence.thread_focus_query_hr == E_ACCESSDENIED,
+        "target-policy: the failed query is preserved under a kill", "");
+
+  // A positive TSF notification can confirm focus while a redundant query failed. The
+  // result is Ok, the source is the notification, and the failed call stays in evidence.
+  evidence = good();
+  evidence.thread_focus_query_ok = false;
+  evidence.thread_focus = false;
+  evidence.thread_focus_query_hr = E_ACCESSDENIED;
+  evidence.thread_focus_notification_set = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(current(result) &&
+            result.thread_focus_evidence == ThreadFocusEvidence::kNotificationSet,
+        "target-policy: a set notification is TSF evidence even after a failed query",
+        DescribeThreadFocusEvidence(result.thread_focus_evidence));
+  Check(!result.evidence.thread_focus_query_ok &&
+            result.evidence.thread_focus_query_hr == E_ACCESSDENIED,
+        "target-policy: the overridden query failure is not rewritten to S_OK", "");
   return Finish();
 }
 
@@ -935,6 +1148,7 @@ int RunObserverCase(const std::string& case_name) {
   if (case_name == "real-focus") return RunRealFocus();
   if (case_name == "shutdown-late-read") return RunShutdownLateRead();
   if (case_name == "target-evidence") return RunTargetEvidencePure();
+  if (case_name == "target-policy") return RunTargetPolicyPure();
   if (case_name == "resource-balance") return RunResourceBalance();
   if (case_name == "can-fail") return RunCanFail();
   return -1;
@@ -964,7 +1178,8 @@ int RunInteractiveFocus() {
   }
   ContextRegistry registry(8);
   RecordingSink sink;
-  ContextObserver observer(registry, host->client_id());
+  ContextObserver observer(registry, host->client_id(),
+                           ThreadFocusPolicy::kStrictTsf);
   ITfDocumentMgr* previous = nullptr;
   const HRESULT associate_hr = AssociateDocumentFocus(
       host->thread_manager_for_test(), window,

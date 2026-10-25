@@ -48,53 +48,130 @@ const char* DescribeThreadFocusEvidence(ThreadFocusEvidence evidence) {
   return "unknown-thread-focus-evidence";
 }
 
+const char* DescribeThreadFocusPolicy(ThreadFocusPolicy policy) {
+  switch (policy) {
+    case ThreadFocusPolicy::kStrictTsf:
+      return "strict-tsf";
+    case ThreadFocusPolicy::kLabWin32Fallback:
+      return "lab-win32-fallback";
+  }
+  return "unknown-thread-focus-policy";
+}
+
+const char* DescribeTargetFailureStage(TargetFailureStage stage) {
+  switch (stage) {
+    case TargetFailureStage::kNone:
+      return "none";
+    case TargetFailureStage::kInvalidRequest:
+      return "invalid-request";
+    case TargetFailureStage::kThreadFocusQuery:
+      return "thread-focus-query";
+    case TargetFailureStage::kGetFocus:
+      return "get-focus";
+    case TargetFailureStage::kGetTop:
+      return "get-top";
+    case TargetFailureStage::kRegistry:
+      return "registry";
+  }
+  return "unknown-target-failure-stage";
+}
+
 TargetRevalidation EvaluateTargetEvidence(const TargetEvidence& evidence) {
   TargetRevalidation result;
   result.evidence = evidence;
 
-  // The evidence source names exactly where the thread-focus fact came from. A notification
-  // that was superseded by a successful live query is reported as a revalidation; a kill
-  // notification is never renamed as a query result.
-  if (evidence.thread_focus_notification_set) {
+  // Thread focus. A notification that was superseded by a successful live query is reported
+  // as a revalidation; a kill notification is never renamed as a query result. The Win32
+  // window is consulted only under the explicitly requested lab policy AND only when the
+  // TSF query itself succeeded with FALSE. A failed query is never turned into permission
+  // by the fallback.
+  const bool notification_confirms = evidence.thread_focus_notification_set;
+  const bool query_confirms = evidence.thread_focus_query_ok && evidence.thread_focus;
+  const bool fallback_confirms =
+      evidence.policy == ThreadFocusPolicy::kLabWin32Fallback &&
+      evidence.thread_focus_query_ok && !evidence.thread_focus &&
+      evidence.win32_thread_focus;
+
+  if (notification_confirms) {
     result.thread_focus_evidence = ThreadFocusEvidence::kNotificationSet;
-  } else if (evidence.thread_focus_query_ok && evidence.thread_focus) {
+  } else if (query_confirms) {
     result.thread_focus_evidence = ThreadFocusEvidence::kQuerySet;
-  } else if (evidence.win32_thread_focus) {
+  } else if (fallback_confirms) {
     result.thread_focus_evidence = ThreadFocusEvidence::kWin32ThreadFocus;
   } else if (evidence.thread_focus_notification_kill) {
     result.thread_focus_evidence = ThreadFocusEvidence::kNotificationKill;
   }
 
-  const bool thread_focus_confirmed =
-      evidence.thread_focus_notification_set || evidence.thread_focus ||
-      evidence.win32_thread_focus;
-  if (!thread_focus_confirmed) {
-    result.status = evidence.thread_focus_notification_kill
-                        ? TargetRevalidationStatus::kThreadFocusLost
-                        : TargetRevalidationStatus::kThreadFocusUnconfirmed;
+  if (!notification_confirms && !query_confirms && !fallback_confirms) {
+    if (evidence.thread_focus_notification_kill) {
+      // The kill notification is the deciding fact. A coincident query failure stays in
+      // evidence; it is not the reason the target was refused.
+      result.status = TargetRevalidationStatus::kThreadFocusLost;
+      result.query_hr = S_OK;
+      return result;
+    }
+    if (!evidence.thread_focus_query_ok) {
+      result.status = TargetRevalidationStatus::kQueryFailed;
+      result.failure_stage = TargetFailureStage::kThreadFocusQuery;
+      result.query_hr = FAILED(evidence.thread_focus_query_hr)
+                            ? evidence.thread_focus_query_hr
+                            : E_UNEXPECTED;
+      return result;
+    }
+    // The query succeeded and answered FALSE. This is a real focus fact, not an API
+    // failure; strict mode refuses it here instead of using a Win32 fallback.
+    result.status = TargetRevalidationStatus::kThreadFocusUnconfirmed;
+    result.query_hr = S_OK;
     return result;
   }
+
   if (!evidence.has_document_manager) {
-    result.status = TargetRevalidationStatus::kNoDocumentManager;
+    if (FAILED(evidence.get_focus_hr)) {
+      result.status = TargetRevalidationStatus::kQueryFailed;
+      result.failure_stage = TargetFailureStage::kGetFocus;
+      result.query_hr = evidence.get_focus_hr;
+    } else {
+      // GetFocus answered successfully and named no document manager. That is an empty
+      // state, not an API failure.
+      result.status = TargetRevalidationStatus::kNoDocumentManager;
+      result.query_hr = S_OK;
+    }
     return result;
   }
   if (!evidence.has_top_context) {
-    result.status = TargetRevalidationStatus::kNoTopContext;
+    if (FAILED(evidence.get_top_hr)) {
+      result.status = TargetRevalidationStatus::kQueryFailed;
+      result.failure_stage = TargetFailureStage::kGetTop;
+      result.query_hr = evidence.get_top_hr;
+    } else {
+      result.status = TargetRevalidationStatus::kNoTopContext;
+      result.query_hr = S_OK;
+    }
     return result;
   }
   if (!evidence.top_context_matches) {
     result.status = TargetRevalidationStatus::kContextMismatch;
+    result.query_hr = S_OK;
+    return result;
+  }
+  if (!evidence.registry_query_ok) {
+    result.status = TargetRevalidationStatus::kQueryFailed;
+    result.failure_stage = TargetFailureStage::kRegistry;
+    result.query_hr = E_FAIL;
     return result;
   }
   if (!evidence.registry_identity_matches) {
     result.status = TargetRevalidationStatus::kContextMismatch;
+    result.query_hr = S_OK;
     return result;
   }
   if (!evidence.registry_generation_matches) {
     result.status = TargetRevalidationStatus::kGenerationMismatch;
+    result.query_hr = S_OK;
     return result;
   }
   result.status = TargetRevalidationStatus::kOk;
+  result.query_hr = S_OK;
   return result;
 }
 

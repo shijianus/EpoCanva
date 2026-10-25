@@ -24,11 +24,12 @@
 //
 // TARGET REVALIDATION (P3.13). Revalidate() answers the live question the coordinator asks
 // before ordinary input and before an ordinary edit: thread focus (the focus sink, the real
-// IsThreadFocus query, or an explicitly labelled real Win32 thread-focus revalidation), the
-// current GetFocus document manager, its canonical top context, and the registry
-// id/generation. CreateWriteGuard() repeats that check inside a granted P3.7 edit callback.
-// The evidence source is published verbatim; a revalidation is never renamed as a
-// notification.
+// IsThreadFocus query, or an explicitly requested lab-only real Win32 thread-focus
+// revalidation), the current GetFocus document manager, its canonical top context, and the
+// registry id/generation. CreateWriteGuard() repeats that check inside a granted P3.7 edit
+// callback. The evidence source is published verbatim; a revalidation is never renamed as a
+// notification. The Win32 fallback is a construction-time policy: the product default is
+// StrictTsf, and only the lab/test configurations explicitly request kLabWin32Fallback.
 //
 // WHERE BINDING HAPPENS. Not inside a TSF notification. OnSetFocus/OnPushContext/
 // OnPopContext/OnUninitDocumentMgr and OnEndEdit may only DROP the old binding and mark a
@@ -150,6 +151,7 @@ struct ContextObserverSnapshot {
   bool thread_focus_sink_advise_failed = false;
   bool has_top_context = false;
   TargetBindingEvidence last_bind_evidence = TargetBindingEvidence::kNone;
+  ThreadFocusPolicy thread_focus_policy = ThreadFocusPolicy::kStrictTsf;
   ThreadFocusEvidence last_thread_focus_evidence = ThreadFocusEvidence::kNone;
   bool thread_focus_query_ok = false;
   bool thread_focus_query_value = false;
@@ -176,6 +178,7 @@ struct ContextObserverSnapshot {
   std::uint64_t thread_focus_queries = 0;
   std::uint64_t thread_focus_query_failures = 0;
   std::uint64_t win32_thread_focus_checks = 0;
+  std::uint64_t win32_thread_focus_accepts = 0;
   std::uint64_t thread_focus_sink_advises = 0;
   std::uint64_t thread_focus_sink_unadvises = 0;
   std::uint64_t thread_focus_sink_advise_failures = 0;
@@ -221,8 +224,11 @@ class ContextObserver : public TargetRevalidator {
  public:
   // `registry` must outlive the observer and is used only on this STA thread. The client id
   // is the TIP's real TfClientId: it is used for the read-only selection sessions and as
-  // the InWriteSession identity that distinguishes our writes from other clients'.
-  ContextObserver(ContextRegistry& registry, TfClientId own_client_id);
+  // the InWriteSession identity that distinguishes our writes from other clients'. The
+  // thread-focus policy must be chosen explicitly by the caller; there is no implicit
+  // fallback and no product switch that ignores it.
+  ContextObserver(ContextRegistry& registry, TfClientId own_client_id,
+                  ThreadFocusPolicy thread_focus_policy);
   ~ContextObserver();
 
   ContextObserver(const ContextObserver&) = delete;

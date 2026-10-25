@@ -201,8 +201,13 @@ bool LabSession::Start(const std::array<HWND, 2>& document_windows,
       *executor_, config_.schema_id,
       engine::ControllerOptions{true, input::InputPermission::kAllowed},
       config_.engine_create_timeout_ms);
-  observer_ = std::make_unique<context::ContextObserver>(*registry_,
-                                                        host_->client_id());
+  // This lab process does not register a TIP, so ITfThreadMgr::IsThreadFocus answers
+  // S_FALSE even with a real Win32 focus window. The fallback is requested explicitly here;
+  // it is not inferred from the registry, the window, or a failed query. Product code uses
+  // StrictTsf.
+  observer_ = std::make_unique<context::ContextObserver>(
+      *registry_, host_->client_id(),
+      context::ThreadFocusPolicy::kLabWin32Fallback);
   controller_ = std::make_unique<coordinator::ObservedBindingController>(
       *observer_, *coordinator_, *registry_, *clients_);
 

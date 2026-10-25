@@ -1351,6 +1351,70 @@ int RunTargetStatusMapping() {
   refuse(epocanva::tsf::context::TargetRevalidationStatus::kQueryFailed,
          SubmitStatus::kTargetUnverified, "query failure -> TargetUnverified");
 
+  // P3.13-R2: the refusal snapshot keeps the evidence of THAT decision. It must not be
+  // replaced by live observer state refreshed later (the controller is not re-queried here).
+  {
+    context::TargetRevalidation failure;
+    failure.status = context::TargetRevalidationStatus::kQueryFailed;
+    failure.failure_stage = context::TargetFailureStage::kGetTop;
+    failure.query_hr = E_ACCESSDENIED;
+    failure.evidence.policy = context::ThreadFocusPolicy::kLabWin32Fallback;
+    failure.evidence.thread_focus_query_ok = true;
+    failure.evidence.thread_focus = false;
+    failure.evidence.thread_focus_query_hr = S_FALSE;
+    failure.evidence.has_document_manager = true;
+    failure.evidence.get_focus_hr = S_OK;
+    failure.evidence.get_top_hr = E_ACCESSDENIED;
+    setup.target.SetResult(failure);
+    WorkId id;
+    const SubmitStatus submitted = coordinator.SubmitKey(h.event, h.text, &id);
+    const CoordinatorSnapshot snapshot = coordinator.Snapshot();
+    Check(submitted == SubmitStatus::kTargetUnverified && !id.valid(),
+          "target-status: a GetTop query failure refuses without work",
+          DescribeSubmitStatus(submitted));
+    Check(snapshot.last_target_revalidation.failure_stage ==
+                  context::TargetFailureStage::kGetTop &&
+              snapshot.last_target_revalidation.query_hr == E_ACCESSDENIED,
+          "target-status: the failure stage and real HRESULT are preserved",
+          context::DescribeTargetFailureStage(
+              snapshot.last_target_revalidation.failure_stage));
+    Check(snapshot.last_target_revalidation.evidence.thread_focus_query_ok &&
+              !snapshot.last_target_revalidation.evidence.thread_focus &&
+              snapshot.last_target_revalidation.evidence.thread_focus_query_hr ==
+                  S_FALSE &&
+              snapshot.last_target_revalidation.evidence.get_top_hr ==
+                  E_ACCESSDENIED,
+          "target-status: the per-query evidence of the refusal is preserved", "");
+    Check(setup.harness.backend->dispatch_calls() == dispatches_before,
+          "target-status: the GetTop failure made no engine call", "");
+  }
+
+  {
+    context::TargetRevalidation unconfirmed;
+    unconfirmed.status =
+        context::TargetRevalidationStatus::kThreadFocusUnconfirmed;
+    unconfirmed.evidence.thread_focus_query_ok = true;
+    unconfirmed.evidence.thread_focus = false;
+    unconfirmed.evidence.thread_focus_query_hr = S_FALSE;
+    setup.target.SetResult(unconfirmed);
+    WorkId id;
+    const SubmitStatus submitted = coordinator.SubmitKey(h.event, h.text, &id);
+    const CoordinatorSnapshot snapshot = coordinator.Snapshot();
+    Check(submitted == SubmitStatus::kTargetUnverified && !id.valid(),
+          "target-status: a successful FALSE thread-focus query refuses", "");
+    Check(snapshot.last_target_revalidation.status ==
+                  context::TargetRevalidationStatus::kThreadFocusUnconfirmed &&
+              snapshot.last_target_revalidation.failure_stage ==
+                  context::TargetFailureStage::kNone &&
+              snapshot.last_target_revalidation.query_hr == S_OK,
+          "target-status: a valid FALSE BOOL is not reported as a query failure",
+          context::DescribeTargetRevalidationStatus(
+              snapshot.last_target_revalidation.status));
+    Check(snapshot.last_target_revalidation.evidence.thread_focus_query_ok &&
+              !snapshot.last_target_revalidation.evidence.thread_focus,
+          "target-status: the FALSE BOOL stays in the refusal evidence", "");
+  }
+
   setup.target.SetStatus(epocanva::tsf::context::TargetRevalidationStatus::kOk);
   WorkId id;
   Check(coordinator.SubmitKey(h.event, h.text, &id) == SubmitStatus::kAccepted,

@@ -23,11 +23,17 @@ Every ordinary admission (new key, candidate acceptance, edit plan) checks, in t
      cookie in `Shutdown`, and the advice/unadvice counts are published.
    - `ITfThreadMgr::IsThreadFocus` (`msctf.h:1101`) is queried live. It is described as
      "TSF input focus", not as global foreground state.
-   - When the TSF query cannot confirm focus (this lab process does not register a TIP and
-     `IsThreadFocus` returns `S_FALSE`), a **real Win32 thread focus window** is accepted
-     only as an explicitly labelled revalidation: `GetGUIThreadInfo(GetCurrentThreadId())`
-     reports `hwndFocus`, and its owning thread is the calling thread. The source label is
-     `win32-thread-focus-revalidation`; it is never reported as a TSF notification.
+   - The Win32 thread-focus window is **not** part of the default policy. The observer is
+     constructed with an explicit `ThreadFocusPolicy`:
+     `StrictTsf` (product default) accepts only a TSF notification or a successful
+     `IsThreadFocus` TRUE; `LabWin32Fallback` additionally accepts a real
+     `GetGUIThreadInfo(GetCurrentThreadId())` focus window owned by this thread. The lab and
+     the declared test harnesses request the fallback explicitly because the non-registered
+     lab process reports `S_FALSE`.
+   - The fallback is consulted only when the TSF query itself **succeeded** with FALSE. A
+     failed `IsThreadFocus` call is never turned into permission by the fallback, even in the
+     lab policy. The source label is `win32-thread-focus-revalidation`; it is never reported
+     as a TSF notification.
    - `GetForegroundWindow` is **not** used for admission. It is displayed in the lab as a
      separate observation only.
 
@@ -50,6 +56,28 @@ The pure decision table is `EvaluateTargetEvidence` in
 `platforms/windows/tsf_context/target_revalidation.cc`. It is unit-tested without a TSF
 manager; the live queries are in `ContextObserver::Revalidate`.
 
+### 1.1 Query failures versus empty results
+
+Each API keeps its own real answer in `TargetEvidence`; the result carries the one stage
+that decided a refusal and that stage's HRESULT. Empty results are not errors.
+
+| Fact | Status | `TargetFailureStage` | `query_hr` |
+| --- | --- | --- | --- |
+| `IsThreadFocus` failed | `QueryFailed` | `thread-focus-query` | the call's real HRESULT; the BOOL is invalid |
+| `IsThreadFocus` succeeded, FALSE | `ThreadFocusUnconfirmed` | `none` | `S_OK`; BOOL is valid and FALSE |
+| `GetFocus` failed | `QueryFailed` | `get-focus` | the call's real HRESULT |
+| `GetFocus` succeeded, no manager | `NoDocumentManager` | `none` | `S_OK` |
+| `GetTop` failed | `QueryFailed` | `get-top` | the call's real HRESULT |
+| `GetTop` succeeded, no top | `NoTopContext` | `none` | `S_OK` |
+| `ContextRegistry::Observe` non-Ok | `QueryFailed` | `registry` | `E_FAIL` (that API returns a status enum; the status is preserved in evidence) |
+| real top/identity mismatch | `ContextMismatch` | `none` | `S_OK` |
+| real generation mismatch | `GenerationMismatch` | `none` | `S_OK` |
+| thread-focus kill notification | `ThreadFocusLost` | `none` | `S_OK` |
+
+A positive TSF notification may confirm focus even if a redundant live query failed; the
+failed call remains verbatim in `TargetEvidence` and is not rewritten to `S_OK`. The final
+refusal snapshot is a copy taken at decision time, so later live refreshes cannot change it.
+
 ## 2. Evidence sources are not renamed
 
 `TargetRevalidation` carries both a status and a `ThreadFocusEvidence` value:
@@ -59,8 +87,12 @@ manager; the live queries are in `ContextObserver::Revalidate`.
 | `thread-focus-notification` | the last thread-focus notification was `OnSetThreadFocus` |
 | `thread-focus-kill-notification` | the last thread-focus notification was `OnKillThreadFocus` |
 | `query-revalidation` | `IsThreadFocus` answered TRUE |
-| `win32-thread-focus-revalidation` | the calling thread owns a real Win32 focus window |
+| `win32-thread-focus-revalidation` | the calling thread owns a real Win32 focus window (lab policy only) |
 | `none` | no evidence |
+
+The Win32 row is reachable only for an observer constructed with
+`ThreadFocusPolicy::kLabWin32Fallback`, and only after `IsThreadFocus` itself succeeded with
+FALSE. StrictTsf does not probe `GetGUIThreadInfo` at all.
 
 The target publication path has a separate `TargetBindingEvidence`:
 `notification` (`ITfThreadMgrEventSink::OnSetFocus`), `top-context-notification`
@@ -94,6 +126,37 @@ A refused submit creates no work item, makes no engine call, and is never replay
 target move **after** the engine consumed the event is `NeedsResync` with
 `RejectCause::kTargetChangedWhileQueued`, because the engine state and the document may have
 diverged.
+
+### 3.1 Notification-first versus execution-time revalidation
+
+Two different rejection paths are verified separately, selected by independent event
+evidence, never by the final outcome:
+
+* **Path A — a notification invalidates first.** A real TSF notification (`OnSetFocus`,
+  `OnKillThreadFocus`, `OnPushContext`, `OnPopContext`, or an external edit) drops the
+  published target; `ObservedBindingController::OnTargetLost` then retires the binding. The
+  queued work reaches its notification-path terminal without any submit/edit target guard
+  running. The bounded retirement consumes the old engine result once and closes the old
+  client once. A later submit is `NotBound`/`Retiring` and creates no work.
+* **Path B — execution-time revalidation refuses.** No notification invalidated the binding
+  before the check. `SubmitKey`/`SubmitCandidate` or the granted `DoEditSession` callback
+  performs the live query itself, observes the real mismatch or focus loss, and returns
+  `TargetChanged`/`TargetUnverified`/`NeedsResync` according to the existing contract. The
+  guard counters and the refusal snapshot prove the check ran.
+
+Path A is pinned by `windows.tsf_coordinator.focus_notification_before_guard` (real
+`OnPushContext`/`OnPopContext`) and by `observed_late_edit` (the binding is retired before
+the late grant). Path B is pinned deterministically by
+`windows.tsf_coordinator.focus_revalidate_before_notification`: a test-only sink gate parks
+`OnTargetLost` while a real `SetFocus` moves the TSF target, the live guard runs and refuses,
+and only then is the buffered loss released. This is controlled ordering, not a real-
+notification verification; the observer's `focus_notifications` counter shows whether a
+real notification was held. `focus_guard_strict_no_fallback` also runs the live guard
+(refusing under StrictTsf), and `focus_guard_submit_target`, `focus_guard_engine_target`,
+`focus_guard_edit_target`, `focus_guard_thread_lost`, and `focus_guard_foreign_dm` branch on
+the guard call count and real notification counts; in this environment they often take path
+A because msctf delivers `OnSetFocus`, while the branch still permits and verifies path B
+when no notification arrives first. There is no product switch that ignores notifications.
 
 ## 4. Edit classification
 
@@ -145,15 +208,17 @@ The status panel shows these as separate facts:
 * actual Win32 focus (child A/B/none), whether the focus HWND belongs to this thread, whether
   a thread focus HWND exists, and whether the foreground window belongs to this process;
 * TSF `GetFocus`, `SetFocus` call count/HRESULT and target;
-* thread-focus sink advice state, set/kill notification counts, `IsThreadFocus` value,
-  query status/HRESULT and evidence source;
+* thread-focus sink advice state, set/kill notification counts, the explicit policy,
+  `IsThreadFocus` value, query status/HRESULT, Win32 probe/accept counts and evidence source;
 * the last bind evidence (notification vs revalidation);
 * per-document TSF context id/generation, real text length/selection (lengths only), real
   `ITfCompositionView` enumeration, and mutation counters;
 * the bound id/generation, permission, gate, phase, work item, last terminal and
   request/session/operation HRESULTs;
 * `Admission` (`Ready`/`Busy`/`Retiring`/`Blocked`/`Unbound`), the last submit status,
-  stage, cause, target status, source and query HRESULT;
+  stage, cause, target status, failure stage, source, query HRESULT, the preserved
+  thread-focus BOOL validity/value, Win32 flag, `GetFocus`/`GetTop` HRESULTs and registry
+  status; the live thread-focus line is labelled as live and is not the refusal snapshot;
 * target-guard counter values, including the P3.7 precheck/callback/rejection counts;
 * live engine clients, executor slots, retirement records, close results and cleanup
   outcomes (including blocked ones);
@@ -166,11 +231,14 @@ and counts only.
 ## 7. Limits of this environment
 
 * `ITfThreadMgr::IsThreadFocus` returns `S_FALSE` in the non-registered lab process even
-  when a real window has Win32 focus. The guard reports that query value and then uses the
-  labelled Win32 thread-focus revalidation. A registered TIP in a normal host gets the TSF
-  query/sink path.
+  when a real window has Win32 focus. The lab therefore constructs its observer with
+  `ThreadFocusPolicy::kLabWin32Fallback` explicitly; the guard reports that query value and
+  then uses the labelled Win32 thread-focus revalidation. A registered TIP in a normal host
+  uses StrictTsf and the TSF query/sink path. The policy is a constructor argument, never
+  inferred from a registry entry, a window, or a failed query.
 * The lab observed no `OnSetFocus` or thread-focus notification in this environment; the
-  self-test and the focus cases record `notify_* = 0` and a revalidation source. The manual
+  self-test and the focus cases record `notify_* = 0` and a revalidation source. `OnPushContext`
+  and `OnPopContext` **are** delivered and back the deterministic path-A case. The manual
   check asks the user to click and report whether the counts change; an automated capture is
   not counted as a manual click.
 * A newly created empty `ITfDocumentMgr` receives a top context from msctf in this
@@ -192,3 +260,5 @@ and counts only.
 | callback-time target check | `platforms/windows/tsf_edit/edit_session.{h,cc}` |
 | lab display and self-test | `tools/windows/tsf_lab/` |
 | automated cases | `tests/windows/tsf_coordinator/observer_binding_tests.cc`, `coordination_tests.cc`, `tests/windows/tsf_context_observer/observer_tests.cc` |
+| pure policy/failure table | `windows.tsf_context_observer.target_policy`, `target_evidence` |
+| path A / path B evidence | `focus_notification_before_guard`, `focus_strict_no_fallback`, `focus_guard_*` |

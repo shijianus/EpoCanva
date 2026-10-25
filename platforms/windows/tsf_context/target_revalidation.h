@@ -5,9 +5,12 @@
 // GetFocus check:
 //
 //   1. thread input focus, from ITfThreadFocusSink notifications when they arrive and from
-//      the real ITfThreadMgr::IsThreadFocus query otherwise; a Win32 thread-focus window is
-//      accepted only as an explicitly labelled revalidation for hosts that do not register
-//      a TIP (the integration lab), never as a TSF notification;
+//      the real ITfThreadMgr::IsThreadFocus query otherwise. A Win32 thread-focus window is
+//      accepted only when the observer was constructed with the explicit
+//      ThreadFocusPolicy::kLabWin32Fallback (the integration lab, whose non-registered
+//      process reports S_FALSE) and only after the TSF query succeeded with FALSE. It is
+//      labelled as a Win32 revalidation, never as a TSF notification. The product default
+//      is StrictTsf: no Win32 fallback at all;
 //   2. the thread manager's current ITfDocumentMgr (GetFocus);
 //   3. the canonical identity of that document manager's top context (GetTop, compared by
 //      IUnknown, never by interface address);
@@ -40,6 +43,8 @@
 #include <functional>
 #include <memory>
 
+#include "context_registry.h"
+
 namespace epocanva {
 namespace tsf {
 namespace context {
@@ -68,17 +73,51 @@ enum class ThreadFocusEvidence : std::uint8_t {
 
 const char* DescribeThreadFocusEvidence(ThreadFocusEvidence evidence);
 
+// Which thread-focus facts may confirm input focus. This is construction-time policy, not
+// an inference from the registry, the presence of a window, or a failed query. StrictTsf
+// is the product default; only the lab and test configurations that declare the lab
+// environment may enable the Win32 fallback.
+enum class ThreadFocusPolicy : std::uint8_t {
+  kStrictTsf = 0,        // only a TSF notification or a successful IsThreadFocus TRUE
+  kLabWin32Fallback = 1, // the above, plus a real Win32 focus window when IsThreadFocus
+                         // itself succeeded with FALSE (never after a failed query)
+};
+
+const char* DescribeThreadFocusPolicy(ThreadFocusPolicy policy);
+
+// Which live query stage produced a kQueryFailed refusal. The empty-result statuses
+// (kNoDocumentManager, kNoTopContext) are deliberately separate: a successful query that
+// reports "no target" is not an API failure.
+enum class TargetFailureStage : std::uint8_t {
+  kNone = 0,
+  kInvalidRequest,    // missing observer/binding inputs
+  kThreadFocusQuery,  // ITfThreadMgr::IsThreadFocus failed
+  kGetFocus,          // ITfThreadMgr::GetFocus failed
+  kGetTop,            // ITfDocumentMgr::GetTop failed
+  kRegistry,          // ContextRegistry::Observe did not answer
+};
+
+const char* DescribeTargetFailureStage(TargetFailureStage stage);
+
 // The raw facts. This struct is COM-free and pure, so the decision can be unit-tested and
-// logged without a live TSF manager.
+// logged without a live TSF manager. Each HRESULT is the real answer of that specific call;
+// a later evidence source may still confirm focus (for example a notification), in which
+// case the failed call stays in the evidence instead of being rewritten to S_OK.
 struct TargetEvidence {
+  ThreadFocusPolicy policy = ThreadFocusPolicy::kStrictTsf;
   bool thread_focus_query_ok = false;
   bool thread_focus = false;
+  HRESULT thread_focus_query_hr = E_UNEXPECTED;
   bool win32_thread_focus = false;
   bool thread_focus_notification_set = false;
   bool thread_focus_notification_kill = false;
+  HRESULT get_focus_hr = S_OK;
   bool has_document_manager = false;
+  HRESULT get_top_hr = S_OK;
   bool has_top_context = false;
   bool top_context_matches = false;
+  bool registry_query_ok = false;
+  ContextRegistryStatus registry_status = ContextRegistryStatus::kClosed;
   bool registry_identity_matches = false;
   bool registry_generation_matches = false;
   std::uint64_t observed_context_id = 0;
@@ -88,9 +127,13 @@ struct TargetEvidence {
 struct TargetRevalidation {
   TargetRevalidationStatus status = TargetRevalidationStatus::kClosed;
   ThreadFocusEvidence thread_focus_evidence = ThreadFocusEvidence::kNone;
-  // The failing query's HRESULT, or the successful query's HRESULT when the refusal is a
-  // logical identity/generation mismatch. S_OK is never used to hide a failed call.
+  // The HRESULT that decided this result: the failing call for kQueryFailed, E_INVALIDARG
+  // for a structurally invalid request, E_FAIL for a registry that answered with a non-Ok
+  // status (that API returns a status enum, not an HRESULT), and S_OK for every logical
+  // mismatch or empty-result refusal. Per-call answers, including a failed focus query
+  // overridden by a notification, remain verbatim in evidence.
   HRESULT query_hr = S_OK;
+  TargetFailureStage failure_stage = TargetFailureStage::kNone;
   TargetEvidence evidence;
 
   bool ok() const { return status == TargetRevalidationStatus::kOk; }

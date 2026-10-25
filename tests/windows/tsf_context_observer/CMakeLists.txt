@@ -115,6 +115,10 @@ epocanva_add_observer_case(
 epocanva_add_observer_case(
   windows.tsf_context_observer.target_evidence target-evidence)
 
+# 10c. P3.13-R2 failure classification and explicit StrictTsf/lab-fallback policy (pure).
+epocanva_add_observer_case(
+  windows.tsf_context_observer.target_policy target-policy)
+
 # 11. The falsifiability control: one deliberately false claim, exit 14, no RESULT PASS.
 add_test(
   NAME windows.tsf_context_observer.can_fail
@@ -140,9 +144,10 @@ set_tests_properties(
   windows.tsf_context_observer.shutdown_late_read
   windows.tsf_context_observer.resource_balance
   windows.tsf_context_observer.target_evidence
+  windows.tsf_context_observer.target_policy
   windows.tsf_context_observer.can_fail
   PROPERTIES TIMEOUT 180
              LABELS "windows;tsf;context;observer;identity;selection;real")
 
 message(STATUS
-  "  tsf_context_observer cases: 12 (11 behavioural + can_fail; real_focus skippable)")
+  "  tsf_context_observer cases: 13 (12 behavioural + can_fail; real_focus skippable)")

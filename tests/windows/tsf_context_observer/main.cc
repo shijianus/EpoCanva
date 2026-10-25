@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
         "       tsf_context_observer_tests --interactive-focus\n"
         "cases: registry-identity initial-binding push-pop-top external-selection\n"
         "       external-text noncollapsed-selection document-uninit own-edit real-focus\n"
-        "       shutdown-late-read resource-balance can-fail\n");
+        "       shutdown-late-read target-evidence target-policy resource-balance can-fail\n");
     return epocanva::tsf::context::test::kExitUsage;
   }
   const int code = epocanva::tsf::context::test::RunObserverCase(case_name);
