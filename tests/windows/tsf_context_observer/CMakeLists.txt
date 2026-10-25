@@ -111,6 +111,10 @@ epocanva_add_observer_case(
 epocanva_add_observer_case(
   windows.tsf_context_observer.resource_balance resource-balance)
 
+# 10b. P3.13 target-evidence decision table (pure facts; no TSF notification is synthesized).
+epocanva_add_observer_case(
+  windows.tsf_context_observer.target_evidence target-evidence)
+
 # 11. The falsifiability control: one deliberately false claim, exit 14, no RESULT PASS.
 add_test(
   NAME windows.tsf_context_observer.can_fail
@@ -135,6 +139,7 @@ set_tests_properties(
   windows.tsf_context_observer.own_edit
   windows.tsf_context_observer.shutdown_late_read
   windows.tsf_context_observer.resource_balance
+  windows.tsf_context_observer.target_evidence
   windows.tsf_context_observer.can_fail
   PROPERTIES TIMEOUT 180
              LABELS "windows;tsf;context;observer;identity;selection;real")

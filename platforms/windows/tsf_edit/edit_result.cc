@@ -35,6 +35,8 @@ const char* DescribeEditRejectReason(EditRejectReason reason) {
       return "IdentityMismatch";
     case EditRejectReason::kStaleGeneration:
       return "StaleGeneration";
+    case EditRejectReason::kTargetChanged:
+      return "TargetChanged";
     case EditRejectReason::kBusy:
       return "Busy";
     case EditRejectReason::kPermissionDenied:

@@ -127,6 +127,11 @@ struct TestHostCleanupReport {
   bool all_document_managers_released = true;
   bool all_contexts_released = true;
   std::uint64_t document_managers_still_enumerated = 0;
+  // P3.13: with real Win32/TSF focus, msctf may enumerate one document manager this host
+  // did not create (neither A nor B). Record that foreign baseline at the start of Shutdown
+  // so the resource check distinguishes it from a leaked TEST document manager. Both counts
+  // are real enumeration results; neither is inferred.
+  std::uint64_t foreign_document_managers_at_shutdown_start = 0;
   long store_reference_count_after_shutdown = 0;
 };
 

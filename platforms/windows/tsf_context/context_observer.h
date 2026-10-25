@@ -1,10 +1,11 @@
-// EpoCanva P3.10 -- the STA TSF context observer.
+// EpoCanva P3.10/P3.13 -- the STA TSF context observer.
 //
 // WHAT THIS OBJECT DOES. It subscribes to the real thread-manager notifications
-// (ITfThreadMgrEventSink) and to the current context's edit notifications
-// (ITfTextEditSink), identifies the top context of the focused document manager, assigns
-// the project identity/generation from ContextRegistry, reads real selection snapshots,
-// and publishes exactly three binding events to one host-provided sink:
+// (ITfThreadMgrEventSink), the thread input-focus notifications (ITfThreadFocusSink) and to
+// the current context's edit notifications (ITfTextEditSink), identifies the top context of
+// the focused document manager, assigns the project identity/generation from
+// ContextRegistry, reads real selection snapshots, and publishes exactly three binding
+// events to one host-provided sink:
 //
 //   OnTargetLost(reason)            the old binding must stop being usable NOW
 //   OnTargetBound(context, target)  a new binding may be created (called from Pump only)
@@ -20,6 +21,14 @@
 // unadvises both sinks, abandons a pending selection read, releases every held reference
 // and marks the state closed. The COM sink objects hold a shared_ptr to that state, so a
 // late notification after Shutdown sees `closed` and touches no COM object.
+//
+// TARGET REVALIDATION (P3.13). Revalidate() answers the live question the coordinator asks
+// before ordinary input and before an ordinary edit: thread focus (the focus sink, the real
+// IsThreadFocus query, or an explicitly labelled real Win32 thread-focus revalidation), the
+// current GetFocus document manager, its canonical top context, and the registry
+// id/generation. CreateWriteGuard() repeats that check inside a granted P3.7 edit callback.
+// The evidence source is published verbatim; a revalidation is never renamed as a
+// notification.
 //
 // WHERE BINDING HAPPENS. Not inside a TSF notification. OnSetFocus/OnPushContext/
 // OnPopContext/OnUninitDocumentMgr and OnEndEdit may only DROP the old binding and mark a
@@ -52,6 +61,7 @@
 
 #include "context_registry.h"
 #include "selection_reader.h"
+#include "target_revalidation.h"
 
 namespace epocanva {
 namespace tsf {
@@ -72,10 +82,25 @@ enum class ContextDropReason : std::uint8_t {
   kEditSinkUnavailable,        // ITfTextEditSink could not be installed on the context
   kRegistryCapacity,           // the identity registry refused a new context
   kUncertainBlocked,           // this context is latched Uncertain in the registry
+  kThreadFocusLost,            // ITfThreadFocusSink::OnKillThreadFocus arrived
+  kThreadFocusChanged,         // thread focus returned; the target is re-read, not reused
   kClosed,
 };
 
 const char* DescribeContextDropReason(ContextDropReason reason);
+
+// Where the publication of a binding target came from. This names the real evidence; the
+// lab and the self-test display it instead of inferring a path from counters.
+enum class TargetBindingEvidence : std::uint8_t {
+  kNone = 0,
+  kInitialAdoption,            // Subscribe adopted an already-focused document
+  kDocumentFocusNotification,  // ITfThreadMgrEventSink::OnSetFocus
+  kTopContextNotification,     // OnPushContext/OnPopContext
+  kThreadFocusNotification,    // ITfThreadFocusSink::OnSetThreadFocus
+  kRevalidation,               // Pump re-read the real GetFocus/GetTop
+};
+
+const char* DescribeTargetBindingEvidence(TargetBindingEvidence evidence);
 
 // A published binding target. The caret is an ACP offset in UTF-16 code units, read from
 // the real selection before this target was published.
@@ -83,6 +108,7 @@ struct ObservedTarget {
   std::uint64_t context_id = 0;
   std::uint64_t generation = 0;
   LONG caret_utf16 = 0;
+  TargetBindingEvidence evidence = TargetBindingEvidence::kNone;
   bool valid() const { return context_id != 0 && generation != 0; }
 };
 
@@ -118,6 +144,20 @@ struct ContextObserverSnapshot {
   ObservedTarget target;
   bool text_sink_advised = false;
   bool thread_sink_advised = false;
+  // P3.13: the separate ITfThreadFocusSink advice. `thread_sink_advised` is the thread
+  // manager event sink; this one is the thread input-focus notification sink.
+  bool thread_focus_sink_advised = false;
+  bool thread_focus_sink_advise_failed = false;
+  bool has_top_context = false;
+  TargetBindingEvidence last_bind_evidence = TargetBindingEvidence::kNone;
+  ThreadFocusEvidence last_thread_focus_evidence = ThreadFocusEvidence::kNone;
+  bool thread_focus_query_ok = false;
+  bool thread_focus_query_value = false;
+  HRESULT thread_focus_query_hr = S_OK;
+  bool win32_thread_focus = false;
+  TargetRevalidation last_target_revalidation{};
+  std::uint64_t target_revalidations = 0;
+  std::uint64_t target_revalidation_failures = 0;
   // Pump state: a bind is still owed, and whether it is waiting on a deferred read.
   bool awaiting_bind = false;
   bool selection_read_pending = false;
@@ -130,6 +170,15 @@ struct ContextObserverSnapshot {
   std::uint64_t background_events_ignored = 0;
   std::uint64_t focus_revalidations = 0;
   std::uint64_t focus_revalidation_changes = 0;
+  // P3.13 thread-focus sink and real focus queries.
+  std::uint64_t thread_focus_set_notifications = 0;
+  std::uint64_t thread_focus_kill_notifications = 0;
+  std::uint64_t thread_focus_queries = 0;
+  std::uint64_t thread_focus_query_failures = 0;
+  std::uint64_t win32_thread_focus_checks = 0;
+  std::uint64_t thread_focus_sink_advises = 0;
+  std::uint64_t thread_focus_sink_unadvises = 0;
+  std::uint64_t thread_focus_sink_advise_failures = 0;
 
   std::uint64_t own_edits = 0;
   std::uint64_t external_edits = 0;
@@ -168,7 +217,7 @@ struct ContextObserverSnapshot {
 
 class ObserverComSink;
 
-class ContextObserver {
+class ContextObserver : public TargetRevalidator {
  public:
   // `registry` must outlive the observer and is used only on this STA thread. The client id
   // is the TIP's real TfClientId: it is used for the read-only selection sessions and as
@@ -204,6 +253,20 @@ class ContextObserver {
   // The completion fact Pump is waiting on for a deferred selection read; the host
   // bounded-waits on it and dispatches STA messages.
   HANDLE PendingSelectionEvent() const;
+
+  // Asks Pump to re-read the real GetFocus/GetTop and publish the CURRENT target. Used by
+  // the binding controller after a Retiring/Busy refusal; it never replays the refused
+  // target. It does nothing when no top context is known or the observer is closed.
+  void RequestRebind();
+  bool has_current_context() const;
+
+  // TargetRevalidator. Revalidate() performs the full live check (thread focus, current
+  // document manager, canonical top context, registry id/generation). CreateWriteGuard()
+  // returns a guard that repeats the check inside a granted edit callback and is safe after
+  // observer shutdown (a lost state refuses).
+  TargetRevalidation Revalidate(ITfContext* context, std::uint64_t context_id,
+                                std::uint64_t generation) override;
+  std::shared_ptr<TargetWriteGuard> CreateWriteGuard() override;
 
   ContextObserverSnapshot Snapshot() const;
 

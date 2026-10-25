@@ -52,6 +52,8 @@ struct RealCase {
   // The production source: verdicts come from the real document metadata through real
   // TSF reads. No test code hands the coordinator an Allowed value here.
   std::unique_ptr<epocanva::tsf::context::PermissionSource> permission;
+  // P3.13 controlled target authority; not a system notification.
+  TestTargetRevalidator target;
   std::unique_ptr<ContextCoordinator> coordinator;
   TestDocument* document = nullptr;
 
@@ -88,6 +90,7 @@ bool SetupRealCase(RealCase* real, const Options& options, const char* leaf,
       epocanva::tsf::context::CreateRealPermissionSource(real->host->client_id());
   real->coordinator = std::make_unique<ContextCoordinator>(
       *real->harness.executor, real->host->client_id(), *real->permission);
+  real->coordinator->AttachTargetRevalidator(&real->target);
   const BindStatus bound = real->coordinator->Bind(
       real->document->context(), real->document->context_id(),
       document_options.initial_selection_start_utf16, real->harness.client_a);

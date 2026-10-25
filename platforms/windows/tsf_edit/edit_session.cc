@@ -122,6 +122,7 @@ struct CompositionEditSession::State {
   bool abandon_pending = false;
   InputPermission permission = InputPermission::kUnknown;
   CompositionEditSession::PermissionRecheck permission_recheck;
+  CompositionEditSession::TargetRecheck target_recheck;
   CompositionWriter writer;
 
   bool has_pending = false;
@@ -181,6 +182,7 @@ class EditSessionCallback final : public ITfEditSession {
     EditRejectReason stale_reason = EditRejectReason::kNotBound;
     InputPermission permission = InputPermission::kUnknown;
     CompositionEditSession::PermissionRecheck recheck;
+    CompositionEditSession::TargetRecheck target_recheck;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       ++state_->counters.callbacks;
@@ -213,14 +215,35 @@ class EditSessionCallback final : public ITfEditSession {
       } else {
         permission = state_->permission;
         recheck = state_->permission_recheck;
+        target_recheck = state_->target_recheck;
       }
     }
 
-    // The callback-time recheck runs outside the state mutex and only for an otherwise
-    // admissible plan. It is authoritative: the cached permission can be older than the
-    // field's current metadata (the lock may have been deferred after the plan was built).
+    // P3.13: the target authority runs BEFORE the permission read and before any TSF write.
+    // It re-reads the real thread focus/GetFocus/GetTop/generation inside the granted lock,
+    // so a focus change during an asynchronous wait cannot be papered over by a permission
+    // answer or by a plan that was valid at submission time. Retirement cleanup is exempt.
+    bool target_checked = false;
+    bool target_current = true;
+    if (!stale && plan_.operation() != EditOperation::kEndOwnedComposition &&
+        target_recheck) {
+      target_checked = true;
+      try {
+        target_current =
+            target_recheck(context_, plan_.context().context_id,
+                           plan_.context().generation);
+      } catch (...) {
+        target_current = false;
+      }
+    }
+
+    // The callback-time permission recheck runs outside the state mutex and only for an
+    // otherwise admissible plan. It is authoritative: the cached permission can be older
+    // than the field's current metadata (the lock may have been deferred after the plan was
+    // built). A stale target short-circuits it: no permission read is made for a plan that
+    // may not write.
     bool recheck_ran = false;
-    if (!stale && permission == InputPermission::kAllowed && recheck) {
+    if (!stale && target_current && permission == InputPermission::kAllowed && recheck) {
       recheck_ran = true;
       try {
         permission = recheck(context_, edit_cookie);
@@ -233,6 +256,9 @@ class EditSessionCallback final : public ITfEditSession {
     if (stale) {
       result.status = EditStatus::kStale;
       result.reason = stale_reason;
+    } else if (!target_current) {
+      result.status = EditStatus::kRejected;
+      result.reason = EditRejectReason::kTargetChanged;
     } else if (permission != InputPermission::kAllowed) {
       result.status = EditStatus::kRejected;
       result.reason = permission == InputPermission::kDenied
@@ -286,6 +312,12 @@ class EditSessionCallback final : public ITfEditSession {
       }
       if (recheck_ran) {
         ++state_->counters.permission_rechecks;
+      }
+      if (target_checked) {
+        ++state_->counters.target_callback_checks;
+        if (!target_current) {
+          ++state_->counters.target_rejections;
+        }
       }
       result_ = result;
       done_ = true;
@@ -367,6 +399,7 @@ bool CompositionEditSession::Bind(ITfContext* context, std::uint64_t context_id,
       state->bound = true;
       state->permission = InputPermission::kUnknown;
       state->permission_recheck = CompositionEditSession::PermissionRecheck{};
+      state->target_recheck = CompositionEditSession::TargetRecheck{};
       accepted = true;
     }
   }
@@ -456,6 +489,14 @@ void CompositionEditSession::SetPermissionRecheck(PermissionRecheck recheck) {
   }
 }
 
+void CompositionEditSession::SetTargetRecheck(TargetRecheck recheck) {
+  const std::shared_ptr<State> state = state_;
+  std::lock_guard<std::mutex> lock(state->mutex);
+  if (!state->closed) {
+    state->target_recheck = std::move(recheck);
+  }
+}
+
 InputPermission CompositionEditSession::input_permission() const {
   const std::shared_ptr<State> state = state_;
   std::lock_guard<std::mutex> lock(state->mutex);
@@ -479,6 +520,7 @@ bool CompositionEditSession::Precheck(const EditPlan& plan, ITfContext** context
   const std::shared_ptr<State> state = state_;
   *context = nullptr;
   *rejection = MakeBaseResult(plan, 0);
+  CompositionEditSession::TargetRecheck target_recheck;
   {
     std::lock_guard<std::mutex> lock(state->mutex);
     ++state->counters.apply_calls;
@@ -546,6 +588,37 @@ bool CompositionEditSession::Precheck(const EditPlan& plan, ITfContext** context
     }
     state->context->AddRef();
     *context = state->context;
+    target_recheck = state->target_recheck;
+  }
+
+  // P3.13: reject a plan whose target is already gone before even requesting a lock. The
+  // callback repeats this check under the granted lock; this precheck simply avoids a
+  // pointless TSF request. Retirement cleanup is exempt (it may run on an unfocused
+  // context the writer still owns).
+  if (plan.operation() != EditOperation::kEndOwnedComposition && target_recheck) {
+    bool current = true;
+    try {
+      current = target_recheck(*context, plan.context().context_id,
+                               plan.context().generation);
+    } catch (...) {
+      current = false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      ++state->counters.target_prechecks;
+      if (!current) {
+        ++state->counters.target_rejections;
+      }
+    }
+    if (!current) {
+      (*context)->Release();
+      *context = nullptr;
+      rejection->status = EditStatus::kRejected;
+      rejection->reason = EditRejectReason::kTargetChanged;
+      std::lock_guard<std::mutex> lock(state->mutex);
+      RecordStatusLocked(&state->counters, rejection->status);
+      return false;
+    }
   }
 
   TF_STATUS status = {};

@@ -1,4 +1,4 @@
-// EpoCanva P3.8/P3.9 -- the context-binding coordinator.
+// EpoCanva P3.8/P3.9/P3.13 -- the context-binding coordinator.
 //
 // WHAT THIS OBJECT IS. A small, deliberately single-purpose coordinator that connects one
 // bound TSF context to one engine client through the existing value-command executor
@@ -28,11 +28,21 @@
 //
 // GATES, IN DOCUMENTED ORDER (Submit): closed -> busy -> not-bound -> retiring (a previous
 // binding still owes a result/close/cleanup) -> blocked latch (uncertain / needs-resync /
-// unsupported shape) -> permission (Denied, then Unknown, resolved from the real context
-// metadata; a query that must go async parks the work in kPermissionPending instead of
-// refusing) -> local engine-candidate evaluation -> executor admission. A Busy answer
-// outranks a permission answer because the single-flight rule is a fact about the
-// coordinator itself.
+// unsupported shape) -> live target (P3.13) -> permission (Denied, then Unknown, resolved
+// from the real context metadata; a query that must go async parks the work in
+// kPermissionPending instead of refusing) -> local engine-candidate evaluation -> executor
+// admission. A Busy answer outranks a permission answer because the single-flight rule is a
+// fact about the coordinator itself.
+//
+// TARGET REVALIDATION (P3.13). An attached TargetRevalidator (the ContextObserver in the
+// product path) is asked for thread focus, current GetFocus/GetTop canonical identity, and
+// the registry generation before ordinary input, after the permission answer, after an
+// engine result and immediately before an edit plan. The P3.7 session repeats the live
+// check before requesting a lock and inside the granted callback. A refusal before the
+// engine is TargetChanged/ThreadFocusLost/TargetUnverified and creates no work; a move
+// after the engine ran is NeedsResync/kTargetChangedWhileQueued. No refusal is replayed.
+// EndOwnedComposition cleanup is exempt from the target check and keeps every P3.12
+// ownership, range, permission, read-only and Uncertain rule.
 //
 // RETIREMENT IS BOUNDED AND EXPLICIT. InvalidateBinding moves the old binding into a
 // fixed-capacity ledger (kRetirementCapacity). The old client is closed through the executor
@@ -121,6 +131,7 @@
 #include "key_decision.h"
 #include "key_event.h"
 #include "permission_query.h"
+#include "target_revalidation.h"
 
 namespace epocanva {
 namespace tsf {
@@ -146,6 +157,7 @@ enum class BindStatus : std::uint8_t {
   kClosed,
   kBlockedUncertain, // this context is locked down after an unconfirmed write
   kInvalidRequest,   // null context, zero context id, invalid client or negative caret
+  kTargetUnverified, // P3.13: no real target authority is attached
 };
 
 enum class SubmitStatus : std::uint8_t {
@@ -159,6 +171,14 @@ enum class SubmitStatus : std::uint8_t {
   kBlockedUncertain,
   kBlockedNeedsResync,
   kBlockedUnsupportedShape,
+  // P3.13 target refusals. These are distinct from permission and from Busy/Retiring:
+  //   kTargetChanged      the TSF focus/top context is no longer this binding, or the
+  //                       registry generation moved on
+  //   kThreadFocusLost    the thread lost TSF/Win32 input focus (or OnKillThreadFocus ran)
+  //   kTargetUnverified   no live target authority answered; conservative refusal
+  kTargetChanged,
+  kThreadFocusLost,
+  kTargetUnverified,
   kNotEngineCandidate,     // the local pure evaluation says this is not an engine key
   kEngineNotRunning,       // mapped from the executor's kNotRunning
   kQueueFull,              // mapped from the executor's kQueueFull
@@ -246,10 +266,14 @@ enum class RejectCause : std::uint8_t {
   kEditRefused,                  // the P3.7 session refused (read-only, lock, stale text..)
   kEditFailedBeforeMutation,     // a TSF call failed before any write was issued
   kTakeFailed,                   // the result store answered with an unexpected status
+  kTargetChangedWhileQueued,     // P3.13: the real target moved while this work was queued
 };
 
 const char* DescribeBindStatus(BindStatus status);
 const char* DescribeSubmitStatus(SubmitStatus status);
+// The refusal category a UI must show instead of a bare failure: focus, target, permission,
+// range/request, queue, engine-not-ready, uncertain, retiring, or busy.
+const char* DescribeSubmitStage(SubmitStatus status);
 const char* DescribeWorkKind(WorkKind kind);
 const char* DescribeWorkPhase(WorkPhase phase);
 const char* DescribeWorkOutcome(WorkOutcome outcome);
@@ -301,6 +325,17 @@ struct CoordinatorSnapshot {
   WorkOutcome outcome = WorkOutcome::kNone;
   RejectCause cause = RejectCause::kNone;
   std::uint64_t work_id = 0;
+  // P3.13: the result of the last SubmitKey/SubmitCandidate call and the live target
+  // revalidation that decided (or accompanied) it. Text-free.
+  SubmitStatus last_submit_status = SubmitStatus::kAccepted;
+  std::uint64_t submit_refusals = 0;
+  context::TargetRevalidation last_target_revalidation{};
+  std::uint64_t target_revalidations = 0;
+  std::uint64_t target_refusals = 0;
+  // The P3.7 session's own target checks (pre-lock and inside the granted callback).
+  std::uint64_t target_prechecks = 0;
+  std::uint64_t target_callback_checks = 0;
+  std::uint64_t target_rejections = 0;
   // The binding generation the in-flight (or last resolved) work item belongs to.
   std::uint64_t work_generation = 0;
   // Valid while phase == kEnginePending; the host may boundedly WaitForResult on it.
@@ -308,6 +343,9 @@ struct CoordinatorSnapshot {
   // Detail of the resolved edit (default status is the P3.7 "unrejected" sentinel).
   edit::EditStatus last_edit_status = edit::EditStatus::kRejected;
   edit::EditRejectReason last_edit_reason = edit::EditRejectReason::kNone;
+  HRESULT last_edit_request_hr = S_OK;
+  HRESULT last_edit_session_hr = S_OK;
+  HRESULT last_edit_operation_hr = S_OK;
   // The coordinator's document mirror. UTF-16 code units / code-unit offsets.
   LONG tracked_caret_utf16 = 0;
   bool composition_active = false;
@@ -384,6 +422,13 @@ class ContextCoordinator {
   // while unbound and before Close(); returns false (and changes nothing) otherwise. The
   // registry must outlive the coordinator.
   bool AttachContextRegistry(context::ContextRegistry* registry);
+
+  // P3.13. Attaches the live target authority (the context observer in the product path).
+  // Must be called while unbound and before Close(); returns false and changes nothing
+  // otherwise. With no authority attached, ordinary input and ordinary BindObserved
+  // admissions are refused as kTargetUnverified -- there is no "unchecked" mode for the
+  // product path. A test-owned TargetRevalidator may be attached by controlled unit cases.
+  bool AttachTargetRevalidator(context::TargetRevalidator* revalidator);
 
   // Reconciles the caret mirror with a real selection read (OnEndEdit's ecReadOnly,
   // collapsed, UTF-16 code units). Applied immediately when no work item is in flight and
@@ -513,6 +558,15 @@ class ContextCoordinator {
   // Begins a real permission query for the current binding. Returns false when the
   // source refuses structurally (the caller refuses the work).
   bool StartPermissionQuery();
+  // P3.13 live target checks. RevalidateForSubmit performs the full query and returns the
+  // submit status to hand back (kAccepted when current). EnsureTargetCurrent is the
+  // post-engine/apply-time variant: with `engine_already_ran` a refusal is NeedsResync
+  // (the engine consumed the event), otherwise Rejected. Neither replays work.
+  SubmitStatus RevalidateForSubmit();
+  bool EnsureTargetCurrent(const char* why, bool engine_already_ran);
+  // Records the last submit result for the lab/self-test without changing the state machine.
+  SubmitStatus RecordSubmit(SubmitStatus status);
+  void RecordTargetRevalidation(const context::TargetRevalidation& result);
   // Consumes a ready verdict: validates identity/generation, caches it, mirrors it to
   // the P3.7 session gate. Returns false unless the verdict is complete, current and
   // Allowed.
@@ -543,6 +597,10 @@ class ContextCoordinator {
   // Optional P3.10 identity/latch owner; not owned. Consulted by both bind paths and by
   // the submit gate with the REAL context pointer.
   context::ContextRegistry* registry_ = nullptr;
+  // Optional P3.13 target authority; not owned. The product controller attaches the
+  // observer. The write guard it creates is owned by the P3.7 session's callback and does
+  // not depend on this pointer's lifetime.
+  context::TargetRevalidator* target_revalidator_ = nullptr;
 
   bool bound_ = false;
   bool closed_ = false;
@@ -585,6 +643,15 @@ class ContextCoordinator {
   std::optional<edit::EditPlan> pending_plan_;
   edit::EditStatus last_edit_status_ = edit::EditStatus::kRejected;
   edit::EditRejectReason last_edit_reason_ = edit::EditRejectReason::kNone;
+  HRESULT last_edit_request_hr_ = S_OK;
+  HRESULT last_edit_session_hr_ = S_OK;
+  HRESULT last_edit_operation_hr_ = S_OK;
+
+  SubmitStatus last_submit_status_ = SubmitStatus::kAccepted;
+  std::uint64_t submit_refusals_ = 0;
+  context::TargetRevalidation last_target_revalidation_{};
+  std::uint64_t target_revalidations_ = 0;
+  std::uint64_t target_refusals_ = 0;
 
   LocalDocumentView view_;
 

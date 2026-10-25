@@ -17,6 +17,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -39,6 +40,58 @@ using epocanva::tsf::edit::test::TestDocumentOptions;
 using epocanva::tsf::edit::test::TestHost;
 using EngineExecutor = epocanva::windows::engine::EngineExecutor;
 using Options = epocanva::tests::engine_executor::Options;
+
+// P3.13 TEST SEAM, EXPLICITLY NOT A SYSTEM NOTIFICATION. The coordinator refuses ordinary
+// input without a TargetRevalidator. Cases that use the old direct Bind() unit seam attach
+// this implementation so their state-machine expectations stay focused on binding/gates;
+// the real observer-backed cases (observer_binding_tests and focus_guard_tests) attach the
+// production ContextObserver instead. `SetStatus` is a deliberate test input, never an
+// observation of TSF; the write guard shares a small state block so a late callback cannot
+// dereference this object after the test case has destroyed it.
+class TestTargetRevalidator final : public context::TargetRevalidator {
+ public:
+  struct WriteState {
+    std::atomic<bool> allowed{true};
+    std::atomic<std::uint64_t> checks{0};
+  };
+
+  TestTargetRevalidator() : write_state_(std::make_shared<WriteState>()) {
+    // The controlled seam starts permissive; cases that exercise a refusal call SetStatus.
+    result_.status = context::TargetRevalidationStatus::kOk;
+  }
+
+  void SetStatus(context::TargetRevalidationStatus status, HRESULT query_hr = S_OK) {
+    result_.status = status;
+    result_.query_hr = query_hr;
+  }
+  void SetWriteAllowed(bool allowed) { write_state_->allowed.store(allowed); }
+  std::uint64_t calls() const { return calls_; }
+  std::uint64_t write_checks() const { return write_state_->checks.load(); }
+
+  context::TargetRevalidation Revalidate(ITfContext* context,
+                                         std::uint64_t context_id,
+                                         std::uint64_t generation) override {
+    (void)context;
+    (void)context_id;
+    (void)generation;
+    ++calls_;
+    return result_;
+  }
+
+  std::shared_ptr<context::TargetWriteGuard> CreateWriteGuard() override {
+    const std::shared_ptr<WriteState> state = write_state_;
+    return context::MakeTargetWriteGuard(
+        [state](ITfContext*, std::uint64_t, std::uint64_t) {
+          state->checks.fetch_add(1);
+          return state->allowed.load();
+        });
+  }
+
+ private:
+  context::TargetRevalidation result_{};
+  std::shared_ptr<WriteState> write_state_;
+  std::uint64_t calls_ = 0;
+};
 
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;

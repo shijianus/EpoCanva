@@ -73,6 +73,8 @@ struct ControlledCase {
   // still reads the REAL metadata of the test document, so a case that needs a
   // last-moment change flips the document's real scope/read-only state, not this knob.
   ManualPermissionSource permission;
+  // P3.13 controlled target authority; not a system notification.
+  TestTargetRevalidator target;
   ContextCoordinator* coordinator = nullptr;
   std::unique_ptr<ContextCoordinator> coordinator_owner;
   TestDocument* document = nullptr;
@@ -108,6 +110,7 @@ bool SetupControlledCase(ControlledCase* setup, const TestDocumentOptions& optio
   setup->coordinator_owner = std::make_unique<ContextCoordinator>(
       *setup->harness.executor, setup->host->client_id(), setup->permission);
   setup->coordinator = setup->coordinator_owner.get();
+  setup->coordinator->AttachTargetRevalidator(&setup->target);
   const BindStatus bound = setup->coordinator->Bind(
       setup->document->context(), setup->document->context_id(),
       options.initial_selection_start_utf16, setup->harness.client_a);
@@ -578,7 +581,9 @@ int RunRetirementQueueFull() {
 
   ManualPermissionSource permission;
   permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
+  TestTargetRevalidator target;
   ContextCoordinator coordinator(*executor, host->client_id(), permission);
+  coordinator.AttachTargetRevalidator(&target);
   Check(coordinator.Bind(doc_a->context(), doc_a->context_id(), 0, client_a) ==
             BindStatus::kOk,
         "retire-queue: bound to A", "");
@@ -1105,7 +1110,9 @@ int RunNeedsResyncFaultCase() {
 
   ManualPermissionSource permission;
   permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
+  TestTargetRevalidator target;
   ContextCoordinator coordinator(*executor, host->client_id(), permission);
+  coordinator.AttachTargetRevalidator(&target);
   Check(coordinator.Bind(document->context(), document->context_id(), 0, client) ==
             BindStatus::kOk,
         "needs-resync: bound", "");
@@ -1294,12 +1301,76 @@ int RunCanFail() {
 
 }  // namespace
 
+// P3.13 CONTROLLED SEAM, NOT A SYSTEM NOTIFICATION. The test-owned revalidator is set to
+// each live-target status in turn; this pins the coordinator's status mapping and proves
+// that no refusal dispatches to the engine. The real observer-backed cases cover the actual
+// TSF facts separately.
+int RunTargetStatusMapping() {
+  ControlledCase setup;
+  if (!SetupControlledCase(&setup, TestDocumentOptions{L"", 0, 0},
+                           "target-status")) {
+    return Finish();
+  }
+  ContextCoordinator& coordinator = *setup.coordinator;
+  const std::uint64_t dispatches_before =
+      setup.harness.backend->dispatch_calls();
+  const executor_tests::TextKey h = Letter(L'h');
+  auto refuse = [&](epocanva::tsf::context::TargetRevalidationStatus status,
+                    SubmitStatus expected, const char* label) {
+    setup.target.SetStatus(status);
+    WorkId id;
+    const SubmitStatus submitted = coordinator.SubmitKey(h.event, h.text, &id);
+    Check(submitted == expected, std::string("target-status: ") + label,
+          DescribeSubmitStatus(submitted));
+    Check(!id.valid(), std::string("target-status: ") + label +
+                           " created no work item", "");
+    const CoordinatorSnapshot snapshot = coordinator.Snapshot();
+    Check(snapshot.last_submit_status == expected,
+          std::string("target-status: ") + label + " is recorded", "");
+    Check(snapshot.last_target_revalidation.status == status,
+          std::string("target-status: ") + label + " names the live status",
+          epocanva::tsf::context::DescribeTargetRevalidationStatus(
+              snapshot.last_target_revalidation.status));
+    Check(setup.harness.backend->dispatch_calls() == dispatches_before,
+          std::string("target-status: ") + label + " made no engine call", "");
+    Check(coordinator.Snapshot().works_accepted == 0,
+          std::string("target-status: ") + label + " accepted no work", "");
+  };
+  refuse(epocanva::tsf::context::TargetRevalidationStatus::kNoDocumentManager,
+         SubmitStatus::kTargetChanged, "no document manager -> TargetChanged");
+  refuse(epocanva::tsf::context::TargetRevalidationStatus::kNoTopContext,
+         SubmitStatus::kTargetChanged, "no top context -> TargetChanged");
+  refuse(epocanva::tsf::context::TargetRevalidationStatus::kContextMismatch,
+         SubmitStatus::kTargetChanged, "context mismatch -> TargetChanged");
+  refuse(epocanva::tsf::context::TargetRevalidationStatus::kGenerationMismatch,
+         SubmitStatus::kTargetChanged, "generation mismatch -> TargetChanged");
+  refuse(epocanva::tsf::context::TargetRevalidationStatus::kThreadFocusUnconfirmed,
+         SubmitStatus::kTargetUnverified, "unconfirmed focus -> TargetUnverified");
+  refuse(epocanva::tsf::context::TargetRevalidationStatus::kThreadFocusLost,
+         SubmitStatus::kThreadFocusLost, "killed focus -> ThreadFocusLost");
+  refuse(epocanva::tsf::context::TargetRevalidationStatus::kQueryFailed,
+         SubmitStatus::kTargetUnverified, "query failure -> TargetUnverified");
+
+  setup.target.SetStatus(epocanva::tsf::context::TargetRevalidationStatus::kOk);
+  WorkId id;
+  Check(coordinator.SubmitKey(h.event, h.text, &id) == SubmitStatus::kAccepted,
+        "target-status: a current target is accepted", "");
+  const DriveResult driven = DriveToCompletion(
+      coordinator, *setup.host, *setup.harness.executor, 20000);
+  CheckOutcome(driven.final_state, WorkOutcome::kApplied,
+               "target-status: the accepted work applies");
+  return Finish();
+}
+
 int RunCoordinationCase(const std::string& case_name) {
   if (case_name == "conversion-pure") {
     return RunConversionPure();
   }
   if (case_name == "bind-gates") {
     return RunBindAndGates();
+  }
+  if (case_name == "target-status-mapping") {
+    return RunTargetStatusMapping();
   }
   if (case_name == "busy-single-flight") {
     return RunBusySingleFlight();

@@ -531,6 +531,56 @@ void TestHost::Shutdown() {
   shutdown_ = true;
   cleanup_.shutdown_called = true;
 
+  // P3.13: record how many enumerated document managers were never created by this host
+  // before any teardown starts. With a real focused window TSF may own one; it must not be
+  // mistaken for a leaked TestDocument manager later.
+  auto same_manager = [](ITfDocumentMgr* left, ITfDocumentMgr* right) {
+    if (left == nullptr || right == nullptr) {
+      return false;
+    }
+    if (left == right) {
+      return true;
+    }
+    IUnknown* left_unknown = nullptr;
+    IUnknown* right_unknown = nullptr;
+    const HRESULT left_hr =
+        left->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&left_unknown));
+    const HRESULT right_hr =
+        right->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&right_unknown));
+    const bool same = SUCCEEDED(left_hr) && SUCCEEDED(right_hr) &&
+                      left_unknown != nullptr && left_unknown == right_unknown;
+    if (left_unknown != nullptr) {
+      left_unknown->Release();
+    }
+    if (right_unknown != nullptr) {
+      right_unknown->Release();
+    }
+    return same;
+  };
+  if (thread_manager_ != nullptr) {
+    IEnumTfDocumentMgrs* managers = nullptr;
+    if (SUCCEEDED(thread_manager_->EnumDocumentMgrs(&managers)) &&
+        managers != nullptr) {
+      ITfDocumentMgr* manager = nullptr;
+      ULONG fetched = 0;
+      while (managers->Next(1, &manager, &fetched) == S_OK && fetched == 1) {
+        bool ours = false;
+        for (const std::unique_ptr<TestDocument>& document : documents_) {
+          if (same_manager(manager, document->document_manager_for_test())) {
+            ours = true;
+            break;
+          }
+        }
+        if (!ours) {
+          ++cleanup_.foreign_document_managers_at_shutdown_start;
+        }
+        manager->Release();
+        fetched = 0;
+      }
+      managers->Release();
+    }
+  }
+
   // A held grant is deliberately NOT granted during teardown: granting it would run a
   // callback that the test chose to keep late. Only the message's store reference is
   // returned; the contexts are popped below and terminate their queued sessions.

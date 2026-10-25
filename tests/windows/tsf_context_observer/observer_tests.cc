@@ -17,6 +17,7 @@
 
 #include "observer_test_support.h"
 #include "observer_tests.h"
+#include "target_revalidation.h"
 
 namespace epocanva {
 namespace tsf {
@@ -716,6 +717,12 @@ int RunShutdownLateRead() {
         "shutdown-late: every advised sink was unadvised",
         "advises=" + std::to_string(closed.sink_advises) +
             " unadvises=" + std::to_string(closed.sink_unadvises));
+  Check(!closed.thread_focus_sink_advised &&
+            closed.thread_focus_sink_unadvises ==
+                closed.thread_focus_sink_advises,
+        "shutdown-late: the thread-focus sink was unadvised in pairs",
+        "advises=" + std::to_string(closed.thread_focus_sink_advises) +
+            " unadvises=" + std::to_string(closed.thread_focus_sink_unadvises));
   Check(closed.selection_reader.reads_abandoned == 1,
         "shutdown-late: the pending read was abandoned", "");
 
@@ -786,6 +793,16 @@ int RunResourceBalance() {
           "balance: sink advises and unadvises match",
           std::to_string(snapshot.sink_advises) + "/" +
               std::to_string(snapshot.sink_unadvises));
+    Check(!snapshot.thread_focus_sink_advised &&
+              snapshot.thread_focus_sink_unadvises ==
+                  snapshot.thread_focus_sink_advises &&
+              snapshot.thread_focus_sink_advise_failures == 0,
+          "balance: the thread-focus sink was advised and unadvised in pairs",
+          "advises=" + std::to_string(snapshot.thread_focus_sink_advises) +
+              " unadvises=" +
+              std::to_string(snapshot.thread_focus_sink_unadvises) +
+              " failures=" +
+              std::to_string(snapshot.thread_focus_sink_advise_failures));
     Check(snapshot.thread_mgr_addrefs == snapshot.thread_mgr_releases &&
               snapshot.document_mgr_addrefs == snapshot.document_mgr_releases &&
               snapshot.context_addrefs == snapshot.context_releases,
@@ -822,6 +839,90 @@ int RunCanFail() {
 
 }  // namespace
 
+// P3.13 pure decision table. These are synthetic evidence facts, not TSF notifications;
+// the real observer-backed cases call Revalidate() against the live manager separately.
+int RunTargetEvidencePure() {
+  TargetEvidence evidence;
+  evidence.thread_focus_query_ok = true;
+  evidence.thread_focus = true;
+
+  TargetRevalidation result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kNoDocumentManager,
+        "target-evidence: no document manager",
+        DescribeTargetRevalidationStatus(result.status));
+  Check(!result.evidence.has_document_manager,
+        "target-evidence: the missing document manager is in the evidence", "");
+
+  evidence.has_document_manager = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kNoTopContext,
+        "target-evidence: no top context",
+        DescribeTargetRevalidationStatus(result.status));
+
+  evidence.has_top_context = true;
+  evidence.top_context_matches = false;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kContextMismatch,
+        "target-evidence: a different top context",
+        DescribeTargetRevalidationStatus(result.status));
+
+  evidence.top_context_matches = true;
+  evidence.registry_identity_matches = false;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kContextMismatch,
+        "target-evidence: a different registry identity",
+        DescribeTargetRevalidationStatus(result.status));
+
+  evidence.registry_identity_matches = true;
+  evidence.registry_generation_matches = false;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kGenerationMismatch,
+        "target-evidence: a stale generation",
+        DescribeTargetRevalidationStatus(result.status));
+
+  evidence.registry_generation_matches = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kOk,
+        "target-evidence: every fact matches",
+        DescribeTargetRevalidationStatus(result.status));
+  Check(result.thread_focus_evidence == ThreadFocusEvidence::kQuerySet,
+        "target-evidence: the source is the IsThreadFocus query",
+        DescribeThreadFocusEvidence(result.thread_focus_evidence));
+
+  evidence.thread_focus = false;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kThreadFocusUnconfirmed,
+        "target-evidence: unconfirmed thread focus",
+        DescribeTargetRevalidationStatus(result.status));
+
+  evidence.thread_focus_notification_kill = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kThreadFocusLost,
+        "target-evidence: a kill notification is focus lost",
+        DescribeTargetRevalidationStatus(result.status));
+  Check(result.thread_focus_evidence == ThreadFocusEvidence::kNotificationKill,
+        "target-evidence: the kill source is not renamed",
+        DescribeThreadFocusEvidence(result.thread_focus_evidence));
+
+  evidence.thread_focus_notification_kill = false;
+  evidence.win32_thread_focus = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kOk,
+        "target-evidence: real Win32 thread focus is an accepted revalidation",
+        DescribeTargetRevalidationStatus(result.status));
+  Check(result.thread_focus_evidence ==
+            ThreadFocusEvidence::kWin32ThreadFocus,
+        "target-evidence: the Win32 source is recorded",
+        DescribeThreadFocusEvidence(result.thread_focus_evidence));
+
+  evidence.thread_focus_notification_set = true;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.thread_focus_evidence == ThreadFocusEvidence::kNotificationSet,
+        "target-evidence: a set notification is reported as a notification",
+        DescribeThreadFocusEvidence(result.thread_focus_evidence));
+  return Finish();
+}
+
 int RunObserverCase(const std::string& case_name) {
   if (case_name == "registry-identity") return RunRegistryIdentity();
   if (case_name == "initial-binding") return RunInitialBinding();
@@ -833,6 +934,7 @@ int RunObserverCase(const std::string& case_name) {
   if (case_name == "own-edit") return RunOwnEdit();
   if (case_name == "real-focus") return RunRealFocus();
   if (case_name == "shutdown-late-read") return RunShutdownLateRead();
+  if (case_name == "target-evidence") return RunTargetEvidencePure();
   if (case_name == "resource-balance") return RunResourceBalance();
   if (case_name == "can-fail") return RunCanFail();
   return -1;

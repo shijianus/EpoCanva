@@ -94,6 +94,10 @@ epocanva_add_coordinator_case(
 epocanva_add_coordinator_case(
   windows.tsf_coordinator.bind_and_gates bind-gates)
 
+# 2b. P3.13 controlled target-status mapping (test-owned revalidator, no TSF notification).
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.target_status_mapping target-status-mapping)
+
 # 3. Single flight: a second submit is Busy, exactly one dispatch, the slot frees.
 epocanva_add_coordinator_case(
   windows.tsf_coordinator.busy_single_flight busy-single-flight)
@@ -229,6 +233,40 @@ epocanva_add_coordinator_case(
   windows.tsf_coordinator.observed_uncertain_swap observed-uncertain-swap)
 epocanva_add_coordinator_case(
   windows.tsf_coordinator.observed_permission_requery observed-permission-requery)
+
+# --- P3.13: live target revalidation and focus admission -------------------------------
+#
+# These cases use the production ContextObserver as the target authority. A real Win32
+# thread-focus window is created by the test scaffolding; it is labelled as a revalidation,
+# never as a TSF notification. The cases cover a target move before input, after the engine
+# result, while an async edit waits, thread-focus loss, no document manager/no top context,
+# a generation move, and the bounded-retirement rebind to the latest target without replay.
+
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_guard_submit_target focus-guard-submit-target)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_guard_engine_target focus-guard-engine-target)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_guard_edit_target focus-guard-edit-target)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_guard_thread_lost focus-guard-thread-lost)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_guard_foreign_dm focus-guard-foreign-dm)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_guard_generation focus-guard-generation)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_guard_retire_rebind focus-guard-retire-rebind)
+
+set_tests_properties(
+  windows.tsf_coordinator.focus_guard_submit_target
+  windows.tsf_coordinator.focus_guard_engine_target
+  windows.tsf_coordinator.focus_guard_edit_target
+  windows.tsf_coordinator.focus_guard_thread_lost
+  windows.tsf_coordinator.focus_guard_foreign_dm
+  windows.tsf_coordinator.focus_guard_generation
+  windows.tsf_coordinator.focus_guard_retire_rebind
+  PROPERTIES TIMEOUT 300
+             LABELS "windows;tsf;coordinator;focus;target;revalidation")
 
 set_tests_properties(
   windows.tsf_coordinator.observed_bind_and_type
@@ -382,6 +420,7 @@ message(STATUS "  tsf_coordinator stage-2 cases: 23 (real English engine, real T
 set_tests_properties(
   windows.tsf_coordinator.conversion_pure
   windows.tsf_coordinator.bind_and_gates
+  windows.tsf_coordinator.target_status_mapping
   windows.tsf_coordinator.busy_single_flight
   windows.tsf_coordinator.composition_progress_controlled
   windows.tsf_coordinator.evaluate_pure

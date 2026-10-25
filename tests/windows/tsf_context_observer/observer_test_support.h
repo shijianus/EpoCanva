@@ -158,10 +158,21 @@ bool SetThreadFocus(TestHost& host, TestDocument* document, FocusCallResult* res
                     std::string* error);
 // S_OK/S_FALSE/... plus whether a document manager is focused.
 HRESULT ReadThreadFocus(TestHost& host, bool* has_document);
+// Canonical comparison of the TSF focus with this document's manager.
+bool IsDocumentFocused(TestHost& host, TestDocument* document);
 
 // Creates a real visible top-level window. Fails in environments that do not allow one
 // (the real-focus case reports that as environment-limited). The caller destroys it.
 bool CreateVisibleTestWindow(HWND* window, std::string* error);
+
+// P3.13 TEST SCAFFOLDING. Creates one off-screen focusable window owned by this STA and
+// puts real Win32 focus on it. This is a Win32 focus fact, not a TSF notification: the
+// production guard labels it "win32-thread-focus-revalidation". Controlled cases use it
+// because ITfThreadMgr::IsThreadFocus reports S_FALSE in this non-registered lab process;
+// the focus sink's notifications are never synthesized. Idempotent.
+bool EnsureTestThreadFocus(std::string* error);
+void ClearTestThreadFocus();
+HWND TestThreadFocusWindow();
 
 // Associates a document manager with a window using ITfThreadMgr::AssociateFocus. Per the
 // documented contract the manager does NOT AddRef pdim_new; *previous receives the

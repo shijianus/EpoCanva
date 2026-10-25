@@ -39,6 +39,8 @@ add_library(epocanva_tsf_context STATIC
   context_registry.cc
   selection_reader.h
   selection_reader.cc
+  target_revalidation.h
+  target_revalidation.cc
   context_observer.h
   context_observer.cc)
 target_compile_definitions(epocanva_tsf_context PRIVATE
@@ -47,4 +49,4 @@ target_compile_options(epocanva_tsf_context PRIVATE
   /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
 target_include_directories(epocanva_tsf_context PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(epocanva_tsf_context PUBLIC ole32 uuid)
+target_link_libraries(epocanva_tsf_context PUBLIC ole32 uuid user32)

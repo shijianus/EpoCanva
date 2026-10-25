@@ -66,6 +66,7 @@ enum class EditRejectReason : std::uint8_t {
   kNotBound,
   kIdentityMismatch,
   kStaleGeneration,
+  kTargetChanged,  // P3.13: the context is no longer the thread's current TSF target
   kBusy,
   kPermissionDenied,
   kPermissionUnknown,

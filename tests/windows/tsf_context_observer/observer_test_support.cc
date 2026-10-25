@@ -446,6 +446,42 @@ HRESULT ReadThreadFocus(TestHost& host, bool* has_document) {
   return hr;
 }
 
+bool IsDocumentFocused(TestHost& host, TestDocument* document) {
+  ITfThreadMgr* thread_manager = host.thread_manager_for_test();
+  if (thread_manager == nullptr || document == nullptr ||
+      document->document_manager_for_test() == nullptr) {
+    return false;
+  }
+  ITfDocumentMgr* focus = nullptr;
+  const HRESULT hr = thread_manager->GetFocus(&focus);
+  if (FAILED(hr) || focus == nullptr) {
+    return false;
+  }
+  IUnknown* focus_unknown = nullptr;
+  IUnknown* expected_unknown = nullptr;
+  focus->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&focus_unknown));
+  document->document_manager_for_test()->QueryInterface(
+      IID_IUnknown, reinterpret_cast<void**>(&expected_unknown));
+  const bool same = focus_unknown != nullptr &&
+                    focus_unknown == expected_unknown;
+  if (focus_unknown != nullptr) {
+    focus_unknown->Release();
+  }
+  if (expected_unknown != nullptr) {
+    expected_unknown->Release();
+  }
+  focus->Release();
+  return same;
+}
+
+void ClearTestThreadFocus() {
+  // Removing any Win32 focus is the point; the focus may not be the helper window after
+  // TSF/application activity.
+  if (::GetFocus() != nullptr) {
+    ::SetFocus(nullptr);
+  }
+}
+
 bool CreateVisibleTestWindow(HWND* window, std::string* error) {
   *window = nullptr;
   HINSTANCE instance = ::GetModuleHandleW(nullptr);
@@ -476,6 +512,56 @@ bool CreateVisibleTestWindow(HWND* window, std::string* error) {
   ::ShowWindow(created, SW_SHOWNORMAL);
   ::UpdateWindow(created);
   *window = created;
+  return true;
+}
+
+HWND TestThreadFocusWindow() {
+  // P3.13 test scaffolding only. One off-screen, real top-level window on this STA; SetFocus
+  // on it is the Win32 thread-focus fact the production guard records as
+  // "win32-thread-focus-revalidation". No TSF notification is synthesized.
+  static HWND window = nullptr;
+  return window;
+}
+
+bool EnsureTestThreadFocus(std::string* error) {
+  HWND window = TestThreadFocusWindow();
+  if (window == nullptr) {
+    HINSTANCE instance = ::GetModuleHandleW(nullptr);
+    WNDCLASSEXW window_class = {};
+    window_class.cbSize = sizeof(window_class);
+    window_class.lpfnWndProc = TestWindowProc;
+    window_class.hInstance = instance;
+    window_class.lpszClassName = kVisibleWindowClass;
+    const ATOM atom = ::RegisterClassExW(&window_class);
+    const DWORD register_error = ::GetLastError();
+    if (atom == 0 && register_error != ERROR_CLASS_ALREADY_EXISTS) {
+      if (error != nullptr) {
+        *error = "RegisterClassExW(focus) failed err=" +
+                 std::to_string(register_error);
+      }
+      return false;
+    }
+    window = ::CreateWindowExW(0, kVisibleWindowClass, L"EpoCanva P3.13 test focus",
+                               WS_POPUP | WS_VISIBLE, -32000, -32000, 2, 2, nullptr,
+                               nullptr, instance, nullptr);
+    const DWORD create_error = ::GetLastError();
+    if (window == nullptr) {
+      if (error != nullptr) {
+        *error = "CreateWindowExW(focus) failed err=" +
+                 std::to_string(create_error);
+      }
+      return false;
+    }
+  }
+  if (::GetFocus() != window) {
+    ::SetFocus(window);
+  }
+  if (::GetFocus() != window) {
+    if (error != nullptr) {
+      *error = "SetFocus(test thread focus window) did not take";
+    }
+    return false;
+  }
   return true;
 }
 

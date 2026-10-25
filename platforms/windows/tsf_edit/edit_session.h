@@ -1,4 +1,4 @@
-// EpoCanva P3.7 -- the TSF edit-session executor.
+// EpoCanva P3.7/P3.13 -- the TSF edit-session executor.
 //
 // WHAT THIS DOES. Binds one real ITfContext to an opaque identity/generation, accepts
 // immutable EditPlans, and applies each plan through the document's real edit-session
@@ -15,6 +15,12 @@
 // waiting; it never means the text was applied. An asynchronous result stays kPending until
 // the callback actually runs; the caller pumps its STA message loop and waits on
 // CompletionEvent() -- no sleep and no polling here.
+//
+// TARGET REVALIDATION (P3.13). An optional TargetRecheck is called before the lock is
+// requested and again inside DoEditSession, after the identity checks and before the
+// permission recheck or any writer call. A false answer is kRejected/kTargetChanged and
+// issues no TSF write. EndOwnedComposition is exempt so a writer can finish its own
+// composition on an unfocused context; every P3.12 cleanup rule still applies.
 //
 // IDENTITY AND GENERATION. A plan is applied only when its ContextIdentity equals the bound
 // identity. Invalidate() bumps the generation and unbinds; a plan built before that is
@@ -76,6 +82,9 @@ struct CompositionEditSessionDiagnostics {
   std::uint64_t callbacks = 0;
   std::uint64_t locks_observed = 0;
   std::uint64_t permission_rechecks = 0;
+  std::uint64_t target_prechecks = 0;
+  std::uint64_t target_callback_checks = 0;
+  std::uint64_t target_rejections = 0;
   std::uint64_t stale = 0;
   std::uint64_t applied = 0;
   std::uint64_t rejected = 0;
@@ -125,6 +134,14 @@ class CompositionEditSession {
   // unset and keep the SetInputPermission behaviour.
   using PermissionRecheck = std::function<InputPermission(ITfContext*, TfEditCookie)>;
   void SetPermissionRecheck(PermissionRecheck recheck);
+  // P3.13 target authority. Called before requesting the lock and again inside
+  // DoEditSession with the granted cookie, before any write; false makes the plan
+  // kRejected/kTargetChanged. It is deliberately NOT called for EndOwnedComposition, so a
+  // retirement cleanup can still finish a composition the writer owns on an unfocused
+  // context. The coordinator installs a guard whose lifetime is independent of itself.
+  using TargetRecheck =
+      std::function<bool(ITfContext*, std::uint64_t context_id, std::uint64_t generation)>;
+  void SetTargetRecheck(TargetRecheck recheck);
   InputPermission input_permission() const;
   bool bound() const;
   ContextIdentity identity() const;

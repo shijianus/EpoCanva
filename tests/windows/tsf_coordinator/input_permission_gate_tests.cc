@@ -52,6 +52,8 @@ struct GateCase {
   // Declared before the coordinator: the coordinator stores a reference, so it must be
   // destroyed first (reverse member order).
   std::unique_ptr<context::PermissionSource> permission;
+  // P3.13 controlled target authority; not a system notification.
+  TestTargetRevalidator target;
   std::unique_ptr<ContextCoordinator> coordinator;
   TestDocument* document = nullptr;
 
@@ -88,6 +90,7 @@ bool SetupGateCase(GateCase* setup, const TestDocumentOptions& options,
   }
   setup->coordinator = std::make_unique<ContextCoordinator>(
       *setup->harness.executor, setup->host->client_id(), *setup->permission);
+  setup->coordinator->AttachTargetRevalidator(&setup->target);
   const BindStatus bound = setup->coordinator->Bind(
       setup->document->context(), setup->document->context_id(),
       options.initial_selection_start_utf16, setup->harness.client_a);
@@ -751,8 +754,10 @@ int RunGenerationChange() {
       ControlledHarness seam_harness;
       if (seam_document != nullptr && CreateControlledHarness(&seam_harness)) {
         WrongGenerationSource wrong;
+        TestTargetRevalidator seam_target;
         ContextCoordinator seam_coordinator(*seam_harness.executor,
                                             seam_host->client_id(), wrong);
+        seam_coordinator.AttachTargetRevalidator(&seam_target);
         Check(seam_coordinator.Bind(seam_document->context(),
                                     seam_document->context_id(), 0,
                                     seam_harness.client_a) == BindStatus::kOk,

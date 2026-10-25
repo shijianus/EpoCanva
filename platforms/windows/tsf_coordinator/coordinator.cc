@@ -62,6 +62,8 @@ const char* DescribeBindStatus(BindStatus status) {
       return "BlockedUncertain";
     case BindStatus::kInvalidRequest:
       return "InvalidRequest";
+    case BindStatus::kTargetUnverified:
+      return "TargetUnverified";
   }
   return "UnknownBindStatus";
 }
@@ -88,6 +90,12 @@ const char* DescribeSubmitStatus(SubmitStatus status) {
       return "BlockedNeedsResync";
     case SubmitStatus::kBlockedUnsupportedShape:
       return "BlockedUnsupportedShape";
+    case SubmitStatus::kTargetChanged:
+      return "TargetChanged";
+    case SubmitStatus::kThreadFocusLost:
+      return "ThreadFocusLost";
+    case SubmitStatus::kTargetUnverified:
+      return "TargetUnverified";
     case SubmitStatus::kNotEngineCandidate:
       return "NotEngineCandidate";
     case SubmitStatus::kEngineNotRunning:
@@ -102,6 +110,44 @@ const char* DescribeSubmitStatus(SubmitStatus status) {
       return "InvalidRequest";
   }
   return "UnknownSubmitStatus";
+}
+
+const char* DescribeSubmitStage(SubmitStatus status) {
+  switch (status) {
+    case SubmitStatus::kAccepted:
+      return "accepted";
+    case SubmitStatus::kBusy:
+      return "busy";
+    case SubmitStatus::kRetiring:
+      return "retiring";
+    case SubmitStatus::kNotBound:
+    case SubmitStatus::kClosed:
+      return "binding";
+    case SubmitStatus::kTargetChanged:
+      return "target-context";
+    case SubmitStatus::kThreadFocusLost:
+    case SubmitStatus::kTargetUnverified:
+      return "focus";
+    case SubmitStatus::kPermissionDenied:
+    case SubmitStatus::kPermissionUnknown:
+      return "permission";
+    case SubmitStatus::kBlockedUncertain:
+      return "uncertain";
+    case SubmitStatus::kBlockedNeedsResync:
+    case SubmitStatus::kBlockedUnsupportedShape:
+      return "needs-resync";
+    case SubmitStatus::kNotEngineCandidate:
+      return "not-applicable";
+    case SubmitStatus::kEngineNotRunning:
+    case SubmitStatus::kEngineClientUnavailable:
+      return "engine-not-ready";
+    case SubmitStatus::kQueueFull:
+      return "queue";
+    case SubmitStatus::kEngineSubmitFailed:
+    case SubmitStatus::kInvalidRequest:
+      return "request";
+  }
+  return "unknown";
 }
 
 const char* DescribeWorkKind(WorkKind kind) {
@@ -188,6 +234,8 @@ const char* DescribeRejectCause(RejectCause cause) {
       return "EditFailedBeforeMutation";
     case RejectCause::kTakeFailed:
       return "TakeFailed";
+    case RejectCause::kTargetChangedWhileQueued:
+      return "TargetChangedWhileQueued";
   }
   return "UnknownRejectCause";
 }
@@ -278,6 +326,15 @@ bool ContextCoordinator::AttachContextRegistry(context::ContextRegistry* registr
   return true;
 }
 
+bool ContextCoordinator::AttachTargetRevalidator(
+    context::TargetRevalidator* revalidator) {
+  if (revalidator == nullptr || closed_ || bound_) {
+    return false;
+  }
+  target_revalidator_ = revalidator;
+  return true;
+}
+
 BindStatus ContextCoordinator::CheckBindingAdmission(
     ITfContext* context, std::uint64_t context_id, std::uint64_t generation,
     LONG initial_caret_utf16) const {
@@ -290,6 +347,12 @@ BindStatus ContextCoordinator::CheckBindingAdmission(
   }
   if (bound_) {
     return BindStatus::kAlreadyBound;
+  }
+  // P3.13: the product binding path does not exist without a live target authority. The
+  // controller attaches the observer before any bind; controlled unit cases attach a
+  // test-owned implementation. This probe runs before the host creates an engine client.
+  if (target_revalidator_ == nullptr) {
+    return BindStatus::kTargetUnverified;
   }
   // The ledger is the only bounded resource binding creates. A full ledger means "do not
   // create another client yet", not "drop an old cleanup on the floor".
@@ -316,6 +379,82 @@ bool ContextCoordinator::RegistryBlocks(ITfContext* context) const {
   // The real context pointer is the key; an integer id supplied by a caller has no
   // influence on this check.
   return registry_->IsUncertain(context);
+}
+
+// --- P3.13 target revalidation ------------------------------------------------------------
+
+SubmitStatus ContextCoordinator::RecordSubmit(SubmitStatus status) {
+  last_submit_status_ = status;
+  if (status != SubmitStatus::kAccepted) {
+    ++submit_refusals_;
+  }
+  return status;
+}
+
+void ContextCoordinator::RecordTargetRevalidation(
+    const context::TargetRevalidation& result) {
+  last_target_revalidation_ = result;
+  ++target_revalidations_;
+  if (!result.ok()) {
+    ++target_refusals_;
+  }
+}
+
+SubmitStatus ContextCoordinator::RevalidateForSubmit() {
+  if (!bound_) {
+    return SubmitStatus::kNotBound;
+  }
+  if (target_revalidator_ == nullptr) {
+    // No live target authority: conservative refusal, never an unchecked pass.
+    return SubmitStatus::kTargetUnverified;
+  }
+  const context::TargetRevalidation result = target_revalidator_->Revalidate(
+      bound_context_, identity_.context_id, identity_.generation);
+  RecordTargetRevalidation(result);
+  switch (result.status) {
+    case context::TargetRevalidationStatus::kOk:
+      return SubmitStatus::kAccepted;
+    case context::TargetRevalidationStatus::kThreadFocusLost:
+      return SubmitStatus::kThreadFocusLost;
+    case context::TargetRevalidationStatus::kThreadFocusUnconfirmed:
+    case context::TargetRevalidationStatus::kQueryFailed:
+    case context::TargetRevalidationStatus::kClosed:
+      return SubmitStatus::kTargetUnverified;
+    case context::TargetRevalidationStatus::kNoDocumentManager:
+    case context::TargetRevalidationStatus::kNoTopContext:
+    case context::TargetRevalidationStatus::kContextMismatch:
+    case context::TargetRevalidationStatus::kGenerationMismatch:
+      return SubmitStatus::kTargetChanged;
+  }
+  return SubmitStatus::kTargetUnverified;
+}
+
+bool ContextCoordinator::EnsureTargetCurrent(const char* why,
+                                             bool engine_already_ran) {
+  if (!bound_ || target_revalidator_ == nullptr) {
+    if (engine_already_ran) {
+      EnterNeedsResync(why, RejectCause::kNone);
+    } else {
+      EndWork(WorkOutcome::kRejected, RejectCause::kNone);
+    }
+    return false;
+  }
+  const context::TargetRevalidation result = target_revalidator_->Revalidate(
+      bound_context_, identity_.context_id, identity_.generation);
+  RecordTargetRevalidation(result);
+  if (result.ok()) {
+    return true;
+  }
+  if (engine_already_ran) {
+    // The engine consumed the event and the target moved. The result must not be applied
+    // to the old context and must not be replayed elsewhere: this is NeedsResync.
+    EnterNeedsResync(why, RejectCause::kTargetChangedWhileQueued);
+  } else {
+    // No engine call has been made for this work item. It is a clean refusal, not a
+    // divergence, and no work is replayed.
+    EndWork(WorkOutcome::kRejected, RejectCause::kTargetChangedWhileQueued);
+  }
+  return false;
 }
 
 void ContextCoordinator::ObserveRealCaret(LONG caret_utf16) {
@@ -359,6 +498,11 @@ BindStatus ContextCoordinator::BindImpl(ITfContext* context,
     // new binding cannot accept work until it has been discarded.
     return BindStatus::kBusy;
   }
+  // The product path (BindObserved) requires a live target authority. Bind() is the
+  // controlled unit-case seam; if no authority is attached there, Submit refuses input.
+  if (!use_internal_generation && target_revalidator_ == nullptr) {
+    return BindStatus::kTargetUnverified;
+  }
   // The latch is keyed by the REAL context identity when a registry is attached, so the
   // same context cannot be re-bound under a different integer id.
   if (RegistryBlocks(context)) {
@@ -369,6 +513,13 @@ BindStatus ContextCoordinator::BindImpl(ITfContext* context,
     return BindStatus::kBlockedUncertain;
   }
 
+  std::shared_ptr<context::TargetWriteGuard> write_guard;
+  if (target_revalidator_ != nullptr) {
+    write_guard = target_revalidator_->CreateWriteGuard();
+    if (write_guard == nullptr) {
+      return BindStatus::kTargetUnverified;
+    }
+  }
   session_ = std::make_unique<edit::CompositionEditSession>(tsf_client_id_);
   if (use_internal_generation) {
     generation = ++generation_counter_;
@@ -376,6 +527,14 @@ BindStatus ContextCoordinator::BindImpl(ITfContext* context,
   if (!session_->Bind(context, context_id, generation)) {
     session_.reset();
     return BindStatus::kInvalidRequest;
+  }
+  if (write_guard != nullptr) {
+    session_->SetTargetRecheck(
+        [write_guard](ITfContext* session_context, std::uint64_t bound_context_id,
+                      std::uint64_t bound_generation) {
+          return write_guard->StillCurrent(session_context, bound_context_id,
+                                           bound_generation);
+        });
   }
   // The session's last-moment gate is the same real metadata read, performed with the
   // cookie of the granted edit session. It sees a permission change that happened after
@@ -866,6 +1025,9 @@ void ContextCoordinator::FinishWorkLedger(WorkKind kind) {
   pending_plan_.reset();
   last_edit_status_ = edit::EditStatus::kRejected;
   last_edit_reason_ = edit::EditRejectReason::kNone;
+  last_edit_request_hr_ = S_OK;
+  last_edit_session_hr_ = S_OK;
+  last_edit_operation_hr_ = S_OK;
   ++works_accepted_;
 }
 
@@ -879,32 +1041,38 @@ SubmitStatus ContextCoordinator::FinishSubmit(engine::RequestId request, WorkKin
 SubmitStatus ContextCoordinator::SubmitKey(const input::KeyEventSnapshot& event,
                                            const input::KeyText& text, WorkId* id) {
   if (id == nullptr) {
-    return SubmitStatus::kInvalidRequest;
+    return RecordSubmit(SubmitStatus::kInvalidRequest);
   }
   id->value = 0;
   if (closed_) {
-    return SubmitStatus::kClosed;
+    return RecordSubmit(SubmitStatus::kClosed);
   }
   if (phase_ != WorkPhase::kIdle) {
-    return SubmitStatus::kBusy;
+    return RecordSubmit(SubmitStatus::kBusy);
   }
   if (!bound_) {
-    return SubmitStatus::kNotBound;
+    return RecordSubmit(SubmitStatus::kNotBound);
   }
   if (RetirementPausesInput()) {
     // A previous binding still owes an engine result, a close, or a TSF cleanup. This is a
     // fact about the host, not about this key: nothing was processed and nothing is dropped
     // silently; the status and the snapshot name the pause.
-    return SubmitStatus::kRetiring;
+    return RecordSubmit(SubmitStatus::kRetiring);
   }
   SubmitStatus blocked = SubmitStatus::kAccepted;
   if (GateBlocksSubmit(&blocked)) {
-    return blocked;
+    return RecordSubmit(blocked);
+  }
+  // P3.13: revalidate the real target BEFORE the permission read and the engine. The
+  // binding identity/generation alone cannot prove the thread still points at it.
+  const SubmitStatus target = RevalidateForSubmit();
+  if (target != SubmitStatus::kAccepted) {
+    return RecordSubmit(target);
   }
   // The real permission gate precedes the engine-candidate evaluation: a privacy
   // refusal is the more specific fact about this field (P3.3 precedence, restated).
   if (!StartPermissionQuery()) {
-    return SubmitStatus::kPermissionUnknown;
+    return RecordSubmit(SubmitStatus::kPermissionUnknown);
   }
   if (permission_source_.Status() == context::PermissionQueryStatus::kPending) {
     // The real query went async. The work item exists from here on; nothing reaches the
@@ -917,19 +1085,21 @@ SubmitStatus ContextCoordinator::SubmitKey(const input::KeyEventSnapshot& event,
     pending_permission_.event = event;
     pending_permission_.text = text;
     *id = WorkId{work_id_};
+    last_submit_status_ = SubmitStatus::kAccepted;
     return SubmitStatus::kAccepted;
   }
   bool identity_current = false;
   if (!PermissionVerdictAllows(&identity_current)) {
     if (!identity_current) {
-      return SubmitStatus::kPermissionUnknown;  // no usable verdict for this binding
+      // no usable verdict for this binding
+      return RecordSubmit(SubmitStatus::kPermissionUnknown);
     }
-    return permission_ == edit::InputPermission::kDenied
-               ? SubmitStatus::kPermissionDenied
-               : SubmitStatus::kPermissionUnknown;
+    return RecordSubmit(permission_ == edit::InputPermission::kDenied
+                            ? SubmitStatus::kPermissionDenied
+                            : SubmitStatus::kPermissionUnknown);
   }
   if (!Evaluate(event, text).is_engine_candidate()) {
-    return SubmitStatus::kNotEngineCandidate;
+    return RecordSubmit(SubmitStatus::kNotEngineCandidate);
   }
   engine::RequestId request;
   const engine::SubmitStatus submitted =
@@ -938,45 +1108,51 @@ SubmitStatus ContextCoordinator::SubmitKey(const input::KeyEventSnapshot& event,
     case engine::SubmitStatus::kAccepted:
       FinishSubmit(request, WorkKind::kKey);
       *id = WorkId{work_id_};
+      last_submit_status_ = SubmitStatus::kAccepted;
       return SubmitStatus::kAccepted;
     case engine::SubmitStatus::kNotRunning:
-      return SubmitStatus::kEngineNotRunning;
+      return RecordSubmit(SubmitStatus::kEngineNotRunning);
     case engine::SubmitStatus::kQueueFull:
-      return SubmitStatus::kQueueFull;
+      return RecordSubmit(SubmitStatus::kQueueFull);
     case engine::SubmitStatus::kClientUnknown:
     case engine::SubmitStatus::kClientNotOpen:
-      return SubmitStatus::kEngineClientUnavailable;
+      return RecordSubmit(SubmitStatus::kEngineClientUnavailable);
     case engine::SubmitStatus::kInternalFailure:
-      return SubmitStatus::kEngineSubmitFailed;
+      return RecordSubmit(SubmitStatus::kEngineSubmitFailed);
     case engine::SubmitStatus::kInvalidRequest:
     default:
-      return SubmitStatus::kInvalidRequest;
+      return RecordSubmit(SubmitStatus::kInvalidRequest);
   }
 }
 
 SubmitStatus ContextCoordinator::SubmitCandidate(std::size_t candidate_index, WorkId* id) {
   if (id == nullptr) {
-    return SubmitStatus::kInvalidRequest;
+    return RecordSubmit(SubmitStatus::kInvalidRequest);
   }
   id->value = 0;
   if (closed_) {
-    return SubmitStatus::kClosed;
+    return RecordSubmit(SubmitStatus::kClosed);
   }
   if (phase_ != WorkPhase::kIdle) {
-    return SubmitStatus::kBusy;
+    return RecordSubmit(SubmitStatus::kBusy);
   }
   if (!bound_) {
-    return SubmitStatus::kNotBound;
+    return RecordSubmit(SubmitStatus::kNotBound);
   }
   if (RetirementPausesInput()) {
-    return SubmitStatus::kRetiring;
+    return RecordSubmit(SubmitStatus::kRetiring);
   }
   SubmitStatus blocked = SubmitStatus::kAccepted;
   if (GateBlocksSubmit(&blocked)) {
-    return blocked;
+    return RecordSubmit(blocked);
+  }
+  // P3.13: accepting a candidate is ordinary input; the same live target check applies.
+  const SubmitStatus target = RevalidateForSubmit();
+  if (target != SubmitStatus::kAccepted) {
+    return RecordSubmit(target);
   }
   if (!StartPermissionQuery()) {
-    return SubmitStatus::kPermissionUnknown;
+    return RecordSubmit(SubmitStatus::kPermissionUnknown);
   }
   if (permission_source_.Status() == context::PermissionQueryStatus::kPending) {
     FinishWorkLedger(WorkKind::kCandidate);
@@ -986,16 +1162,17 @@ SubmitStatus ContextCoordinator::SubmitCandidate(std::size_t candidate_index, Wo
     pending_permission_.kind = WorkKind::kCandidate;
     pending_permission_.candidate_index = candidate_index;
     *id = WorkId{work_id_};
+    last_submit_status_ = SubmitStatus::kAccepted;
     return SubmitStatus::kAccepted;
   }
   bool identity_current = false;
   if (!PermissionVerdictAllows(&identity_current)) {
     if (!identity_current) {
-      return SubmitStatus::kPermissionUnknown;
+      return RecordSubmit(SubmitStatus::kPermissionUnknown);
     }
-    return permission_ == edit::InputPermission::kDenied
-               ? SubmitStatus::kPermissionDenied
-               : SubmitStatus::kPermissionUnknown;
+    return RecordSubmit(permission_ == edit::InputPermission::kDenied
+                            ? SubmitStatus::kPermissionDenied
+                            : SubmitStatus::kPermissionUnknown);
   }
   engine::RequestId request;
   const engine::SubmitStatus submitted =
@@ -1004,19 +1181,20 @@ SubmitStatus ContextCoordinator::SubmitCandidate(std::size_t candidate_index, Wo
     case engine::SubmitStatus::kAccepted:
       FinishSubmit(request, WorkKind::kCandidate);
       *id = WorkId{work_id_};
+      last_submit_status_ = SubmitStatus::kAccepted;
       return SubmitStatus::kAccepted;
     case engine::SubmitStatus::kNotRunning:
-      return SubmitStatus::kEngineNotRunning;
+      return RecordSubmit(SubmitStatus::kEngineNotRunning);
     case engine::SubmitStatus::kQueueFull:
-      return SubmitStatus::kQueueFull;
+      return RecordSubmit(SubmitStatus::kQueueFull);
     case engine::SubmitStatus::kClientUnknown:
     case engine::SubmitStatus::kClientNotOpen:
-      return SubmitStatus::kEngineClientUnavailable;
+      return RecordSubmit(SubmitStatus::kEngineClientUnavailable);
     case engine::SubmitStatus::kInternalFailure:
-      return SubmitStatus::kEngineSubmitFailed;
+      return RecordSubmit(SubmitStatus::kEngineSubmitFailed);
     case engine::SubmitStatus::kInvalidRequest:
     default:
-      return SubmitStatus::kInvalidRequest;
+      return RecordSubmit(SubmitStatus::kInvalidRequest);
   }
 }
 
@@ -1074,6 +1252,14 @@ void ContextCoordinator::AdvancePermissionStage() {
                   ? RejectCause::kPermissionDenied
                   : RejectCause::kPermissionUnknown);
     }
+    pending_permission_ = PendingPermissionWork{};
+    return;
+  }
+  // P3.13: the target is revalidated after the permission answer and immediately before
+  // the engine call or the held edit plan. A pre-engine work item is a clean refusal; the
+  // apply-time path (has_plan) has already consumed the engine event and is NeedsResync.
+  if (!EnsureTargetCurrent("target-changed-after-permission",
+                           pending_permission_.has_plan)) {
     pending_permission_ = PendingPermissionWork{};
     return;
   }
@@ -1247,10 +1433,13 @@ void ContextCoordinator::BeginApplyAfterEngine(const EngineObservation& observat
       break;
   }
 
-  // An edit is now unavoidable, so the permission is re-resolved from the CURRENT real
-  // metadata (not read back from dispatch time). The engine already consumed the event;
-  // a non-Allowed verdict now is an engine/host divergence and lands on NeedsResync,
-  // never on a quiet drop.
+  // An edit is now unavoidable, so the target and the permission are re-resolved from the
+  // CURRENT real state (not read back from dispatch time). The engine already consumed the
+  // event; a target move or a non-Allowed verdict now is an engine/host divergence and
+  // lands on NeedsResync, never on a quiet drop and never on a write to the old context.
+  if (!EnsureTargetCurrent("target-changed-after-engine", true)) {
+    return;
+  }
   if (!StartPermissionQuery()) {
     EnterNeedsResync("permission-requery-refused", RejectCause::kNone);
     return;
@@ -1274,6 +1463,12 @@ void ContextCoordinator::BeginApplyAfterEngine(const EngineObservation& observat
 }
 
 void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision) {
+  // The last synchronous check before a TSF request. The P3.7 session repeats the live
+  // target check before requesting a lock and again inside the granted callback; this one
+  // keeps an already-moved target from even reaching RequestEditSession.
+  if (!EnsureTargetCurrent("target-changed-before-edit", true)) {
+    return;
+  }
   // The plan builders take UTF-8 bytes; the engine text is UTF-16 code units. The strict
   // P3.2 converter is used in both directions, so a malformed value is refused, never
   // repaired. (EditPlan itself converts straight back through the same converter.)
@@ -1324,6 +1519,9 @@ void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision) {
 void ContextCoordinator::ResolveEditResult(const EditResult& result) {
   last_edit_status_ = result.status;
   last_edit_reason_ = result.reason;
+  last_edit_request_hr_ = result.request_hr;
+  last_edit_session_hr_ = result.edit_session_hr;
+  last_edit_operation_hr_ = result.operation_hr;
 
   if (result.pending()) {
     // Defensive only: callers hand over final results. Pending stays pending.
@@ -1374,6 +1572,15 @@ void ContextCoordinator::ResolveEditResult(const EditResult& result) {
     case edit::EditStatus::kRejected:
     case edit::EditStatus::kPending:
     default:
+      if (result.status == edit::EditStatus::kRejected &&
+          result.reason == edit::EditRejectReason::kTargetChanged) {
+        // The P3.7 callback's live target check refused the write after the engine ran.
+        // The engine's result and the document have diverged; no retry, no replay.
+        ++edits_refused_;
+        EnterNeedsResync("edit-target-changed",
+                         RejectCause::kTargetChangedWhileQueued);
+        return;
+      }
       // Same divergence shape: read-only, a refused lock, a disconnected context or a
       // permission refusal inside the P3.7 callback, all after the engine ran.
       ++edits_refused_;
@@ -1635,11 +1842,19 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.outcome = outcome_;
   snapshot.cause = cause_;
   snapshot.work_id = work_id_;
+  snapshot.last_submit_status = last_submit_status_;
+  snapshot.submit_refusals = submit_refusals_;
+  snapshot.last_target_revalidation = last_target_revalidation_;
+  snapshot.target_revalidations = target_revalidations_;
+  snapshot.target_refusals = target_refusals_;
   snapshot.work_generation = work_generation_;
   snapshot.engine_request = phase_ == WorkPhase::kEnginePending ? engine_request_
                                                                : engine::RequestId{};
   snapshot.last_edit_status = last_edit_status_;
   snapshot.last_edit_reason = last_edit_reason_;
+  snapshot.last_edit_request_hr = last_edit_request_hr_;
+  snapshot.last_edit_session_hr = last_edit_session_hr_;
+  snapshot.last_edit_operation_hr = last_edit_operation_hr_;
   snapshot.tracked_caret_utf16 = view_.caret_utf16;
   snapshot.composition_active = view_.composition_active;
   snapshot.composition_start_utf16 = view_.composition_start_utf16;
@@ -1655,7 +1870,11 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.permission_queries_completed = permission_queries_completed_;
   snapshot.permission_rechecks = 0;
   if (session_ != nullptr) {
-    snapshot.permission_rechecks = session_->Snapshot().permission_rechecks;
+    const edit::CompositionEditSessionDiagnostics session = session_->Snapshot();
+    snapshot.permission_rechecks = session.permission_rechecks;
+    snapshot.target_prechecks = session.target_prechecks;
+    snapshot.target_callback_checks = session.target_callback_checks;
+    snapshot.target_rejections = session.target_rejections;
   }
   snapshot.pumps = pumps_;
   snapshot.observed_caret_updates = observed_caret_updates_;

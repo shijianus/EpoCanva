@@ -120,6 +120,10 @@ bool SetupControlledObserved(ControlledObservedEnv* env,
   if (env->doc_a == nullptr) {
     return false;
   }
+  if (!oct::EnsureTestThreadFocus(&env->error)) {
+    Check(false, std::string(label) + ": real Win32 thread focus", env->error);
+    return false;
+  }
   if (!CreateControlledHarness(&env->harness)) {
     return false;
   }
@@ -171,6 +175,10 @@ bool WireObserved(ControlledObservedEnv* env, const TestDocumentOptions& options
   env->doc_a = env->host->CreateDocument(options, &env->error);
   Check(env->doc_a != nullptr, std::string(label) + ": document created", env->error);
   if (env->doc_a == nullptr) {
+    return false;
+  }
+  if (!oct::EnsureTestThreadFocus(&env->error)) {
+    Check(false, std::string(label) + ": real Win32 thread focus", env->error);
     return false;
   }
   env->permission = ctx::CreateRealPermissionSource(env->host->client_id());
@@ -603,6 +611,26 @@ int RunObservedComposeRetirementReadOnly(const Options& options) {
             retired.retirement.blocked == 1,
         "compose-readonly: cleanup is explicitly Blocked, never Completed",
         DescribeSnapshot(retired));
+  // The record is dropped (completed accounting) but the cleanup did not succeed:
+  // finished == 0, the real composition is still live, and no end call was made.
+  Check(retired.retirement.completed == 1 &&
+            retired.retirement.finished == 0 &&
+            retired.retirement.already_ordinary == 0,
+        "compose-readonly: a blocked cleanup is not counted as a finished one",
+        "completed=" + std::to_string(retired.retirement.completed) +
+            " finished=" + std::to_string(retired.retirement.finished) +
+            " already_ordinary=" +
+            std::to_string(retired.retirement.already_ordinary));
+  Check(retired.retirement.retiring_bindings == 0 &&
+            !retired.retirement.admission_paused,
+        "compose-readonly: the terminal record no longer pauses input",
+        std::to_string(retired.retirement.retiring_bindings));
+  ULONG remaining_compositions = 0;
+  Check(SUCCEEDED(oct::CountCompositions(env.doc_a->context(),
+                                         &remaining_compositions)) &&
+            remaining_compositions == 1,
+        "compose-readonly: A's composition really remains (not silently ended)",
+        std::to_string(remaining_compositions));
   Check(retired.retirement.last_cleanup_block == CleanupBlockReason::kReadOnly ||
             retired.retirement.last_cleanup_block ==
                 CleanupBlockReason::kPermissionDenied,
@@ -610,10 +638,12 @@ int RunObservedComposeRetirementReadOnly(const Options& options) {
         DescribeCleanupBlockReason(retired.retirement.last_cleanup_block));
   const auto after = env.doc_a->diagnostics().store;
   Check(after.text_mutations == before.text_mutations &&
-            after.set_text_calls == before.set_text_calls,
-        "compose-readonly: no destructive cleanup wrote text",
+            after.set_text_calls == before.set_text_calls &&
+            after.composition_end_calls == before.composition_end_calls,
+        "compose-readonly: no destructive cleanup wrote text or ended the composition",
         "mutations=" + std::to_string(after.text_mutations) +
-            " set_text=" + std::to_string(after.set_text_calls));
+            " set_text=" + std::to_string(after.set_text_calls) +
+            " end=" + std::to_string(after.composition_end_calls));
   CheckDocText(env.doc_a->text_utf16(), L"hel",
                "compose-readonly: the displayed text was preserved");
   env.doc_a->SetReadOnly(false);
@@ -1263,6 +1293,591 @@ int RunObservedPermissionRequery() {
 
 }  // namespace
 
+// =======================================================================================
+// P3.13 target-admission cases. Every binding here is created by the real observer; the
+// live guard is the production ContextObserver. The hidden off-screen window supplies a
+// real Win32 thread-focus fact (labelled win32-thread-focus-revalidation), not a
+// synthesized TSF notification.
+// =======================================================================================
+
+bool CreateDocumentB(ControlledObservedEnv* env, TestDocument** document,
+                     const char* label) {
+  *document = env->host->CreateDocument(TestDocumentOptions{}, &env->error);
+  Check(*document != nullptr, std::string(label) + ": document B created",
+        env->error);
+  return *document != nullptr;
+}
+
+// A new submit after a real TSF focus move (A -> B) must be refused before the engine,
+// even though the observer has not processed the move and the coordinator still says A.
+int RunFocusGuardSubmitTargetChanged() {
+  ControlledObservedEnv env;
+  if (!SetupControlledObserved(&env, TestDocumentOptions{L"", 0, 0},
+                               "focus-submit-target")) {
+    return Finish();
+  }
+  TestDocument* doc_b = nullptr;
+  if (!CreateDocumentB(&env, &doc_b, "focus-submit-target")) {
+    return Finish();
+  }
+  const CoordinatorSnapshot before = env.coordinator->Snapshot();
+  const std::uint64_t dispatches_before = env.harness.backend->dispatch_calls();
+  const std::uint64_t a_mutations_before =
+      env.doc_a->diagnostics().store.text_mutations;
+  const std::uint64_t b_mutations_before =
+      doc_b->diagnostics().store.text_mutations;
+
+  oct::FocusCallResult focus;
+  Check(oct::SetThreadFocus(*env.host, doc_b, &focus, &env.error),
+        "focus-submit-target: real SetFocus moved to B", env.error);
+  Check(oct::IsDocumentFocused(*env.host, doc_b),
+        "focus-submit-target: TSF GetFocus is B immediately after SetFocus", "");
+
+  const ex::TextKey h = Letter(L'h');
+  WorkId id;
+  const SubmitStatus refused =
+      env.coordinator->SubmitKey(h.event, h.text, &id);
+  Check(refused == SubmitStatus::kTargetChanged,
+        "focus-submit-target: the submit is refused as TargetChanged before the engine",
+        DescribeSubmitStatus(refused));
+  Check(!id.valid(), "focus-submit-target: the refused key created no work item", "");
+  const CoordinatorSnapshot refused_state = env.coordinator->Snapshot();
+  Check(refused_state.last_submit_status == SubmitStatus::kTargetChanged,
+        "focus-submit-target: the snapshot records the refusal status", "");
+  Check(refused_state.last_target_revalidation.status ==
+            ctx::TargetRevalidationStatus::kContextMismatch,
+        "focus-submit-target: the guard names the context mismatch",
+        ctx::DescribeTargetRevalidationStatus(
+            refused_state.last_target_revalidation.status));
+  Check(refused_state.last_target_revalidation.thread_focus_evidence !=
+            ctx::ThreadFocusEvidence::kNone,
+        "focus-submit-target: the thread-focus evidence source is recorded",
+        ctx::DescribeThreadFocusEvidence(
+            refused_state.last_target_revalidation.thread_focus_evidence));
+  Check(refused_state.works_accepted == before.works_accepted,
+        "focus-submit-target: no work was accepted", "");
+  Check(env.harness.backend->dispatch_calls() == dispatches_before,
+        "focus-submit-target: no engine dispatch happened", "");
+  Check(env.doc_a->diagnostics().store.text_mutations == a_mutations_before &&
+            doc_b->diagnostics().store.text_mutations == b_mutations_before,
+        "focus-submit-target: neither document was written", "");
+
+  // Recover through the real observer after the refusal. The latest target is B.
+  const oct::ObserverDriveResult rebound =
+      oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(rebound.settled && env.coordinator->bound(),
+        "focus-submit-target: the observer bound the current target B",
+        oct::DescribeObserverSnapshot(rebound.final_state));
+  PumpRetirements(&env, *env.harness.executor, "focus-submit-target");
+  ContextIdRecord b_record;
+  env.registry->Observe(doc_b->context(), &b_record);
+  Check(env.coordinator->Snapshot().identity.context_id == b_record.context_id,
+        "focus-submit-target: the binding is B, not the refused old target", "");
+  CheckDocText(doc_b->text_utf16(), L"",
+               "focus-submit-target: the refused key was not replayed");
+
+  const ex::TextKey a = Letter(L'a');
+  const DriveResult typed = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                            *env.harness.executor, a.event,
+                                            a.text, "focus-submit-target: B types");
+  CheckOutcome(typed.final_state, WorkOutcome::kApplied,
+               "focus-submit-target: new input on B applies");
+  CheckDocText(doc_b->text_utf16(), L"a",
+               "focus-submit-target: only the new key reached B");
+  CheckDocText(env.doc_a->text_utf16(), L"",
+               "focus-submit-target: A was not touched");
+  return Finish();
+}
+
+// The engine result arrives after the target moved. The coordinator must not build or
+// apply an edit; the engine already ran, so the honest terminal is NeedsResync.
+int RunFocusGuardEngineResultTargetChanged() {
+  ControlledObservedEnv env;
+  if (!SetupControlledObserved(&env, TestDocumentOptions{L"", 0, 0},
+                               "focus-engine-target")) {
+    return Finish();
+  }
+  TestDocument* doc_b = nullptr;
+  if (!CreateDocumentB(&env, &doc_b, "focus-engine-target")) {
+    return Finish();
+  }
+  env.harness.backend->HoldDispatches();
+  const ex::TextKey h = Letter(L'h');
+  WorkId id;
+  Check(env.coordinator->SubmitKey(h.event, h.text, &id) ==
+            SubmitStatus::kAccepted,
+        "focus-engine-target: the key was accepted while the target was A", "");
+  Check(env.coordinator->Snapshot().phase == WorkPhase::kEnginePending,
+        "focus-engine-target: the dispatch is pending", "");
+
+  oct::FocusCallResult focus;
+  Check(oct::SetThreadFocus(*env.host, doc_b, &focus, &env.error),
+        "focus-engine-target: real SetFocus moved to B before the result", env.error);
+  env.harness.backend->ReleaseDispatches();
+  const DriveResult driven = DriveToCompletion(
+      *env.coordinator, *env.host, *env.harness.executor, 20000);
+  Check(driven.completed, "focus-engine-target: the work reached a terminal state",
+        DescribeSnapshot(driven.final_state));
+  CheckOutcome(driven.final_state, WorkOutcome::kNeedsResync,
+               "focus-engine-target: the post-engine target move is NeedsResync");
+  Check(driven.final_state.cause == RejectCause::kTargetChangedWhileQueued,
+        "focus-engine-target: the cause names the target change",
+        DescribeRejectCause(driven.final_state.cause));
+  Check(driven.final_state.plans_submitted == 0,
+        "focus-engine-target: no edit plan was submitted", "");
+  Check(driven.final_state.edits_applied == 0,
+        "focus-engine-target: no edit applied", "");
+  Check(env.doc_a->diagnostics().store.text_mutations == 0 &&
+            doc_b->diagnostics().store.text_mutations == 0,
+        "focus-engine-target: neither document was written", "");
+  Check(driven.final_state.last_target_revalidation.status ==
+            ctx::TargetRevalidationStatus::kContextMismatch,
+        "focus-engine-target: the live guard saw the context move",
+        ctx::DescribeTargetRevalidationStatus(
+            driven.final_state.last_target_revalidation.status));
+
+  // Recover: the observer invalidates A and binds the current B. No replay of the old key.
+  const oct::ObserverDriveResult rebound =
+      oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(rebound.settled && env.coordinator->bound(),
+        "focus-engine-target: a fresh binding is created for B",
+        oct::DescribeObserverSnapshot(rebound.final_state));
+  PumpRetirements(&env, *env.harness.executor, "focus-engine-target");
+  CheckDocText(doc_b->text_utf16(), L"",
+               "focus-engine-target: the old key was not replayed");
+  const ex::TextKey a = Letter(L'a');
+  const DriveResult typed = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                            *env.harness.executor, a.event,
+                                            a.text, "focus-engine-target: B types");
+  CheckOutcome(typed.final_state, WorkOutcome::kApplied,
+               "focus-engine-target: fresh input on B applies");
+  CheckDocText(doc_b->text_utf16(), L"a",
+               "focus-engine-target: only the fresh key reached B");
+  CheckDocText(env.doc_a->text_utf16(), L"",
+               "focus-engine-target: A was not touched");
+  return Finish();
+}
+
+// The target moves while an asynchronous edit waits behind a held grant. The P3.7
+// callback repeats the live target query under the granted lock and must refuse before any
+// write. The observer is deliberately NOT pumped before the grant is released.
+int RunFocusGuardEditWaitTargetChanged() {
+  ControlledObservedEnv env;
+  TestDocumentOptions options;
+  options.async_locks = true;
+  if (!SetupControlledObserved(&env, options, "focus-edit-target")) {
+    return Finish();
+  }
+  TestDocument* doc_b = nullptr;
+  if (!CreateDocumentB(&env, &doc_b, "focus-edit-target")) {
+    return Finish();
+  }
+  const ex::TextKey h = Letter(L'h');
+  WorkId id;
+  Check(env.coordinator->SubmitKey(h.event, h.text, &id) ==
+            SubmitStatus::kAccepted,
+        "focus-edit-target: the key was accepted", "");
+  const ULONGLONG deadline = ::GetTickCount64() + 20000;
+  CoordinatorSnapshot snapshot = env.coordinator->Snapshot();
+  while (snapshot.phase != WorkPhase::kEditPending) {
+    env.coordinator->Pump();
+    snapshot = env.coordinator->Snapshot();
+    if (snapshot.phase == WorkPhase::kEditPending ||
+        snapshot.phase == WorkPhase::kIdle || ::GetTickCount64() >= deadline) {
+      break;
+    }
+    if (snapshot.phase == WorkPhase::kEnginePending) {
+      env.harness.executor->WaitForResult(snapshot.engine_request,
+                                          std::chrono::milliseconds(50));
+    } else {
+      ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+      env.host->DispatchQueuedMessages();
+    }
+  }
+  Check(snapshot.phase == WorkPhase::kEditPending,
+        "focus-edit-target: the edit is queued behind the deferred lock",
+        DescribeSnapshot(snapshot));
+  env.host->SetHoldGrantMessages(true);
+  oct::PumpMessagesFor(*env.host, 300);
+  const auto held = env.doc_a->diagnostics().store;
+  Check(held.pending_async_lock && held.write_lock_grants == 0,
+        "focus-edit-target: the write lock is held before the callback",
+        "pending=" + std::to_string(held.pending_async_lock ? 1 : 0) +
+            " grants=" + std::to_string(held.write_lock_grants));
+
+  oct::FocusCallResult focus;
+  Check(oct::SetThreadFocus(*env.host, doc_b, &focus, &env.error),
+        "focus-edit-target: real SetFocus moved to B while the edit waited",
+        env.error);
+  env.host->SetHoldGrantMessages(false);
+  const std::size_t granted = env.host->ReleaseHeldGrantMessages();
+  Check(granted >= 1, "focus-edit-target: the held grant was released",
+        std::to_string(granted));
+
+  const ULONGLONG terminal_deadline = ::GetTickCount64() + 20000;
+  while (snapshot.phase != WorkPhase::kIdle) {
+    env.coordinator->Pump();
+    snapshot = env.coordinator->Snapshot();
+    if (snapshot.phase == WorkPhase::kIdle ||
+        ::GetTickCount64() >= terminal_deadline) {
+      break;
+    }
+    if (snapshot.phase == WorkPhase::kEditPending) {
+      env.host->PumpUntil(env.coordinator->EditCompletionEvent(), 50);
+    } else {
+      ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+      env.host->DispatchQueuedMessages();
+    }
+  }
+  Check(snapshot.phase == WorkPhase::kIdle,
+        "focus-edit-target: the callback completed", DescribeSnapshot(snapshot));
+  CheckOutcome(snapshot, WorkOutcome::kNeedsResync,
+               "focus-edit-target: a refused post-engine write is NeedsResync");
+  Check(snapshot.cause == RejectCause::kTargetChangedWhileQueued,
+        "focus-edit-target: the cause names the target change",
+        DescribeRejectCause(snapshot.cause));
+  Check(snapshot.last_edit_status == edit::EditStatus::kRejected &&
+            snapshot.last_edit_reason == edit::EditRejectReason::kTargetChanged,
+        "focus-edit-target: the session refused with TargetChanged",
+        std::string(edit::DescribeEditStatus(snapshot.last_edit_status)) + "/" +
+            edit::DescribeEditRejectReason(snapshot.last_edit_reason));
+  Check(snapshot.target_callback_checks >= 1,
+        "focus-edit-target: the granted-callback target check ran",
+        std::to_string(snapshot.target_callback_checks));
+  Check(snapshot.target_rejections >= 1,
+        "focus-edit-target: the granted-callback target check refused",
+        std::to_string(snapshot.target_rejections));
+  Check(env.doc_a->diagnostics().store.text_mutations == 0 &&
+            env.doc_a->diagnostics().store.composition_start_calls == 0,
+        "focus-edit-target: A received no write and no composition", "");
+  Check(doc_b->diagnostics().store.text_mutations == 0,
+        "focus-edit-target: B received no write", "");
+
+  const oct::ObserverDriveResult rebound =
+      oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(rebound.settled && env.coordinator->bound(),
+        "focus-edit-target: the observer bound the current B after the refusal",
+        oct::DescribeObserverSnapshot(rebound.final_state));
+  PumpRetirements(&env, *env.harness.executor, "focus-edit-target");
+  CheckDocText(doc_b->text_utf16(), L"",
+               "focus-edit-target: the refused edit was not replayed");
+  const ex::TextKey a = Letter(L'a');
+  const DriveResult typed = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                            *env.harness.executor, a.event,
+                                            a.text, "focus-edit-target: B types");
+  CheckOutcome(typed.final_state, WorkOutcome::kApplied,
+               "focus-edit-target: fresh input on B applies");
+  CheckDocText(doc_b->text_utf16(), L"a",
+               "focus-edit-target: only the fresh key reached B");
+  CheckDocText(env.doc_a->text_utf16(), L"",
+               "focus-edit-target: A was not touched");
+  return Finish();
+}
+
+// The thread loses Win32 focus (SetFocus(nullptr)). Even though TSF still points at the
+// bound context, ordinary input must be refused before the engine. If this environment
+// delivers OnKillThreadFocus, the observer invalidates the binding first; both outcomes are
+// reported, neither is renamed.
+int RunFocusGuardThreadFocusLost() {
+  ControlledObservedEnv env;
+  if (!SetupControlledObserved(&env, TestDocumentOptions{L"", 0, 0},
+                               "focus-thread-lost")) {
+    return Finish();
+  }
+  const std::uint64_t dispatches_before = env.harness.backend->dispatch_calls();
+  oct::ClearTestThreadFocus();
+  Check(::GetFocus() == nullptr,
+        "focus-thread-lost: Win32 focus is really gone", "");
+
+  const ex::TextKey h = Letter(L'h');
+  WorkId id;
+  const SubmitStatus refused =
+      env.coordinator->SubmitKey(h.event, h.text, &id);
+  const CoordinatorSnapshot snapshot = env.coordinator->Snapshot();
+  Check(refused != SubmitStatus::kAccepted && !id.valid(),
+        "focus-thread-lost: the key is refused and creates no work",
+        DescribeSubmitStatus(refused));
+  Check(env.harness.backend->dispatch_calls() == dispatches_before,
+        "focus-thread-lost: no engine call", "");
+  Check(env.doc_a->diagnostics().store.text_mutations == 0,
+        "focus-thread-lost: no document write", "");
+  const context::ContextObserverSnapshot observer = env.observer->Snapshot();
+  if (env.coordinator->bound()) {
+    Check(refused == SubmitStatus::kTargetUnverified,
+          "focus-thread-lost: the live guard refuses as TargetUnverified",
+          DescribeSubmitStatus(refused));
+    Check(snapshot.last_target_revalidation.status ==
+              ctx::TargetRevalidationStatus::kThreadFocusUnconfirmed,
+          "focus-thread-lost: the guard reports unconfirmed thread focus",
+          ctx::DescribeTargetRevalidationStatus(
+              snapshot.last_target_revalidation.status));
+    Check(observer.thread_focus_kill_notifications == 0,
+          "focus-thread-lost: no kill notification was fabricated", "");
+  } else {
+    Check(refused == SubmitStatus::kNotBound,
+          "focus-thread-lost: an OnKillThreadFocus invalidated the binding first",
+          DescribeSubmitStatus(refused));
+    Check(observer.thread_focus_kill_notifications >= 1,
+          "focus-thread-lost: the invalidation came from a real kill notification",
+          std::to_string(observer.thread_focus_kill_notifications));
+  }
+
+  // Restore real Win32 focus. If the binding was invalidated, the observer re-reads the
+  // real TSF focus and publishes a fresh target; no old input is replayed.
+  Check(oct::EnsureTestThreadFocus(&env.error),
+        "focus-thread-lost: Win32 focus restored", env.error);
+  if (!env.coordinator->bound()) {
+    const oct::ObserverDriveResult rebound =
+        oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+    Check(rebound.settled && env.coordinator->bound(),
+          "focus-thread-lost: the observer bound the current target again",
+          oct::DescribeObserverSnapshot(rebound.final_state));
+    PumpRetirements(&env, *env.harness.executor, "focus-thread-lost");
+  }
+  CheckDocText(env.doc_a->text_utf16(), L"",
+               "focus-thread-lost: the refused key was not replayed");
+  const ex::TextKey a = Letter(L'a');
+  const DriveResult typed = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                            *env.harness.executor, a.event,
+                                            a.text, "focus-thread-lost: A types");
+  CheckOutcome(typed.final_state, WorkOutcome::kApplied,
+               "focus-thread-lost: input is admitted again after focus returns");
+  Check(env.doc_a->diagnostics().store.text_mutations > 0,
+        "focus-thread-lost: the fresh key reached A", "");
+  return Finish();
+}
+
+// No focused document manager, then a real empty document manager. Both are distinct
+// target failures and must be refused before the engine.
+int RunFocusGuardForeignDocumentManager() {
+  ControlledObservedEnv env;
+  if (!SetupControlledObserved(&env, TestDocumentOptions{L"", 0, 0},
+                               "focus-foreign-dm")) {
+    return Finish();
+  }
+  ITfThreadMgr* thread_manager = env.host->thread_manager_for_test();
+  const std::uint64_t dispatches_before = env.harness.backend->dispatch_calls();
+  const ex::TextKey h = Letter(L'h');
+  WorkId id;
+
+  // A real document manager that this test host did not create, focused while the
+  // coordinator still holds document A. In this environment msctf gives a newly created
+  // manager its own top context, so the live check reports a context mismatch rather than
+  // no-top; the pure target-evidence case pins the no-document-manager and no-top branches,
+  // and the controlled status case pins their coordinator mapping.
+  ITfDocumentMgr* foreign = nullptr;
+  Check(SUCCEEDED(thread_manager->CreateDocumentMgr(&foreign)) &&
+            foreign != nullptr,
+        "focus-foreign-dm: a foreign document manager was created", "");
+  if (foreign == nullptr) {
+    return Finish();
+  }
+  Check(SUCCEEDED(thread_manager->SetFocus(foreign)),
+        "focus-foreign-dm: the foreign manager received TSF focus", "");
+  ITfDocumentMgr* current = nullptr;
+  const HRESULT current_hr = thread_manager->GetFocus(&current);
+  const bool focus_is_foreign = current != nullptr && current == foreign;
+  if (current != nullptr) {
+    current->Release();
+  }
+  Check(SUCCEEDED(current_hr) && focus_is_foreign,
+        "focus-foreign-dm: GetFocus really is the foreign manager", "");
+  Check(!oct::IsDocumentFocused(*env.host, env.doc_a),
+        "focus-foreign-dm: TSF focus is not document A", "");
+
+  const SubmitStatus refused = env.coordinator->SubmitKey(h.event, h.text, &id);
+  const CoordinatorSnapshot snapshot = env.coordinator->Snapshot();
+  Check(refused == SubmitStatus::kTargetChanged && !id.valid(),
+        "focus-foreign-dm: ordinary input is refused before the engine",
+        DescribeSubmitStatus(refused));
+  Check(snapshot.last_target_revalidation.status ==
+                ctx::TargetRevalidationStatus::kContextMismatch ||
+            snapshot.last_target_revalidation.status ==
+                ctx::TargetRevalidationStatus::kNoTopContext,
+        "focus-foreign-dm: the guard names the non-bound focus target",
+        ctx::DescribeTargetRevalidationStatus(
+            snapshot.last_target_revalidation.status));
+  Check(snapshot.last_submit_status == SubmitStatus::kTargetChanged,
+        "focus-foreign-dm: the refuse status is recorded", "");
+  Check(env.harness.backend->dispatch_calls() == dispatches_before,
+        "focus-foreign-dm: no engine call for the refusal", "");
+  Check(env.doc_a->diagnostics().store.text_mutations == 0,
+        "focus-foreign-dm: no document write", "");
+  thread_manager->SetFocus(nullptr);
+  foreign->Release();
+  return Finish();
+}
+
+// The same context is re-bound by the registry (generation moved on) without any TSF focus
+// event. The binding's generation is no longer the current one; input is refused.
+int RunFocusGuardGenerationChanged() {
+  ControlledObservedEnv env;
+  if (!SetupControlledObserved(&env, TestDocumentOptions{L"", 0, 0},
+                               "focus-generation")) {
+    return Finish();
+  }
+  ContextIdRecord before;
+  Check(env.registry->Observe(env.doc_a->context(), &before) ==
+            ctx::ContextRegistryStatus::kOk,
+        "focus-generation: the current identity is readable", "");
+  ContextIdRecord bumped;
+  Check(env.registry->BeginBinding(env.doc_a->context(), &bumped) ==
+                ctx::ContextRegistryStatus::kOk &&
+            bumped.generation > before.generation,
+        "focus-generation: a newer binding generation exists",
+        "before=" + std::to_string(before.generation) +
+            " after=" + std::to_string(bumped.generation));
+  const std::uint64_t dispatches_before = env.harness.backend->dispatch_calls();
+  const ex::TextKey h = Letter(L'h');
+  WorkId id;
+  const SubmitStatus refused = env.coordinator->SubmitKey(h.event, h.text, &id);
+  const CoordinatorSnapshot snapshot = env.coordinator->Snapshot();
+  Check(refused == SubmitStatus::kTargetChanged && !id.valid(),
+        "focus-generation: the stale binding refuses input",
+        DescribeSubmitStatus(refused));
+  Check(snapshot.last_target_revalidation.status ==
+            ctx::TargetRevalidationStatus::kGenerationMismatch,
+        "focus-generation: the guard names the generation mismatch",
+        ctx::DescribeTargetRevalidationStatus(
+            snapshot.last_target_revalidation.status));
+  Check(snapshot.last_target_revalidation.evidence.observed_generation ==
+            bumped.generation,
+        "focus-generation: the observed generation is the newer one",
+        std::to_string(
+            snapshot.last_target_revalidation.evidence.observed_generation));
+  Check(env.harness.backend->dispatch_calls() == dispatches_before,
+        "focus-generation: no engine call", "");
+  Check(env.doc_a->diagnostics().store.text_mutations == 0,
+        "focus-generation: no document write", "");
+  return Finish();
+}
+
+// Rapid A -> B -> A -> B switching fills the bounded retirement ledger. The refused target
+// is NOT promised bound and no client is created for it. After the ledger is terminal the
+// controller re-reads the CURRENT focus (B), binds it, and the refused key is not replayed.
+int RunFocusGuardRetireRebindLatest() {
+  ControlledObservedEnv env;
+  if (!SetupControlledObserved(&env, TestDocumentOptions{L"", 0, 0},
+                               "focus-retire-rebind")) {
+    return Finish();
+  }
+  TestDocument* doc_b = nullptr;
+  if (!CreateDocumentB(&env, &doc_b, "focus-retire-rebind")) {
+    return Finish();
+  }
+  const std::size_t clients_before = env.clients->created().size();
+  auto switch_focus = [&](TestDocument* document, const char* label) {
+    oct::FocusCallResult focus;
+    Check(oct::SetThreadFocus(*env.host, document, &focus, &env.error),
+          std::string(label) + ": real SetFocus", env.error);
+    const oct::ObserverDriveResult driven =
+        oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+    Check(driven.settled, std::string(label) + ": the observer settled",
+          oct::DescribeObserverSnapshot(driven.final_state));
+  };
+
+  switch_focus(doc_b, "focus-retire-rebind: A to B");
+  Check(env.coordinator->bound(),
+        "focus-retire-rebind: B is bound while A retires", "");
+  switch_focus(env.doc_a, "focus-retire-rebind: B to A");
+  Check(!env.coordinator->bound(),
+        "focus-retire-rebind: A is refused while the ledger is full", "");
+  Check(env.coordinator->Snapshot().retirement.retiring_bindings == 2,
+        "focus-retire-rebind: the bounded ledger holds two retirements",
+        std::to_string(
+            env.coordinator->Snapshot().retirement.retiring_bindings));
+  Check(env.controller->Snapshot().rebind_pending,
+        "focus-retire-rebind: a target recheck is pending, not a bound target", "");
+  switch_focus(doc_b, "focus-retire-rebind: A to B again");
+  Check(!env.coordinator->bound(),
+        "focus-retire-rebind: the newest target is still not promised bound", "");
+  Check(env.controller->Snapshot().binds_paused_retiring >= 2,
+        "focus-retire-rebind: both refused targets were paused as Retiring",
+        std::to_string(env.controller->Snapshot().binds_paused_retiring));
+  Check(env.clients->created().size() == clients_before + 1,
+        "focus-retire-rebind: refused targets created no engine client",
+        "created=" + std::to_string(env.clients->created().size()) +
+            " expected=" + std::to_string(clients_before + 1));
+
+  const std::uint64_t dispatches_before = env.harness.backend->dispatch_calls();
+  const ex::TextKey h = Letter(L'h');
+  WorkId id;
+  const SubmitStatus paused = env.coordinator->SubmitKey(h.event, h.text, &id);
+  Check(paused == SubmitStatus::kNotBound && !id.valid(),
+        "focus-retire-rebind: input while unbound creates no work",
+        DescribeSubmitStatus(paused));
+  Check(env.harness.backend->dispatch_calls() == dispatches_before,
+        "focus-retire-rebind: no engine call for the unbound key", "");
+  Check(env.coordinator->Snapshot().works_accepted == 0,
+        "focus-retire-rebind: the refused key was never accepted", "");
+
+  // Advance the real retirement facts, then let the controller re-read the current focus.
+  const ULONGLONG deadline = ::GetTickCount64() + 30000;
+  CoordinatorSnapshot snapshot = env.coordinator->Snapshot();
+  for (;;) {
+    env.coordinator->Pump();
+    env.controller->Pump();
+    env.observer->Pump();
+    env.host->DispatchQueuedMessages();
+    snapshot = env.coordinator->Snapshot();
+    if (snapshot.bound && snapshot.retirement.retiring_bindings == 0) {
+      break;
+    }
+    if (::GetTickCount64() >= deadline) {
+      break;
+    }
+    if (snapshot.retirement.pending_edit_event != nullptr) {
+      env.host->PumpUntil(snapshot.retirement.pending_edit_event, 20);
+    } else if (snapshot.retirement.pending_close_request.valid()) {
+      env.harness.executor->WaitForResult(
+          snapshot.retirement.pending_close_request, std::chrono::milliseconds(20));
+    } else if (snapshot.retirement.pending_engine_request.valid()) {
+      env.harness.executor->WaitForResult(
+          snapshot.retirement.pending_engine_request,
+          std::chrono::milliseconds(20));
+    } else {
+      ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+    }
+  }
+  Check(snapshot.bound && snapshot.retirement.retiring_bindings == 0,
+        "focus-retire-rebind: the binding is restored after retirement",
+        DescribeSnapshot(snapshot));
+  Check(env.controller->Snapshot().rebind_requests >= 1,
+        "focus-retire-rebind: the controller revalidated the current target",
+        std::to_string(env.controller->Snapshot().rebind_requests));
+  Check(!env.controller->Snapshot().rebind_pending,
+        "focus-retire-rebind: no stale target is still pending", "");
+  ContextIdRecord b_record;
+  env.registry->Observe(doc_b->context(), &b_record);
+  Check(snapshot.identity.context_id == b_record.context_id,
+        "focus-retire-rebind: the restored binding is the LATEST target B",
+        "bound=" + std::to_string(snapshot.identity.context_id) +
+            " latest=" + std::to_string(b_record.context_id));
+  Check(env.clients->created().size() == clients_before + 2,
+        "focus-retire-rebind: only the two real B bindings created clients",
+        "created=" + std::to_string(env.clients->created().size()) +
+            " expected=" + std::to_string(clients_before + 2));
+  Check(snapshot.retirement.close_requests ==
+            snapshot.retirement.close_results_taken,
+        "focus-retire-rebind: every close result was consumed",
+        std::to_string(snapshot.retirement.close_requests) + "/" +
+            std::to_string(snapshot.retirement.close_results_taken));
+  CheckDocText(doc_b->text_utf16(), L"",
+               "focus-retire-rebind: the refused key was not replayed");
+
+  const ex::TextKey a = Letter(L'a');
+  const DriveResult typed = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                            *env.harness.executor, a.event,
+                                            a.text, "focus-retire-rebind: B types");
+  CheckOutcome(typed.final_state, WorkOutcome::kApplied,
+               "focus-retire-rebind: fresh input on the restored target applies");
+  CheckDocText(doc_b->text_utf16(), L"a",
+               "focus-retire-rebind: only the fresh key reached B");
+  CheckDocText(env.doc_a->text_utf16(), L"",
+               "focus-retire-rebind: A was not touched");
+  return Finish();
+}
+
 int RunObservedBindingCase(const std::string& case_name, const Options& options) {
   if (case_name == "observed-bind-and-type") return RunObservedBindAndType();
   if (case_name == "observed-external-selection") return RunObservedExternalSelection();
@@ -1288,6 +1903,27 @@ int RunObservedBindingCase(const std::string& case_name, const Options& options)
   }
   if (case_name == "observed-real-compose" && !options.rime_dll.empty()) {
     return RunObservedRealComposeProgress(options);
+  }
+  if (case_name == "focus-guard-submit-target") {
+    return RunFocusGuardSubmitTargetChanged();
+  }
+  if (case_name == "focus-guard-engine-target") {
+    return RunFocusGuardEngineResultTargetChanged();
+  }
+  if (case_name == "focus-guard-edit-target") {
+    return RunFocusGuardEditWaitTargetChanged();
+  }
+  if (case_name == "focus-guard-thread-lost") {
+    return RunFocusGuardThreadFocusLost();
+  }
+  if (case_name == "focus-guard-foreign-dm") {
+    return RunFocusGuardForeignDocumentManager();
+  }
+  if (case_name == "focus-guard-generation") {
+    return RunFocusGuardGenerationChanged();
+  }
+  if (case_name == "focus-guard-retire-rebind") {
+    return RunFocusGuardRetireRebindLatest();
   }
   return -1;
 }

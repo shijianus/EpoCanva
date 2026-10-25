@@ -1,4 +1,4 @@
-// EpoCanva P3.10 -- the coordinator side of the context observer.
+// EpoCanva P3.10/P3.13 -- the coordinator side of the context observer.
 //
 // WHAT THIS IS. A small adapter that turns the observer's three binding events into the
 // coordinator's operations:
@@ -22,6 +22,12 @@
 // UNCERTAIN ACROSS CONTROLLERS. The controller attaches the shared ContextRegistry to the
 // coordinator. The latch is keyed by the real ITfContext, so a new controller/coordinator
 // pair that shares the registry cannot bind the same context by supplying another integer.
+//
+// TARGET AUTHORITY AND REBIND (P3.13). The controller attaches the observer as the
+// coordinator's live TargetRevalidator. A target refused as Retiring/Busy is not promised
+// bound, creates no client, and only sets `rebind_pending`. Pump() re-reads the CURRENT
+// focus after the retirement ledger is terminal; it never replays the refused target id or
+// any refused key/candidate/commit.
 //
 // NO WRITES FROM A NOTIFICATION. OnTargetLost may be called from inside
 // ITfTextEditSink::OnEndEdit. It only invalidates: the session is moved into the retirement
@@ -88,10 +94,29 @@ class ObservedBindingController final : public context::ContextObserverSink {
     std::uint64_t engine_clients_requested = 0;
     BindStatus last_bind_status = BindStatus::kOk;
     context::ContextDropReason last_loss_reason = context::ContextDropReason::kNone;
+    context::TargetBindingEvidence last_bind_evidence =
+        context::TargetBindingEvidence::kNone;
+    // P3.13: a target refused as Retiring/Busy is not promised bound. The controller
+    // remembers that a recheck is owed and, once the retirement ledger is terminal, asks
+    // the observer to re-read the CURRENT GetFocus/GetTop. The refused target itself is
+    // never replayed and no client is created for it.
+    bool rebind_pending = false;
+    std::uint64_t rebind_requests = 0;
+    std::uint64_t rebind_retries = 0;
+    std::uint64_t rebind_revalidations = 0;
+    std::uint64_t last_refused_context_id = 0;
+    std::uint64_t last_refused_generation = 0;
+    BindStatus last_refusal = BindStatus::kOk;
     bool coordinator_bound = false;
   };
 
   Diagnostics Snapshot() const;
+
+  // P3.13: advances a pending rebind. Called by the host after ContextCoordinator::Pump,
+  // outside every TSF notification. It does nothing while the coordinator is busy or its
+  // retirement ledger is non-empty, then asks the observer for a fresh read of the current
+  // TSF focus. No stored target, key, candidate or commit is replayed.
+  void Pump();
 
  private:
   context::ContextObserver& observer_;
@@ -99,6 +124,7 @@ class ObservedBindingController final : public context::ContextObserverSink {
   context::ContextRegistry& registry_;
   ObservedEngineClients& clients_;
   Diagnostics diagnostics_;
+  bool rebind_pending_ = false;
 };
 
 }  // namespace coordinator
