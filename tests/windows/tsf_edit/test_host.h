@@ -69,6 +69,10 @@ struct TestDocumentOptions {
   // asynchronous ones are deferred through the message window like async_locks. A
   // reader that first asks TF_ES_SYNC must fall back to TF_ES_ASYNC and wait.
   bool refuse_sync_locks = false;
+  // Fail the store's GetSelection answer while a lock is held. Used to produce a real
+  // query-failure shape in the InputScope read (the selection the property is read over
+  // is unavailable), distinct from absent metadata.
+  bool refuse_selection_reads = false;
   // InputScope metadata the document's store publishes through the real attribute path.
   TestScopeAnswer scope_answer = TestScopeAnswer::kNone;
   std::vector<long> input_scopes;
@@ -153,6 +157,8 @@ class TestDocument {
   void SetReadOnly(bool read_only);
   // Changes the InputScope metadata the document's store publishes.
   void SetScopeAnswer(TestScopeAnswer answer, std::vector<long> scopes);
+  // Flips whether the store answers GetSelection with a failure while locked.
+  void SetRefuseSelectionReads(bool refuse);
 
   // --- real application-side compartment writes -----------------------------------------
   // The application owns its context's compartments (the predefined-compartments

@@ -106,20 +106,25 @@ struct PlanDecision {
 };
 
 // The pure mapping. Rules, in order:
-//   1. engine_refused (or no engine call at all)                -> kNoEdit
-//   2. state_status != kOk, or commit_status not kNoCommit/kRead -> kInvalidObservation
-//   3. commit present AND engine still composing with preedit    -> kUnsupportedShape
-//   4. commit present:
+//   1. no engine call at all (not dispatched / deferred)       -> kNoEdit
+//   2. a call ran, state_status != kOk / invalid, or commit
+//      status not kNoCommit/kRead                              -> kInvalidObservation
+//      (an unreadable observation of a dispatched call is never kNoEdit, even when the
+//      engine reported the call unhandled)
+//   3. a call ran, the observation is readable, and the engine
+//      reported unhandled/refused                              -> kNoEdit
+//   4. commit present AND engine still composing with preedit    -> kUnsupportedShape
+//   5. commit present:
 //        composition locally active                              -> kCommit(commit text)
 //        no local composition, commit text empty                 -> kNoEdit (nothing to
 //                                                                   insert; the no-preedit
 //                                                                   commit path refuses it)
 //        no local composition                                    -> kCommit at tracked caret
-//   5. no commit, engine composing with non-empty preedit:
+//   6. no commit, engine composing with non-empty preedit:
 //        no local composition                                    -> kBegin at tracked caret
 //        local text equals preedit                               -> kNoEdit (already shown)
 //        otherwise                                               -> kUpdate(preedit)
-//   6. no commit, engine not composing (or empty preedit):
+//   7. no commit, engine not composing (or empty preedit):
 //        local composition active                                -> kCancel
 //        otherwise                                               -> kNoEdit
 PlanDecision DecidePlanFromEngine(const LocalDocumentView& view,

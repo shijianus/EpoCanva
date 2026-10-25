@@ -26,6 +26,8 @@ add_executable(tsf_coordinator_tests
   coordinator_test_support.h
   coordination_tests.cc
   coordination_tests.h
+  input_permission_gate_tests.cc
+  input_permission_gate_tests.h
   real_engine_tests.cc
   real_engine_tests.h
   "${_tsf_edit_tests_dir}/inputscope_test_guids.cc"
@@ -145,6 +147,48 @@ add_test(
     "-DPASS_ARGS=--case;can-fail"
     -DTIMEOUT_SECONDS=120
     -P ${_coordinator_assert})
+
+# --- P3.9: coordinator admission over REAL TSF metadata ---------------------------------
+#
+# The production PermissionSource reads GetStatus, the KEYBOARD_DISABLED/EMPTYCONTEXT
+# compartments and GUID_PROP_INPUTSCOPE through real edit sessions on the P3.7 host.
+# The engine is the controlled backend, so the "no engine call" checks are direct
+# counters. No case hands the coordinator an Allowed value.
+
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.permission_real_allow permission-real-allow)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.permission_real_deny permission-real-deny)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.permission_real_unknown permission-real-unknown)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.permission_real_async permission-real-async)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.permission_real_flip_before_apply
+  permission-real-flip-before-apply)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.permission_real_engine_ran_refused
+  permission-real-engine-ran-refused)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.permission_real_generation permission-real-generation)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.permission_real_close_pending
+  permission-real-close-pending)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.permission_real_balance permission-real-balance)
+
+set_tests_properties(
+  windows.tsf_coordinator.permission_real_allow
+  windows.tsf_coordinator.permission_real_deny
+  windows.tsf_coordinator.permission_real_unknown
+  windows.tsf_coordinator.permission_real_async
+  windows.tsf_coordinator.permission_real_flip_before_apply
+  windows.tsf_coordinator.permission_real_engine_ran_refused
+  windows.tsf_coordinator.permission_real_generation
+  windows.tsf_coordinator.permission_real_close_pending
+  windows.tsf_coordinator.permission_real_balance
+  PROPERTIES TIMEOUT 240
+             LABELS "windows;tsf;coordinator;permission;metadata;real")
 
 # --- stage 2: the real English engine through the real TSF store ------------------------
 #
@@ -270,3 +314,4 @@ set_tests_properties(
              LABELS "windows;tsf;coordinator;context;binding;generation")
 
 message(STATUS "  tsf_coordinator stage-1 cases: 14 (13 behavioural + can_fail)")
+message(STATUS "  tsf_coordinator permission cases: 9 (real TSF metadata, controlled engine)")

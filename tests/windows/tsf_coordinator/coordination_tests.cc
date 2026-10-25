@@ -67,6 +67,10 @@ input::KeyEventSnapshot SpecialKey(std::uint32_t virtual_key) {
 struct ControlledCase {
   std::unique_ptr<TestHost> host;
   ControlledHarness harness;
+  // The explicit test-owned permission seam. The coordinator's callback-time recheck
+  // still reads the REAL metadata of the test document, so a case that needs a
+  // last-moment change flips the document's real scope/read-only state, not this knob.
+  ManualPermissionSource permission;
   ContextCoordinator* coordinator = nullptr;
   std::unique_ptr<ContextCoordinator> coordinator_owner;
   TestDocument* document = nullptr;
@@ -100,14 +104,14 @@ bool SetupControlledCase(ControlledCase* setup, const TestDocumentOptions& optio
     return false;
   }
   setup->coordinator_owner = std::make_unique<ContextCoordinator>(
-      *setup->harness.executor, setup->host->client_id());
+      *setup->harness.executor, setup->host->client_id(), setup->permission);
   setup->coordinator = setup->coordinator_owner.get();
   const BindStatus bound = setup->coordinator->Bind(
       setup->document->context(), setup->document->context_id(),
       options.initial_selection_start_utf16, setup->harness.client_a);
   Check(bound == BindStatus::kOk, std::string(label) + ": bound", DescribeBindStatus(bound));
   if (grant_allowed) {
-    setup->coordinator->SetPermission(edit::InputPermission::kAllowed);
+    setup->permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
   }
   return bound == BindStatus::kOk;
 }
@@ -209,6 +213,25 @@ int RunConversionPure() {
   Check(DecidePlanFromEngine(view_h, unhandled).kind == PlanDecisionKind::kNoEdit,
         "conversion: no engine call is NoEdit", "");
 
+  // P3.9 ordering: a call that ran but whose observation is unreadable is never NoEdit,
+  // even when the engine also reported the call unhandled. A call that never ran is
+  // NoEdit regardless of the (irrelevant) observation fields.
+  EngineObservation dispatched_unreadable = HandledObservation(StateWithPreedit(he));
+  dispatched_unreadable.engine_refused = true;
+  dispatched_unreadable.state_status = engine::SessionStateStatus::kStatusFailed;
+  Check(DecidePlanFromEngine(view_h, dispatched_unreadable).kind ==
+            PlanDecisionKind::kInvalidObservation,
+        "conversion: dispatched + unreadable is not masked by the refusal branch", "");
+  EngineObservation not_dispatched_unreadable =
+      HandledObservation(StateWithPreedit(he));
+  not_dispatched_unreadable.engine_call_made = false;
+  not_dispatched_unreadable.engine_refused = true;
+  not_dispatched_unreadable.state_status = engine::SessionStateStatus::kStatusFailed;
+  Check(DecidePlanFromEngine(view_h, not_dispatched_unreadable).kind ==
+            PlanDecisionKind::kNoEdit,
+        "conversion: not-dispatched stays distinguishable from dispatched-but-failed",
+        "");
+
   // An unreadable state cannot be mapped.
   EngineObservation broken = HandledObservation(StateWithPreedit(he));
   broken.state_status = engine::SessionStateStatus::kStatusFailed;
@@ -248,12 +271,12 @@ int RunBindAndGates() {
   Check(setup.document->store()->diagnostics().request_lock_calls == 0,
         "gates: Unknown requested no edit", "");
 
-  coordinator.SetPermission(edit::InputPermission::kDenied);
+  setup.permission.Set(epocanva::tsf::context::PermissionState::kDenied);
   Check(coordinator.SubmitKey(h.event, h.text, &id) == SubmitStatus::kPermissionDenied,
         "gates: Denied permission refuses before the engine", "");
   Check(backend.dispatch_calls() == 0, "gates: Denied made no engine call", "");
 
-  coordinator.SetPermission(edit::InputPermission::kAllowed);
+  setup.permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
   const BindStatus rebind = coordinator.Bind(setup.document->context(),
                                              setup.document->context_id(), 0,
                                              setup.harness.client_a);
@@ -383,23 +406,40 @@ int RunEvaluatePure() {
   ContextCoordinator& coordinator = *setup.coordinator;
   const auto& backend = *setup.harness.backend;
 
+  // Evaluate never queries permission; the coordinator's cached verdict is populated by
+  // work items. Prime it with one real work item, then prove repeated evaluation adds
+  // nothing of its own.
   const executor_tests::TextKey h = Letter(L'h');
+  const DriveResult primed = TypeKeyAndDrive(coordinator, *setup.host,
+                                             *setup.harness.executor, h.event, h.text,
+                                             "evaluate: prime the cached verdict");
+  CheckOutcome(primed.final_state, WorkOutcome::kApplied,
+               "evaluate: the priming work applied");
+  const engine::CapacityUsage capacity_before = setup.harness.executor->capacity();
+  const std::uint64_t dispatches_before = backend.dispatch_calls();
+  const auto diagnostics_before = setup.document->diagnostics().store;
+  const std::wstring text_before = setup.document->text_utf16();
+
+  const executor_tests::TextKey e = Letter(L'e');
   for (int index = 0; index < 3; ++index) {
-    const input::KeyDecision decision = coordinator.Evaluate(h.event, h.text);
+    const input::KeyDecision decision = coordinator.Evaluate(e.event, e.text);
     Check(decision.disposition == input::KeyDisposition::kEngineTextCandidate,
           "evaluate: letter is an engine candidate", "");
-    Check(decision.ascii_code_point == static_cast<std::uint32_t>(L'h'),
+    Check(decision.ascii_code_point == static_cast<std::uint32_t>(L'e'),
           "evaluate: the candidate carries the scalar", "");
   }
   const engine::CapacityUsage capacity = setup.harness.executor->capacity();
-  Check(capacity.occupied == 0, "evaluate: no executor request exists",
+  Check(capacity.occupied == capacity_before.occupied,
+        "evaluate: no executor request exists",
         std::to_string(capacity.occupied));
-  Check(backend.dispatch_calls() == 0 && backend.evaluate_calls() == 0,
+  Check(backend.dispatch_calls() == dispatches_before && backend.evaluate_calls() == 0,
         "evaluate: neither dispatch nor evaluate was submitted", "");
   const auto diagnostics = setup.document->diagnostics().store;
-  Check(diagnostics.request_lock_calls == 0 && diagnostics.text_mutations == 0,
+  Check(diagnostics.request_lock_calls == diagnostics_before.request_lock_calls &&
+            diagnostics.text_mutations == diagnostics_before.text_mutations,
         "evaluate: no edit was requested", "");
-  CheckDocText(setup.document->text_utf16(), L"", "evaluate: the document is untouched");
+  CheckDocText(setup.document->text_utf16(), text_before,
+               "evaluate: the document is untouched");
   return Finish();
 }
 
@@ -463,7 +503,7 @@ int RunEnginePendingInvalidate() {
                                             setup.harness.client_b);
   Check(bound == BindStatus::kOk, "engine-pending: re-bind after discard",
         DescribeBindStatus(bound));
-  coordinator.SetPermission(edit::InputPermission::kAllowed);
+  setup.permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
   const executor_tests::TextKey a = Letter(L'a');
   const DriveResult typed = TypeKeyAndDrive(coordinator, *setup.host,
                                             *setup.harness.executor, a.event, a.text,
@@ -532,7 +572,7 @@ int RunEditPendingInvalidate() {
   Check(coordinator.Bind(document_b->context(), document_b->context_id(), 0,
                          setup.harness.client_b) == BindStatus::kOk,
         "edit-pending: the new binding is accepted at once", "");
-  coordinator.SetPermission(edit::InputPermission::kAllowed);
+  setup.permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
 
   // The deferred grant now dispatches; the OLD callback must refuse (invalidated session)
   // and write to neither document.
@@ -570,31 +610,38 @@ int RunPermissionChangeQueued() {
   WorkId id;
   Check(coordinator.SubmitKey(h.event, h.text, &id) == SubmitStatus::kAccepted,
         "permission-queued: submit accepted while allowed", "");
-  coordinator.SetPermission(edit::InputPermission::kDenied);
+  setup.permission.Set(epocanva::tsf::context::PermissionState::kDenied);
   backend->ReleaseDispatches();
 
   const DriveResult driven =
       DriveToCompletion(coordinator, *setup.host, *setup.harness.executor, 20000);
   Check(driven.completed, "permission-queued: the work terminated",
         DescribeSnapshot(driven.final_state));
-  CheckOutcome(driven.final_state, WorkOutcome::kRejected,
-               "permission-queued: the changed permission rejected the work");
+  CheckOutcome(driven.final_state, WorkOutcome::kNeedsResync,
+               "permission-queued: the changed permission is an engine/host divergence");
   Check(driven.final_state.cause == RejectCause::kPermissionChangedWhileQueued,
         "permission-queued: the cause names the permission change",
         DescribeRejectCause(driven.final_state.cause));
+  Check(driven.final_state.gate == CoordinatorGate::kBlockedNeedsResync,
+        "permission-queued: the binding is blocked, not quietly reusable",
+        DescribeCoordinatorGate(driven.final_state.gate));
   Check(backend->dispatch_calls() == 1,
         "permission-queued: the engine had consumed the key (refusal is at apply time)",
         std::to_string(backend->dispatch_calls()));
   const auto diagnostics = setup.document->diagnostics().store;
   Check(diagnostics.request_lock_calls == 0,
         "permission-queued: no edit was ever requested", "");
+  Check(diagnostics.text_mutations == 0,
+        "permission-queued: the document is untouched", "");
   CheckDocText(setup.document->text_utf16(), L"",
                "permission-queued: the document is untouched");
 
   const executor_tests::TextKey e = Letter(L'e');
   WorkId second;
-  Check(coordinator.SubmitKey(e.event, e.text, &second) == SubmitStatus::kPermissionDenied,
-        "permission-queued: further submits are refused at the gate", "");
+  const SubmitStatus blocked_submit = coordinator.SubmitKey(e.event, e.text, &second);
+  Check(blocked_submit == SubmitStatus::kBlockedNeedsResync,
+        "permission-queued: further submits are refused until resync",
+        DescribeSubmitStatus(blocked_submit));
   Check(backend->dispatch_calls() == 1, "permission-queued: no second engine call", "");
   return Finish();
 }
@@ -629,16 +676,24 @@ int RunPermissionChangeEditPending() {
         "permission-edit: the edit is pending behind the deferred lock",
         DescribeSnapshot(snapshot));
 
-  coordinator.SetPermission(edit::InputPermission::kUnknown);
+  // A real metadata change while the lock is deferred. The coordinator's pre-edit query
+  // already said Allowed, so only the P3.9 callback-time recheck can see this, and it must
+  // refuse before any TSF call.
+  setup.document->SetScopeAnswer(
+      epocanva::tsf::edit::test::TestScopeAnswer::kScopes, {31L});  // IS_PASSWORD
   setup.host->PumpUntil(coordinator.EditCompletionEvent(), 5000);
   coordinator.Pump();
   snapshot = coordinator.Snapshot();
-  Check(snapshot.phase == WorkPhase::kIdle && snapshot.outcome == WorkOutcome::kRejected,
-        "permission-edit: the callback-time permission check rejected the edit",
+  Check(snapshot.phase == WorkPhase::kIdle &&
+            snapshot.outcome == WorkOutcome::kNeedsResync,
+        "permission-edit: the callback-time real-metadata check rejected the edit",
         DescribeSnapshot(snapshot));
-  Check(snapshot.last_edit_reason == edit::EditRejectReason::kPermissionUnknown,
+  Check(snapshot.last_edit_reason == edit::EditRejectReason::kPermissionDenied,
         "permission-edit: P3.7 named the permission refusal",
         edit::DescribeEditRejectReason(snapshot.last_edit_reason));
+  Check(snapshot.permission_rechecks == 1,
+        "permission-edit: exactly one callback-time recheck ran",
+        std::to_string(snapshot.permission_rechecks));
   const auto diagnostics = setup.document->diagnostics().store;
   // The deferred lock really was granted and the callback really ran; the refusal happened
   // inside the callback (P3.7's permission re-check), before any TSF call.
@@ -681,40 +736,34 @@ int RunRefusalsNotApplied() {
     const SubmitStatus submitted =
         setup.coordinator->SubmitKey(h.event, h.text, &id);
     Check(submitted == SubmitStatus::kAccepted,
-          std::string(shape.label) + ": submit accepted", "");
-    // Bounded drive. For the refused-write-lock shape msctf accepts the asynchronous
-    // request (TF_S_ASYNC) but the store never grants the lock, so DoEditSession never
-    // runs and the edit stays pending forever -- exactly the "cannot assume DoEditSession
-    // will be called" path. The bounded wait ends without a completion, and the explicit
-    // invalidation below gives the work its terminal state; no sleep is consulted.
-    const DriveResult driven =
-        DriveToCompletion(*setup.coordinator, *setup.host, *setup.harness.executor,
-                          shape.refuse_write_locks ? 1500 : 20000);
-    if (shape.refuse_write_locks) {
-      Check(!driven.completed && driven.final_state.phase == WorkPhase::kEditPending &&
-                driven.final_state.outcome != WorkOutcome::kApplied,
-            std::string(shape.label) + ": the never-granted edit stays unapplied",
-            DescribeSnapshot(driven.final_state));
+          std::string(shape.label) + ": submit accepted (the manual seam says Allowed)",
+          DescribeSubmitStatus(submitted));
+    // The engine has run by the time these shapes are exercised. A refusal or a lock that
+    // is never granted therefore leaves the engine view and the document divergent; the
+    // terminal state is NeedsResync, and a callback that never arrives is ended by the
+    // explicit invalidation below -- never by assuming DoEditSession will run.
+    DriveResult driven =
+        DriveToCompletion(*setup.coordinator, *setup.host, *setup.harness.executor, 5000);
+    if (!driven.completed) {
       setup.coordinator->InvalidateBinding();
-      const CoordinatorSnapshot after =
-          setup.coordinator->Snapshot();
+      const CoordinatorSnapshot after = setup.coordinator->Snapshot();
       Check(after.phase == WorkPhase::kIdle &&
                 after.outcome == WorkOutcome::kAbandonedStale,
-            std::string(shape.label) + ": invalidation terminalizes the stuck edit",
+            std::string(shape.label) +
+                ": a never-completing edit is terminal after explicit invalidation",
             DescribeSnapshot(after));
-      const auto lock_diagnostics = setup.document->diagnostics().store;
-      Check(lock_diagnostics.write_lock_refusals >= 1,
-            std::string(shape.label) + ": the store really refused the lock",
-            std::to_string(lock_diagnostics.write_lock_refusals));
+      driven.final_state = after;
     } else {
-      Check(driven.completed, std::string(shape.label) + ": the work terminated",
+      Check(driven.final_state.outcome == WorkOutcome::kNeedsResync,
+            std::string(shape.label) +
+                ": engine ran but the edit did not apply -> NeedsResync",
             DescribeSnapshot(driven.final_state));
-      Check(driven.final_state.outcome == WorkOutcome::kRejected,
-            std::string(shape.label) + ": the work ended Rejected",
-            DescribeWorkOutcome(driven.final_state.outcome));
       Check(driven.final_state.last_edit_status == edit::EditStatus::kRejected,
             std::string(shape.label) + ": P3.7 reported a clean rejection",
             edit::DescribeEditStatus(driven.final_state.last_edit_status));
+      Check(driven.final_state.gate == CoordinatorGate::kBlockedNeedsResync,
+            std::string(shape.label) + ": the binding is blocked",
+            DescribeCoordinatorGate(driven.final_state.gate));
     }
     const auto diagnostics = setup.document->diagnostics().store;
     Check(diagnostics.text_mutations == 0,
@@ -766,11 +815,12 @@ int RunNeedsResyncFaultCase() {
   }
   executor_tests::TakeOrFail(*executor, create, 10000, "needs-resync create");
 
-  ContextCoordinator coordinator(*executor, host->client_id());
+  ManualPermissionSource permission;
+  permission.Set(epocanva::tsf::context::PermissionState::kAllowed);
+  ContextCoordinator coordinator(*executor, host->client_id(), permission);
   Check(coordinator.Bind(document->context(), document->context_id(), 0, client) ==
             BindStatus::kOk,
         "needs-resync: bound", "");
-  coordinator.SetPermission(edit::InputPermission::kAllowed);
 
   const executor_tests::TextKey h = Letter(L'h');
   const DriveResult driven =
@@ -801,7 +851,6 @@ int RunNeedsResyncFaultCase() {
   Check(coordinator.Bind(document->context(), document->context_id(), 0, client) ==
             BindStatus::kOk,
         "needs-resync: re-bind after invalidation", "");
-  coordinator.SetPermission(edit::InputPermission::kAllowed);
   const DriveResult next =
       TypeKeyAndDrive(coordinator, *host, *executor, e.event, e.text, "needs-resync: next");
   CheckOutcome(next.final_state, WorkOutcome::kApplied,

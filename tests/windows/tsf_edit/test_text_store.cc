@@ -42,6 +42,7 @@ TestTextStore::TestTextStore(const TestStoreOptions& options)
       text_utf16_(options.initial_text_utf16),
       refuse_compositions_(options.refuse_compositions),
       read_only_(options.read_only),
+      refuse_selection_reads_(options.refuse_selection_reads),
       scope_answer_(options.scope_answer),
       input_scopes_(options.input_scopes) {
   selection_.acpStart = options.initial_selection_start_utf16;
@@ -379,6 +380,11 @@ HRESULT STDMETHODCALLTYPE TestTextStore::GetSelection(ULONG index, ULONG count,
   }
   if (!HasReadLock()) {
     return TS_E_NOLOCK;
+  }
+  if (refuse_selection_reads_) {
+    // A genuine query failure for a reader that is already inside its lock: the
+    // selection payload is unavailable, not absent.
+    return E_FAIL;
   }
   if (index != 0 && index != TS_DEFAULT_SELECTION) {
     return TS_E_NOSELECTION;
@@ -779,6 +785,13 @@ HRESULT STDMETHODCALLTYPE TestTextStore::RetrieveRequestedAttrs(ULONG count,
   attributes[0].idAttr = GUID_PROP_INPUTSCOPE;
   attributes[0].dwOverlapId = 0;
   ::VariantInit(&attributes[0].varValue);
+  if (scope_answer_ == TestScopeAnswer::kEmptyValue) {
+    // A well-formed answer that carries no value. Whether msctf surfaces this as
+    // S_OK+VT_EMPTY or as its no-coverage answer, the reader must treat it as absent,
+    // never as a permission fact.
+    *fetched = 1;
+    return S_OK;
+  }
   if (scope_answer_ == TestScopeAnswer::kWrongType) {
     // The documented payload for this property is VT_UNKNOWN holding ITfInputScope; a
     // VT_I4 is a contract violation the product layer must refuse to interpret.
@@ -1000,6 +1013,10 @@ void TestTextStore::SetRefuseWriteLocks(bool enabled) {
 
 void TestTextStore::SetRefuseSyncLocks(bool enabled) {
   options_.refuse_sync_locks = enabled;
+}
+
+void TestTextStore::SetRefuseSelectionReads(bool enabled) {
+  refuse_selection_reads_ = enabled;
 }
 
 void TestTextStore::SetRefuseCompositions(bool refuse) {

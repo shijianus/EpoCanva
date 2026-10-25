@@ -533,6 +533,42 @@ int RunScopeAbsentWrongTypeFail() {
           DescribeDecision(result.decision));
   }
   {
+    // A well-formed answer whose VARIANT carries no payload. Whether msctf surfaces it as
+    // S_OK+VT_EMPTY or as its no-coverage answer, it is an absence, not a permission fact.
+    Case setup;
+    TestDocumentOptions options;
+    options.scope_answer = TestScopeAnswer::kEmptyValue;
+    if (!SetupCase(&setup, options, "empty-value")) {
+      return Finish();
+    }
+    const PermissionQueryResult result = QueryOnce(setup, "empty-value");
+    CheckState(result, PermissionState::kAllowed,
+               "empty-value: a normal empty value is absent, not Unknown");
+    Check(result.decision.unknown_findings == kFindingNone,
+          "empty-value: no unknown finding", DescribeDecision(result.decision));
+  }
+  {
+    // The store refuses GetSelection while the read lock is held: the InputScope range
+    // read genuinely fails, while GetStatus and both compartments stay readable. This is
+    // the distinguishable query-failure shape (as opposed to the E_FAIL ambiguity below).
+    Case setup;
+    TestDocumentOptions options;
+    options.refuse_selection_reads = true;
+    if (!SetupCase(&setup, options, "scope-query-failure")) {
+      return Finish();
+    }
+    const PermissionQueryResult result = QueryOnce(setup, "scope-query-failure");
+    CheckState(result, PermissionState::kUnknown,
+               "query-failure: an unreadable selection read is Unknown");
+    Check((result.decision.unknown_findings & kFindingScopeQueryFailed) != 0,
+          "query-failure: the finding names the scope axis",
+          DescribeDecision(result.decision));
+    const PermissionQueryDiagnostics diagnostics = setup.source->Diagnostics();
+    Check(diagnostics.last_scope_stage == 1,
+          "query-failure: the failure is the selection read",
+          std::to_string(diagnostics.last_scope_stage));
+  }
+  {
     // DOCUMENTED GAP: when the context owner's RetrieveRequestedAttrs fails, the real
     // msctf.dll surfaces the same E_FAIL from GetAppProperty(...)->GetValue that an
     // attribute-free owner produces (observed on this machine, stage-2 hr=0x80004005 in
@@ -676,6 +712,51 @@ int RunAbandonPendingQuery() {
   const PermissionQueryDiagnostics diagnostics = setup.source->Diagnostics();
   Check(diagnostics.queries_abandoned == 1 && diagnostics.queries_completed == 0,
         "abandon: counted as abandoned, not completed", "");
+
+  // A second, sharper lifetime case: a new query is begun (on a different context) while
+  // the abandoned query's deferred grant is STILL queued. Each Begin must own a separate
+  // state, so the late old callback cannot complete or corrupt the new query's verdict.
+  std::string error;
+  TestDocument* document_b =
+      setup.host->CreateDocument(TestDocumentOptions{}, &error);
+  Check(document_b != nullptr, "abandon: second document created", error);
+  if (document_b == nullptr) {
+    return Finish();
+  }
+  Check(setup.source->Begin(setup.document->context(), setup.document->context_id(),
+                            /*generation=*/2),
+        "abandon: second query begun", "");
+  Check(setup.source->Status() == PermissionQueryStatus::kPending,
+        "abandon: second query pending", "");
+  setup.source->Abandon();
+  // The second document's read is synchronous (no deferred lock), so this verdict is
+  // complete before the old context's queued grant is dispatched.
+  Check(setup.source->Begin(document_b->context(), document_b->context_id(),
+                            /*generation=*/3),
+        "abandon: replacement query begun on the second context", "");
+  Check(setup.source->Status() == PermissionQueryStatus::kReady,
+        "abandon: the replacement verdict is ready before the old callback runs",
+        DescribePermissionQueryStatus(setup.source->Status()));
+  const PermissionQueryResult replacement = setup.source->Result();
+  Check(replacement.complete && replacement.decision.state == PermissionState::kAllowed,
+        "abandon: the replacement verdict is Allowed", "");
+  Check(replacement.generation == 3 &&
+            replacement.context_id == document_b->context_id(),
+        "abandon: the replacement verdict carries its own identity",
+        "generation=" + std::to_string(replacement.generation) +
+            " context=" + std::to_string(replacement.context_id));
+  setup.host->DispatchQueuedMessages();
+  const PermissionQueryResult after_callback = setup.source->Result();
+  Check(after_callback.complete &&
+            after_callback.generation == replacement.generation &&
+            after_callback.context_id == replacement.context_id &&
+            after_callback.decision.state == replacement.decision.state,
+        "abandon: a later old callback cannot rewrite the replacement verdict", "");
+  const PermissionQueryDiagnostics after = setup.source->Diagnostics();
+  Check(after.queries_completed == 1 && after.queries_abandoned == 2,
+        "abandon: exactly one completion and two abandons were counted",
+        "completed=" + std::to_string(after.queries_completed) +
+            " abandoned=" + std::to_string(after.queries_abandoned));
   return Finish();
 }
 

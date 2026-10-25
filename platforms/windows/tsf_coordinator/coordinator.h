@@ -1,17 +1,20 @@
-// EpoCanva P3.8 -- the context-binding coordinator.
+// EpoCanva P3.8/P3.9 -- the context-binding coordinator.
 //
 // WHAT THIS OBJECT IS. A small, deliberately single-purpose coordinator that connects one
 // bound TSF context to one engine client through the existing value-command executor
 // (P3.5) and the existing composition edit session (P3.7). It runs ENTIRELY on the STA
-// thread that created it. ITfContext pointers, edit sessions and composition objects never
-// leave that thread; the engine is reached only through EngineExecutor's typed commands
-// and value results, never through a Runtime/Session/Controller pointer.
+// thread that created it. ITfContext pointers, edit sessions, permission queries and
+// composition objects never leave that thread; the engine is reached only through
+// EngineExecutor's typed commands and value results, never through a
+// Runtime/Session/Controller pointer.
 //
-// WHAT IT SUPPORTS, AND ONLY THIS (brief section 2):
-//   * one current binding (ITfContext + identity/generation + engine ClientId + permission);
+// WHAT IT SUPPORTS, AND ONLY THIS:
+//   * one current binding (ITfContext + identity/generation + engine ClientId);
 //   * one in-flight work item -- a single key dispatch or a single candidate acceptance;
 //   * controlled input submitted explicitly by the host;
-//   * explicit permission (Allowed/Denied/Unknown, host-supplied);
+//   * permission resolved from REAL context metadata through an injected PermissionSource
+//     (P3.9); the coordinator itself has no manual permission setter -- the explicit
+//     Allowed/Denied knob exists only as a test-owned implementation of that interface;
 //   * explicit binding invalidation with generation bump;
 //   * real engine results landing in the real P3.7 text store through real edit sessions.
 // There is no multi-request pipeline, no message bus, no key sink, no candidate window, no
@@ -24,24 +27,40 @@
 // nothing about a future pfEaten.
 //
 // GATES, IN DOCUMENTED ORDER (Submit): closed -> busy -> not-bound -> blocked latch
-// (uncertain / needs-resync / unsupported shape) -> permission (Denied, then Unknown) ->
-// local engine-candidate evaluation -> executor admission. A Busy answer outranks a
-// permission answer because the single-flight rule is a fact about the coordinator itself.
+// (uncertain / needs-resync / unsupported shape) -> permission (Denied, then Unknown,
+// resolved from the real context metadata; a query that must go async parks the work in
+// kPermissionPending instead of refusing) -> local engine-candidate evaluation ->
+// executor admission. A Busy answer outranks a permission answer because the
+// single-flight rule is a fact about the coordinator itself.
 //
 // LIFECYCLE OF ONE WORK ITEM.
-//   Idle --Submit--> EnginePending --Pump takes result--> (convert) --> EditPending
-//        --callback completes--> terminal. Terminals: Applied (edit really succeeded),
-//   NoEdit (nothing to change), Rejected (a gate refused; no edit or a clean refusal),
-//   NeedsResync (engine dispatched but its observation is unusable; no retry, no replay),
-//   Uncertain (a TSF write could not be confirmed; the coordinator locks down),
-//   UnsupportedShape (commit + preedit in one observation; the coordinator locks down),
-//   AbandonedStale (invalidated or closed while pending; the result is discarded).
+//   Idle --Submit--> PermissionPending (only when the real query went async)
+//        --verdict Allowed--> EnginePending --Pump takes result--> (convert, and the
+//   apply-time permission re-verification, which itself may pass through
+//   PermissionPending once more) --> EditPending --callback completes--> terminal.
+//   Terminals: Applied (edit really succeeded), NoEdit (nothing to change), Rejected
+//   (a gate refused BEFORE the engine ran: a pending query answered Denied/Unknown),
+//   NeedsResync (the engine already ran but its observation is unusable, or its edit
+//   could not be applied -- including a permission change, read-only, a refused lock or
+//   a disconnected context; no retry, no replay), Uncertain (a TSF write could not be
+//   confirmed; the coordinator locks down), UnsupportedShape (commit + preedit in one
+//   observation; the coordinator locks down), AbandonedStale (invalidated or closed
+//   while pending; the result is discarded).
+//
+// ENGINE/HOST DIVERGENCE (P3.9). Once the engine has consumed an event, every outcome
+// short of a confirmed Applied or a NoEdit (document already matches) is NeedsResync or
+// worse: the engine's internal state and the document may have diverged, so the binding
+// is not quietly returned to a typeable state. An explicit InvalidateBinding (and, for
+// the engine side, a rebuilt engine client owned by the host) is the only way on. A
+// Rejected terminal therefore exists only for refusals that precede any engine call.
 //
 // TF_S_ASYNC IS PENDING, NOT APPLIED. An async edit session result stays EditPending until
-// DoEditSession really ran; only a callback-confirmed Applied makes the work Applied.
-// Close/invalidation do not assume DoEditSession will ever be called: a pending work item
-// is given its AbandonedStale terminal immediately, cleanup is not written inside the
-// callback, and a never-run callback cannot make the coordinator wait forever.
+// DoEditSession really ran; only a callback-confirmed Applied makes the work Applied. A
+// permission query behaves the same way: kPermissionPending means the real read session is
+// still queued, and no engine call and no edit exists for that work item yet. Close or
+// invalidation do not assume any callback will ever be called: pending work is given its
+// AbandonedStale terminal immediately, the query is abandoned, and cleanup is never
+// written inside a callback.
 //
 // THE UNCERTAIN LOCKDOWN. When P3.7 reports FailedPossiblyMutated or FailedAfterMutation
 // the coordinator refuses all further normal input for that context, and re-binding the
@@ -50,18 +69,25 @@
 // NeedsResync and UnsupportedShape blocks are cleared by an explicit invalidation, because
 // there the document text is known; the engine client's state is the host's to rebuild.
 //
-// PERMISSION. Unknown and Denied never dispatch to the engine and never request an edit,
-// at Submit and again when an engine result is about to be converted. A permission change
-// while a work item is queued rejects that work item; a change while an edit is pending is
-// caught again inside the P3.7 callback. This is an explicit host gate, NOT password-field
-// detection, and nothing here reads the document to classify a field.
+// PERMISSION, FROM REAL METADATA. Every work item resolves the permission from the bound
+// context's real metadata (GetStatus / KEYBOARD_DISABLED / EMPTYCONTEXT compartments /
+// the InputScope application property) through the injected PermissionSource, once before
+// the engine dispatch and once more before the edit is built; a verdict is re-validated
+// against the binding identity and generation at every use. Unknown and Denied never
+// dispatch to the engine and never request an edit. A non-Allowed verdict AFTER the
+// engine ran is NeedsResync, not a silent drop. The P3.7 session's own permission gate is
+// kept in step with each verdict as defense in depth, and its callback re-reads the real
+// metadata with its granted edit cookie immediately before any write (a permission change
+// while a lock is deferred still refuses the write). This is context metadata, not
+// content inspection: nothing here reads the document text to classify a field.
 //
-// PUMPING. Pump() is non-blocking: it takes an engine result if one is ready (TakeResult,
-// never WaitForResult), converts it, submits the edit, and harvests a completed edit
-// result if the completion event is already signalled. It never waits for the engine, never
-// waits for a TSF write lock and never dispatches STA messages. The host owns bounded
-// waiting and the message loop (P3.7 TestHost::PumpUntil / EngineExecutor::WaitForResult)
-// and drives completion from real state, not from sleeps.
+// PUMPING. Pump() is non-blocking: it advances a pending permission query when the real
+// read session completed, takes an engine result if one is ready (TakeResult, never
+// WaitForResult), converts it, submits the edit, and harvests a completed edit result if
+// the completion event is already signalled. It never waits for the engine, never waits
+// for a TSF write lock and never dispatches STA messages. The host owns bounded waiting
+// and the message loop (P3.7 TestHost::PumpUntil / EngineExecutor::WaitForResult) and
+// drives completion from real state, not from sleeps.
 //
 // PRIVACY. No network I/O exists anywhere in this path. Diagnostics and snapshots carry
 // statuses, generations and counters only -- never key text, preedit, commit text or field
@@ -83,15 +109,17 @@
 #include "engine_to_plan.h"
 #include "key_decision.h"
 #include "key_event.h"
+#include "permission_query.h"
 
 namespace epocanva {
 namespace tsf {
 namespace coordinator {
 
-// The P3.4/P3.5 engine value types and the P3.3 input types this header speaks, under
-// short names that resolve from inside this namespace.
+// The P3.4/P3.5 engine value types, the P3.3 input types and the P3.9 context types this
+// header speaks, under short names that resolve from inside this namespace.
 namespace engine = ::epocanva::windows::engine;
 namespace input = ::epocanva::windows::input;
+namespace context = ::epocanva::tsf::context;
 
 // Opaque id of one accepted work item. Never reused; 0 is invalid.
 struct WorkId {
@@ -130,6 +158,9 @@ enum class WorkKind : std::uint8_t { kNone = 0, kKey, kCandidate };
 
 enum class WorkPhase : std::uint8_t {
   kIdle = 0,
+  // The real permission query for this work item went async; no engine call and no edit
+  // exist for it yet. The verdict decides: dispatch (or apply) or reject.
+  kPermissionPending,
   // A dispatch/candidate command is accepted by the executor and its result has not been
   // taken. Still EnginePending when the result exists but was not consumed yet.
   kEnginePending,
@@ -142,8 +173,8 @@ enum class WorkOutcome : std::uint8_t {
   kNone = 0,
   kApplied,          // the edit ran and every step, including the write, succeeded
   kNoEdit,           // the engine consumed the event; the document already matches
-  kRejected,         // a gate or the edit refused; see `cause` / last-edit fields
-  kNeedsResync,      // engine dispatched, observation unusable; no retry, no replay
+  kRejected,         // a gate refused BEFORE any engine call (pending-query verdict)
+  kNeedsResync,      // engine dispatched, but its result or edit is unusable/unapplied
   kUncertain,        // a TSF write could not be confirmed; this context locks down
   kUnsupportedShape, // commit and preedit in one observation; this context locks down
   kAbandonedStale,   // invalidated/closed while pending; the old result is never applied
@@ -156,14 +187,17 @@ enum class CoordinatorGate : std::uint8_t {
   kBlockedUnsupportedShape,
 };
 
-// Why a work item ended kRejected. The P3.7 EditStatus/EditRejectReason of the edit side
-// are carried separately in the snapshot; this enumerates only the coordinator's own
-// refusals.
+// Why a work item ended kRejected or kNeedsResync. The P3.7 EditStatus/EditRejectReason
+// of the edit side are carried separately in the snapshot; this enumerates only the
+// coordinator's own refusals.
 enum class RejectCause : std::uint8_t {
   kNone = 0,
+  kPermissionDenied,             // a pending permission query answered Denied
+  kPermissionUnknown,            // a pending permission query answered Unknown
   kPermissionChangedWhileQueued, // allowed at dispatch time, not allowed at apply time
   kEngineRefused,                // the engine command reported a clean refusal
   kEngineUnavailable,            // the engine command reported the client gone
+  kEngineSubmitFailed,           // the executor refused the enqueue at dispatch time
   kEditRefused,                  // the P3.7 session refused (read-only, lock, stale text..)
   kEditFailedBeforeMutation,     // a TSF call failed before any write was issued
   kTakeFailed,                   // the result store answered with an unexpected status
@@ -183,6 +217,8 @@ struct CoordinatorSnapshot {
   bool closed = false;
   CoordinatorGate gate = CoordinatorGate::kOpen;
   edit::ContextIdentity identity{};
+  // The last verdict the real source produced for THIS binding (Unknown until one
+  // completes; Evaluate and the session gate read this cache, never a live query).
   edit::InputPermission permission = edit::InputPermission::kUnknown;
   WorkKind work_kind = WorkKind::kNone;
   WorkPhase phase = WorkPhase::kIdle;
@@ -208,14 +244,20 @@ struct CoordinatorSnapshot {
   std::uint64_t edits_applied = 0;
   std::uint64_t edits_refused = 0;
   std::uint64_t edits_stale = 0;
+  std::uint64_t permission_queries_begun = 0;
+  std::uint64_t permission_queries_completed = 0;
+  // Callback-time real-metadata rechecks the P3.7 session performed before writing.
+  std::uint64_t permission_rechecks = 0;
   std::uint64_t pumps = 0;
 };
 
 class ContextCoordinator {
  public:
-  // `executor` must outlive this object (the coordinator never stops or joins it). All
-  // methods, including Close() and the destructor, run on this STA thread.
-  ContextCoordinator(engine::EngineExecutor& executor, TfClientId tsf_client_id);
+  // `executor` and `permission_source` must outlive this object (the coordinator never
+  // stops or joins the executor and never owns the source). All methods, including
+  // Close() and the destructor, run on this STA thread.
+  ContextCoordinator(engine::EngineExecutor& executor, TfClientId tsf_client_id,
+                     context::PermissionSource& permission_source);
   ~ContextCoordinator();
 
   ContextCoordinator(const ContextCoordinator&) = delete;
@@ -224,33 +266,37 @@ class ContextCoordinator {
   // --- binding ---------------------------------------------------------------------------
   // Binds one context. `initial_caret_utf16` is the host-asserted collapsed caret in
   // UTF-16 code units at bind time; the coordinator never reads the document, so its caret
-  // mirror starts from this value and is then maintained from applied edits only.
-  // Permission starts Unknown (the safe refusal) for every new binding.
+  // mirror starts from this value and is then maintained from applied edits only. The
+  // context is AddRef'd for the binding's duration. The permission cache starts Unknown
+  // (the safe refusal) for every new binding; the first work item resolves it from real
+  // metadata.
   BindStatus Bind(ITfContext* context, std::uint64_t context_id,
                   LONG initial_caret_utf16, engine::ClientId engine_client);
 
   // Invalidates the current binding: the P3.7 session is invalidated (its generation
-  // bumps, pending plans of the old binding become Stale) and released. A pending work
-  // item is terminal immediately as AbandonedStale; an engine result that arrives later is
-  // consumed once and discarded, never applied to any context. Clears the
-  // NeedsResync/UnsupportedShape blocks (the document text is known); the Uncertain block
-  // stays with its context id. Idempotent when not bound.
+  // bumps, pending plans of the old binding become Stale) and released, the permission
+  // source is abandoned (a late read-session callback publishes nothing) and the held
+  // context reference is released. A pending work item is terminal immediately as
+  // AbandonedStale; an engine result that arrives later is consumed once and discarded,
+  // never applied to any context. Clears the NeedsResync/UnsupportedShape blocks (the
+  // document text is known); the Uncertain block stays with its context id. Idempotent
+  // when not bound.
   void InvalidateBinding();
 
   bool bound() const { return bound_; }
   edit::ContextIdentity identity() const { return identity_; }
 
   // --- permission ------------------------------------------------------------------------
-  // The explicit host gate. Applied to the current P3.7 session as well, so an edit that
-  // is already pending is refused inside its callback if the permission changed.
-  void SetPermission(edit::InputPermission permission);
+  // The last verdict the source produced for this binding. There is deliberately no
+  // setter: real verdicts come from the source's metadata queries, and the explicit
+  // Allowed/Denied knob exists only as a test-owned PermissionSource implementation.
   edit::InputPermission permission() const { return permission_; }
 
   // --- evaluation (pure) -----------------------------------------------------------------
   // The local P3.3 decision over the coordinator's own context facts. Submits nothing to
-  // the engine, requests no edit, changes no state. DecideKey's own permission field is
-  // fed from the coordinator's permission, so a Denied/Unknown field answers
-  // pass-through here too.
+  // the engine, requests no edit, queries no permission, changes no state. DecideKey's
+  // own permission field is fed from the last cached verdict, so a Denied/Unknown field
+  // answers pass-through here too.
   input::KeyDecision Evaluate(const input::KeyEventSnapshot& event,
                               const input::KeyText& text) const;
 
@@ -260,45 +306,83 @@ class ContextCoordinator {
   SubmitStatus SubmitCandidate(std::size_t candidate_index, WorkId* id);
 
   // --- non-blocking advance --------------------------------------------------------------
-  // Takes a ready engine result (once), converts it, submits the edit, and harvests an
-  // edit result whose completion event is already signalled. Never waits, never pumps
-  // messages, never blocks on the engine or a TSF lock.
+  // Advances a pending permission query whose real read session completed, takes a ready
+  // engine result (once), converts it, submits the edit, and harvests an edit result
+  // whose completion event is already signalled. Never waits, never pumps messages,
+  // never blocks on the engine or a TSF lock.
   void Pump();
 
-  // The P3.7 session's completion event while a work item is in EditPending; the host
-  // bounded-waits on it and dispatches STA messages. Invalid handle when not pending.
+  // The completion facts a pending work item is waiting on; the host bounded-waits on
+  // them and dispatches STA messages. Null handles when nothing of that kind is pending.
   HANDLE EditCompletionEvent() const;
+  HANDLE PermissionCompletionEvent() const;
 
   CoordinatorSnapshot Snapshot() const;
 
   // --- teardown --------------------------------------------------------------------------
   // Terminal. Pending work becomes AbandonedStale, a ready-but-untaken engine result is
   // consumed and discarded (an unready one is left for the executor's own stop drain --
-  // documented, not hidden), the session is invalidated, closed and destroyed. Never
-  // issues a text operation: cleanup never commits or cancels unknown text. Idempotent.
+  // documented, not hidden), the permission query is abandoned, the session is
+  // invalidated, closed and destroyed. Never issues a text operation: cleanup never
+  // commits or cancels unknown text. Idempotent.
   void Close();
 
  private:
+  // What a kPermissionPending work item is waiting to do once the verdict arrives.
+  struct PendingPermissionWork {
+    WorkKind kind = WorkKind::kNone;
+    // kKey: the submitted key, held for its dispatch decision.
+    input::KeyEventSnapshot event{};
+    input::KeyText text{};
+    // kCandidate: the accepted index.
+    std::size_t candidate_index = 0;
+    // The apply-time re-verification: the edit plan whose submission is held until the
+    // verdict arrives. The plan was decided from the engine observation BEFORE the query,
+    // so an unreadable observation is never masked by a later permission answer.
+    bool has_plan = false;
+    PlanDecision plan;
+  };
+
   bool GateBlocksSubmit(SubmitStatus* status) const;
+  // Begins a real permission query for the current binding. Returns false when the
+  // source refuses structurally (the caller refuses the work).
+  bool StartPermissionQuery();
+  // Consumes a ready verdict: validates identity/generation, caches it, mirrors it to
+  // the P3.7 session gate. Returns false unless the verdict is complete, current and
+  // Allowed.
+  bool PermissionVerdictAllows(bool* identity_current);
+  // A kPermissionPending work item advanced by Pump once its query completed.
+  void AdvancePermissionStage();
+  // Continues a permission-allowed work item into the engine dispatch.
+  void DispatchPendingWork(const PendingPermissionWork& work);
+  void FinishWorkLedger(WorkKind kind);
   SubmitStatus FinishSubmit(engine::RequestId request, WorkKind kind);
   void ResolveEngineResult(const engine::CommandResult& result);
-  void ConvertAndSubmitEdit(const EngineObservation& observation);
+  // Decides what the observation means, then (only for an edit-producing plan) resolves
+  // the permission again before submitting. NoEdit/InvalidObservation/UnsupportedShape are
+  // decided first so a permission answer cannot hide an unreadable engine result.
+  void BeginApplyAfterEngine(const EngineObservation& observation);
   void SubmitEditPlan(const PlanDecision& decision);
   void ResolveEditResult(const edit::EditResult& result);
   void ApplyViewUpdate(const edit::EditPlan& plan);
   void EndWork(WorkOutcome outcome, RejectCause cause);
-  void EnterNeedsResync(const char* why);
+  void EnterNeedsResync(const char* why, RejectCause cause);
   void EnterUncertainLockdown();
   void DiscardPendingEngineResult();
+  void CachePermission(context::PermissionState state);
 
   engine::EngineExecutor& executor_;
   TfClientId tsf_client_id_;
+  context::PermissionSource& permission_source_;
 
   bool bound_ = false;
   bool closed_ = false;
   std::uint64_t generation_counter_ = 0;
   edit::ContextIdentity identity_{};
   engine::ClientId engine_client_{};
+  // The context AddRef'd for the binding's duration; only the permission source and the
+  // P3.7 session ever receive it, both on this STA thread.
+  ITfContext* bound_context_ = nullptr;
   edit::InputPermission permission_ = edit::InputPermission::kUnknown;
   std::unique_ptr<edit::CompositionEditSession> session_;
   // 0 = no context is blocked. Set only by the uncertain lockdown; survives
@@ -314,6 +398,9 @@ class ContextCoordinator {
   std::uint64_t work_generation_ = 0;
   engine::RequestId engine_request_{};
   bool work_abandoned_ = false;
+  // The work item parked in kPermissionPending: the submitted key/candidate, or the
+  // engine observation held for its apply-time re-verification.
+  PendingPermissionWork pending_permission_;
   // The plan of the edit currently pending (EditPlan's constructors are private to its
   // factory, so the slot is an optional rather than a pre-built value).
   std::optional<edit::EditPlan> pending_plan_;
@@ -328,6 +415,8 @@ class ContextCoordinator {
   std::uint64_t edits_applied_ = 0;
   std::uint64_t edits_refused_ = 0;
   std::uint64_t edits_stale_ = 0;
+  std::uint64_t permission_queries_begun_ = 0;
+  std::uint64_t permission_queries_completed_ = 0;
   std::uint64_t pumps_ = 0;
 };
 

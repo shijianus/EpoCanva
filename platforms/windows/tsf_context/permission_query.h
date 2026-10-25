@@ -29,9 +29,10 @@
 // IDENTITY AND LIFETIME. A query is begun against one (context, context_id, generation)
 // triple and its result carries that triple; the coordinator re-validates it against
 // its binding before using a verdict. The source AddRefs the context for the duration of
-// the query and releases it in Abandon()/destructor; the property and callback objects
-// it holds are released per their contracts. A callback that never runs cannot make
-// anything wait: Abandon() returns immediately and a late callback publishes nothing.
+// the query and releases it when the query completes, is abandoned, or is destroyed; the
+// property and callback objects it holds are released per their contracts. A callback
+// that never runs cannot make anything wait: Abandon() returns immediately and a late
+// callback publishes nothing.
 //
 // WHAT IS DELIBERATELY NOT HERE. No network I/O, no document text read (the InputScope
 // property is metadata about the field, not field content), no clipboard, no UIA, no
@@ -51,6 +52,14 @@
 namespace epocanva {
 namespace tsf {
 namespace context {
+
+// Reads the same four axes again, using an edit cookie the caller already holds. This is
+// the last-moment check an edit session performs inside its own granted lock: it requests
+// no new edit session, invents no cookie, and reads only the field's metadata (status,
+// two compartments, InputScope) -- never document text. A failed read is represented in
+// the returned facts (and therefore classifies as Unknown), never as Allowed.
+PermissionFacts ReadPermissionFactsWithCookie(ITfContext* context,
+                                              TfEditCookie edit_cookie);
 
 // One resolved query, stamped with the binding identity it was begun against. Callers
 // that hold a result across time must compare identity and generation again at use
@@ -74,7 +83,7 @@ const char* DescribePermissionQueryStatus(PermissionQueryStatus status);
 struct PermissionQueryDiagnostics {
   std::uint64_t queries_begun = 0;
   std::uint64_t queries_completed = 0;   // reached a verdict (Allowed/Denied/Unknown)
-  std::uint64_t queries_abandoned = 0;
+  std::uint64_t queries_abandoned = 0;   // terminated before a verdict existed
   std::uint64_t status_reads = 0;
   std::uint64_t compartment_reads = 0;
   std::uint64_t scope_property_reads = 0;  // GetValue calls inside the read session

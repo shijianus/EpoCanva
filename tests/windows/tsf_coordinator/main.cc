@@ -17,6 +17,7 @@
 
 #include "coordinator_test_support.h"
 #include "coordination_tests.h"
+#include "input_permission_gate_tests.h"
 #include "real_engine_tests.h"
 
 int main(int argc, char** argv) {
@@ -33,6 +34,11 @@ int main(int argc, char** argv) {
       epocanva::tsf::coordinator::test::RunCoordinationCase(case_name);
   if (code >= 0) {
     return code;
+  }
+  const int permission_code =
+      epocanva::tsf::coordinator::test::RunInputPermissionGateCase(case_name);
+  if (permission_code >= 0) {
+    return permission_code;
   }
   const int real_code =
       epocanva::tsf::coordinator::test::RunRealEngineCase(case_name, options);

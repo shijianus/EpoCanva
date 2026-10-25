@@ -41,6 +41,7 @@
 #include <msctf.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "edit_plan.h"
@@ -74,6 +75,7 @@ struct CompositionEditSessionDiagnostics {
   std::uint64_t request_failures = 0;
   std::uint64_t callbacks = 0;
   std::uint64_t locks_observed = 0;
+  std::uint64_t permission_rechecks = 0;
   std::uint64_t stale = 0;
   std::uint64_t applied = 0;
   std::uint64_t rejected = 0;
@@ -107,6 +109,14 @@ class CompositionEditSession {
   void Close();
 
   void SetInputPermission(InputPermission permission);
+  // The last-moment, callback-time permission source. When set, it is called inside
+  // DoEditSession with the session's real context and the granted edit cookie, after the
+  // identity/staleness checks and before any TSF write. The value it returns is
+  // authoritative for that callback; a throw or kUnknown refuses the write. The product
+  // coordinator installs a real-metadata reader here (P3.9); P3.7-only users leave it
+  // unset and keep the SetInputPermission behaviour.
+  using PermissionRecheck = std::function<InputPermission(ITfContext*, TfEditCookie)>;
+  void SetPermissionRecheck(PermissionRecheck recheck);
   InputPermission input_permission() const;
   bool bound() const;
   ContextIdentity identity() const;

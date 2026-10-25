@@ -58,4 +58,4 @@ target_compile_options(epocanva_tsf_coordinator PRIVATE
 target_include_directories(epocanva_tsf_coordinator PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(epocanva_tsf_coordinator
-  PUBLIC epocanva_tsf_edit_layer epocanva_engine_executor)
+  PUBLIC epocanva_tsf_edit_layer epocanva_engine_executor epocanva_tsf_context)

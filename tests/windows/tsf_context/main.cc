@@ -20,7 +20,7 @@ const struct {
     {"empty-context-denied", epocanva::tsf::context::test::RunEmptyContextDenied},
     {"sensitive-scopes-denied", epocanva::tsf::context::test::RunSensitiveScopesDenied},
     {"scope-absent-wrongtype-fail", epocanva::tsf::context::test::RunScopeAbsentWrongTypeFail},
-    {"cleared-compartment-unknown", epocanva::tsf::context::test::RunClearedCompartmentRecreated},
+    {"cleared-compartment-recreated", epocanva::tsf::context::test::RunClearedCompartmentRecreated},
     {"repeated-queries-consistent", epocanva::tsf::context::test::RunRepeatedQueriesConsistent},
     {"async-query-pending", epocanva::tsf::context::test::RunAsyncQueryPending},
     {"abandon-pending-query", epocanva::tsf::context::test::RunAbandonPendingQuery},

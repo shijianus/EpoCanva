@@ -166,6 +166,12 @@ void TestDocument::SetScopeAnswer(TestScopeAnswer answer, std::vector<long> scop
   }
 }
 
+void TestDocument::SetRefuseSelectionReads(bool refuse) {
+  if (store_ != nullptr) {
+    store_->SetRefuseSelectionReads(refuse);
+  }
+}
+
 HRESULT TestDocument::SetContextCompartment(REFGUID guid, TfClientId client,
                                             LONG value) {
   if (context_ == nullptr) {
@@ -327,6 +333,7 @@ TestDocument* TestHost::CreateDocument(const TestDocumentOptions& options,
   store_options.refuse_write_locks = options.refuse_write_locks;
   store_options.refuse_compositions = options.refuse_compositions;
   store_options.refuse_sync_locks = options.refuse_sync_locks;
+  store_options.refuse_selection_reads = options.refuse_selection_reads;
   store_options.scope_answer = options.scope_answer;
   store_options.input_scopes = options.input_scopes;
   store_options.message_window = window_;

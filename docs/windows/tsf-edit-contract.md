@@ -18,6 +18,9 @@ In scope:
 * identity/generation checks, input-permission refusal, read-only refusal, asynchronous lock
   handling, stale-plan refusal, and explicit failure statuses that distinguish *whether a
   mutating call was issued* from *whether the text change is known*;
+* a callback-time permission recheck hook (`SetPermissionRecheck`): when installed, it runs
+  inside `DoEditSession` with the granted cookie immediately before any TSF call. P3.9's
+  coordinator installs the real-metadata reader here; P3.7-only users leave it unset;
 * 23 behavioural composition cases plus a composition falsifiability control, alongside
   four host cases and a host falsifiability control (29 CTest cases in total).
 
@@ -25,7 +28,10 @@ Out of scope and **not claimed**:
 
 * no input-method registration, no keyboard sink (`AdviseKeyEventSink`), no key handling in
   an external application, no candidate window, no language-bar entry;
-* no real password-field or one-time-code-field identification;
+* no real password-field or one-time-code-field identification in this layer. `InputPermission`
+  is a host-supplied gate; P3.9's coordinator resolves it from application-published
+  InputScope/compartment metadata (see `input-permission-contract.md`), which is not a
+  security boundary;
 * no grapheme-cluster editing or grapheme-aware caret movement;
 * no automatic retry, no rollback of a partially applied edit, no replay of a failed commit;
 * no system-wide input-method availability claim. The layer is exercised inside a test
@@ -238,8 +244,8 @@ For a successful `Begin` in the test host, the observed order is:
 2. msctf calls `ITextStoreACP::RequestLock(TS_LF_READWRITE|TS_LF_SYNC, &phrSession)`;
 3. the store calls the real `ITextStoreACPSink::OnLockGranted(TS_LF_READWRITE)`;
 4. msctf calls `ITfEditSession::DoEditSession(ec)` inside that grant;
-5. the callback rechecks closed/bound/identity/generation/permission/read-only, then the
-   writer:
+5. the callback rechecks closed/bound/identity/generation/permission/read-only, runs the
+   installed permission recheck with the granted cookie, then the writer:
    * `ITfContext::GetSelection` → `ITfRangeACP::GetExtent` (collapsed, expected caret);
    * scalar-boundary check via range clones;
    * `ITfContextComposition::StartComposition(ec, range, sink, &composition)`;
@@ -374,6 +380,13 @@ covered by a test.
 * `InputPermission` is host-supplied: `Allowed`, `Denied`, `Unknown`. The executor writes
   only for `Allowed`; `Denied`/`Unknown` are refused before `RequestEditSession`, so no lock
   is requested and no text is touched. This is **not** real password-field detection.
+* `SetPermissionRecheck` adds a last-moment, callback-time check. The coordinator installs
+  `ReadPermissionFactsWithCookie`; it runs inside the granted lock, after the stale checks
+  and before any TSF call, and its answer overrides the cached `InputPermission`. A throw
+  or `Unknown` refuses the write. The cached permission is still updated from every real
+  verdict as defense in depth. P3.7-only callers leave the hook unset and keep the
+  `SetInputPermission` behaviour. The recheck reads only status/compartments/InputScope;
+  it never reads document text.
 * Read-only is checked twice: `ITfContext::GetStatus` (`TF_SD_READONLY`) before submission
   (observed `reason=ReadOnlyContext request_locks_before=0 after=0`) and the store's own
   read/write-lock refusal (`refuse_write_locks`; observed
@@ -397,9 +410,10 @@ covered by a test.
   (`cleanup_end_composition`), never with another `SetText`; a successful cleanup end is not
   an Applied claim. A later operation on a range whose text no longer matches is refused
   rather than deleting unknown text.
-* Status counters (`applied`, `rejected`, `failed_before_mutation`,
-  `failed_possibly_mutated`, `failed_after_mutation`, `stale`, `callbacks`,
-  `locks_observed`) are recorded in `CompositionEditSession::Snapshot()`.
+Status counters (`applied`, `rejected`, `failed_before_mutation`,
+`failed_possibly_mutated`, `failed_after_mutation`, `stale`, `callbacks`,
+`locks_observed`, `permission_rechecks`) are recorded in
+`CompositionEditSession::Snapshot()`.
 
 ## 8. Verification
 
@@ -513,9 +527,9 @@ All from the current source tree, with new log tags (no log was overwritten):
 | P3.1 TSF lifecycle (`build/windows-tsf/test`, Release) | 3/3 |
 | P3.2 text encoding/boundary (`build/windows-text/test`, Release) | 4/4 |
 | P3.3 input decisions/translation (`build/windows-input/test`, Release) | 5/5 |
-| P3.4–P3.6 bridge/executor/hosted/broker (`build/windows-engine-bridge/test`, Release) | 22/22 |
+| P3.4–P3.9 bridge/executor/hosted/coordinator (`build/windows-engine-bridge/test`, Release) | 77/77 |
 | Root project infrastructure/English core (`build/vs2022-x64-debug`, Debug) | 7/8 -- see below |
-| Formal English entry (`tools/test_english_integration.ps1`, tag `fix-r1`) | 29/29 |
+| Formal English entry (`tools/test_english_integration.ps1`, tag `p39-r1`) | 29/29 |
 
 The one root-suite failure is `english.core.spelling_cost_trial_on_pilot_lexicon`: its
 worst-single-call budget (25 ms, Debug build) measured 46.7–58.2 ms across a loaded and an
@@ -536,7 +550,10 @@ the CTest list against the `NAME` registrations in `CMakeLists.txt`; the actual 
 
 1. **No installed input method.** No COM registration, no `AdviseKeyEventSink`, no candidate
    UI, no external application was touched. A green suite does not mean an IME is available.
-2. **No real password/one-time-code detection.** Input permission is an explicit host gate.
+2. **No real password/one-time-code detection in this layer.** Input permission is a
+   host-supplied gate; P3.9's coordinator resolves it from application metadata, which is
+   not a security boundary and cannot force a non-compliant application to publish
+   `IS_PASSWORD`.
 3. **Focus is unverified.** `ITfThreadMgr::SetFocus` returned `E_FAIL` in this headless
    process; `RequestEditSession` works without it. `AssociateFocus` and a focused-window
    round trip were not tested.

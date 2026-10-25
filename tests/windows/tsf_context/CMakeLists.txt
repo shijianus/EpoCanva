@@ -85,14 +85,15 @@ epocanva_add_context_case(
 epocanva_add_context_case(
   windows.tsf_context.sensitive_scopes_denied sensitive-scopes-denied)
 
-# 8. Absent scope metadata, a wrong-typed payload and a failing attribute read.
+# 8. Absent scope metadata, a normal empty value, a failing selection read, a wrong-typed
+#    payload and the owner-side E_FAIL ambiguity.
 epocanva_add_context_case(
   windows.tsf_context.scope_absent_wrongtype_fail scope-absent-wrongtype-fail)
 
 # 9. A cleared compartment: the next GetCompartment recreates it (the documented
 #    first-call-creates rule); the no-value answer is asserted with its grounding.
 epocanva_add_context_case(
-  windows.tsf_context.cleared_compartment_unknown cleared-compartment-unknown)
+  windows.tsf_context.cleared_compartment_recreated cleared-compartment-recreated)
 
 # 10. The same metadata queried repeatedly yields the same decision.
 epocanva_add_context_case(
@@ -132,7 +133,7 @@ set_tests_properties(
   windows.tsf_context.empty_context_denied
   windows.tsf_context.sensitive_scopes_denied
   windows.tsf_context.scope_absent_wrongtype_fail
-  windows.tsf_context.cleared_compartment_unknown
+  windows.tsf_context.cleared_compartment_recreated
   windows.tsf_context.repeated_queries_consistent
   windows.tsf_context.async_query_pending
   windows.tsf_context.abandon_pending_query

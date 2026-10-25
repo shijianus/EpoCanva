@@ -26,6 +26,7 @@
 #include "engine_executor/controlled_backend.h"
 #include "engine_executor/test_support.h"
 #include "key_event.h"
+#include "permission_query.h"
 #include "test_host.h"
 
 namespace epocanva {
@@ -43,6 +44,122 @@ constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
 constexpr int kExitCheckFailed = 5;
 constexpr int kExitSelfCheckFailed = 14;
+
+// THE MANUAL PERMISSION GATE, AS A TEST-OWNED PERMISSION SOURCE. The product coordinator
+// has no permission setter of its own; real verdicts always come from the real source
+// (CreateRealPermissionSource over the P3.7 host's metadata). This class exists so the
+// P3.8 unit cases can drive the coordinator's permission-dependent state machine
+// deterministically without a document, and it is compiled only into test targets. The
+// verdicts it hands out are explicit test inputs, never observations.
+class ManualPermissionSource final
+    : public epocanva::tsf::context::PermissionSource {
+ public:
+  ManualPermissionSource() {
+    completion_event_ = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  }
+  ~ManualPermissionSource() override {
+    if (completion_event_ != nullptr) {
+      ::CloseHandle(completion_event_);
+      completion_event_ = nullptr;
+    }
+  }
+
+  void Set(epocanva::tsf::context::PermissionState state) { state_ = state; }
+  // When set, Begin() parks the query in kPending until Release() is called, which is
+  // the deterministic stand-in for a read session that must be pumped.
+  void SetHoldPending(bool hold) { hold_pending_ = hold; }
+  void Release() {
+    complete_ = true;
+    if (completion_event_ != nullptr) {
+      ::SetEvent(completion_event_);
+    }
+  }
+
+  bool Begin(ITfContext* context, std::uint64_t context_id,
+             std::uint64_t generation) override {
+    if (context == nullptr || context_id == 0 || generation == 0) {
+      return false;
+    }
+    if (begun_ && !complete_) {
+      return false;
+    }
+    context_ = context;
+    context_id_ = context_id;
+    generation_ = generation;
+    begun_ = true;
+    complete_ = false;
+    if (completion_event_ != nullptr) {
+      ::ResetEvent(completion_event_);
+    }
+    ++diagnostics_.queries_begun;
+    if (!hold_pending_) {
+      complete_ = true;
+      ++diagnostics_.queries_completed;
+      if (completion_event_ != nullptr) {
+        ::SetEvent(completion_event_);
+      }
+    }
+    return true;
+  }
+
+  epocanva::tsf::context::PermissionQueryStatus Status() const override {
+    using Q = epocanva::tsf::context::PermissionQueryStatus;
+    if (!begun_) {
+      return Q::kIdle;
+    }
+    return complete_ ? Q::kReady : Q::kPending;
+  }
+
+  epocanva::tsf::context::PermissionQueryResult Result() const override {
+    epocanva::tsf::context::PermissionQueryResult result;
+    result.context_id = context_id_;
+    result.generation = generation_;
+    if (begun_ && complete_) {
+      result.complete = true;
+      result.decision.state = state_;
+    }
+    return result;
+  }
+
+  HANDLE CompletionEvent() const override {
+    if (begun_ && !complete_) {
+      return completion_event_;
+    }
+    return nullptr;
+  }
+
+  void Abandon() override {
+    if (!begun_ || complete_) {
+      return;
+    }
+    ++diagnostics_.queries_abandoned;
+    begun_ = false;
+    complete_ = false;
+    context_ = nullptr;
+    if (completion_event_ != nullptr) {
+      ::SetEvent(completion_event_);
+    }
+  }
+
+  epocanva::tsf::context::PermissionQueryDiagnostics Diagnostics() const override {
+    return diagnostics_;
+  }
+
+  std::uint64_t began() const { return diagnostics_.queries_begun; }
+  std::uint64_t completed() const { return diagnostics_.queries_completed; }
+
+ private:
+  epocanva::tsf::context::PermissionState state_ =
+      epocanva::tsf::context::PermissionState::kUnknown;
+  bool hold_pending_ = false;
+  bool complete_ = false;
+  bool begun_ = false;
+  HANDLE completion_event_ = nullptr;
+  ITfContext* context_ = nullptr;  // not AddRef'd: the coordinator owns the binding
+  std::uint64_t context_id_ = 0;
+  std::uint64_t generation_ = 0;
+  epocanva::tsf::context::PermissionQueryDiagnostics diagnostics_;
+};
 
 extern int g_total;
 extern int g_failed;

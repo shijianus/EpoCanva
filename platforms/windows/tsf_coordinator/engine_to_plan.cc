@@ -44,16 +44,19 @@ PlanDecision DecidePlanFromEngine(const LocalDocumentView& view,
                                   const EngineObservation& observation) {
   PlanDecision decision;
 
-  // Rule 1: the command produced no mappable engine change.
-  if (observation.engine_refused || !observation.engine_call_made) {
+  // Rule 1: no engine call at all. Nothing could have changed, so an unreadable
+  // observation is irrelevant here (not-dispatched and deferred-boundary are distinguished
+  // from a call that ran).
+  if (!observation.engine_call_made) {
     decision.kind = PlanDecisionKind::kNoEdit;
-    decision.diagnostic = "engine-refused-or-not-called";
+    decision.diagnostic = "engine-not-called";
     return decision;
   }
 
-  // Rule 2: the observation itself is not trustworthy. A dispatch whose state read failed
-  // has already changed the engine; claiming "no edit" or building a plan from a stale
-  // state would both be guesses.
+  // Rule 2: the call ran, so the observation is the only evidence of what it did. An
+  // unreadable state/commit can never be reported as NoEdit -- not even for an
+  // engine-reported refusal (kDispatchedUnhandled): that status proves the call ran, not
+  // that its state is readable or unchanged.
   const bool state_ok = observation.state_status == engine::SessionStateStatus::kOk &&
                         observation.state.valid;
   const bool commit_ok = observation.commit_status ==
@@ -62,6 +65,15 @@ PlanDecision DecidePlanFromEngine(const LocalDocumentView& view,
   if (!state_ok || !commit_ok) {
     decision.kind = PlanDecisionKind::kInvalidObservation;
     decision.diagnostic = "observation-state-or-commit-unavailable";
+    return decision;
+  }
+
+  // Rule 3: the engine was called, the observation is readable, and the engine reported
+  // the call as unhandled/refused. Its state is the unchanged state just read, so no edit
+  // results. (A refusal reported without a readable observation was Rule 2, not this.)
+  if (observation.engine_refused) {
+    decision.kind = PlanDecisionKind::kNoEdit;
+    decision.diagnostic = "engine-refused-with-readable-observation";
     return decision;
   }
 

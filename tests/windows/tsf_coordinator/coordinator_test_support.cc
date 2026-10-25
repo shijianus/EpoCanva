@@ -75,6 +75,10 @@ std::string DescribeSnapshot(const CoordinatorSnapshot& snapshot) {
   text += " applied=" + std::to_string(snapshot.edits_applied);
   text += " refused=" + std::to_string(snapshot.edits_refused);
   text += " stale=" + std::to_string(snapshot.edits_stale);
+  text += std::string(" permission=") + edit::DescribeInputPermission(snapshot.permission);
+  text += " pqueries=" + std::to_string(snapshot.permission_queries_begun) + "/" +
+          std::to_string(snapshot.permission_queries_completed);
+  text += " prechecks=" + std::to_string(snapshot.permission_rechecks);
   return text;
 }
 
@@ -189,10 +193,20 @@ DriveResult DriveToCompletion(ContextCoordinator& coordinator, TestHost& host,
       // STA cannot starve an edit callback; it only avoids a spin.
       executor.WaitForResult(driven.final_state.engine_request,
                              std::chrono::milliseconds(slice));
-    } else {
+    } else if (driven.final_state.phase == WorkPhase::kEditPending) {
       // EditPending: dispatch the STA's messages until the edit's completion event (set
       // by the real callback, on success and refusal alike) is signalled.
       host.PumpUntil(coordinator.EditCompletionEvent(), slice);
+    } else {
+      // PermissionPending: dispatch the STA's messages until the real read session's
+      // completion event is signalled (a manual test source releases this synchronously
+      // through the cases' own driver, so this branch simply yields the slice).
+      HANDLE event = coordinator.PermissionCompletionEvent();
+      if (event != nullptr) {
+        host.PumpUntil(event, slice);
+      } else {
+        ::SleepEx(slice, TRUE);
+      }
     }
   }
 }

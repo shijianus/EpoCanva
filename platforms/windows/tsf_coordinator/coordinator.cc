@@ -1,6 +1,7 @@
-// EpoCanva P3.8 -- implementation of the context-binding coordinator. The contract, the
-// gate order, the work-item state machine and the lockdown rules are documented in
-// coordinator.h; this file follows them line by line and adds no policy of its own.
+// EpoCanva P3.8/P3.9 -- implementation of the context-binding coordinator. The
+// contract, the gate order, the work-item state machine and the lockdown rules are
+// documented in coordinator.h; this file follows them line by line and adds no policy
+// of its own.
 #include "coordinator.h"
 
 #include <utility>
@@ -29,6 +30,18 @@ std::u16string Narrow(const std::wstring& text) {
   static_assert(sizeof(wchar_t) == sizeof(char16_t),
                 "the wstring -> u16string bridge requires 16-bit wchar_t");
   return std::u16string(text.begin(), text.end());
+}
+
+edit::InputPermission MapPermission(context::PermissionState state) {
+  switch (state) {
+    case context::PermissionState::kAllowed:
+      return edit::InputPermission::kAllowed;
+    case context::PermissionState::kDenied:
+      return edit::InputPermission::kDenied;
+    case context::PermissionState::kUnknown:
+      break;
+  }
+  return edit::InputPermission::kUnknown;
 }
 
 }  // namespace
@@ -103,6 +116,8 @@ const char* DescribeWorkPhase(WorkPhase phase) {
   switch (phase) {
     case WorkPhase::kIdle:
       return "Idle";
+    case WorkPhase::kPermissionPending:
+      return "PermissionPending";
     case WorkPhase::kEnginePending:
       return "EnginePending";
     case WorkPhase::kEditPending:
@@ -151,12 +166,18 @@ const char* DescribeRejectCause(RejectCause cause) {
   switch (cause) {
     case RejectCause::kNone:
       return "None";
+    case RejectCause::kPermissionDenied:
+      return "PermissionDenied";
+    case RejectCause::kPermissionUnknown:
+      return "PermissionUnknown";
     case RejectCause::kPermissionChangedWhileQueued:
       return "PermissionChangedWhileQueued";
     case RejectCause::kEngineRefused:
       return "EngineRefused";
     case RejectCause::kEngineUnavailable:
       return "EngineUnavailable";
+    case RejectCause::kEngineSubmitFailed:
+      return "EngineSubmitFailed";
     case RejectCause::kEditRefused:
       return "EditRefused";
     case RejectCause::kEditFailedBeforeMutation:
@@ -168,8 +189,11 @@ const char* DescribeRejectCause(RejectCause cause) {
 }
 
 ContextCoordinator::ContextCoordinator(engine::EngineExecutor& executor,
-                                       TfClientId tsf_client_id)
-    : executor_(executor), tsf_client_id_(tsf_client_id) {}
+                                       TfClientId tsf_client_id,
+                                       context::PermissionSource& permission_source)
+    : executor_(executor),
+      tsf_client_id_(tsf_client_id),
+      permission_source_(permission_source) {}
 
 ContextCoordinator::~ContextCoordinator() { Close(); }
 
@@ -206,6 +230,17 @@ BindStatus ContextCoordinator::Bind(ITfContext* context, std::uint64_t context_i
     session_.reset();
     return BindStatus::kInvalidRequest;
   }
+  // The session's last-moment gate is the same real metadata read, performed with the
+  // cookie of the granted edit session. It sees a permission change that happened after
+  // the coordinator's pre-edit query (for example while the lock was deferred).
+  session_->SetPermissionRecheck(
+      [](ITfContext* session_context, TfEditCookie edit_cookie) {
+        const context::PermissionDecision decision = context::DecidePermission(
+            context::ReadPermissionFactsWithCookie(session_context, edit_cookie));
+        return MapPermission(decision.state);
+      });
+  context->AddRef();
+  bound_context_ = context;
   identity_ = edit::ContextIdentity{context_id, generation};
   engine_client_ = engine_client;
   bound_ = true;
@@ -215,9 +250,9 @@ BindStatus ContextCoordinator::Bind(ITfContext* context, std::uint64_t context_i
   outcome_ = WorkOutcome::kNone;
   cause_ = RejectCause::kNone;
   work_kind_ = WorkKind::kNone;
-  // Every new binding starts from the safe refusal; the host grants Allowed explicitly.
-  permission_ = edit::InputPermission::kUnknown;
-  session_->SetInputPermission(permission_);
+  // Every new binding starts from the safe refusal; the first work item replaces it with
+  // a verdict resolved from the real context metadata.
+  CachePermission(context::PermissionState::kUnknown);
   view_ = LocalDocumentView{};
   view_.caret_utf16 = initial_caret_utf16;
   return BindStatus::kOk;
@@ -229,7 +264,7 @@ void ContextCoordinator::InvalidateBinding() {
   }
   // The work item's terminal state is decided here, not inside any callback: a callback
   // that never runs cannot keep the coordinator pending forever.
-  if (phase_ == WorkPhase::kEditPending) {
+  if (phase_ == WorkPhase::kEditPending || phase_ == WorkPhase::kPermissionPending) {
     EndWork(WorkOutcome::kAbandonedStale, RejectCause::kNone);
   } else if (phase_ == WorkPhase::kEnginePending) {
     // The engine result, when it becomes ready, is consumed once and discarded.
@@ -237,10 +272,17 @@ void ContextCoordinator::InvalidateBinding() {
     outcome_ = WorkOutcome::kAbandonedStale;
     cause_ = RejectCause::kNone;
   }
+  pending_permission_ = PendingPermissionWork{};
+  // A permission read session that is still queued publishes nothing from now on.
+  permission_source_.Abandon();
   if (session_ != nullptr) {
     session_->Invalidate();
     session_->Close();
     session_.reset();
+  }
+  if (bound_context_ != nullptr) {
+    bound_context_->Release();
+    bound_context_ = nullptr;
   }
   bound_ = false;
   identity_ = edit::ContextIdentity{};
@@ -251,31 +293,65 @@ void ContextCoordinator::InvalidateBinding() {
   // here: it belongs to the context's document, whose text state is still unknown.
 }
 
-void ContextCoordinator::SetPermission(edit::InputPermission permission) {
-  permission_ = permission;
+// --- permission --------------------------------------------------------------------------
+
+bool ContextCoordinator::StartPermissionQuery() {
+  if (bound_context_ == nullptr || !bound_) {
+    return false;
+  }
+  if (!permission_source_.Begin(bound_context_, identity_.context_id,
+                                identity_.generation)) {
+    return false;
+  }
+  ++permission_queries_begun_;
+  return true;
+}
+
+bool ContextCoordinator::PermissionVerdictAllows(bool* identity_current) {
+  *identity_current = false;
+  const context::PermissionQueryResult verdict = permission_source_.Result();
+  if (!verdict.complete) {
+    return false;
+  }
+  // The verdict is re-validated against the binding at every use: a result resolved for
+  // another context or an older generation never grants anything here.
+  if (verdict.context_id != identity_.context_id ||
+      verdict.generation != identity_.generation) {
+    return false;
+  }
+  *identity_current = true;
+  ++permission_queries_completed_;
+  CachePermission(verdict.decision.state);
+  return verdict.decision.state == context::PermissionState::kAllowed;
+}
+
+void ContextCoordinator::CachePermission(context::PermissionState state) {
+  permission_ = MapPermission(state);
   if (session_ != nullptr) {
-    session_->SetInputPermission(permission);
+    // Defense in depth: the P3.7 session refuses its own writes under a non-Allowed
+    // permission even if a pending callback is already queued.
+    session_->SetInputPermission(permission_);
   }
 }
 
 input::KeyDecision ContextCoordinator::Evaluate(const input::KeyEventSnapshot& event,
                                                 const input::KeyText& text) const {
-  input::InputContext context;
-  context.input_enabled = true;
-  context.engine_ready = bound_ && engine_client_.valid();
-  context.composition_active = view_.composition_active;
+  input::InputContext evaluation_context;
+  evaluation_context.input_enabled = true;
+  evaluation_context.engine_ready = bound_ && engine_client_.valid();
+  evaluation_context.composition_active = view_.composition_active;
   switch (permission_) {
     case edit::InputPermission::kAllowed:
-      context.permission = input::InputPermission::kAllowed;
+      evaluation_context.permission = input::InputPermission::kAllowed;
       break;
     case edit::InputPermission::kDenied:
-      context.permission = input::InputPermission::kForbidden;
+      evaluation_context.permission = input::InputPermission::kForbidden;
       break;
     case edit::InputPermission::kUnknown:
-      context.permission = input::InputPermission::kUnknown;
+      evaluation_context.permission = input::InputPermission::kUnknown;
       break;
   }
-  return input::DecideKey(event, text, context);
+  return input::DecideKey(event, text, evaluation_context);
 }
 
 // --- submit ------------------------------------------------------------------------------
@@ -298,19 +374,23 @@ bool ContextCoordinator::GateBlocksSubmit(SubmitStatus* status) const {
   }
 }
 
-SubmitStatus ContextCoordinator::FinishSubmit(engine::RequestId request, WorkKind kind) {
+void ContextCoordinator::FinishWorkLedger(WorkKind kind) {
   work_kind_ = kind;
-  phase_ = WorkPhase::kEnginePending;
   outcome_ = WorkOutcome::kNone;
   cause_ = RejectCause::kNone;
   work_id_ = next_work_id_++;
   work_generation_ = identity_.generation;
-  engine_request_ = request;
   work_abandoned_ = false;
   pending_plan_.reset();
   last_edit_status_ = edit::EditStatus::kRejected;
   last_edit_reason_ = edit::EditRejectReason::kNone;
   ++works_accepted_;
+}
+
+SubmitStatus ContextCoordinator::FinishSubmit(engine::RequestId request, WorkKind kind) {
+  FinishWorkLedger(kind);
+  phase_ = WorkPhase::kEnginePending;
+  engine_request_ = request;
   return SubmitStatus::kAccepted;
 }
 
@@ -333,13 +413,32 @@ SubmitStatus ContextCoordinator::SubmitKey(const input::KeyEventSnapshot& event,
   if (GateBlocksSubmit(&blocked)) {
     return blocked;
   }
-  // The explicit permission gate precedes the engine-candidate evaluation: a privacy
+  // The real permission gate precedes the engine-candidate evaluation: a privacy
   // refusal is the more specific fact about this field (P3.3 precedence, restated).
-  if (permission_ == edit::InputPermission::kDenied) {
-    return SubmitStatus::kPermissionDenied;
-  }
-  if (permission_ == edit::InputPermission::kUnknown) {
+  if (!StartPermissionQuery()) {
     return SubmitStatus::kPermissionUnknown;
+  }
+  if (permission_source_.Status() == context::PermissionQueryStatus::kPending) {
+    // The real query went async. The work item exists from here on; nothing reaches the
+    // engine until the verdict arrives.
+    FinishWorkLedger(WorkKind::kKey);
+    phase_ = WorkPhase::kPermissionPending;
+    engine_request_ = engine::RequestId{};
+    pending_permission_ = PendingPermissionWork{};
+    pending_permission_.kind = WorkKind::kKey;
+    pending_permission_.event = event;
+    pending_permission_.text = text;
+    *id = WorkId{work_id_};
+    return SubmitStatus::kAccepted;
+  }
+  bool identity_current = false;
+  if (!PermissionVerdictAllows(&identity_current)) {
+    if (!identity_current) {
+      return SubmitStatus::kPermissionUnknown;  // no usable verdict for this binding
+    }
+    return permission_ == edit::InputPermission::kDenied
+               ? SubmitStatus::kPermissionDenied
+               : SubmitStatus::kPermissionUnknown;
   }
   if (!Evaluate(event, text).is_engine_candidate()) {
     return SubmitStatus::kNotEngineCandidate;
@@ -385,11 +484,27 @@ SubmitStatus ContextCoordinator::SubmitCandidate(std::size_t candidate_index, Wo
   if (GateBlocksSubmit(&blocked)) {
     return blocked;
   }
-  if (permission_ == edit::InputPermission::kDenied) {
-    return SubmitStatus::kPermissionDenied;
-  }
-  if (permission_ == edit::InputPermission::kUnknown) {
+  if (!StartPermissionQuery()) {
     return SubmitStatus::kPermissionUnknown;
+  }
+  if (permission_source_.Status() == context::PermissionQueryStatus::kPending) {
+    FinishWorkLedger(WorkKind::kCandidate);
+    phase_ = WorkPhase::kPermissionPending;
+    engine_request_ = engine::RequestId{};
+    pending_permission_ = PendingPermissionWork{};
+    pending_permission_.kind = WorkKind::kCandidate;
+    pending_permission_.candidate_index = candidate_index;
+    *id = WorkId{work_id_};
+    return SubmitStatus::kAccepted;
+  }
+  bool identity_current = false;
+  if (!PermissionVerdictAllows(&identity_current)) {
+    if (!identity_current) {
+      return SubmitStatus::kPermissionUnknown;
+    }
+    return permission_ == edit::InputPermission::kDenied
+               ? SubmitStatus::kPermissionDenied
+               : SubmitStatus::kPermissionUnknown;
   }
   engine::RequestId request;
   const engine::SubmitStatus submitted =
@@ -414,12 +529,98 @@ SubmitStatus ContextCoordinator::SubmitCandidate(std::size_t candidate_index, Wo
   }
 }
 
+// --- the permission stage ----------------------------------------------------------------
+
+// Continues a permission-allowed, already-accepted work item into the engine. Used only
+// from AdvancePermissionStage: submit-time failures here are outcomes of an existing
+// work item, not submit statuses handed to the host.
+void ContextCoordinator::DispatchPendingWork(const PendingPermissionWork& work) {
+  engine::RequestId request;
+  engine::SubmitStatus submitted = engine::SubmitStatus::kInvalidRequest;
+  if (work.kind == WorkKind::kKey) {
+    submitted = executor_.TryDispatch(engine_client_, work.event, work.text, &request);
+  } else if (work.kind == WorkKind::kCandidate) {
+    submitted = executor_.TryAcceptCandidate(engine_client_, work.candidate_index,
+                                             &request);
+  }
+  switch (submitted) {
+    case engine::SubmitStatus::kAccepted:
+      FinishSubmit(request, work.kind);
+      return;
+    case engine::SubmitStatus::kNotRunning:
+    case engine::SubmitStatus::kClientUnknown:
+    case engine::SubmitStatus::kClientNotOpen:
+      EndWork(WorkOutcome::kRejected, RejectCause::kEngineUnavailable);
+      return;
+    case engine::SubmitStatus::kQueueFull:
+    case engine::SubmitStatus::kInternalFailure:
+    case engine::SubmitStatus::kInvalidRequest:
+    default:
+      EndWork(WorkOutcome::kRejected, RejectCause::kEngineSubmitFailed);
+      return;
+  }
+}
+
+void ContextCoordinator::AdvancePermissionStage() {
+  const context::PermissionQueryStatus status = permission_source_.Status();
+  if (status == context::PermissionQueryStatus::kPending) {
+    return;  // the real read session has not completed; the host bounded-waits
+  }
+  if (status == context::PermissionQueryStatus::kIdle) {
+    // The query was terminated without a verdict; nothing was sent to the engine.
+    EndWork(WorkOutcome::kRejected, RejectCause::kPermissionUnknown);
+    pending_permission_ = PendingPermissionWork{};
+    return;
+  }
+  bool identity_current = false;
+  if (!PermissionVerdictAllows(&identity_current)) {
+    if (!identity_current) {
+      // A verdict from another binding or an older generation never grants anything.
+      EndWork(WorkOutcome::kAbandonedStale, RejectCause::kNone);
+    } else {
+      EndWork(WorkOutcome::kRejected,
+              permission_ == edit::InputPermission::kDenied
+                  ? RejectCause::kPermissionDenied
+                  : RejectCause::kPermissionUnknown);
+    }
+    pending_permission_ = PendingPermissionWork{};
+    return;
+  }
+  PendingPermissionWork work = std::move(pending_permission_);
+  pending_permission_ = PendingPermissionWork{};
+  if (work.has_plan) {
+    // The apply-time re-verification finished Allowed; the already-decided edit is built.
+    SubmitEditPlan(work.plan);
+    return;
+  }
+  if (work.kind == WorkKind::kKey &&
+      !Evaluate(work.event, work.text).is_engine_candidate()) {
+    EndWork(WorkOutcome::kNoEdit, RejectCause::kNone);
+    return;
+  }
+  DispatchPendingWork(work);
+}
+
 // --- pump --------------------------------------------------------------------------------
 
 void ContextCoordinator::Pump() {
   ++pumps_;
   if (closed_) {
     return;
+  }
+
+  if (phase_ == WorkPhase::kPermissionPending) {
+    AdvancePermissionStage();
+    if (phase_ == WorkPhase::kEnginePending) {
+      // A freshly dispatched engine result is never ready in the same Pump; the host
+      // bounded-waits on the executor's completion like before.
+      return;
+    }
+    if (phase_ != WorkPhase::kEditPending) {
+      return;
+    }
+    // An edit submitted by the apply-time path may have completed synchronously; fall
+    // through to the existing harvest exactly as the engine-pending branch does.
   }
 
   if (phase_ == WorkPhase::kEnginePending) {
@@ -460,6 +661,13 @@ HANDLE ContextCoordinator::EditCompletionEvent() const {
   return nullptr;
 }
 
+HANDLE ContextCoordinator::PermissionCompletionEvent() const {
+  if (phase_ == WorkPhase::kPermissionPending) {
+    return permission_source_.CompletionEvent();
+  }
+  return nullptr;
+}
+
 // --- engine result resolution ------------------------------------------------------------
 
 void ContextCoordinator::ResolveEngineResult(const engine::CommandResult& result) {
@@ -481,17 +689,9 @@ void ContextCoordinator::ResolveEngineResult(const engine::CommandResult& result
       default:
         // The dispatch may already have reached the engine; the engine's state is unknown
         // and must not be guessed from a later observation. No retry, no replay.
-        EnterNeedsResync("engine-command-failed");
+        EnterNeedsResync("engine-command-failed", RejectCause::kNone);
         return;
     }
-  }
-
-  // The permission is re-verified here, not only at dispatch time: the work item is
-  // rejected if the permission changed while it was queued, even though the engine already
-  // consumed the event. No edit is requested for it.
-  if (permission_ != edit::InputPermission::kAllowed) {
-    EndWork(WorkOutcome::kRejected, RejectCause::kPermissionChangedWhileQueued);
-    return;
   }
 
   EngineObservation observation;
@@ -522,14 +722,18 @@ void ContextCoordinator::ResolveEngineResult(const engine::CommandResult& result
     observation.state = outcome.state;
     observation.commit = outcome.pending_commit;
   } else {
-    EnterNeedsResync("unexpected-command-kind");
+    EnterNeedsResync("unexpected-command-kind", RejectCause::kNone);
     return;
   }
 
-  ConvertAndSubmitEdit(observation);
+  BeginApplyAfterEngine(observation);
 }
 
-void ContextCoordinator::ConvertAndSubmitEdit(const EngineObservation& observation) {
+// The observation is interpreted BEFORE any further permission read. That order is what
+// keeps an unreadable result of a dispatched command from being reported as NoEdit: the
+// pure mapping's validity rules see the failed state/commit read first, and only an
+// edit-producing plan pays for the apply-time permission query.
+void ContextCoordinator::BeginApplyAfterEngine(const EngineObservation& observation) {
   const PlanDecision decision = DecidePlanFromEngine(view_, observation);
   switch (decision.kind) {
     case PlanDecisionKind::kNoEdit:
@@ -539,15 +743,39 @@ void ContextCoordinator::ConvertAndSubmitEdit(const EngineObservation& observati
       EndWork(WorkOutcome::kUnsupportedShape, RejectCause::kNone);
       return;
     case PlanDecisionKind::kInvalidObservation:
-      EnterNeedsResync("invalid-engine-observation");
+      EnterNeedsResync("invalid-engine-observation", RejectCause::kNone);
       return;
     case PlanDecisionKind::kBegin:
     case PlanDecisionKind::kUpdate:
     case PlanDecisionKind::kCommit:
     case PlanDecisionKind::kCancel:
-      SubmitEditPlan(decision);
-      return;
+      break;
   }
+
+  // An edit is now unavoidable, so the permission is re-resolved from the CURRENT real
+  // metadata (not read back from dispatch time). The engine already consumed the event;
+  // a non-Allowed verdict now is an engine/host divergence and lands on NeedsResync,
+  // never on a quiet drop.
+  if (!StartPermissionQuery()) {
+    EnterNeedsResync("permission-requery-refused", RejectCause::kNone);
+    return;
+  }
+  if (permission_source_.Status() == context::PermissionQueryStatus::kPending) {
+    // The apply-time re-verification went async; the decided plan is held until the
+    // verdict arrives and no edit is built in the meantime.
+    phase_ = WorkPhase::kPermissionPending;
+    pending_permission_ = PendingPermissionWork{};
+    pending_permission_.has_plan = true;
+    pending_permission_.plan = decision;
+    return;
+  }
+  bool identity_current = false;
+  if (!PermissionVerdictAllows(&identity_current)) {
+    EndWork(WorkOutcome::kNeedsResync, RejectCause::kPermissionChangedWhileQueued);
+    return;
+  }
+
+  SubmitEditPlan(decision);
 }
 
 void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision) {
@@ -558,7 +786,7 @@ void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision) {
   const auto utf8 =
       epocanva::windows::text::ConvertUtf16CodeUnitsToUtf8Bytes(widened);
   if (!utf8.ok()) {
-    EnterNeedsResync("engine-text-conversion-refused");
+    EnterNeedsResync("engine-text-conversion-refused", RejectCause::kNone);
     return;
   }
 
@@ -580,7 +808,7 @@ void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision) {
         }
       }();
   if (!built.ok()) {
-    EnterNeedsResync("plan-build-refused");
+    EnterNeedsResync("plan-build-refused", RejectCause::kNone);
     return;
   }
 
@@ -639,14 +867,20 @@ void ContextCoordinator::ResolveEditResult(const EditResult& result) {
       EnterUncertainLockdown();
       return;
     case edit::EditStatus::kFailedBeforeMutation:
+      // The engine already consumed the event and holds its result; an edit that failed
+      // before any write leaves the engine view and the document diverged. P3.9: this is
+      // NeedsResync, not a quiet return to a typeable state.
       ++edits_refused_;
-      EndWork(WorkOutcome::kRejected, RejectCause::kEditFailedBeforeMutation);
+      EnterNeedsResync("edit-failed-before-mutation",
+                       RejectCause::kEditFailedBeforeMutation);
       return;
     case edit::EditStatus::kRejected:
     case edit::EditStatus::kPending:
     default:
+      // Same divergence shape: read-only, a refused lock, a disconnected context or a
+      // permission refusal inside the P3.7 callback, all after the engine ran.
       ++edits_refused_;
-      EndWork(WorkOutcome::kRejected, RejectCause::kEditRefused);
+      EnterNeedsResync("edit-refused", RejectCause::kEditRefused);
       return;
   }
 }
@@ -690,14 +924,16 @@ void ContextCoordinator::EndWork(WorkOutcome outcome, RejectCause cause) {
   phase_ = WorkPhase::kIdle;
   work_kind_ = WorkKind::kNone;
   work_abandoned_ = false;
+  pending_permission_ = PendingPermissionWork{};
 }
 
-void ContextCoordinator::EnterNeedsResync(const char* why) {
+void ContextCoordinator::EnterNeedsResync(const char* why, RejectCause cause) {
   (void)why;
   outcome_ = WorkOutcome::kNeedsResync;
-  cause_ = RejectCause::kNone;
+  cause_ = cause;
   phase_ = WorkPhase::kIdle;
   work_kind_ = WorkKind::kNone;
+  pending_permission_ = PendingPermissionWork{};
 }
 
 void ContextCoordinator::EnterUncertainLockdown() {
@@ -706,6 +942,7 @@ void ContextCoordinator::EnterUncertainLockdown() {
   cause_ = RejectCause::kNone;
   phase_ = WorkPhase::kIdle;
   work_kind_ = WorkKind::kNone;
+  pending_permission_ = PendingPermissionWork{};
 }
 
 void ContextCoordinator::DiscardPendingEngineResult() {
@@ -731,13 +968,22 @@ void ContextCoordinator::Close() {
   if (phase_ == WorkPhase::kEnginePending) {
     outcome_ = WorkOutcome::kAbandonedStale;
     DiscardPendingEngineResult();
-  } else if (phase_ == WorkPhase::kEditPending) {
+  } else if (phase_ == WorkPhase::kEditPending ||
+             phase_ == WorkPhase::kPermissionPending) {
     EndWork(WorkOutcome::kAbandonedStale, RejectCause::kNone);
   }
+  // A permission read session still queued publishes nothing from now on; this returns
+  // immediately and never waits for a callback that may never run.
+  permission_source_.Abandon();
+  pending_permission_ = PendingPermissionWork{};
   if (session_ != nullptr) {
     session_->Invalidate();
     session_->Close();
     session_.reset();
+  }
+  if (bound_context_ != nullptr) {
+    bound_context_->Release();
+    bound_context_ = nullptr;
   }
   bound_ = false;
   closed_ = true;
@@ -786,6 +1032,11 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.edits_applied = edits_applied_;
   snapshot.edits_refused = edits_refused_;
   snapshot.edits_stale = edits_stale_;
+  snapshot.permission_queries_begun = permission_queries_begun_;
+  snapshot.permission_queries_completed = permission_queries_completed_;
+  if (session_ != nullptr) {
+    snapshot.permission_rechecks = session_->Snapshot().permission_rechecks;
+  }
   snapshot.pumps = pumps_;
   return snapshot;
 }

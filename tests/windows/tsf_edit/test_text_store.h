@@ -76,6 +76,7 @@ enum class TestInputPermission {
 enum class TestScopeAnswer {
   kNone = 0,   // publish no input scope; attribute queries answer nothing
   kScopes,     // answer VT_UNKNOWN holding this store's ITfInputScope object
+  kEmptyValue, // answer the attribute with a well-formed VT_EMPTY value
   kWrongType,  // answer VT_I4 -- a contract-violating payload type
   kFail,       // RetrieveRequestedAttrs returns E_FAIL after a matching request
 };
@@ -114,6 +115,10 @@ struct TestStoreOptions {
   // asynchronous ones are deferred through the message window like async_locks. A
   // reader that first asks TF_ES_SYNC must fall back to TF_ES_ASYNC and wait.
   bool refuse_sync_locks = false;
+  // Fail ITextStoreACP::GetSelection while a lock is held. The permission reader's
+  // selection lookup then fails inside its real read session, which is a genuine
+  // query-failure observable distinct from absent metadata and from a wrong-typed value.
+  bool refuse_selection_reads = false;
   // Refuse every composition through the context-owner composition sink. This is the real
   // TSF path: TSF queries the object passed to CreateContext for
   // ITfContextOwnerCompositionSink, and ITfContextComposition::StartComposition returns
@@ -297,6 +302,7 @@ class TestTextStore final : public ITextStoreACP,
   void SetAsyncLocks(bool enabled);
   void SetRefuseWriteLocks(bool enabled);
   void SetRefuseSyncLocks(bool enabled);
+  void SetRefuseSelectionReads(bool enabled);
   void SetRefuseCompositions(bool refuse);
   // Flips the read-only bit this store reports through its real GetStatus. The
   // read_only option seeds this at creation; the control exists so a test can change
@@ -373,6 +379,7 @@ class TestTextStore final : public ITextStoreACP,
 
   // Read-only state, seeded from options_ and flippable through SetReadOnly.
   bool read_only_ = false;
+  bool refuse_selection_reads_ = false;
   // InputScope metadata: the answer mode, the published list and the object handed out
   // through RetrieveRequestedAttrs. The object is owned by one reference from the store
   // and released in the destructor; every reference a query took is returned by the

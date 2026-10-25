@@ -117,6 +117,7 @@ struct CompositionEditSession::State {
   bool bound = false;
   bool closed = false;
   InputPermission permission = InputPermission::kUnknown;
+  CompositionEditSession::PermissionRecheck permission_recheck;
   CompositionWriter writer;
 
   bool has_pending = false;
@@ -174,8 +175,8 @@ class EditSessionCallback final : public ITfEditSession {
     EditResult result = MakeBaseResult(plan_, session_id_);
     bool stale = false;
     EditRejectReason stale_reason = EditRejectReason::kNotBound;
-    bool permission_denied = false;
-    bool permission_unknown = false;
+    InputPermission permission = InputPermission::kUnknown;
+    CompositionEditSession::PermissionRecheck recheck;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       ++state_->counters.callbacks;
@@ -194,10 +195,22 @@ class EditSessionCallback final : public ITfEditSession {
       } else if (state_->pending_session_id != session_id_) {
         stale = true;
         stale_reason = EditRejectReason::kStaleGeneration;
-      } else if (state_->permission == InputPermission::kDenied) {
-        permission_denied = true;
-      } else if (state_->permission == InputPermission::kUnknown) {
-        permission_unknown = true;
+      } else {
+        permission = state_->permission;
+        recheck = state_->permission_recheck;
+      }
+    }
+
+    // The callback-time recheck runs outside the state mutex and only for an otherwise
+    // admissible plan. It is authoritative: the cached permission can be older than the
+    // field's current metadata (the lock may have been deferred after the plan was built).
+    bool recheck_ran = false;
+    if (!stale && permission == InputPermission::kAllowed && recheck) {
+      recheck_ran = true;
+      try {
+        permission = recheck(context_, edit_cookie);
+      } catch (...) {
+        permission = InputPermission::kUnknown;
       }
     }
 
@@ -205,10 +218,11 @@ class EditSessionCallback final : public ITfEditSession {
     if (stale) {
       result.status = EditStatus::kStale;
       result.reason = stale_reason;
-    } else if (permission_denied || permission_unknown) {
+    } else if (permission != InputPermission::kAllowed) {
       result.status = EditStatus::kRejected;
-      result.reason = permission_denied ? EditRejectReason::kPermissionDenied
-                                        : EditRejectReason::kPermissionUnknown;
+      result.reason = permission == InputPermission::kDenied
+                          ? EditRejectReason::kPermissionDenied
+                          : EditRejectReason::kPermissionUnknown;
     } else {
       // Re-check read-only state at the last possible moment: the host can change it between
       // submission and the granted lock.
@@ -254,6 +268,9 @@ class EditSessionCallback final : public ITfEditSession {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (result.lock_observed) {
         ++state_->counters.locks_observed;
+      }
+      if (recheck_ran) {
+        ++state_->counters.permission_rechecks;
       }
       result_ = result;
       done_ = true;
@@ -331,6 +348,7 @@ bool CompositionEditSession::Bind(ITfContext* context, std::uint64_t context_id,
       state->identity.generation = generation;
       state->bound = true;
       state->permission = InputPermission::kUnknown;
+      state->permission_recheck = CompositionEditSession::PermissionRecheck{};
       accepted = true;
     }
   }
@@ -388,6 +406,14 @@ void CompositionEditSession::SetInputPermission(InputPermission permission) {
   std::lock_guard<std::mutex> lock(state->mutex);
   if (!state->closed) {
     state->permission = permission;
+  }
+}
+
+void CompositionEditSession::SetPermissionRecheck(PermissionRecheck recheck) {
+  const std::shared_ptr<State> state = state_;
+  std::lock_guard<std::mutex> lock(state->mutex);
+  if (!state->closed) {
+    state->permission_recheck = std::move(recheck);
   }
 }
 

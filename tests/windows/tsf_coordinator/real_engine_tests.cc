@@ -49,6 +49,9 @@ std::string RequireLetter(executor_tests::TextKey* key, wchar_t character,
 struct RealCase {
   std::unique_ptr<TestHost> host;
   RealHarness harness;
+  // The production source: verdicts come from the real document metadata through real
+  // TSF reads. No test code hands the coordinator an Allowed value here.
+  std::unique_ptr<epocanva::tsf::context::PermissionSource> permission;
   std::unique_ptr<ContextCoordinator> coordinator;
   TestDocument* document = nullptr;
 
@@ -66,7 +69,7 @@ struct RealCase {
 };
 
 bool SetupRealCase(RealCase* real, const Options& options, const char* leaf,
-                   const TestDocumentOptions& document_options, bool grant_allowed = true) {
+                   const TestDocumentOptions& document_options) {
   std::string error;
   real->host = TestHost::Create(&error);
   Check(real->host != nullptr, std::string(leaf) + ": real TSF host created", error);
@@ -81,15 +84,14 @@ bool SetupRealCase(RealCase* real, const Options& options, const char* leaf,
   if (!CreateRealHarness(options, leaf, &real->harness)) {
     return false;
   }
-  real->coordinator = std::make_unique<ContextCoordinator>(*real->harness.executor,
-                                                           real->host->client_id());
+  real->permission =
+      epocanva::tsf::context::CreateRealPermissionSource(real->host->client_id());
+  real->coordinator = std::make_unique<ContextCoordinator>(
+      *real->harness.executor, real->host->client_id(), *real->permission);
   const BindStatus bound = real->coordinator->Bind(
       real->document->context(), real->document->context_id(),
       document_options.initial_selection_start_utf16, real->harness.client_a);
   Check(bound == BindStatus::kOk, std::string(leaf) + ": bound", DescribeBindStatus(bound));
-  if (grant_allowed) {
-    real->coordinator->SetPermission(edit::InputPermission::kAllowed);
-  }
   return bound == BindStatus::kOk;
 }
 
@@ -369,6 +371,17 @@ int RunRealEvaluatePure(const Options& options) {
   if (!RequireLetter(&h, L'h', "evaluate").empty()) {
     return Finish();
   }
+  // Evaluate never queries permission; the cached verdict is populated by work items.
+  // Prime it with one real composition and cancel it, so the evaluations below run with a
+  // known permission and no active composition -- and add nothing of their own.
+  if (!TypeLetter(real, L'h', "evaluate: prime the cached verdict")) {
+    return Finish();
+  }
+  Special(real, input::kVirtualKeyEscape, "evaluate: clear the priming composition");
+  CheckDocText(real.document->text_utf16(), L"", "evaluate: priming left no text");
+
+  const engine::CapacityUsage capacity_before = real.harness.executor->capacity();
+  const auto diagnostics_before = real.document->diagnostics().store;
   for (int index = 0; index < 3; ++index) {
     const input::KeyDecision decision = real.coordinator->Evaluate(h.event, h.text);
     Check(decision.disposition == input::KeyDisposition::kEngineTextCandidate,
@@ -380,10 +393,12 @@ int RunRealEvaluatePure(const Options& options) {
             enter.reason == input::KeyDecisionReason::kNoComposition,
         "evaluate: Return with nothing composing stays with the host", "");
   const engine::CapacityUsage capacity = real.harness.executor->capacity();
-  Check(capacity.occupied == 0, "evaluate: no executor request was ever created",
+  Check(capacity.occupied == capacity_before.occupied,
+        "evaluate: no executor request was ever created",
         std::to_string(capacity.occupied));
   const auto diagnostics = real.document->diagnostics().store;
-  Check(diagnostics.request_lock_calls == 0 && diagnostics.text_mutations == 0,
+  Check(diagnostics.request_lock_calls == diagnostics_before.request_lock_calls &&
+            diagnostics.text_mutations == diagnostics_before.text_mutations,
         "evaluate: no lock, no mutation", "");
   CheckDocText(real.document->text_utf16(), L"", "evaluate: the document is untouched");
   return Finish();
@@ -477,7 +492,6 @@ int RunRealRebindPending(const Options& options) {
       document_b->context(), document_b->context_id(), 0, client_b);
   Check(bound == BindStatus::kOk, "rebind: the new binding is accepted",
         DescribeBindStatus(bound));
-  real.coordinator->SetPermission(edit::InputPermission::kAllowed);
   // From here the case's `document` is the bound document, so evidence lines speak
   // about the store that is actually receiving edits; the old store keeps its own name.
   TestDocument* old_document = real.document;
@@ -534,7 +548,6 @@ int RunRealAsyncGeneration(const Options& options) {
   Check(real.coordinator->Bind(document_b->context(), document_b->context_id(), 0,
                                client_b) == BindStatus::kOk,
         "async-generation: the new binding is accepted at once", "");
-  real.coordinator->SetPermission(edit::InputPermission::kAllowed);
   real.document = document_b;
 
   // The deferred grant now dispatches; the OLD callback runs against an invalidated,
@@ -553,7 +566,9 @@ int RunRealAsyncGeneration(const Options& options) {
   return Finish();
 }
 
-// 13. Allowed -> Denied/Unknown: no further edits, at both re-verification points.
+// 13. Allowed -> Denied through REAL metadata: no further edits, at both re-verification
+//     points. The scope is published by the test document through the real attribute path,
+//     read by the production PermissionSource and by the session's callback-time recheck.
 int RunRealPermissionFlip(const Options& options) {
   {
     // (a) the flip happens while the engine result is queued/unconsumed.
@@ -567,30 +582,35 @@ int RunRealPermissionFlip(const Options& options) {
     }
     WorkId id;
     Check(real.coordinator->SubmitKey(h.event, h.text, &id) == SubmitStatus::kAccepted,
-          "flip-queued: accepted while allowed", "");
-    real.coordinator->SetPermission(edit::InputPermission::kDenied);
+          "flip-queued: accepted while the real metadata is Allowed", "");
+    real.document->SetScopeAnswer(
+        epocanva::tsf::edit::test::TestScopeAnswer::kScopes, {31L});  // IS_PASSWORD
     const DriveResult driven =
         DriveToCompletion(*real.coordinator, *real.host, *real.harness.executor, 30000);
     Check(driven.completed, "flip-queued: terminal", DescribeSnapshot(driven.final_state));
-    CheckOutcome(driven.final_state, WorkOutcome::kRejected, "flip-queued: rejected");
+    CheckOutcome(driven.final_state, WorkOutcome::kNeedsResync,
+                 "flip-queued: the apply-time denial is an engine/host divergence");
     Check(driven.final_state.cause == RejectCause::kPermissionChangedWhileQueued,
           "flip-queued: the cause names the permission change",
           DescribeRejectCause(driven.final_state.cause));
+    Check(driven.final_state.gate == CoordinatorGate::kBlockedNeedsResync,
+          "flip-queued: the binding is blocked", "");
     const auto store = real.document->diagnostics().store;
-    Check(store.request_lock_calls == 0 && store.text_mutations == 0,
-          "flip-queued: no edit was requested", "");
+    Check(store.write_lock_grants == 0 && store.text_mutations == 0,
+          "flip-queued: no write lock was granted and nothing was written", "");
     CheckDocText(real.document->text_utf16(), L"", "flip-queued: the document is empty");
     executor_tests::TextKey e;
     WorkId second;
     if (RequireLetter(&e, L'e', "flip e").empty()) {
-      Check(real.coordinator->SubmitKey(e.event, e.text, &second) ==
-                SubmitStatus::kPermissionDenied,
-            "flip-queued: later submits are refused at the gate", "");
+      const SubmitStatus blocked = real.coordinator->SubmitKey(e.event, e.text, &second);
+      Check(blocked == SubmitStatus::kBlockedNeedsResync,
+            "flip-queued: later submits are refused until resync",
+            DescribeSubmitStatus(blocked));
     }
   }
   {
     // (b) the flip happens while the edit waits behind a deferred lock; the real callback
-    // refuses it.
+    // re-reads the metadata with its granted cookie and refuses before any TSF call.
     RealCase real;
     TestDocumentOptions document_options;
     document_options.async_locks = true;
@@ -607,25 +627,43 @@ int RunRealPermissionFlip(const Options& options) {
     if (!ReachEditPending(real, "flip-pending")) {
       return Finish();
     }
-    real.coordinator->SetPermission(edit::InputPermission::kUnknown);
+    real.document->SetScopeAnswer(
+        epocanva::tsf::edit::test::TestScopeAnswer::kScopes, {31L});  // IS_PASSWORD
     real.host->PumpUntil(real.coordinator->EditCompletionEvent(), 5000);
     real.coordinator->Pump();
     const CoordinatorSnapshot snapshot = real.coordinator->Snapshot();
-    Check(snapshot.phase == WorkPhase::kIdle && snapshot.outcome == WorkOutcome::kRejected,
-          "flip-pending: the callback-time check rejected the edit",
+    Check(snapshot.phase == WorkPhase::kIdle &&
+              snapshot.outcome == WorkOutcome::kNeedsResync,
+          "flip-pending: the callback-time real-metadata check rejected the edit",
           DescribeSnapshot(snapshot));
-    Check(snapshot.last_edit_reason == edit::EditRejectReason::kPermissionUnknown,
+    Check(snapshot.last_edit_reason == edit::EditRejectReason::kPermissionDenied,
           "flip-pending: P3.7 named the permission refusal",
           edit::DescribeEditRejectReason(snapshot.last_edit_reason));
+    Check(snapshot.permission_rechecks == 1,
+          "flip-pending: exactly one callback-time real-metadata recheck ran",
+          std::to_string(snapshot.permission_rechecks));
     const auto store = real.document->diagnostics().store;
-    Check(store.text_mutations == 0 && store.set_text_calls == 0,
-          "flip-pending: no text call, no mutation", "");
+    Check(store.write_lock_grants == 1 && store.text_mutations == 0 &&
+              store.set_text_calls == 0,
+          "flip-pending: the callback ran, but no text call and no mutation", "");
     CheckDocText(real.document->text_utf16(), L"", "flip-pending: the document is empty");
+
+    // Restoring Allowed must not unblock the old binding or surface the engine's queued
+    // preedit.
+    real.document->SetScopeAnswer(epocanva::tsf::edit::test::TestScopeAnswer::kNone, {});
+    WorkId second;
+    const SubmitStatus blocked = real.coordinator->SubmitKey(h.event, h.text, &second);
+    Check(blocked == SubmitStatus::kBlockedNeedsResync,
+          "flip-pending: restoring Allowed does not bypass the divergence block",
+          DescribeSubmitStatus(blocked));
+    CheckDocText(real.document->text_utf16(), L"",
+                 "flip-pending: the unshown engine text never reached the document");
   }
   return Finish();
 }
 
-// 14. Read-only, refused write locks and a disconnected context are never Applied.
+// 14. Real metadata refusals: read-only and a disconnected context are resolved before
+//     the engine; a refused write lock after the engine ran is a divergence.
 int RunRealRefusalsNotApplied(const Options& options) {
   struct Shape {
     const char* label;
@@ -655,46 +693,63 @@ int RunRealRefusalsNotApplied(const Options& options) {
       continue;
     }
     WorkId id;
-    Check(real.coordinator->SubmitKey(h.event, h.text, &id) == SubmitStatus::kAccepted,
-          std::string(shape.label) + ": accepted", "");
-    // The refused-lock shape never runs its callback (msctf queued the async request but
-    // the store never grants the lock): bounded wait, then the explicit invalidation gives
-    // the work its terminal state -- the "cannot assume DoEditSession will run" path.
-    const DriveResult driven = DriveToCompletion(
-        *real.coordinator, *real.host, *real.harness.executor,
-        shape.refuse_write_locks ? 1500 : 30000);
-    if (shape.refuse_write_locks) {
-      Check(!driven.completed && driven.final_state.outcome != WorkOutcome::kApplied,
-            std::string(shape.label) + ": never applied", DescribeSnapshot(driven.final_state));
-      real.coordinator->InvalidateBinding();
-      const CoordinatorSnapshot after = real.coordinator->Snapshot();
-      Check(after.phase == WorkPhase::kIdle &&
-                after.outcome == WorkOutcome::kAbandonedStale,
-            std::string(shape.label) + ": invalidation terminalized the stuck edit",
-            DescribeSnapshot(after));
+    const SubmitStatus submitted = real.coordinator->SubmitKey(h.event, h.text, &id);
+    if (shape.read_only) {
+      Check(submitted == SubmitStatus::kPermissionDenied,
+            "read-only: the real metadata denies before the engine",
+            DescribeSubmitStatus(submitted));
+    } else if (shape.disconnect) {
+      Check(submitted == SubmitStatus::kPermissionUnknown,
+            "disconnected: an unreadable context is Unknown, never Allowed",
+            DescribeSubmitStatus(submitted));
+    } else {
+      Check(submitted == SubmitStatus::kAccepted,
+            "write-lock-refused: metadata says Allowed, so the engine runs",
+            DescribeSubmitStatus(submitted));
+    }
+
+    CoordinatorSnapshot terminal = real.coordinator->Snapshot();
+    if (submitted == SubmitStatus::kAccepted) {
+      // The engine ran. A lock that is never granted is ended by the explicit
+      // invalidation; a refused lock results in NeedsResync. Neither is Applied.
+      const DriveResult driven = DriveToCompletion(
+          *real.coordinator, *real.host, *real.harness.executor, 5000);
+      terminal = driven.final_state;
+      if (!driven.completed) {
+        real.coordinator->InvalidateBinding();
+        terminal = real.coordinator->Snapshot();
+        Check(terminal.phase == WorkPhase::kIdle &&
+                  terminal.outcome == WorkOutcome::kAbandonedStale,
+              "write-lock-refused: a never-completing edit is terminal after "
+              "invalidation",
+              DescribeSnapshot(terminal));
+      } else {
+        Check(terminal.outcome == WorkOutcome::kNeedsResync,
+              "write-lock-refused: engine ran but the edit did not apply -> NeedsResync",
+              DescribeSnapshot(terminal));
+      }
       const auto store = real.document->diagnostics().store;
       Check(store.write_lock_refusals >= 1,
-            std::string(shape.label) + ": the store really refused the lock",
+            "write-lock-refused: the store really refused the lock",
             std::to_string(store.write_lock_refusals));
     } else {
-      Check(driven.completed, std::string(shape.label) + ": terminal",
-            DescribeSnapshot(driven.final_state));
-      CheckOutcome(driven.final_state, WorkOutcome::kRejected,
-                   std::string(shape.label) + ": rejected, not Applied");
-      Check(driven.final_state.last_edit_status == edit::EditStatus::kRejected,
-            std::string(shape.label) + ": P3.7 reported a clean rejection",
-            edit::DescribeEditStatus(driven.final_state.last_edit_status));
+      Check(terminal.outcome == WorkOutcome::kNone && terminal.phase == WorkPhase::kIdle,
+            std::string(shape.label) + ": no work item was created",
+            DescribeSnapshot(terminal));
     }
+
     const auto store = real.document->diagnostics().store;
     Check(store.text_mutations == 0,
           std::string(shape.label) + ": the document was never mutated",
           std::to_string(store.text_mutations));
     CheckDocText(real.document->text_utf16(), L"",
                  std::string(shape.label) + ": the document is empty");
-    std::printf("[coordinator-win] evidence real-refusal %s: reason=%s mutations=%llu\n",
-                shape.label,
-                edit::DescribeEditRejectReason(driven.final_state.last_edit_reason),
-                static_cast<unsigned long long>(store.text_mutations));
+    std::printf("[coordinator-win] evidence real-refusal %s: submit=%s outcome=%s "
+                "mutations=%llu write_lock_grants=%llu\n",
+                shape.label, DescribeSubmitStatus(submitted),
+                DescribeWorkOutcome(terminal.outcome),
+                static_cast<unsigned long long>(store.text_mutations),
+                static_cast<unsigned long long>(store.write_lock_grants));
   }
   return Finish();
 }
@@ -764,7 +819,6 @@ int RunRealUncertainLockdown(const Options& options) {
                                                     document_b->context_id(), 0, client_b);
     Check(other == BindStatus::kOk, "uncertain: a different context binds",
           DescribeBindStatus(other));
-    real.coordinator->SetPermission(edit::InputPermission::kAllowed);
     real.document = document_b;
     if (TypeLetter(real, L'a', "uncertain: type on the fresh context")) {
       CheckDocText(document_b->text_utf16(), L"a",
