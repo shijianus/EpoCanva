@@ -45,6 +45,46 @@ std::string HrText(HRESULT hr) {
   return buffer;
 }
 
+// Validates the common document options and builds the store options. Shared by the base
+// document and the additional-context helper so both exercise the same checks.
+bool BuildStoreOptions(const TestDocumentOptions& options, HWND message_window,
+                       UINT grant_message, TestStoreOptions* store_options,
+                       std::string* error) {
+  const std::size_t text_size = options.initial_text_utf16.size();
+  if (text_size > static_cast<std::size_t>(std::numeric_limits<LONG>::max()) ||
+      !IsWellFormedUtf16(options.initial_text_utf16)) {
+    if (error != nullptr) {
+      *error = "initial text is not well-formed UTF-16 or is too long";
+    }
+    return false;
+  }
+  const LONG length = static_cast<LONG>(text_size);
+  if (options.initial_selection_start_utf16 < 0 ||
+      options.initial_selection_end_utf16 < options.initial_selection_start_utf16 ||
+      options.initial_selection_end_utf16 > length) {
+    if (error != nullptr) {
+      *error = "initial selection is outside the initial text (UTF-16 code units)";
+    }
+    return false;
+  }
+  TestStoreOptions built;
+  built.initial_text_utf16 = options.initial_text_utf16;
+  built.initial_selection_start_utf16 = options.initial_selection_start_utf16;
+  built.initial_selection_end_utf16 = options.initial_selection_end_utf16;
+  built.read_only = options.read_only;
+  built.async_locks = options.async_locks;
+  built.refuse_write_locks = options.refuse_write_locks;
+  built.refuse_compositions = options.refuse_compositions;
+  built.refuse_sync_locks = options.refuse_sync_locks;
+  built.refuse_selection_reads = options.refuse_selection_reads;
+  built.scope_answer = options.scope_answer;
+  built.input_scopes = options.input_scopes;
+  built.message_window = message_window;
+  built.grant_message = grant_message;
+  *store_options = std::move(built);
+  return true;
+}
+
 }  // namespace
 
 std::atomic<int> TestHost::live_instances_{0};
@@ -52,13 +92,15 @@ std::atomic<int> TestHost::live_instances_{0};
 // --- TestDocument ---------------------------------------------------------------------
 TestDocument::TestDocument(ITfThreadMgr* thread_manager, ITfDocumentMgr* document_manager,
                            ITfContext* context, TestTextStore* store,
-                           std::uint64_t context_id, std::uint64_t generation)
+                           std::uint64_t context_id, std::uint64_t generation,
+                           bool pops_single_context)
     : thread_manager_(thread_manager),
       document_manager_(document_manager),
       context_(context),
       store_(store),
       context_id_(context_id),
-      generation_(generation) {}
+      generation_(generation),
+      pops_single_context_(pops_single_context) {}
 
 TestDocument::~TestDocument() {
   Shutdown();
@@ -80,8 +122,10 @@ bool TestDocument::Shutdown() {
     // ends through the real OnEndComposition notification instead of disappearing silently.
     // Pop(TF_POPF_ALL) also releases every reference the context holds to the text store and
     // the context-owner composition sink, which is why the count below drops to the host's
-    // own reference.
-    teardown_.pop_hr = document_manager_->Pop(TF_POPF_ALL);
+    // own reference. A child context pops only itself; the base document's teardown still
+    // uses TF_POPF_ALL and releases the manager.
+    teardown_.pop_hr = pops_single_context_ ? document_manager_->Pop(0)
+                                            : document_manager_->Pop(TF_POPF_ALL);
     connected_ = false;
   }
   if (store_ != nullptr) {
@@ -141,7 +185,8 @@ bool TestDocument::Disconnect() {
   if (!connected_ || document_manager_ == nullptr) {
     return false;
   }
-  disconnect_result_ = document_manager_->Pop(TF_POPF_ALL);
+  disconnect_result_ = pops_single_context_ ? document_manager_->Pop(0)
+                                            : document_manager_->Pop(TF_POPF_ALL);
   if (SUCCEEDED(disconnect_result_)) {
     connected_ = false;
   }
@@ -297,21 +342,8 @@ TestDocument* TestHost::CreateDocument(const TestDocumentOptions& options,
     }
     return nullptr;
   }
-  const std::size_t text_size = options.initial_text_utf16.size();
-  if (text_size > static_cast<std::size_t>(std::numeric_limits<LONG>::max()) ||
-      !IsWellFormedUtf16(options.initial_text_utf16)) {
-    if (error != nullptr) {
-      *error = "initial text is not well-formed UTF-16 or is too long";
-    }
-    return nullptr;
-  }
-  const LONG length = static_cast<LONG>(text_size);
-  if (options.initial_selection_start_utf16 < 0 ||
-      options.initial_selection_end_utf16 < options.initial_selection_start_utf16 ||
-      options.initial_selection_end_utf16 > length) {
-    if (error != nullptr) {
-      *error = "initial selection is outside the initial text (UTF-16 code units)";
-    }
+  TestStoreOptions store_options;
+  if (!BuildStoreOptions(options, window_, kGrantLockMessage, &store_options, error)) {
     return nullptr;
   }
 
@@ -323,21 +355,6 @@ TestDocument* TestHost::CreateDocument(const TestDocumentOptions& options,
     }
     return nullptr;
   }
-
-  TestStoreOptions store_options;
-  store_options.initial_text_utf16 = options.initial_text_utf16;
-  store_options.initial_selection_start_utf16 = options.initial_selection_start_utf16;
-  store_options.initial_selection_end_utf16 = options.initial_selection_end_utf16;
-  store_options.read_only = options.read_only;
-  store_options.async_locks = options.async_locks;
-  store_options.refuse_write_locks = options.refuse_write_locks;
-  store_options.refuse_compositions = options.refuse_compositions;
-  store_options.refuse_sync_locks = options.refuse_sync_locks;
-  store_options.refuse_selection_reads = options.refuse_selection_reads;
-  store_options.scope_answer = options.scope_answer;
-  store_options.input_scopes = options.input_scopes;
-  store_options.message_window = window_;
-  store_options.grant_message = kGrantLockMessage;
 
   TestTextStore* store = new TestTextStore(store_options);
   ITfContext* context = nullptr;
@@ -369,15 +386,70 @@ TestDocument* TestHost::CreateDocument(const TestDocumentOptions& options,
   const std::uint64_t context_id = ++next_context_id_;
   std::unique_ptr<TestDocument> document(
       new TestDocument(thread_manager_, document_manager, context, store, context_id,
-                       /*generation=*/1));
+                       /*generation=*/1, /*pops_single_context=*/false));
   document->connected_ = true;  // the Push above succeeded
   TestDocument* borrowed = document.get();
   documents_.push_back(std::move(document));
-  // SetFocus is not called here. ITfThreadMgr::SetFocus sets the input focus of the thread,
-  // and this headless test process has none; the real call returns E_FAIL in this
-  // environment. RequestEditSession does not require focus, so the host does not manufacture
-  // one. The case where focus matters is out of scope for this phase and documented as
-  // unverified in docs/windows/tsf-edit-contract.md.
+  // SetFocus is not called here. P3.10's probe shows ITfThreadMgr::SetFocus(dm) succeeds
+  // in this environment but does not deliver OnSetFocus to a thread-manager sink while the
+  // process owns no OS input focus; the observer tests drive SetFocus explicitly and mark
+  // the delivered-notification expectation environment-limited. RequestEditSession does
+  // not require focus.
+  return borrowed;
+}
+
+TestDocument* TestHost::CreateChildContext(TestDocument* base_document,
+                                           const TestDocumentOptions& options,
+                                           std::string* error) {
+  if (shutdown_ || thread_manager_ == nullptr) {
+    if (error != nullptr) {
+      *error = "CreateChildContext called on a shut-down host";
+    }
+    return nullptr;
+  }
+  if (base_document == nullptr || base_document->document_manager_ == nullptr) {
+    if (error != nullptr) {
+      *error = "CreateChildContext requires a live base document";
+    }
+    return nullptr;
+  }
+  TestStoreOptions store_options;
+  if (!BuildStoreOptions(options, window_, kGrantLockMessage, &store_options, error)) {
+    return nullptr;
+  }
+  ITfDocumentMgr* document_manager = base_document->document_manager_;
+  TestTextStore* store = new TestTextStore(store_options);
+  ITfContext* context = nullptr;
+  TfEditCookie cookie = 0;
+  HRESULT hr = document_manager->CreateContext(client_id_, 0,
+                                               static_cast<ITextStoreACP*>(store),
+                                               &context, &cookie);
+  if (FAILED(hr) || context == nullptr) {
+    if (error != nullptr) {
+      *error = "ITfDocumentMgr::CreateContext (child) failed " + HrText(hr);
+    }
+    store->Release();
+    return nullptr;
+  }
+  hr = document_manager->Push(context);
+  if (FAILED(hr)) {
+    if (error != nullptr) {
+      *error = "ITfDocumentMgr::Push (child) failed " + HrText(hr);
+    }
+    context->Release();
+    store->Release();
+    return nullptr;
+  }
+  // The host's store reference is handed to TestDocument, which releases it at teardown;
+  // the context holds its own additional reference after CreateContext.
+  document_manager->AddRef();  // the child holds a manager reference of its own
+  const std::uint64_t context_id = ++next_context_id_;
+  std::unique_ptr<TestDocument> document(
+      new TestDocument(thread_manager_, document_manager, context, store, context_id,
+                       /*generation=*/1, /*pops_single_context=*/true));
+  document->connected_ = true;
+  TestDocument* borrowed = document.get();
+  documents_.push_back(std::move(document));
   return borrowed;
 }
 
@@ -442,7 +514,10 @@ void TestHost::Shutdown() {
   DrainGrantMessages();
 
   std::uint64_t destroyed = 0;
-  for (const std::unique_ptr<TestDocument>& document : documents_) {
+  // Reverse creation order: a child context pushed on a base document's manager must be
+  // popped (Pop(0)) before the base document's Pop(TF_POPF_ALL).
+  for (auto iterator = documents_.rbegin(); iterator != documents_.rend(); ++iterator) {
+    const std::unique_ptr<TestDocument>& document = *iterator;
     document->Shutdown();
     ++destroyed;
     const TestDocumentTeardownRecord& record = document->teardown_record();

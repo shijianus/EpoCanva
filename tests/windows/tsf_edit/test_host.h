@@ -173,7 +173,7 @@ class TestDocument {
   friend class TestHost;
   TestDocument(ITfThreadMgr* thread_manager, ITfDocumentMgr* document_manager,
                ITfContext* context, TestTextStore* store, std::uint64_t context_id,
-               std::uint64_t generation);
+               std::uint64_t generation, bool pops_single_context);
   bool Shutdown();
 
   ITfThreadMgr* thread_manager_ = nullptr;
@@ -182,6 +182,10 @@ class TestDocument {
   TestTextStore* store_ = nullptr;
   std::uint64_t context_id_ = 0;
   std::uint64_t generation_ = 0;
+  // True when this document was created as an additional context on another document's
+  // manager. Its teardown pops only its own top context (Pop(0)); the base document's
+  // teardown still calls Pop(TF_POPF_ALL) and releases the manager itself.
+  bool pops_single_context_ = false;
   bool connected_ = false;
   bool shutdown_ = false;
   HRESULT disconnect_result_ = S_OK;
@@ -197,7 +201,19 @@ class TestHost {
   TestHost& operator=(const TestHost&) = delete;
 
   TestDocument* CreateDocument(const TestDocumentOptions& options, std::string* error);
+  // Creates one additional real context on `base_document`'s document manager and pushes
+  // it on top. That is the real Push path the observer's OnPushContext/OnPopContext
+  // notifications describe. The returned document does not own the manager (it holds its
+  // own reference) and its teardown uses Pop(0), so tests must tear children down in
+  // LIFO order before the base document (Host::Shutdown does so automatically).
+  TestDocument* CreateChildContext(TestDocument* base_document,
+                                   const TestDocumentOptions& options,
+                                   std::string* error);
   TfClientId client_id() const { return client_id_; }
+  // Borrowed; valid until Shutdown(). Used by tests to drive real SetFocus /
+  // AssociateFocus / GetFocus on the same thread manager the documents live on.
+  ITfThreadMgr* thread_manager_for_test() const { return thread_manager_; }
+  HWND message_window_for_test() const { return window_; }
 
   // Dispatch messages until `event` is signalled. Returns false on timeout. This is a real
   // message loop, not a sleep-poll loop.

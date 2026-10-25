@@ -218,6 +218,13 @@ add_subdirectory(
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_context"
   "${CMAKE_CURRENT_BINARY_DIR}/tsf_context_tests")
 
+# --- P3.10: real TSF context observation, identity and selection ------------------------
+# The observer lives in the engine-free tsf_context library. Its tests reuse the P3.7 TSF
+# host sources and drive the real msctf sinks; no engine target is linked.
+add_subdirectory(
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/windows/tsf_context_observer"
+  "${CMAKE_CURRENT_BINARY_DIR}/tsf_context_observer_tests")
+
 # --- P3.6: explicit hosted TEST DLL variant + TSF lifecycle verification ----------------
 # The DLL compiles the production TSF sources with the engine host enabled and a private
 # test seam. The product epocanva_tsf target and its export table are unchanged.
