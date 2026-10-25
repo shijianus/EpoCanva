@@ -109,7 +109,9 @@ background context.
 `Pump()` additionally revalidates `GetFocus`. This is a **defensive fallback for missed
 focus notifications**, not notification coverage; the real-focus case reports it separately.
 It is also what makes a programmatic `SetFocus` observable when msctf does not deliver
-`OnSetFocus`.
+`OnSetFocus`. `OnPushContext` and `OnPopContext` are real deliveries in this environment:
+they drop the old target synchronously, before any coordinator guard, and back the path-A
+integration case.
 
 ## 4. Identity, generations, capacity and the latch
 

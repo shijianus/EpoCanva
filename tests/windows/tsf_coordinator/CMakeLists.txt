@@ -257,6 +257,17 @@ epocanva_add_coordinator_case(
 epocanva_add_coordinator_case(
   windows.tsf_coordinator.focus_guard_retire_rebind focus-guard-retire-rebind)
 
+# P3.13-R2: path A (a real OnPushContext/OnPopContext notification invalidates first) and
+# the strict-policy integration probe (a real Win32 window is present but never accepted).
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_notification_before_guard
+  focus-notification-before-guard)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_revalidate_before_notification
+  focus-revalidate-before-notification)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.focus_guard_strict_no_fallback focus-strict-no-fallback)
+
 set_tests_properties(
   windows.tsf_coordinator.focus_guard_submit_target
   windows.tsf_coordinator.focus_guard_engine_target
@@ -265,6 +276,9 @@ set_tests_properties(
   windows.tsf_coordinator.focus_guard_foreign_dm
   windows.tsf_coordinator.focus_guard_generation
   windows.tsf_coordinator.focus_guard_retire_rebind
+  windows.tsf_coordinator.focus_notification_before_guard
+  windows.tsf_coordinator.focus_revalidate_before_notification
+  windows.tsf_coordinator.focus_guard_strict_no_fallback
   PROPERTIES TIMEOUT 300
              LABELS "windows;tsf;coordinator;focus;target;revalidation")
 
