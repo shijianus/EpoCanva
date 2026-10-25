@@ -228,15 +228,26 @@ cmake --build build/windows-engine-bridge/test --config Release --target tsf_lab
 ```
 
 Paths default to the existing engine-bridge cache values (pinned English `rime.dll`, the two
-fixed fixture directories, and a build-local run root). They can be overridden explicitly:
+fixed fixture directories, and the build-local trusted run root
+`build/windows-engine-bridge/test/tsf_lab/run`). The fixture paths can be overridden
+explicitly:
 
 ```text
 build/windows-engine-bridge/test/tsf_lab/Release/tsf_lab.exe \
   --rime-dll build/librime-english/rime/install/lib/rime.dll \
   --fixture-dir tests/fixtures/english_completion \
   --spelling-fixture-dir tests/fixtures/english_spelling \
-  --run-root build/p311-lab-run
+  --run-root build/windows-engine-bridge/test/tsf_lab/run
 ```
+
+`--run-root` selects a parent directory **inside** the build-supplied trusted run root; it
+cannot replace or widen that root, and a path outside it (including a prefix-similar sibling
+or a link that resolves outside) is refused before any run directory is created. Every
+launch creates a new, previously nonexistent `engine-executor-run-<UTC timestamp>-p<PID>`
+directory below the selected parent and keeps all artefacts there. Existing directories are never deleted or
+reused; a name collision retries with a bounded `-1`, `-2`, ... suffix, and an exhausted
+budget is refused. Older run roots such as `build/p311-lab-run` are left untouched and are
+no longer valid parents.
 
 Interactive use:
 
@@ -256,7 +267,7 @@ build/windows-engine-bridge/test/tsf_lab/Release/tsf_lab.exe \
   --rime-dll build/librime-english/rime/install/lib/rime.dll \
   --fixture-dir tests/fixtures/english_completion \
   --spelling-fixture-dir tests/fixtures/english_spelling \
-  --run-root build/p311-lab-screenshot/run
+  --run-root build/windows-engine-bridge/test/tsf_lab/run/screenshots
 ```
 
 The screenshot used for this delivery is
@@ -280,7 +291,14 @@ build/windows-engine-bridge/test/tsf_lab/Release/tsf_lab.exe \
   --rime-dll build/librime-english/rime/install/lib/rime.dll \
   --fixture-dir tests/fixtures/english_completion \
   --spelling-fixture-dir tests/fixtures/english_spelling \
-  --run-root build/p311-lab-run
+  --run-root build/windows-engine-bridge/test/tsf_lab/run/scenarios
+```
+
+The no-engine directory check runs in its own isolated area below the same trusted root:
+
+```text
+build/windows-engine-bridge/test/tsf_lab/Release/tsf_lab.exe \
+  --self-test --case run-root
 ```
 
 CTest:
@@ -311,6 +329,14 @@ The first screenshot attempt (before the settle pump and before the visible mode
 Win32 focus) hit a transient `NeedsResync / EditRefused` during activation. Two runs after
 the fix completed all three letters and wrote the screenshot. This is recorded rather than
 hidden; the final screenshot runs are the evidence.
+
+P3.13-R1 replaced the lab's recursive run-root recreation with a guarded fresh-directory
+path. In the R1 verification run, `windows.tsf_lab.run_root` passed 60/60 checks in an
+isolated area below `build/windows-engine-bridge/test/tsf_lab/run`, including preserved
+sentinels with unchanged full SHA-256 hashes, a legacy `engine-executor-run` directory that
+was not treated as deletion authority, refusal of outside/prefix-sibling/junction parents,
+normalization, and bounded collision retries. The lab CTest filter then passed 3/3. Those
+numbers belong to R1; the P3.13 table above is unchanged.
 
 The P3.10 Debug English-core performance failure is unchanged and out of scope for this
 round; no threshold or English source was touched. Re-running the root `build/vs2022-x64-debug`
@@ -343,7 +369,7 @@ Set-Location "D:\Users\Smart Kevin\OneDrive\Desktop\EpoCanva"
   --rime-dll ".\build\librime-english\rime\install\lib\rime.dll" `
   --fixture-dir ".\tests\fixtures\english_completion" `
   --spelling-fixture-dir ".\tests\fixtures\english_spelling" `
-  --run-root ".\build\p313-lab-run"
+  --run-root ".\build\windows-engine-bridge\test\tsf_lab\run"
 ```
 
 Click A, then B, then A again. The expected observation is that `Observer: OnSetFocus`
@@ -377,7 +403,12 @@ result or an automated screenshot as an automated pass.
 5. **Scenario 6 depends on the test host's grant hold.** That is deterministic fault
    injection for this experiment; it is not a product scheduling policy and is not compiled
    into a product path.
-6. **Null/empty TSF focus could not be held for a real integration case.** This environment
+6. **Run-directory checks are path validation, not an OS sandbox.** Each launch creates a
+   fresh child below the build-local trusted root after canonical containment checks and
+   never deletes an existing run directory. A hostile local process that swaps a validated
+   component for a junction between validation and creation is outside this test tool's
+   threat model; the guarantee here is the absence of any deletion path, not OS enforcement.
+7. **Null/empty TSF focus could not be held for a real integration case.** This environment
    restores the document focus after `SetFocus(nullptr)` and gives a newly created empty
    `ITfDocumentMgr` its own top context. The no-document-manager and no-top branches are
    pinned by the pure target-evidence case and the controlled coordinator status case; the

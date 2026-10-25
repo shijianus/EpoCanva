@@ -2,11 +2,22 @@
 #include "lab_self_test.h"
 
 #include <windows.h>
+#include <bcrypt.h>
+#include <winioctl.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
+#include <system_error>
+#include <vector>
 
+#include "lab_run_root.h"
 #include "lab_window.h"
 #include "scenario_runner.h"
 
@@ -285,6 +296,467 @@ bool RunScenarios(const LabConfig& config) {
   return all_ok && g_failed == 0;
 }
 
+namespace fs = std::filesystem;
+
+std::string NarrowPath(const fs::path& path) { return path.u8string(); }
+
+bool Sha256File(const fs::path& file, std::string* hex, std::string* error) {
+  std::ifstream input(file, std::ios::binary);
+  if (!input) {
+    *error = "cannot open " + NarrowPath(file);
+    return false;
+  }
+  const std::vector<char> bytes((std::istreambuf_iterator<char>(input)),
+                                std::istreambuf_iterator<char>());
+  if (input.bad()) {
+    *error = "cannot read " + NarrowPath(file);
+    return false;
+  }
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  NTSTATUS status = ::BCryptOpenAlgorithmProvider(
+      &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+  if (status >= 0) {
+    status = ::BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0);
+  }
+  if (status >= 0 && !bytes.empty()) {
+    status = ::BCryptHashData(hash, reinterpret_cast<PUCHAR>(
+                                       const_cast<char*>(bytes.data())),
+                              static_cast<ULONG>(bytes.size()), 0);
+  }
+  std::array<unsigned char, 32> digest = {};
+  if (status >= 0) {
+    status = ::BCryptFinishHash(hash, digest.data(),
+                                static_cast<ULONG>(digest.size()), 0);
+  }
+  if (hash != nullptr) {
+    ::BCryptDestroyHash(hash);
+  }
+  if (algorithm != nullptr) {
+    ::BCryptCloseAlgorithmProvider(algorithm, 0);
+  }
+  if (status < 0) {
+    *error = "cannot compute SHA-256 for " + NarrowPath(file);
+    return false;
+  }
+  char text[65] = {};
+  for (std::size_t index = 0; index < digest.size(); ++index) {
+    std::snprintf(text + index * 2, 3, "%02x",
+                  static_cast<unsigned int>(digest[index]));
+  }
+  *hex = text;
+  return true;
+}
+
+bool ReadAll(const fs::path& file, std::string* bytes) {
+  std::ifstream input(file, std::ios::binary);
+  if (!input) {
+    return false;
+  }
+  bytes->assign(std::istreambuf_iterator<char>(input),
+                std::istreambuf_iterator<char>());
+  return !input.bad();
+}
+
+bool SeedSentinel(const fs::path& file, const std::string& bytes,
+                  std::string* hash) {
+  std::error_code ec;
+  fs::create_directories(file.parent_path(), ec);
+  if (ec) {
+    return false;
+  }
+  std::ofstream output(file, std::ios::binary | std::ios::trunc);
+  output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  output.close();
+  if (!output.good()) {
+    return false;
+  }
+  std::string error;
+  if (!Sha256File(file, hash, &error)) {
+    return false;
+  }
+  std::printf("[lab-win] evidence sentinel %s sha256=%s (before)\n",
+              NarrowPath(file).c_str(), hash->c_str());
+  return true;
+}
+
+void CheckSentinel(const fs::path& file, const std::string& expected,
+                   const std::string& before, const std::string& what) {
+  std::string bytes;
+  std::string after;
+  std::string error;
+  const bool read_ok = ReadAll(file, &bytes);
+  const bool hash_ok = Sha256File(file, &after, &error);
+  Check(read_ok && bytes == expected, what + ": content unchanged",
+        read_ok ? bytes : std::string("unreadable"));
+  Check(hash_ok && !before.empty() && after == before,
+        what + ": full SHA-256 unchanged",
+        "before=" + before + " after=" + after + " " + error);
+  if (hash_ok) {
+    std::printf("[lab-win] evidence sentinel %s sha256=%s (after)\n",
+                NarrowPath(file).c_str(), after.c_str());
+  }
+}
+
+bool Equivalent(const fs::path& left, const fs::path& right) {
+  std::error_code ec;
+  const bool same = fs::equivalent(left, right, ec);
+  return !ec && same;
+}
+
+std::size_t CountEntries(const fs::path& directory) {
+  std::error_code ec;
+  std::size_t count = 0;
+  fs::directory_iterator iterator(directory, ec);
+  const fs::directory_iterator end;
+  while (!ec && iterator != end) {
+    ++count;
+    iterator.increment(ec);
+  }
+  return count;
+}
+
+// The user-mode SDK does not publish REPARSE_DATA_BUFFER (it lives in the WDK). This
+// test-only definition mirrors the documented mount-point layout used with
+// FSCTL_SET_REPARSE_POINT.
+struct LabMountPointReparseData {
+  USHORT SubstituteNameOffset;
+  USHORT SubstituteNameLength;
+  USHORT PrintNameOffset;
+  USHORT PrintNameLength;
+  WCHAR PathBuffer[1];
+};
+
+union LabReparseUnion {
+  LabMountPointReparseData MountPointReparseBuffer;
+  UCHAR GenericReparseBuffer[1];
+};
+
+struct LabReparseDataBuffer {
+  ULONG ReparseTag;
+  USHORT ReparseDataLength;
+  USHORT Reserved;
+  LabReparseUnion Reparse;
+};
+
+// Test fixture only: turns an empty directory into a junction without requiring the
+// symlink privilege. The target is a disposable directory created by the same test.
+bool CreateDirectoryJunction(const fs::path& link, const fs::path& target,
+                             std::string* error) {
+  std::error_code ec;
+  if (!fs::create_directory(link, ec) || ec) {
+    *error = "cannot create the junction stub (" + ec.message() + ")";
+    return false;
+  }
+  const fs::path absolute_target = fs::absolute(target, ec);
+  if (ec) {
+    *error = "cannot resolve the junction target (" + ec.message() + ")";
+    return false;
+  }
+  const std::wstring substitute = L"\\??\\" + absolute_target.native();
+  const std::size_t path_bytes = substitute.size() * sizeof(wchar_t);
+  const std::size_t header_bytes =
+      offsetof(LabReparseDataBuffer, Reparse);
+  const std::size_t path_offset =
+      offsetof(LabReparseUnion, MountPointReparseBuffer) +
+      offsetof(LabMountPointReparseData, PathBuffer);
+  const std::size_t buffer_bytes =
+      header_bytes + path_offset + path_bytes + sizeof(wchar_t);
+  std::vector<unsigned char> buffer(buffer_bytes, 0);
+  auto* reparse = reinterpret_cast<LabReparseDataBuffer*>(buffer.data());
+  reparse->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
+  reparse->ReparseDataLength =
+      static_cast<USHORT>(buffer_bytes - header_bytes);
+  reparse->Reserved = 0;
+  LabMountPointReparseData* mount = &reparse->Reparse.MountPointReparseBuffer;
+  mount->SubstituteNameOffset = 0;
+  // Lengths exclude the terminating null; the print name starts after that null.
+  mount->SubstituteNameLength =
+      static_cast<USHORT>(path_bytes - sizeof(wchar_t));
+  mount->PrintNameOffset = static_cast<USHORT>(path_bytes);
+  mount->PrintNameLength = 0;
+  std::memcpy(mount->PathBuffer, substitute.c_str(),
+              path_bytes + sizeof(wchar_t));
+
+  HANDLE handle = ::CreateFileW(
+      link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    *error = "cannot open the junction stub (" +
+             std::to_string(::GetLastError()) + ")";
+    return false;
+  }
+  DWORD returned = 0;
+  const BOOL ok = ::DeviceIoControl(
+      handle, FSCTL_SET_REPARSE_POINT, reparse,
+      static_cast<DWORD>(buffer_bytes), nullptr, 0, &returned, nullptr);
+  const DWORD code = ok != FALSE ? ERROR_SUCCESS : ::GetLastError();
+  ::CloseHandle(handle);
+  if (ok == FALSE) {
+    *error = "cannot set the junction reparse point (" + std::to_string(code) +
+             ")";
+    return false;
+  }
+  return true;
+}
+
+bool RunRunRootSafety(const LabConfig& config) {
+  const fs::path trusted = config.trusted_run_root;
+  std::printf("[lab-win] run-root safety: trusted root %s\n",
+              NarrowPath(trusted).c_str());
+  Check(!trusted.empty() && trusted.is_absolute(),
+        "run-root: the build supplies an absolute trusted root",
+        NarrowPath(trusted));
+  if (trusted.empty() || !trusted.is_absolute()) {
+    return false;
+  }
+
+  const std::string base_stem = FreshLabRunStem();
+  const fs::path area = trusted / ("selftest-" + base_stem);
+  const std::string area_text = NarrowPath(area);
+  std::error_code area_error;
+  fs::create_directories(area, area_error);
+  Check(!area_error, "run-root: the isolated test area is available",
+        area_error.message());
+  if (area_error) {
+    return false;
+  }
+  std::printf("[lab-win] evidence isolated area %s (retained)\n",
+              area_text.c_str());
+
+  {
+    const fs::path parent = area / "fresh" / "nested";
+    const std::string stem = base_stem + "-fresh";
+    LabRunDirectories first;
+    std::string error;
+    const bool first_ok =
+        PrepareFreshLabRunRoot(trusted, parent, stem, 4, &first, &error);
+    Check(first_ok, "run-root: a missing nested parent is created", error);
+    if (first_ok) {
+      Check(first.run_dir.filename().string() == stem,
+            "run-root: the first run directory uses the fresh unique name",
+            first.run_dir.filename().string());
+      Check(Equivalent(first.run_dir.parent_path(), parent),
+            "run-root: the run directory is a direct child of the requested "
+            "parent");
+      Check(fs::is_directory(first.shared_dir) &&
+                fs::is_directory(first.user_dir) &&
+                fs::is_directory(first.log_dir),
+            "run-root: shared, user and log are created inside the new run");
+      const fs::path sentinel = first.log_dir / "sentinel-a.txt";
+      std::string hash;
+      Check(SeedSentinel(sentinel, "fresh-run-a-kept", &hash),
+            "run-root: first-run sentinel written");
+      LabRunDirectories second;
+      error.clear();
+      const bool second_ok =
+          PrepareFreshLabRunRoot(trusted, parent, stem, 4, &second, &error);
+      Check(second_ok, "run-root: a second run gets its own directory", error);
+      if (second_ok) {
+        Check(!Equivalent(second.run_dir, first.run_dir),
+              "run-root: the second run did not reuse the first directory");
+        Check(second.run_dir.filename().string() == stem + "-1",
+              "run-root: the second run uses the next free name",
+              second.run_dir.filename().string());
+        CheckSentinel(sentinel, "fresh-run-a-kept", hash,
+                      "run-root: first run log survives the second run");
+      }
+    }
+  }
+
+  {
+    const fs::path parent = area / "collision";
+    const std::string stem = base_stem + "-collision";
+    const fs::path zero = parent / stem;
+    const fs::path one = parent / (stem + "-1");
+    std::string hash_zero;
+    std::string hash_one;
+    Check(SeedSentinel(zero / "keep.txt", "legacy-zero", &hash_zero) &&
+              SeedSentinel(one / "keep.txt", "legacy-one", &hash_one),
+          "run-root: collision sentinels written");
+    LabRunDirectories run;
+    std::string error;
+    const bool ok =
+        PrepareFreshLabRunRoot(trusted, parent, stem, 4, &run, &error);
+    Check(ok, "run-root: existing candidates are skipped, not deleted", error);
+    if (ok) {
+      Check(run.run_dir.filename().string() == stem + "-2",
+            "run-root: the first free collision suffix is used",
+            run.run_dir.filename().string());
+      CheckSentinel(zero / "keep.txt", "legacy-zero", hash_zero,
+                    "run-root: existing stem directory");
+      CheckSentinel(one / "keep.txt", "legacy-one", hash_one,
+                    "run-root: existing -1 directory");
+    }
+  }
+
+  {
+    const fs::path parent = area / "exhausted";
+    const std::string stem = base_stem + "-exhausted";
+    std::string hash_zero;
+    std::string hash_one;
+    std::string hash_two;
+    Check(SeedSentinel(parent / stem / "keep.txt", "exhausted-0",
+                       &hash_zero) &&
+              SeedSentinel(parent / (stem + "-1") / "keep.txt", "exhausted-1",
+                           &hash_one) &&
+              SeedSentinel(parent / (stem + "-2") / "keep.txt", "exhausted-2",
+                           &hash_two),
+          "run-root: exhaustion sentinels written");
+    const std::size_t before = CountEntries(parent);
+    LabRunDirectories run;
+    std::string error;
+    const bool ok =
+        PrepareFreshLabRunRoot(trusted, parent, stem, 3, &run, &error);
+    Check(!ok, "run-root: the bounded attempt budget is enforced");
+    Check(error.find("all 3 run directory names") != std::string::npos,
+          "run-root: the refusal names the attempt budget", error);
+    Check(CountEntries(parent) == before,
+          "run-root: a refused preparation creates no directory",
+          std::to_string(CountEntries(parent)) + " vs " +
+              std::to_string(before));
+    CheckSentinel(parent / stem / "keep.txt", "exhausted-0", hash_zero,
+                  "run-root: exhausted stem directory");
+    CheckSentinel(parent / (stem + "-1") / "keep.txt", "exhausted-1", hash_one,
+                  "run-root: exhausted -1 directory");
+    CheckSentinel(parent / (stem + "-2") / "keep.txt", "exhausted-2", hash_two,
+                  "run-root: exhausted -2 directory");
+  }
+
+  {
+    const fs::path legacy_base = area / "legacy" / "base";
+    const fs::path old_run = legacy_base / "engine-executor-run";
+    const fs::path old_log = old_run / "shared" / "old.log";
+    std::string old_hash;
+    Check(SeedSentinel(old_log, "old-log-kept", &old_hash),
+          "run-root: legacy run sentinel written");
+    LabRunDirectories run;
+    std::string error;
+    const bool ok =
+        PrepareFreshLabRunRoot(trusted, legacy_base, "engine-executor-run", 4,
+                               &run, &error);
+    Check(ok,
+          "run-root: a legacy engine-executor-run is not deletion authority",
+          error);
+    if (ok) {
+      Check(run.run_dir.filename().string() == "engine-executor-run-1",
+            "run-root: a sibling name is created next to the legacy directory",
+            run.run_dir.filename().string());
+      CheckSentinel(old_log, "old-log-kept", old_hash,
+                    "run-root: legacy run log");
+    }
+    LabRunDirectories nested;
+    error.clear();
+    const bool nested_ok = PrepareFreshLabRunRoot(
+        trusted, old_run, "engine-executor-run", 4, &nested, &error);
+    Check(nested_ok,
+          "run-root: a parent whose leaf is engine-executor-run is usable",
+          error);
+    if (nested_ok) {
+      Check(Equivalent(nested.run_dir.parent_path(), old_run),
+            "run-root: the nested run is inside the legacy directory, not a "
+            "replacement");
+      CheckSentinel(old_log, "old-log-kept", old_hash,
+                    "run-root: legacy run log after nested preparation");
+    }
+  }
+
+  {
+    const fs::path outside =
+        trusted.parent_path() / ("selftest-outside-" + base_stem);
+    std::string outside_hash;
+    Check(SeedSentinel(outside / "keep.txt", "outside-kept", &outside_hash),
+          "run-root: outside sentinel written");
+    LabRunDirectories run;
+    std::string error;
+    const bool ok = PrepareFreshLabRunRoot(
+        trusted, outside, base_stem + "-outside", 4, &run, &error);
+    Check(!ok,
+          "run-root: an absolute parent outside the trusted root is refused");
+    Check(!error.empty(), "run-root: the outside refusal is explained", error);
+    CheckSentinel(outside / "keep.txt", "outside-kept", outside_hash,
+                  "run-root: outside sentinel");
+
+    error.clear();
+    const bool dotted_ok = PrepareFreshLabRunRoot(
+        trusted, trusted / ".." / outside.filename(), base_stem + "-dotted", 4,
+        &run, &error);
+    Check(!dotted_ok, "run-root: a .. path outside the trusted root is refused");
+    CheckSentinel(outside / "keep.txt", "outside-kept", outside_hash,
+                  "run-root: outside sentinel after the .. attempt");
+
+    const fs::path sibling(trusted.native() + L"-sibling-" +
+                           std::to_wstring(::GetCurrentProcessId()));
+    std::string sibling_hash;
+    Check(SeedSentinel(sibling / "keep.txt", "sibling-kept", &sibling_hash),
+          "run-root: prefix-sibling sentinel written");
+    error.clear();
+    const bool sibling_ok = PrepareFreshLabRunRoot(
+        trusted, sibling, base_stem + "-sibling", 4, &run, &error);
+    Check(!sibling_ok,
+          "run-root: a prefix-similar sibling of the trusted root is refused");
+    CheckSentinel(sibling / "keep.txt", "sibling-kept", sibling_hash,
+                  "run-root: prefix-sibling sentinel");
+
+    error.clear();
+    const bool relative_ok = PrepareFreshLabRunRoot(
+        trusted, fs::path("relative-run-parent"), base_stem + "-relative", 4,
+        &run, &error);
+    Check(!relative_ok, "run-root: a relative parent is refused");
+    Check(!error.empty(), "run-root: the relative refusal is explained", error);
+  }
+
+  {
+    const fs::path target =
+        trusted.parent_path() / ("selftest-junction-target-" + base_stem);
+    std::string target_hash;
+    Check(SeedSentinel(target / "keep.txt", "junction-target-kept",
+                       &target_hash),
+          "run-root: junction target sentinel written");
+    const fs::path link = area / "junction-escape";
+    std::string junction_error;
+    if (!CreateDirectoryJunction(link, target, &junction_error)) {
+      std::printf("[lab-win] SKIP run-root: junction fixture unavailable (%s)\n",
+                  junction_error.c_str());
+    } else {
+      LabRunDirectories run;
+      std::string error;
+      const bool ok = PrepareFreshLabRunRoot(
+          trusted, link, base_stem + "-junction", 4, &run, &error);
+      Check(!ok,
+            "run-root: a junction that resolves outside the trusted root is "
+            "refused");
+      Check(!error.empty(), "run-root: the junction refusal is explained",
+            error);
+    }
+    CheckSentinel(target / "keep.txt", "junction-target-kept", target_hash,
+                  "run-root: junction target sentinel");
+  }
+
+  {
+    const fs::path normalize = area / "normalize";
+    std::error_code ec;
+    fs::create_directories(normalize / "a", ec);
+    Check(!ec, "run-root: normalization fixture created", ec.message());
+    LabRunDirectories run;
+    std::string error;
+    const bool ok = PrepareFreshLabRunRoot(
+        trusted, normalize / "a" / "." / "b" / ".." / "b",
+        base_stem + "-normalized", 4, &run, &error);
+    Check(ok, "run-root: . and .. components are normalized before validation",
+          error);
+    if (ok) {
+      Check(Equivalent(run.run_dir.parent_path(), normalize / "a" / "b"),
+            "run-root: the run directory is under the normalized parent",
+            NarrowPath(run.run_dir.parent_path()));
+    }
+  }
+
+  std::printf("[lab-win] evidence run-root area retained without cleanup: %s\n",
+              area_text.c_str());
+  return g_failed == 0;
+}
+
 }  // namespace
 
 int RunLabSelfTest(const LabConfig& config, const std::string& case_name) {
@@ -298,8 +770,11 @@ int RunLabSelfTest(const LabConfig& config, const std::string& case_name) {
   if (case_name == "scenarios" || case_name == "all") {
     ok = RunScenarios(config) && ok;
   }
+  if (case_name == "run-root" || case_name == "all") {
+    ok = RunRunRootSafety(config) && ok;
+  }
   if (case_name != "window-lifecycle" && case_name != "scenarios" &&
-      case_name != "all") {
+      case_name != "run-root" && case_name != "all") {
     std::printf("[lab-win] unknown case: %s\n", case_name.c_str());
     return 2;
   }

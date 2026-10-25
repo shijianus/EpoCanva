@@ -16,8 +16,11 @@ Set-Location "D:\Users\Smart Kevin\OneDrive\Desktop\EpoCanva"
   --rime-dll ".\build\librime-english\rime\install\lib\rime.dll" `
   --fixture-dir ".\tests\fixtures\english_completion" `
   --spelling-fixture-dir ".\tests\fixtures\english_spelling" `
-  --run-root ".\build\p313-lab-run"
+  --run-root ".\build\windows-engine-bridge\test\tsf_lab\run"
 ```
+
+Each launch creates a new retained run directory below this build-local parent; existing
+run directories are never deleted. The console prints the exact new path.
 
 The window title is `EpoCanva P3.13 - visible TSF integration lab`. Click document **A** or
 **B** in the upper area to give it real Win32 focus; the status panel shows the focus facts.

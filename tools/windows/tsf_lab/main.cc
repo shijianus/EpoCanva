@@ -32,6 +32,9 @@
 #ifndef EPOCANVA_LAB_DEFAULT_RUN_ROOT
 #define EPOCANVA_LAB_DEFAULT_RUN_ROOT ""
 #endif
+#ifndef EPOCANVA_LAB_TRUSTED_RUN_ROOT
+#define EPOCANVA_LAB_TRUSTED_RUN_ROOT ""
+#endif
 
 namespace {
 
@@ -49,6 +52,10 @@ void PrintUsage() {
       "               [--spelling-fixture-dir DIR] [--run-root DIR]\n"
       "               [--schema ID] [--self-test [--case NAME]]\n"
       "               [--screenshot FILE.bmp] [--screenshot-scenario N]\n"
+      "\n"
+      "--run-root DIR is a parent below the build-local trusted run root. Each\n"
+      "launch creates a new, previously nonexistent run directory and keeps its\n"
+      "artefacts; existing directories are never deleted or reused.\n"
       "\n"
       "interactive (default): opens the lab window. Click A or B for real Win32\n"
       "focus, then a fixed scenario button. Typed keys are ignored.\n"
@@ -70,6 +77,7 @@ bool ParseArgs(int argc, char** argv, LabConfig* config, bool* self_test,
   config->rime_dll = EPOCANVA_LAB_DEFAULT_RIME_DLL;
   config->fixture_dir = EPOCANVA_LAB_DEFAULT_FIXTURE_DIR;
   config->spelling_fixture_dir = EPOCANVA_LAB_DEFAULT_SPELLING_FIXTURE_DIR;
+  config->trusted_run_root = EPOCANVA_LAB_TRUSTED_RUN_ROOT;
   config->run_root = EPOCANVA_LAB_DEFAULT_RUN_ROOT;
   *self_test = false;
   *case_name = "all";
@@ -115,11 +123,12 @@ bool ParseArgs(int argc, char** argv, LabConfig* config, bool* self_test,
 
 bool RequireSessionPaths(const LabConfig& config) {
   if (config.rime_dll.empty() || config.fixture_dir.empty() ||
-      config.spelling_fixture_dir.empty() || config.run_root.empty()) {
+      config.spelling_fixture_dir.empty() || config.run_root.empty() ||
+      config.trusted_run_root.empty()) {
     std::fprintf(stderr,
-                 "tsf_lab: rime dll, both fixture directories and run-root are "
-                 "required (pass --rime-dll/--fixture-dir/"
-                 "--spelling-fixture-dir/--run-root)\n");
+                 "tsf_lab: rime dll, both fixture directories, run-root and the "
+                 "build-supplied trusted run root are required (pass "
+                 "--rime-dll/--fixture-dir/--spelling-fixture-dir/--run-root)\n");
     return false;
   }
   return true;
@@ -180,10 +189,12 @@ int main(int argc, char** argv) {
   }
 
   if (self_test) {
-    if (case_name != "window-lifecycle" && !RequireSessionPaths(config)) {
+    const bool needs_session_paths =
+        case_name != "window-lifecycle" && case_name != "run-root";
+    if (needs_session_paths && !RequireSessionPaths(config)) {
       return 2;
     }
-    if (case_name != "window-lifecycle") {
+    if (needs_session_paths) {
       std::string path_error;
       if (!NormalizePaths(&config, &path_error)) {
         std::fprintf(stderr, "tsf_lab: %s\n", path_error.c_str());

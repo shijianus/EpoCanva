@@ -69,8 +69,10 @@ struct LabConfig {
   std::filesystem::path rime_dll;
   std::filesystem::path fixture_dir;
   std::filesystem::path spelling_fixture_dir;
-  // The session creates/uses <run_root>/engine-executor-run, which the executor test
-  // scaffolding recreates empty. Nothing is written into the source tree.
+  // Build-supplied anchor for run artefacts. It never comes from --run-root.
+  std::filesystem::path trusted_run_root;
+  // The command-line parent. The session creates one fresh, previously nonexistent
+  // directory below it and retains every artefact; existing directories are preserved.
   std::filesystem::path run_root;
   std::size_t executor_capacity = 16;
   DWORD engine_create_timeout_ms = 30000;

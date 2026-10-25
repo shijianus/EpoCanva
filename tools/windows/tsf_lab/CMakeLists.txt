@@ -32,6 +32,8 @@ add_executable(tsf_lab
   lab_window.h
   lab_session.cc
   lab_session.h
+  lab_run_root.cc
+  lab_run_root.h
   scenario_runner.cc
   scenario_runner.h
   lab_self_test.cc
@@ -44,12 +46,16 @@ add_executable(tsf_lab
   "${_lab_tsf_edit_tests_dir}/test_text_store.h"
   "${_lab_executor_tests_dir}/test_support.cc"
   "${_lab_executor_tests_dir}/test_support.h")
+# Build-supplied anchor for every lab run. --run-root can select a parent below this
+# directory but can never replace or widen it.
+set(_lab_trusted_run_root "${CMAKE_CURRENT_BINARY_DIR}/run")
 target_compile_definitions(tsf_lab PRIVATE
   _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE
   EPOCANVA_LAB_DEFAULT_RIME_DLL="${EPOCANVA_RIME_DLL}"
   EPOCANVA_LAB_DEFAULT_FIXTURE_DIR="${EPOCANVA_ENGLISH_FIXTURE_DIR}"
   EPOCANVA_LAB_DEFAULT_SPELLING_FIXTURE_DIR="${EPOCANVA_SPELLING_FIXTURE_DIR}"
-  EPOCANVA_LAB_DEFAULT_RUN_ROOT="${CMAKE_CURRENT_BINARY_DIR}/run")
+  EPOCANVA_LAB_DEFAULT_RUN_ROOT="${_lab_trusted_run_root}"
+  EPOCANVA_LAB_TRUSTED_RUN_ROOT="${_lab_trusted_run_root}")
 target_compile_options(tsf_lab PRIVATE
   /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
 target_include_directories(tsf_lab PRIVATE
@@ -59,7 +65,8 @@ target_include_directories(tsf_lab PRIVATE
   # tests/windows so "engine_executor/test_support.h" is unambiguous.
   "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows")
 target_link_libraries(tsf_lab PRIVATE
-  epocanva_tsf_coordinator epocanva_engine_keyboard_adapters ole32 uuid user32)
+  epocanva_tsf_coordinator epocanva_engine_keyboard_adapters ole32 uuid user32
+  bcrypt)
 
 enable_testing()
 
@@ -86,6 +93,24 @@ set_tests_properties(
   PROPERTIES TIMEOUT 180
              LABELS "windows;tsf;lab;window;lifecycle;no-ui")
 
+# No engine and no window: exercises the guarded fresh-directory preparation in an
+# isolated area below the build-local trusted root only. Existing sentinels are kept.
+add_test(
+  NAME windows.tsf_lab.run_root
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:tsf_lab>
+    -DCASE=run-root
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--self-test;--case;run-root"
+    -DTIMEOUT_SECONDS=120
+    -P ${_lab_assert})
+set_tests_properties(
+  windows.tsf_lab.run_root
+  PROPERTIES TIMEOUT 180
+             LABELS "windows;tsf;lab;run-root;directory;no-ui")
+
 set(_lab_run_base "${CMAKE_CURRENT_BINARY_DIR}/run/scenarios")
 add_test(
   NAME windows.tsf_lab.scenarios
@@ -104,4 +129,4 @@ set_tests_properties(
              LABELS "windows;tsf;lab;scenario;engine;english;real;no-ui")
 
 message(STATUS
-  "  tsf_lab: add_test window_lifecycle + scenarios (hidden windows, no interactive CTest)")
+  "  tsf_lab: add_test window_lifecycle + run_root + scenarios (no interactive CTest)")

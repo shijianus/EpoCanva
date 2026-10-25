@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "engine_executor/test_support.h"
+#include "lab_run_root.h"
 #include "observer_test_support.h"
 
 namespace epocanva {
@@ -237,15 +238,24 @@ bool LabSession::StartExecutor(std::string* error) {
     session_error_ = "run-root is empty";
     return false;
   }
-  if (options.run_root.filename() != "engine-executor-run") {
-    options.run_root /= "engine-executor-run";
-  }
 
-  std::filesystem::path shared_dir;
-  std::filesystem::path user_dir;
-  std::filesystem::path log_dir;
-  if (!ex::PrepareRunRoot(options, "tsf-lab", &shared_dir, &user_dir, &log_dir) ||
-      !ex::StageFixtures(options, shared_dir)) {
+  LabRunDirectories run;
+  std::string run_error;
+  if (!PrepareFreshLabRunRoot(config_.trusted_run_root, options.run_root,
+                              FreshLabRunStem(), 32, &run, &run_error)) {
+    session_error_ = "run directory preparation failed: " + run_error;
+    if (error != nullptr) {
+      *error = session_error_;
+    }
+    return false;
+  }
+  std::printf("[lab-win] run directory %s (fresh, retained)\n",
+              run.run_dir.u8string().c_str());
+
+  const std::filesystem::path& shared_dir = run.shared_dir;
+  const std::filesystem::path& user_dir = run.user_dir;
+  const std::filesystem::path& log_dir = run.log_dir;
+  if (!ex::StageFixtures(options, shared_dir)) {
     session_error_ = "engine fixture staging failed";
     if (error != nullptr) {
       *error = session_error_;
