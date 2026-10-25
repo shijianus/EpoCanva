@@ -1,4 +1,4 @@
-// EpoCanva P3.11 -- the reusable TSF side of the interactive integration lab.
+// EpoCanva P3.11/P3.13 -- the reusable TSF side of the interactive integration lab.
 //
 // WHAT THIS OWNS. One real P3.7 TSF host (ITfThreadMgr, two document managers, two
 // ITextStoreACP documents), one real English-engine executor, the P3.10 observer and
@@ -19,6 +19,13 @@
 // A successful SetFocus is never reported as an OnSetFocus notification: the lab records
 // whether the bind followed a real thread-manager notification or Pump's GetFocus
 // revalidation, and the UI shows both.
+//
+// TARGET GUARD (P3.13). The controller attaches the observer as the coordinator's live
+// TargetRevalidator. PumpOnce advances the observer, the coordinator and then the
+// controller's rebind retry; a target refused as Retiring/Busy is never promised bound and
+// is re-read from the CURRENT focus after the retirement ledger is terminal. The UI displays
+// the Win32/TSF focus facts, evidence source, admission state, guard counters and the last
+// refusal separately.
 //
 // TEARDOWN. Clear both AssociateFocus associations (releasing the returned previous
 // managers), release the observer's sinks, retire the current binding and pump the bounded
@@ -99,6 +106,14 @@ struct LabSnapshot {
   std::uint64_t focus_calls = 0;
   HRESULT last_set_focus_hr = S_OK;
   int last_focus_target = -1;
+  // P3.13 display facts: actual Win32 focus, the thread's GUI focus window, and the
+  // foreground/host relationship. These are shown separately from TSF focus and are not
+  // used as a universal substitute for it.
+  HWND win32_focus_hwnd = nullptr;
+  bool win32_focus_owned = false;
+  HWND win32_thread_focus_hwnd = nullptr;
+  HWND foreground_hwnd = nullptr;
+  bool foreground_is_process = false;
 
   bool bound = false;
   bool closed = false;
@@ -129,6 +144,19 @@ struct LabSnapshot {
   std::uint64_t permission_queries_begun = 0;
   std::uint64_t permission_queries_completed = 0;
   std::uint64_t permission_rechecks = 0;
+  // P3.13 admission/refusal evidence.
+  coordinator::SubmitStatus last_submit_status =
+      coordinator::SubmitStatus::kAccepted;
+  std::uint64_t submit_refusals = 0;
+  context::TargetRevalidation last_target_revalidation{};
+  std::uint64_t target_revalidations = 0;
+  std::uint64_t target_refusals = 0;
+  std::uint64_t target_prechecks = 0;
+  std::uint64_t target_callback_checks = 0;
+  std::uint64_t target_rejections = 0;
+  HRESULT last_edit_request_hr = S_OK;
+  HRESULT last_edit_session_hr = S_OK;
+  HRESULT last_edit_operation_hr = S_OK;
 
   context::ContextObserverSnapshot observer;
   coordinator::ObservedBindingController::Diagnostics binding;

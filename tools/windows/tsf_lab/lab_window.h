@@ -1,4 +1,4 @@
-// EpoCanva P3.11 -- the visible native Win32 shell of the TSF integration lab.
+// EpoCanva P3.11/P3.13 -- the visible native Win32 shell of the TSF integration lab.
 //
 // WHAT THIS IS. One ordinary top-level window with two focusable child document surfaces
 // and a fixed set of scenario buttons. The child surfaces are not edit controls: they paint
@@ -145,6 +145,7 @@ class LabWindow {
   bool create_rejected_ = false;
   std::string create_error_;
   ULONGLONG last_refresh_tick_ = 0;
+  std::uint64_t last_logged_submit_refusals_ = 0;
 
   static int class_refs_;
   static int live_windows_;

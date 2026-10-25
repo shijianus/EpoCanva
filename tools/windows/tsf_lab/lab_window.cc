@@ -1,4 +1,4 @@
-// EpoCanva P3.11 -- the visible Win32 shell. See lab_window.h.
+// EpoCanva P3.11/P3.13 -- the visible Win32 shell. See lab_window.h.
 #include "lab_window.h"
 
 #include <algorithm>
@@ -108,8 +108,8 @@ std::unique_ptr<LabWindow> LabWindow::Create(const LabWindowOptions& options,
 
   HINSTANCE instance = ::GetModuleHandleW(nullptr);
   HWND created = ::CreateWindowExW(
-      0, kTopWindowClass, L"EpoCanva P3.11 - visible TSF integration lab",
-      WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 60, 40, 1180, 920, nullptr, nullptr,
+      0, kTopWindowClass, L"EpoCanva P3.13 - visible TSF integration lab",
+      WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 40, 20, 1180, 1060, nullptr, nullptr,
       instance, window.get());
   // Capture the failure value before any other API call can overwrite it.
   const DWORD create_error = ::GetLastError();
@@ -310,7 +310,7 @@ void LabWindow::Layout() {
   const int button_height = 30;
   const int button_rows = 2;
   const int button_area_height = button_rows * button_height + gap;
-  int status_height = 430;
+  int status_height = 590;
   int document_height =
       height - margin * 2 - button_area_height - status_height - gap * 2;
   if (document_height < 170) {
@@ -438,6 +438,25 @@ void LabWindow::OnTimer() {
     return;
   }
   session_->PumpOnce(0);
+  {
+    const LabSnapshot snapshot = session_->Snapshot();
+    if (snapshot.submit_refusals > last_logged_submit_refusals_) {
+      last_logged_submit_refusals_ = snapshot.submit_refusals;
+      AddStatusLine(
+          "refused: " +
+          std::string(coordinator::DescribeSubmitStatus(
+              snapshot.last_submit_status)) +
+          " stage=" +
+          coordinator::DescribeSubmitStage(snapshot.last_submit_status) +
+          " target=" +
+          context::DescribeTargetRevalidationStatus(
+              snapshot.last_target_revalidation.status) +
+          " source=" +
+          context::DescribeThreadFocusEvidence(
+              snapshot.last_target_revalidation.thread_focus_evidence) +
+          " cause=" + coordinator::DescribeRejectCause(snapshot.cause));
+    }
+  }
   MaybeRefreshEngineState(false);
   RefreshView();
 }
@@ -537,13 +556,16 @@ std::wstring LabWindow::BuildEngineLine(const LabSnapshot& snapshot) {
 std::wstring LabWindow::BuildStatusText() {
   std::wstring text;
   AppendLine(&text,
-             L"EpoCanva P3.11 - visible TSF integration lab (fixed-fixture experiment)");
+             L"EpoCanva P3.13 - visible TSF integration lab (fixed-fixture experiment)");
   AppendLine(&text,
              L"NOT a registered input method. No keyboard sink, no SendInput, no "
              L"write into another application.");
   AppendLine(&text,
              L"Click document A or B for real Win32 focus. Typed keys into this "
              L"window are ignored; use the scenario buttons.");
+  AppendLine(&text,
+             L"P3.13 guard: every ordinary input/edit revalidates thread focus, "
+             L"GetFocus/GetTop identity, generation and permission.");
   AppendLine(&text, L"");
   if (!session_ready()) {
     AppendLine(&text, L"SESSION NOT READY");
@@ -557,21 +579,117 @@ std::wstring LabWindow::BuildStatusText() {
 
   const LabSnapshot snapshot = session_->Snapshot();
   AppendLine(&text, L"Focus: Win32=" + FocusLetter(snapshot.win32_focus) +
-                        L"  TSF GetFocus=" +
-                        FocusLetter(snapshot.tsf_focus) +
-                        L"  TSF SetFocus calls=" +
+                        L" thread_owned=" +
+                        (snapshot.win32_focus_owned ? L"1" : L"0") +
+                        L" thread_focus_hwnd=" +
+                        (snapshot.win32_thread_focus_hwnd != nullptr ? L"set"
+                                                                     : L"none") +
+                        L" foreground=" +
+                        (snapshot.foreground_is_process ? L"this-process"
+                                                        : L"other/none"));
+  AppendLine(&text, L"TSF: GetFocus=" + FocusLetter(snapshot.tsf_focus) +
+                        L" SetFocus calls=" +
                         std::to_wstring(snapshot.focus_calls) + L" last=" +
                         WideAscii(HrText(snapshot.last_set_focus_hr)) +
-                        L" target=" +
-                        FocusLetter(snapshot.last_focus_target));
+                        L" target=" + FocusLetter(snapshot.last_focus_target) +
+                        L" thread_sink=" +
+                        (snapshot.observer.thread_focus_sink_advised
+                             ? L"advised"
+                             : L"not-advised"));
   AppendLine(&text,
-             L"Last bind path=" + WideAscii(snapshot.last_bind_path) +
-                 L" (notification = real OnSetFocus; revalidation = Pump observed "
-                 L"GetFocus)");
+             std::wstring(L"Thread focus: IsThreadFocus=") +
+                 (snapshot.observer.thread_focus_query_value ? L"1" : L"0") +
+                 L" query=" +
+                 (snapshot.observer.thread_focus_query_ok ? L"ok" : L"failed") +
+                 L" hr=" +
+                 WideAscii(HrText(snapshot.observer.thread_focus_query_hr)) +
+                 L" source=" +
+                 WideAscii(context::DescribeThreadFocusEvidence(
+                     snapshot.observer.last_thread_focus_evidence)) +
+                 L" notify_set=" +
+                 std::to_wstring(snapshot.observer.thread_focus_set_notifications) +
+                 L" notify_kill=" +
+                 std::to_wstring(
+                     snapshot.observer.thread_focus_kill_notifications));
+  AppendLine(&text,
+             L"Last bind evidence=" +
+                 WideAscii(context::DescribeTargetBindingEvidence(
+                     snapshot.binding.last_bind_evidence)) +
+                 L" (notification/revalidation; the source is never renamed)");
   AppendLine(&text, BuildDocumentLine(0, snapshot));
   AppendLine(&text, BuildDocumentLine(1, snapshot));
   AppendLine(&text, BuildEngineLine(snapshot));
   AppendLine(&text, L"");
+  {
+    const bool target_blocked =
+        snapshot.bound &&
+        snapshot.last_target_revalidation.status !=
+            context::TargetRevalidationStatus::kOk &&
+        snapshot.last_submit_status != coordinator::SubmitStatus::kAccepted;
+    std::wstring admission;
+    if (snapshot.gate != coordinator::CoordinatorGate::kOpen) {
+      admission = L"Blocked";
+    } else if (snapshot.binding.rebind_pending) {
+      admission = L"Blocked(rebind-pending)";
+    } else if (target_blocked) {
+      admission = L"Blocked(target)";
+    } else if (snapshot.retirement.admission_paused) {
+      admission = L"Retiring";
+    } else if (snapshot.phase != coordinator::WorkPhase::kIdle) {
+      admission = L"Busy";
+    } else if (snapshot.bound) {
+      admission = L"Ready";
+    } else {
+      admission = L"Unbound";
+    }
+    AppendLine(&text,
+               L"Admission: " + admission + L"  gate=" +
+                   WideAscii(coordinator::DescribeCoordinatorGate(snapshot.gate)) +
+                   L" phase=" +
+                   WideAscii(coordinator::DescribeWorkPhase(snapshot.phase)) +
+                   L" submit_refusals=" +
+                   std::to_wstring(snapshot.submit_refusals));
+    if (snapshot.last_submit_status ==
+        coordinator::SubmitStatus::kAccepted) {
+      AppendLine(&text, L"Last refusal: none");
+    } else {
+      AppendLine(&text,
+                 L"Last refusal: submit=" +
+                     WideAscii(coordinator::DescribeSubmitStatus(
+                         snapshot.last_submit_status)) +
+                     L" stage=" +
+                     WideAscii(coordinator::DescribeSubmitStage(
+                         snapshot.last_submit_status)) +
+                     L" cause=" +
+                     WideAscii(coordinator::DescribeRejectCause(
+                         snapshot.cause)) +
+                     L" target=" +
+                     WideAscii(context::DescribeTargetRevalidationStatus(
+                         snapshot.last_target_revalidation.status)) +
+                     L" source=" +
+                     WideAscii(context::DescribeThreadFocusEvidence(
+                         snapshot.last_target_revalidation
+                             .thread_focus_evidence)) +
+                     L" query_hr=" +
+                     WideAscii(HrText(
+                         snapshot.last_target_revalidation.query_hr)));
+    }
+    AppendLine(&text,
+               L"Target guard: checks=" +
+                   std::to_wstring(snapshot.target_revalidations) +
+                   L" refusals=" + std::to_wstring(snapshot.target_refusals) +
+                   L" prechecks=" + std::to_wstring(snapshot.target_prechecks) +
+                   L" callback=" +
+                   std::to_wstring(snapshot.target_callback_checks) +
+                   L" rejected=" + std::to_wstring(snapshot.target_rejections) +
+                   L" top_match=" +
+                   (snapshot.last_target_revalidation.evidence.top_context_matches
+                        ? L"1"
+                        : L"0") +
+                   L" observed_gen=" +
+                   std::to_wstring(snapshot.last_target_revalidation.evidence
+                                       .observed_generation));
+  }
   AppendLine(&text,
              L"Coordinator: bound=" + std::wstring(snapshot.bound ? L"1" : L"0") +
                  L" ctx=" + std::to_wstring(snapshot.identity.context_id) +
@@ -604,6 +722,13 @@ std::wstring LabWindow::BuildStatusText() {
                  L"/" +
                  WideAscii(edit::DescribeEditRejectReason(
                      snapshot.last_edit_reason)));
+  AppendLine(&text,
+             L"  last edit: request_hr=" +
+                 WideAscii(HrText(snapshot.last_edit_request_hr)) +
+                 L" session_hr=" +
+                 WideAscii(HrText(snapshot.last_edit_session_hr)) +
+                 L" op_hr=" +
+                 WideAscii(HrText(snapshot.last_edit_operation_hr)));
   AppendLine(&text,
              L"  counters: works=" + std::to_wstring(snapshot.works_accepted) +
                  L" results=" + std::to_wstring(snapshot.engine_results_taken) +
@@ -646,7 +771,14 @@ std::wstring LabWindow::BuildStatusText() {
                  std::to_wstring(snapshot.engine_clients_created) +
                  L" last_bind=" +
                  WideAscii(coordinator::DescribeBindStatus(
-                     snapshot.binding.last_bind_status)));
+                     snapshot.binding.last_bind_status)) +
+                 L" rebind_pending=" +
+                 (snapshot.binding.rebind_pending ? L"1" : L"0") +
+                 L" rebind_requests=" +
+                 std::to_wstring(snapshot.binding.rebind_requests) +
+                 L" evidence=" +
+                 WideAscii(context::DescribeTargetBindingEvidence(
+                     snapshot.binding.last_bind_evidence)));
   AppendLine(&text,
              L"Retirement: live_clients=" +
                  std::to_wstring(snapshot.client_usage.live) + L" (open=" +
@@ -667,7 +799,15 @@ std::wstring LabWindow::BuildStatusText() {
                  L" own_comp=" +
                  (snapshot.owned_composition_active ? L"1" : L"0") +
                  L" retiring_comp=" +
-                 std::to_wstring(snapshot.retirement.retiring_compositions));
+                 std::to_wstring(snapshot.retirement.retiring_compositions) +
+                 L" unresolved_close=" +
+                 std::to_wstring(
+                     snapshot.retirement.unresolved_close_requests) +
+                 L" unresolved_engine=" +
+                 std::to_wstring(
+                     snapshot.retirement.unresolved_engine_results) +
+                 L" close_fail=" +
+                 std::to_wstring(snapshot.retirement.close_failures));
   AppendLine(&text,
              L"  cleanup: last=" +
                  WideAscii(coordinator::DescribeCleanupState(

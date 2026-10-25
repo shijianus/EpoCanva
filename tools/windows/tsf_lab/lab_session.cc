@@ -1,4 +1,4 @@
-// EpoCanva P3.11 -- implementation of the reusable TSF lab session. See lab_session.h.
+// EpoCanva P3.11/P3.13 -- implementation of the reusable TSF lab session. See lab_session.h.
 #include "lab_session.h"
 
 #include <algorithm>
@@ -380,6 +380,36 @@ void LabSession::Shutdown() {
   bound_client_ = engine::ClientId{};
   ready_ = false;
   shutdown_complete_ = true;
+  // Manual-acceptance summary: value-only, no document text, no field identity. The
+  // interactive window prints this on close; the self-test keeps its own assertions.
+  std::printf(
+      "[lab] shutdown cleanup: stop=%s drain=%s/%s live_clients=%llu "
+      "created/closed=%llu/%llu slots=%zu/%zu retiring=%zu/%zu "
+      "cleanup=%s/%s finished=%llu already_ordinary=%llu blocked=%llu "
+      "assoc_clear=A:%d B:%d stores_alive=%llu advised_sinks_alive=%llu "
+      "thread_mgr_deactivated=%d released=%d foreign_dms=%llu still_enumerated=%llu\n",
+      engine::DescribeStopStatus(stop_status_),
+      retire_drain_complete_ ? "complete" : "incomplete",
+      retire_drain_timed_out_ ? "timed-out" : "ok",
+      static_cast<unsigned long long>(client_usage_after_drain_.live),
+      static_cast<unsigned long long>(client_usage_after_drain_.created),
+      static_cast<unsigned long long>(client_usage_after_drain_.closed),
+      capacity_after_drain_.occupied, capacity_after_drain_.capacity,
+      retirement_cache_.retiring_bindings, retirement_cache_.capacity,
+      coordinator::DescribeCleanupState(retirement_cache_.last_cleanup_state),
+      coordinator::DescribeCleanupBlockReason(retirement_cache_.last_cleanup_block),
+      static_cast<unsigned long long>(retirement_cache_.finished),
+      static_cast<unsigned long long>(retirement_cache_.already_ordinary),
+      static_cast<unsigned long long>(retirement_cache_.blocked),
+      association_cleared_[0] ? 1 : 0, association_cleared_[1] ? 1 : 0,
+      static_cast<unsigned long long>(cleanup_report_.store_instances_alive),
+      static_cast<unsigned long long>(cleanup_report_.advised_store_sinks_alive),
+      cleanup_report_.thread_manager_deactivated ? 1 : 0,
+      cleanup_report_.thread_manager_released ? 1 : 0,
+      static_cast<unsigned long long>(
+          cleanup_report_.foreign_document_managers_at_shutdown_start),
+      static_cast<unsigned long long>(
+          cleanup_report_.document_managers_still_enumerated));
 }
 
 void LabSession::ClearAssociations() {
@@ -389,6 +419,12 @@ void LabSession::ClearAssociations() {
   ITfThreadMgr* thread_manager = host_->thread_manager_for_test();
   if (thread_manager == nullptr) {
     return;
+  }
+  // Remove Win32 focus from the document surfaces before clearing the TSF association.
+  // Leaving a child HWND focused across AssociateFocus(NULL) can keep the manager referenced
+  // by the association until the window is destroyed, which would outlive the host teardown.
+  if (::GetFocus() != nullptr) {
+    ::SetFocus(nullptr);
   }
   // Focus is not left pointing at a document whose manager is about to be released.
   thread_manager->SetFocus(nullptr);
@@ -480,13 +516,27 @@ void LabSession::PumpOnce(DWORD timeout_ms) {
   }
   observer_->Pump();
   coordinator_->Pump();
+  // P3.13: after the retirement ledger advances, re-read the CURRENT target and retry a
+  // binding that was refused as Retiring/Busy. This never replays a refused key or target.
+  controller_->Pump();
 
   const coordinator::CoordinatorSnapshot coordinator = coordinator_->Snapshot();
   if (coordinator.bound) {
     if (coordinator.identity.context_id != last_bound_context_id_ ||
         coordinator.identity.generation != last_bound_generation_) {
       const context::ContextObserverSnapshot after = observer_->Snapshot();
-      if (after.focus_notifications > before.focus_notifications) {
+      if (controller_ != nullptr) {
+        const auto evidence = controller_->Snapshot().last_bind_evidence;
+        if (evidence != context::TargetBindingEvidence::kNone) {
+          last_bind_path_ = context::DescribeTargetBindingEvidence(evidence);
+        } else if (after.focus_notifications > before.focus_notifications) {
+          last_bind_path_ = "notification";
+        } else if (after.focus_revalidations > before.focus_revalidations) {
+          last_bind_path_ = "revalidation";
+        } else {
+          last_bind_path_ = "initial-adoption";
+        }
+      } else if (after.focus_notifications > before.focus_notifications) {
         last_bind_path_ = "notification";
       } else if (after.focus_revalidations > before.focus_revalidations) {
         last_bind_path_ = "revalidation";
@@ -1101,6 +1151,25 @@ LabSnapshot LabSession::Snapshot() {
   }
 
   HWND focus = ::GetFocus();
+  snapshot.win32_focus_hwnd = focus;
+  if (focus != nullptr) {
+    DWORD focus_process = 0;
+    const DWORD focus_thread =
+        ::GetWindowThreadProcessId(focus, &focus_process);
+    snapshot.win32_focus_owned = focus_thread == ::GetCurrentThreadId();
+  }
+  GUITHREADINFO thread_info = {};
+  thread_info.cbSize = sizeof(thread_info);
+  if (::GetGUIThreadInfo(::GetCurrentThreadId(), &thread_info) != FALSE) {
+    snapshot.win32_thread_focus_hwnd = thread_info.hwndFocus;
+  }
+  snapshot.foreground_hwnd = ::GetForegroundWindow();
+  if (snapshot.foreground_hwnd != nullptr) {
+    DWORD foreground_process = 0;
+    ::GetWindowThreadProcessId(snapshot.foreground_hwnd, &foreground_process);
+    snapshot.foreground_is_process =
+        foreground_process == ::GetCurrentProcessId();
+  }
   for (int index = 0; index < 2; ++index) {
     if (focus != nullptr && focus == document_windows_[index]) {
       snapshot.win32_focus = index;
@@ -1143,6 +1212,17 @@ LabSnapshot LabSession::Snapshot() {
     snapshot.permission_queries_begun = coordinator.permission_queries_begun;
     snapshot.permission_queries_completed = coordinator.permission_queries_completed;
     snapshot.permission_rechecks = coordinator.permission_rechecks;
+    snapshot.last_submit_status = coordinator.last_submit_status;
+    snapshot.submit_refusals = coordinator.submit_refusals;
+    snapshot.last_target_revalidation = coordinator.last_target_revalidation;
+    snapshot.target_revalidations = coordinator.target_revalidations;
+    snapshot.target_refusals = coordinator.target_refusals;
+    snapshot.target_prechecks = coordinator.target_prechecks;
+    snapshot.target_callback_checks = coordinator.target_callback_checks;
+    snapshot.target_rejections = coordinator.target_rejections;
+    snapshot.last_edit_request_hr = coordinator.last_edit_request_hr;
+    snapshot.last_edit_session_hr = coordinator.last_edit_session_hr;
+    snapshot.last_edit_operation_hr = coordinator.last_edit_operation_hr;
   }
   if (observer_ != nullptr) {
     snapshot.observer = observer_->Snapshot();

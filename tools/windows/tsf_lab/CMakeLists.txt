@@ -1,4 +1,4 @@
-# EpoCanva P3.11 -- the visible TSF integration lab.
+# EpoCanva P3.11/P3.13 -- the visible TSF integration lab.
 #
 # NOT A STANDALONE PROJECT. It is added by platforms/windows/engine_bridge only when
 # EPOCANVA_BUILD_TSF_LAB=ON, so the normal CTest tree never opens an interactive window.

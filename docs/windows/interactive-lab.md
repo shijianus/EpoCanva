@@ -9,6 +9,16 @@ The lab is an **experiment host**, not a product input method. It registers no T
 installs no keyboard sink (`AdviseKeyEventSink` or otherwise), calls no `SendInput`, installs
 no hook, and writes to no external application. Its two documents live in its own process.
 
+> **P3.13 update.** The lab now drives the focus-admission guard: every ordinary submit and
+> edit revalidates thread focus, the current `GetFocus`/`GetTop` canonical target, the
+> registry generation and real permission; the P3.7 callback repeats the target check under
+> the granted lock. The window shows the Win32 focus, the TSF facts, the evidence source
+> (`notification` vs `revalidation`), `Admission` state, target-guard counters and the last
+> refusal's stage/cause/HRESULT. The hidden scenario self-test now uses the real Win32 focus
+> path (still with no visible window in CTest). See
+> `docs/windows/focus-admission-contract.md` and the manual
+> `docs/windows/focus-acceptance-checklist.md`.
+
 ## 1. Scope and non-goals
 
 In scope:
@@ -250,12 +260,14 @@ build/windows-engine-bridge/test/tsf_lab/Release/tsf_lab.exe \
 ```
 
 The screenshot used for this delivery is
-`build/p311-lab-screenshot/lab-final.png` (converted from `lab-final.bmp`, produced by the
-command above with `--screenshot build/p311-lab-screenshot/lab-final.bmp`). It was captured
-from a 1180×920 window showing document A with `hel`, the fixed candidate menu (`hel`,
+`build/p313-lab-screenshot/lab-r2.png` (converted from `lab-r2.bmp`, produced by the
+command above with `--screenshot build/p313-lab-screenshot/lab-r2.bmp`). It was captured
+from a 1180×1060 window showing document A with `hel`, the fixed candidate menu (`hel`,
 `hello`, `help`, `helmet`), Win32 focus A, TSF target A, `OnSetFocus=0`,
-`path=revalidation`, permission Allowed, coordinator Idle, and the applied work counters.
-It is a build artifact and is not committed.
+`source=win32-thread-focus-revalidation`, `Last bind evidence=revalidation`,
+`Admission=Ready`, permission Allowed, coordinator Idle, target-guard counters, the last
+edit HRESULTs, the retirement ledger and the cleanup line. It is a build artifact produced
+by an automated screenshot mode, not a manual click result, and is not committed.
 
 Headless checks (no window is shown):
 
@@ -289,9 +301,9 @@ x64 Release, static CRT, the pinned English `rime.dll`.
 | --- | --- | --- |
 | lab build | `cmake --build ... --config Release --target tsf_lab` | exit 0; zero `warning C` / `error C` lines in the captured log |
 | window lifecycle | `tsf_lab.exe --self-test --case window-lifecycle` | 17/17 checks, exit 0 |
-| all nine scenarios + balance | `tsf_lab.exe --self-test --case scenarios ...` | 40/40 checks, exit 0; all nine scenarios passed; every teardown/balance assertion passed |
+| all nine scenarios + balance | `tsf_lab.exe --self-test --case scenarios ...` | 46/46 checks, exit 0; all nine scenarios passed; every teardown/balance assertion passed, including the target guard and the foreign-manager distinction |
 | lab CTest | `ctest ... -R "windows\.tsf_lab"` | 2/2 passed, exit 0 |
-| full engine-bridge tree | full CTest | 99 tests, **98 passed, 1 skipped**, exit 0; the skip is `windows.tsf_context_observer.real_focus` (exit 77, environment-limited: no real `OnSetFocus`) |
+| full engine-bridge tree | full CTest | 115 tests, **100% passed, 0 failed, 1 skipped**, exit 0; the skip is `windows.tsf_context_observer.real_focus` (exit 77, environment-limited: no real `OnSetFocus`); the seven new focus/target cases and the target-evidence/status cases all passed |
 | host fix regression | `real-focus` case in the full tree | window creation and `AssociateFocus` now pass; the case remains skipped only because no real `OnSetFocus` was delivered |
 | visible screenshot run | `--screenshot ...` (run twice) | both exit 0; 1180×920 BMP rendered; `Win32=A`, `TSF GetFocus=A`, `OnSetFocus=0`, `path=revalidation` |
 
@@ -319,53 +331,68 @@ Automated and screenshot evidence confirms:
 * Win32 focus and TSF `GetFocus` can be displayed separately from the `OnSetFocus` counter.
 
 **Not observed** in any run of this phase: a real `ITfThreadMgrEventSink::OnSetFocus`
-notification. Both the headless and visible runs bound through the observer's real
-`GetFocus` revalidation (`OnSetFocus=0`, `path=revalidation`), and
+notification or an `ITfThreadFocusSink` notification. Both the headless and visible runs
+bound through the observer's real `GetFocus` revalidation
+(`Last bind evidence=revalidation`, `notify_set=0`, `notify_kill=0`), and
 `windows.tsf_context_observer.real_focus` remains registered with `SKIP_RETURN_CODE 77`.
 Independent click verification is therefore **pending the user**:
 
-```text
-build/windows-engine-bridge/test/tsf_lab/Release/tsf_lab.exe \
-  --rime-dll build/librime-english/rime/install/lib/rime.dll \
-  --fixture-dir tests/fixtures/english_completion \
-  --spelling-fixture-dir tests/fixtures/english_spelling \
-  --run-root build/p311-lab-run
+```powershell
+Set-Location "D:\Users\Smart Kevin\OneDrive\Desktop\EpoCanva"
+& ".\build\windows-engine-bridge\test\tsf_lab\Release\tsf_lab.exe" `
+  --rime-dll ".\build\librime-english\rime\install\lib\rime.dll" `
+  --fixture-dir ".\tests\fixtures\english_completion" `
+  --spelling-fixture-dir ".\tests\fixtures\english_spelling" `
+  --run-root ".\build\p313-lab-run"
 ```
 
 Click A, then B, then A again. The expected observation is that `Observer: OnSetFocus`
-increases and the last bind path becomes `notification`; if it stays 0 and `revalidation`,
-the environment did not deliver the notification. The UI is the evidence either way. This
-document does not count a manual result as an automated pass.
+and/or the thread-focus `notify_set`/`notify_kill` counts change and the bind evidence
+becomes `notification`/`thread-focus-notification`; if they stay 0 and the source remains
+`win32-thread-focus-revalidation` or `query-revalidation`, the environment did not deliver
+the notification. The UI is the evidence either way. This document does not count a manual
+result or an automated screenshot as an automated pass.
 
 ## 10. Current limitations and risks
 
-1. **No real `OnSetFocus` delivery was observed.** The binding path is real but labelled
-   revalidation. The interactive click check is open (section 9).
+1. **No real `OnSetFocus` or thread-focus notification was observed.** The binding path is
+   real but labelled revalidation. `ITfThreadMgr::IsThreadFocus` also reports `S_FALSE` in
+   this non-registered lab process, so the guard records
+   `win32-thread-focus-revalidation`. The interactive click check is open (section 9).
 2. **The lab is not an input method.** It does not register, install, or connect to a system
    keyboard path. It submits fixed, already-translated `KeyText` values; it is not evidence
    of natural typing, layout handling, or key-eating behavior.
-3. **An orphan composition can survive a focus switch.** P3.10 documents that invalidation
-   never issues a text operation. The fixed scenarios cancel the current composition before
-   switching, but arbitrary manual focus changes while a composition is active can leave its
-   text behind. **Restart session** creates a fresh pair of documents; it does not silently
-   rewrite the old one.
-4. **Engine clients are retired at stop, not per bind.** The host creates a fresh client per
-   binding and does not guess when an old client is safe to close; `StopAndJoin` closes every
-   client. A long interactive session with many focus switches accumulates clients until
-   restart/exit. The self-test asserts `clients_created==clients_closed` at teardown.
+3. **A composition cleanup can be blocked, and that is reported, not hidden.** P3.13
+   retires the old binding and attempts `EndOwnedComposition` (no text write) when the
+   focus moves. If the old context is read-only, the permission changed, the range is
+   uncertain or the lock is refused, the cleanup is `Blocked` with a named reason and the
+   real composition enumeration still shows it; the displayed text is preserved. The lab
+   distinguishes `finished`, `already_ordinary` and `blocked` rather than treating all three
+   as success.
+4. **Engine clients are closed per retired binding.** The controller creates a fresh client
+   per admitted binding, and the coordinator's bounded retirement ledger submits a close and
+   consumes its result. `StopAndJoin` remains the last-resort owner. A target refused while
+   the ledger is full is not given a client. The self-test asserts
+   `clients_created==clients_closed` and no live client remained before `StopAndJoin`.
 5. **Scenario 6 depends on the test host's grant hold.** That is deterministic fault
    injection for this experiment; it is not a product scheduling policy and is not compiled
    into a product path.
-6. **Scenario 9 asserts the coordinator's refusal, not the text.** The host applied-then-
+6. **Null/empty TSF focus could not be held for a real integration case.** This environment
+   restores the document focus after `SetFocus(nullptr)` and gives a newly created empty
+   `ITfDocumentMgr` its own top context. The no-document-manager and no-top branches are
+   pinned by the pure target-evidence case and the controlled coordinator status case; the
+   real integration case covers a focused manager whose top is not the bound context. The
+   manual checklist does not claim a null-focus observation.
+8. **Scenario 9 asserts the coordinator's refusal, not the text.** The host applied-then-
    failed; the coordinator correctly does not know the resulting document content.
-7. **Read-only is the only privacy metadata exercised.** InputScope/password classification
+9. **Read-only is the only privacy metadata exercised.** InputScope/password classification
    is the production P3.9 path, but no scenario claims to identify a password field or
    provide a security boundary.
-8. **The Windows offline guarantee is architectural.** A normal in-process TSF DLL cannot be
+10. **The Windows offline guarantee is architectural.** A normal in-process TSF DLL cannot be
    network-sandboxed by the OS. This lab makes no socket calls; review and build policy are
    the enforcement. Do not describe it as OS-enforced. (The Android statement, where
    `INTERNET` is omitted, is separate and not touched here.)
-9. **The status panel scrolls.** The screenshot shows the high-value lines (focus, bind path,
+11. **The status panel scrolls.** The screenshot shows the high-value lines (focus, bind path,
    documents, engine composition/candidates, coordinator); observer/binding lines may require
    scrolling on a smaller window.
 

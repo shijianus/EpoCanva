@@ -1,4 +1,4 @@
-// EpoCanva P3.11 -- implementation of the non-interactive lab checks.
+// EpoCanva P3.11/P3.13 -- implementation of the non-interactive lab checks.
 #include "lab_self_test.h"
 
 #include <windows.h>
@@ -163,9 +163,13 @@ bool CheckCleanupReports(LabSession* session) {
             cleanup.all_document_managers_released &&
             cleanup.all_contexts_released,
         "resource balance: contexts and document managers were released");
-  Check(cleanup.document_managers_still_enumerated == 0,
-        "resource balance: no document manager remained enumerated",
-        std::to_string(cleanup.document_managers_still_enumerated));
+  Check(cleanup.document_managers_still_enumerated <=
+            cleanup.foreign_document_managers_at_shutdown_start,
+        "resource balance: no TEST document manager remained enumerated "
+        "(a real focused window may leave one TSF-owned manager; recorded as foreign)",
+        "still=" + std::to_string(cleanup.document_managers_still_enumerated) +
+            " foreign_at_start=" +
+            std::to_string(cleanup.foreign_document_managers_at_shutdown_start));
   Check(cleanup.store_instances_alive == 0,
         "resource balance: no text store remained alive",
         std::to_string(cleanup.store_instances_alive));
@@ -227,7 +231,11 @@ bool RunScenarios(const LabConfig& config) {
   options.config = config;
   options.show = false;
   options.start_session = true;
-  options.use_window_focus = false;
+  // P3.13: the hidden scenario window still uses the REAL Win32 focus path. SetFocus on
+  // the hidden document child is a real thread-focus fact (not a synthesized TSF
+  // notification), recorded as win32-thread-focus-revalidation. The TSF-only path leaves
+  // the thread with no Win32 focus evidence and the target guard refuses input.
+  options.use_window_focus = true;
 
   std::string error;
   std::unique_ptr<LabWindow> window = LabWindow::Create(options, &error);

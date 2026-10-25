@@ -1,4 +1,4 @@
-// EpoCanva P3.11 -- automatic, non-interactive checks for the TSF lab.
+// EpoCanva P3.11/P3.13 -- automatic, non-interactive checks for the TSF lab.
 //
 // The window-lifecycle case creates and destroys the real lab window without a session and
 // with no UI shown. The scenarios case creates a hidden lab window with the real TSF host

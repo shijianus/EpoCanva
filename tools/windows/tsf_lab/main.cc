@@ -1,4 +1,4 @@
-// EpoCanva P3.11 -- the visible TSF integration lab entry point.
+// EpoCanva P3.11/P3.13 -- the visible TSF integration lab entry point.
 //
 // DEFAULT PATHS are supplied by CMake as compile definitions derived from the existing
 // engine-bridge cache variables. They are not hardcoded machine paths in this source. Every
@@ -43,7 +43,7 @@ using epocanva::tsf::lab::ScenarioId;
 
 void PrintUsage() {
   std::printf(
-      "EpoCanva P3.11 visible TSF integration lab\n"
+      "EpoCanva P3.13 visible TSF integration lab\n"
       "\n"
       "usage: tsf_lab [--rime-dll PATH] [--fixture-dir DIR]\n"
       "               [--spelling-fixture-dir DIR] [--run-root DIR]\n"
