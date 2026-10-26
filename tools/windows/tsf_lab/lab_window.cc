@@ -852,8 +852,13 @@ std::wstring LabWindow::BuildStatusText() {
                  L" already_ordinary=" +
                  std::to_wstring(snapshot.retirement.already_ordinary) +
                  L" blocked=" + std::to_wstring(snapshot.retirement.blocked) +
-                 L" completed=" +
-                 std::to_wstring(snapshot.retirement.completed) + L"/" +
+                 L" external=" +
+                 std::to_wstring(snapshot.retirement.externally_terminated) +
+                 L" end_calls=" +
+                 std::to_wstring(snapshot.retirement.cleanup_end_calls) + L"/" +
+                 std::to_wstring(snapshot.retirement.cleanup_end_failures) +
+                 L" settled=" +
+                 std::to_wstring(snapshot.retirement.settled) + L"/" +
                  std::to_wstring(snapshot.retirement.started) +
                  L" slots=" +
                  std::to_wstring(snapshot.capacity_usage.occupied) + L"/" +

@@ -7,6 +7,7 @@
 //
 // EXIT CODES: 0 pass; 5 a check failed; 14 the falsifiability control's expected failure.
 #include <windows.h>
+#include <msctf.h>
 
 #include <cstdio>
 #include <memory>
@@ -17,6 +18,7 @@
 #include "coordination_tests.h"
 #include "engine_to_plan.h"
 #include "observer_test_support.h"
+#include "test_support.h"
 
 namespace epocanva {
 namespace tsf {
@@ -638,8 +640,20 @@ int RunRetirementQueueFull() {
         "retire-queue: both retirements became terminal",
         DescribeSnapshot(drained.final_state));
   Check(drained.final_state.retirement.started == 2 &&
-            drained.final_state.retirement.completed == 2,
-        "retire-queue: two started, two completed retirements",
+            drained.final_state.retirement.settled == 2,
+        "retire-queue: two started, two settled retirements",
+        DescribeSnapshot(drained.final_state));
+  Check(drained.final_state.retirement.already_ordinary == 2 &&
+            drained.final_state.retirement.finished == 0 &&
+            drained.final_state.retirement.externally_terminated == 0 &&
+            drained.final_state.retirement.blocked == 0 &&
+            drained.final_state.retirement.cleanup_end_calls == 0 &&
+            !drained.final_state.retirement.last_cleanup_owned_at_start &&
+            !drained.final_state.retirement.last_cleanup_plan_submitted &&
+            !drained.final_state.retirement.last_cleanup_end_issued &&
+            RetirementCleanupEvidenceConsistent(drained.final_state.retirement) &&
+            RetirementAccountingBalanced(drained.final_state.retirement),
+        "retire-queue: bindings that never owned a composition are AlreadyOrdinary",
         DescribeSnapshot(drained.final_state));
   Check(drained.final_state.retirement.close_requests == 2 &&
             drained.final_state.retirement.close_results_taken == 2,
@@ -767,6 +781,24 @@ int RunRetirementComposeWithheld() {
   Check(drained.final_state.retirement.last_cleanup_state == CleanupState::kFinished,
         "withheld: the composition was finished (not committed/cancelled)",
         DescribeSnapshot(drained.final_state));
+  std::printf("[coordinator-win] evidence retire-withheld: %s\n",
+              DescribeSnapshot(drained.final_state).c_str());
+  const RetirementSnapshot& retired = drained.final_state.retirement;
+  Check(retired.settled == 1 && retired.finished == 1 &&
+            retired.already_ordinary == 0 && retired.externally_terminated == 0 &&
+            retired.blocked == 0 && retired.cleanup_end_calls == 1 &&
+            retired.cleanup_end_failures == 0,
+        "withheld: one settled Finished, backed by exactly one end call",
+        DescribeSnapshot(drained.final_state));
+  Check(retired.last_cleanup_owned_at_start && retired.last_cleanup_live_at_start &&
+            !retired.last_cleanup_external_at_start &&
+            !retired.last_cleanup_ended_before_at_start &&
+            retired.last_cleanup_plan_submitted && retired.last_cleanup_end_issued &&
+            SUCCEEDED(retired.last_cleanup_end_hr) &&
+            RetirementCleanupEvidenceConsistent(retired) &&
+            RetirementAccountingBalanced(retired),
+        "withheld: Finished is explained only by this cleanup's own success",
+        DescribeSnapshot(drained.final_state));
   const auto after_release = setup.document->diagnostics().store;
   Check(after_release.text_mutations == before_release.text_mutations &&
             after_release.set_text_calls == before_release.set_text_calls,
@@ -781,6 +813,23 @@ int RunRetirementComposeWithheld() {
         "withheld: A's real composition ended after the lock was granted",
         std::to_string(compositions));
 
+  // The record is already terminal and erased; a late Pump must not settle it a second
+  // time or add a second end call.
+  const CoordinatorSnapshot before_repeat = coordinator.Snapshot();
+  for (int pump = 0; pump < 3; ++pump) {
+    coordinator.Pump();
+  }
+  const CoordinatorSnapshot repeated = coordinator.Snapshot();
+  Check(repeated.retirement.settled == before_repeat.retirement.settled &&
+            repeated.retirement.finished == before_repeat.retirement.finished &&
+            repeated.retirement.externally_terminated ==
+                before_repeat.retirement.externally_terminated &&
+            repeated.retirement.blocked == before_repeat.retirement.blocked &&
+            repeated.retirement.cleanup_end_calls ==
+                before_repeat.retirement.cleanup_end_calls,
+        "withheld: repeated Pump leaves the settled record unchanged",
+        DescribeSnapshot(repeated));
+
   const executor_tests::TextKey a = Letter(L'a');
   const DriveResult typed = TypeKeyAndDrive(coordinator, *setup.host,
                                             *setup.harness.executor, a.event, a.text,
@@ -791,6 +840,318 @@ int RunRetirementComposeWithheld() {
                "withheld: only B received the resumed key");
   CheckDocText(setup.document->text_utf16(), L"he",
                "withheld: A was not touched by B");
+  return Finish();
+}
+
+// --- 6d. an external owner termination, not this cleanup's end call ---------------------
+
+bool TerminateOwnedTestComposition(ControlledCase& setup, const char* label) {
+  oct::OwnerCompositionEndResult ended;
+  std::string error;
+  const bool terminated = oct::TerminateTestCompositionAsOwner(
+      setup.document->context(), &ended, &error);
+  Check(terminated, std::string(label) + ": the document owner terminated the composition",
+        error);
+  Check(ended.found && ended.compositions_before == 1 && SUCCEEDED(ended.end_hr) &&
+            ended.completed,
+        std::string(label) + ": exactly the one confirmed test composition ended",
+        "found=" + std::to_string(ended.found ? 1 : 0) +
+            " before=" + std::to_string(ended.compositions_before) +
+            " end_hr=" + epocanva::tsf::edit::test::HrText(ended.end_hr));
+  ULONG remaining = 99;
+  Check(SUCCEEDED(oct::CountCompositions(setup.document->context(), &remaining)) &&
+            remaining == 0,
+        std::string(label) + ": the real composition enumeration is empty",
+        std::to_string(remaining));
+  return terminated;
+}
+
+int RunRetirementComposeExternallyTerminatedBeforePump() {
+  ControlledCase setup;
+  if (!SetupControlledCase(&setup, TestDocumentOptions{}, "retire-external-before")) {
+    return Finish();
+  }
+  ContextCoordinator& coordinator = *setup.coordinator;
+  for (wchar_t letter : {L'h', L'e'}) {
+    const executor_tests::TextKey key = Letter(letter);
+    TypeKeyAndDrive(coordinator, *setup.host, *setup.harness.executor, key.event,
+                    key.text, "external-before: composition letter");
+  }
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "external-before: the composition holds he");
+  if (!TerminateOwnedTestComposition(setup, "external-before")) {
+    return Finish();
+  }
+  const auto before = setup.document->diagnostics().store;
+
+  coordinator.InvalidateBinding();
+  const DriveResult drained =
+      DriveToCompletion(coordinator, *setup.host, *setup.harness.executor, 20000);
+  Check(drained.completed && drained.final_state.retirement.retiring_bindings == 0,
+        "external-before: the retirement reached a terminal state",
+        DescribeSnapshot(drained.final_state));
+  const RetirementSnapshot& retired = drained.final_state.retirement;
+  std::printf("[coordinator-win] evidence retire-external-before: %s\n",
+              DescribeSnapshot(drained.final_state).c_str());
+  Check(retired.last_cleanup_state == CleanupState::kTerminatedExternally &&
+            retired.settled == 1 && retired.externally_terminated == 1 &&
+            retired.finished == 0 && retired.already_ordinary == 0 &&
+            retired.blocked == 0 && retired.cleanup_end_calls == 0,
+        "external-before: attributed to the external termination, not AlreadyOrdinary",
+        DescribeSnapshot(drained.final_state));
+  Check(retired.last_cleanup_owned_at_start &&
+            !retired.last_cleanup_ended_before_at_start &&
+            !retired.last_cleanup_end_issued &&
+            RetirementCleanupEvidenceConsistent(retired) &&
+            RetirementAccountingBalanced(retired),
+        "external-before: no end call is claimed by this cleanup",
+        DescribeSnapshot(drained.final_state));
+  const auto after = setup.document->diagnostics().store;
+  Check(after.text_mutations == before.text_mutations &&
+            after.set_text_calls == before.set_text_calls &&
+            after.composition_end_calls == before.composition_end_calls,
+        "external-before: cleanup issued no SetText and no end call",
+        "mutations=" + std::to_string(after.text_mutations) +
+            " set_text=" + std::to_string(after.set_text_calls) +
+            " end=" + std::to_string(after.composition_end_calls));
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "external-before: the displayed text survived verbatim");
+  return Finish();
+}
+
+int RunRetirementComposeExternallyTerminatedWhilePending() {
+  ControlledCase setup;
+  TestDocumentOptions options;
+  options.async_locks = true;
+  if (!SetupControlledCase(&setup, options, "retire-external-pending")) {
+    return Finish();
+  }
+  ContextCoordinator& coordinator = *setup.coordinator;
+  for (wchar_t letter : {L'h', L'e'}) {
+    const executor_tests::TextKey key = Letter(letter);
+    TypeKeyAndDrive(coordinator, *setup.host, *setup.harness.executor, key.event,
+                    key.text, "external-pending: composition letter");
+  }
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "external-pending: the composition holds he");
+
+  // Park an accepted third plan behind a held grant, then retire. The cleanup must wait for
+  // that plan's Stale terminal before it can submit its own EndOwnedComposition session.
+  setup.host->SetHoldGrantMessages(true);
+  const executor_tests::TextKey l = Letter(L'l');
+  WorkId held_id;
+  Check(coordinator.SubmitKey(l.event, l.text, &held_id) == SubmitStatus::kAccepted,
+        "external-pending: the third letter was accepted", "");
+  const ULONGLONG phase_deadline = ::GetTickCount64() + 20000;
+  CoordinatorSnapshot snapshot = coordinator.Snapshot();
+  while (snapshot.phase != WorkPhase::kEditPending) {
+    coordinator.Pump();
+    snapshot = coordinator.Snapshot();
+    if (snapshot.phase == WorkPhase::kIdle || ::GetTickCount64() >= phase_deadline) {
+      break;
+    }
+    setup.harness.executor->WaitForResult(snapshot.engine_request,
+                                          std::chrono::milliseconds(50));
+  }
+  Check(snapshot.phase == WorkPhase::kEditPending,
+        "external-pending: the abandoned plan waits behind the held grant",
+        DescribeSnapshot(snapshot));
+  setup.host->DispatchQueuedMessages();
+  Check(setup.host->held_grant_messages() >= 1,
+        "external-pending: the abandoned plan's grant is parked",
+        std::to_string(setup.host->held_grant_messages()));
+
+  coordinator.InvalidateBinding();
+  coordinator.Pump();
+  snapshot = coordinator.Snapshot();
+  Check(snapshot.retirement.retiring_bindings == 1 &&
+            snapshot.retirement.pending_edit_event != nullptr,
+        "external-pending: cleanup waits for the abandoned plan's terminal",
+        DescribeSnapshot(snapshot));
+
+  // Let the abandoned plan reach Stale without any TSF call, then hold again before the
+  // cleanup's own grant is dispatched. That makes the cleanup edit session really pending.
+  setup.host->SetHoldGrantMessages(false);
+  const std::size_t released = setup.host->ReleaseHeldGrantMessages();
+  Check(released >= 1, "external-pending: the abandoned grant was released",
+        std::to_string(released));
+  setup.host->SetHoldGrantMessages(true);
+  const ULONGLONG pending_deadline = ::GetTickCount64() + 20000;
+  bool cleanup_parked = false;
+  while (::GetTickCount64() < pending_deadline) {
+    coordinator.Pump();
+    setup.host->DispatchQueuedMessages();
+    const CoordinatorSnapshot current = coordinator.Snapshot();
+    if (setup.host->held_grant_messages() >= 1 &&
+        current.retirement.pending_edit_event != nullptr &&
+        current.retirement.last_cleanup_state == CleanupState::kNone) {
+      cleanup_parked = true;
+      snapshot = current;
+      break;
+    }
+    ::Sleep(1);
+  }
+  Check(cleanup_parked,
+        "external-pending: the cleanup plan is pending behind the held grant",
+        DescribeSnapshot(coordinator.Snapshot()));
+
+  if (!TerminateOwnedTestComposition(setup, "external-pending")) {
+    return Finish();
+  }
+  // The owner's own TerminateComposition is a real end call and is counted by the store.
+  // Compare against the post-termination counts so only the cleanup is in scope.
+  const auto after_owner = setup.document->diagnostics().store;
+
+  setup.host->SetHoldGrantMessages(false);
+  setup.host->ReleaseHeldGrantMessages();
+  const DriveResult drained =
+      DriveToCompletion(coordinator, *setup.host, *setup.harness.executor, 20000);
+  Check(drained.completed && drained.final_state.retirement.retiring_bindings == 0,
+        "external-pending: the retirement reached a terminal state",
+        DescribeSnapshot(drained.final_state));
+  const RetirementSnapshot& retired = drained.final_state.retirement;
+  std::printf("[coordinator-win] evidence retire-external-pending: %s\n",
+              DescribeSnapshot(drained.final_state).c_str());
+  Check(retired.last_cleanup_state == CleanupState::kTerminatedExternally &&
+            retired.settled == 1 && retired.externally_terminated == 1 &&
+            retired.finished == 0 && retired.already_ordinary == 0 &&
+            retired.blocked == 0 && retired.cleanup_end_calls == 0,
+        "external-pending: the external end is attributed, never Finished",
+        DescribeSnapshot(drained.final_state));
+  Check(retired.last_cleanup_owned_at_start &&
+            !retired.last_cleanup_ended_before_at_start &&
+            !retired.last_cleanup_end_issued &&
+            RetirementCleanupEvidenceConsistent(retired) &&
+            RetirementAccountingBalanced(retired),
+        "external-pending: the pending cleanup issued no end call",
+        DescribeSnapshot(drained.final_state));
+  const auto after = setup.document->diagnostics().store;
+  Check(after.text_mutations == after_owner.text_mutations &&
+            after.set_text_calls == after_owner.set_text_calls &&
+            after.composition_end_calls == after_owner.composition_end_calls,
+        "external-pending: cleanup issued no SetText and no end call",
+        "mutations=" + std::to_string(after.text_mutations) +
+            " set_text=" + std::to_string(after.set_text_calls) +
+            " end=" + std::to_string(after.composition_end_calls));
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "external-pending: the displayed text survived verbatim");
+  return Finish();
+}
+
+// --- 6e. a blocked cleanup stays blocked, with no destructive fallback -------------------
+
+int RunRetirementComposePermissionDenied() {
+  ControlledCase setup;
+  if (!SetupControlledCase(&setup, TestDocumentOptions{}, "retire-permission-denied")) {
+    return Finish();
+  }
+  ContextCoordinator& coordinator = *setup.coordinator;
+  for (wchar_t letter : {L'h', L'e'}) {
+    const executor_tests::TextKey key = Letter(letter);
+    TypeKeyAndDrive(coordinator, *setup.host, *setup.harness.executor, key.event,
+                    key.text, "permission-denied: composition letter");
+  }
+  const auto before = setup.document->diagnostics().store;
+  const HRESULT set_hr = setup.document->SetContextCompartment(
+      GUID_COMPARTMENT_KEYBOARD_DISABLED, setup.host->client_id(), 1);
+  Check(SUCCEEDED(set_hr), "permission-denied: the real disabled compartment was set",
+        epocanva::tsf::edit::test::HrText(set_hr));
+
+  coordinator.InvalidateBinding();
+  const DriveResult drained =
+      DriveToCompletion(coordinator, *setup.host, *setup.harness.executor, 20000);
+  Check(drained.completed && drained.final_state.retirement.retiring_bindings == 0,
+        "permission-denied: the retirement reached a terminal state",
+        DescribeSnapshot(drained.final_state));
+  const RetirementSnapshot& retired = drained.final_state.retirement;
+  std::printf("[coordinator-win] evidence retire-permission-denied: %s\n",
+              DescribeSnapshot(drained.final_state).c_str());
+  Check(retired.last_cleanup_state == CleanupState::kBlocked &&
+            retired.last_cleanup_block == CleanupBlockReason::kPermissionDenied &&
+            retired.settled == 1 && retired.blocked == 1 && retired.finished == 0 &&
+            retired.already_ordinary == 0 && retired.externally_terminated == 0 &&
+            retired.cleanup_end_calls == 0 && !retired.last_cleanup_end_issued &&
+            RetirementCleanupEvidenceConsistent(retired) &&
+            RetirementAccountingBalanced(retired),
+        "permission-denied: cleanup is Blocked(PermissionDenied), not Finished",
+        DescribeSnapshot(drained.final_state));
+  const auto after = setup.document->diagnostics().store;
+  Check(after.text_mutations == before.text_mutations &&
+            after.set_text_calls == before.set_text_calls &&
+            after.composition_end_calls == before.composition_end_calls,
+        "permission-denied: no SetText and no end call on the refused cleanup",
+        "mutations=" + std::to_string(after.text_mutations) +
+            " set_text=" + std::to_string(after.set_text_calls) +
+            " end=" + std::to_string(after.composition_end_calls));
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "permission-denied: the displayed text was preserved");
+  ULONG remaining = 0;
+  Check(SUCCEEDED(oct::CountCompositions(setup.document->context(), &remaining)) &&
+            remaining == 1,
+        "permission-denied: the refused composition is still live",
+        std::to_string(remaining));
+  setup.document->SetContextCompartment(GUID_COMPARTMENT_KEYBOARD_DISABLED,
+                                        setup.host->client_id(), 0);
+  return Finish();
+}
+
+// --- 6f. a range mismatch blocks cleanup instead of deleting foreign text ---------------
+
+int RunRetirementComposeRangeMismatch() {
+  ControlledCase setup;
+  if (!SetupControlledCase(&setup, TestDocumentOptions{}, "retire-range-mismatch")) {
+    return Finish();
+  }
+  ContextCoordinator& coordinator = *setup.coordinator;
+  for (wchar_t letter : {L'h', L'e'}) {
+    const executor_tests::TextKey key = Letter(letter);
+    TypeKeyAndDrive(coordinator, *setup.host, *setup.harness.executor, key.event,
+                    key.text, "range-mismatch: composition letter");
+  }
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "range-mismatch: the composition holds he");
+
+  std::string error;
+  const TfClientId external =
+      oct::ExternalClientId(setup.host->thread_manager_for_test(), &error);
+  Check(external != 0, "range-mismatch: a distinct external client id", error);
+  oct::ExternalEditResult edit;
+  Check(oct::RunExternalEdit(*setup.host, setup.document, external,
+                             oct::ExternalEditMode::kInsertText, 1, 1, L"X", &edit,
+                             &error),
+        "range-mismatch: the external edit inside the composition ran", error);
+  CheckDocText(setup.document->text_utf16(), L"hXe",
+               "range-mismatch: the backing text no longer matches the writer's cache");
+  const auto before = setup.document->diagnostics().store;
+
+  coordinator.InvalidateBinding();
+  const DriveResult drained =
+      DriveToCompletion(coordinator, *setup.host, *setup.harness.executor, 20000);
+  Check(drained.completed && drained.final_state.retirement.retiring_bindings == 0,
+        "range-mismatch: the retirement reached a terminal state",
+        DescribeSnapshot(drained.final_state));
+  const RetirementSnapshot& retired = drained.final_state.retirement;
+  std::printf("[coordinator-win] evidence retire-range-mismatch: %s\n",
+              DescribeSnapshot(drained.final_state).c_str());
+  Check(retired.last_cleanup_state == CleanupState::kBlocked &&
+            retired.last_cleanup_block == CleanupBlockReason::kRangeMismatch &&
+            retired.settled == 1 && retired.blocked == 1 && retired.finished == 0 &&
+            retired.already_ordinary == 0 && retired.externally_terminated == 0 &&
+            !retired.last_cleanup_end_issued &&
+            RetirementCleanupEvidenceConsistent(retired) &&
+            RetirementAccountingBalanced(retired),
+        "range-mismatch: cleanup is Blocked(RangeMismatch), not a success",
+        DescribeSnapshot(drained.final_state));
+  const auto after = setup.document->diagnostics().store;
+  Check(after.text_mutations == before.text_mutations &&
+            after.set_text_calls == before.set_text_calls &&
+            after.composition_end_calls == before.composition_end_calls,
+        "range-mismatch: no cleanup SetText and no end call",
+        "mutations=" + std::to_string(after.text_mutations) +
+            " set_text=" + std::to_string(after.set_text_calls) +
+            " end=" + std::to_string(after.composition_end_calls));
+  CheckDocText(setup.document->text_utf16(), L"hXe",
+               "range-mismatch: the foreign text survived verbatim");
   return Finish();
 }
 
@@ -1453,6 +1814,18 @@ int RunCoordinationCase(const std::string& case_name) {
   }
   if (case_name == "retirement-compose-withheld") {
     return RunRetirementComposeWithheld();
+  }
+  if (case_name == "retirement-compose-external-before") {
+    return RunRetirementComposeExternallyTerminatedBeforePump();
+  }
+  if (case_name == "retirement-compose-external-pending") {
+    return RunRetirementComposeExternallyTerminatedWhilePending();
+  }
+  if (case_name == "retirement-compose-permission-denied") {
+    return RunRetirementComposePermissionDenied();
+  }
+  if (case_name == "retirement-compose-range-mismatch") {
+    return RunRetirementComposeRangeMismatch();
   }
   if (case_name == "edit-pending-invalidate") {
     return RunEditPendingInvalidate();

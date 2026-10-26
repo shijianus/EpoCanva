@@ -179,10 +179,32 @@ match the current target at all three points.
 this writer really owns, so it is **exempt from the target guard**. It keeps every P3.12
 check: ownership/active composition, exact range, real permission, read-only state, and the
 Uncertain latch. It never calls `SetText`, never accepts a candidate and never adds a
-space. A cleanup that cannot be performed is reported as `CleanupState::kBlocked` with a
-named reason; the retirement record may then be dropped from the bounded ledger, but
-`finished` is not incremented and the real composition enumeration still shows the live
-composition.
+space.
+
+A cleanup has exactly one of four terminal attributions, each backed by that operation's
+own evidence (never by a later null pointer or by the final text):
+
+* `Finished` — this cleanup submitted `EndOwnedComposition`, issued the `EndComposition`
+  call itself, and the call returned success. The composition was live and had not already
+  been ended by this writer when cleanup started.
+* `AlreadyOrdinary` — this cleanup issued no end call, and either the writer never owned a
+  composition or it had already ended its last one through a normal successful
+  `Commit`/`Cancel`.
+* `TerminatedExternally` — this cleanup issued no end call, and an owned composition that
+  this writer had not ended was terminated by TSF or the application (observed either
+  before cleanup started or while its submitted plan waited for a lock).
+* `Blocked` — the cleanup could not run or failed, with a named reason. This includes
+  read-only, permission denied/unknown, the Uncertain latch, range mismatch, lock refusal,
+  a failed `EndComposition`, and shutdown with a live composition. It is never counted as a
+  success.
+
+`RetirementSnapshot::settled` is the number of cleanup attempts with one of those terminal
+attributions: `settled == finished + already_ordinary + externally_terminated + blocked`.
+It includes every Blocked attempt and is therefore **not** a count of successful cleanups.
+`finished` is the only cleanup-success counter. The window and logs print `settled`, not a
+"completed" total. A record whose cleanup is settled may still be in the retirement ledger
+until its engine close result is consumed. The real composition enumeration still shows a
+live composition after a Blocked cleanup.
 
 ## 5. Rebind after a rapid switch or a full ledger
 

@@ -83,12 +83,44 @@ std::string DescribeSnapshot(const CoordinatorSnapshot& snapshot) {
   text += " retiring=" + std::to_string(snapshot.retirement.retiring_bindings) +
           "/" + std::to_string(snapshot.retirement.capacity);
   text += " retire_paused=" + std::to_string(snapshot.retirement.admission_paused ? 1 : 0);
-  text += " retire_done=" + std::to_string(snapshot.retirement.completed) +
+  text += " retire_settled=" + std::to_string(snapshot.retirement.settled) +
           " blocked=" + std::to_string(snapshot.retirement.blocked) +
           " close=" + std::to_string(snapshot.retirement.close_requests) + "/" +
           std::to_string(snapshot.retirement.close_results_taken);
   text += std::string(" cleanup=") +
           DescribeCleanupState(snapshot.retirement.last_cleanup_state);
+  text += " ext_term=" + std::to_string(snapshot.retirement.externally_terminated) +
+          " end_calls=" + std::to_string(snapshot.retirement.cleanup_end_calls) +
+          "/" + std::to_string(snapshot.retirement.cleanup_end_failures);
+  text += " last_owned=" +
+          std::to_string(snapshot.retirement.last_cleanup_owned_at_start ? 1 : 0) +
+          " last_live=" +
+          std::to_string(snapshot.retirement.last_cleanup_live_at_start ? 1 : 0) +
+          " last_ext=" +
+          std::to_string(snapshot.retirement.last_cleanup_external_at_start ? 1 : 0) +
+          " last_ended=" +
+          std::to_string(snapshot.retirement.last_cleanup_ended_before_at_start ? 1 : 0) +
+          " last_notif=" +
+          std::to_string(
+              snapshot.retirement.last_cleanup_termination_notifications_at_start) +
+          "/" +
+          std::to_string(
+              snapshot.retirement.last_cleanup_termination_notifications_after_call) +
+          " last_retire=" + std::to_string(snapshot.retirement.last_cleanup_sequence) +
+          " last_ctx=" + std::to_string(snapshot.retirement.last_cleanup_context_id) +
+          " last_gen=" + std::to_string(snapshot.retirement.last_cleanup_generation) +
+          " last_plan=" +
+          std::to_string(snapshot.retirement.last_cleanup_plan_submitted ? 1 : 0) +
+          " last_plan_id=" +
+          std::to_string(snapshot.retirement.last_cleanup_plan_session_id) +
+          " last_end=" +
+          std::to_string(snapshot.retirement.last_cleanup_end_issued ? 1 : 0) +
+          " last_hr=0x" + [&] {
+            char buffer[16] = {};
+            std::snprintf(buffer, sizeof(buffer), "%08lX",
+                          static_cast<unsigned long>(snapshot.retirement.last_cleanup_end_hr));
+            return std::string(buffer);
+          }();
   return text;
 }
 

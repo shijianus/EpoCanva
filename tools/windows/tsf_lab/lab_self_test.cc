@@ -202,6 +202,20 @@ bool CheckCleanupReports(LabSession* session) {
   Check(snapshot.retirement.retiring_bindings == 0,
         "resource balance: no retiring binding remained",
         std::to_string(snapshot.retirement.retiring_bindings));
+  Check(coordinator::RetirementAccountingBalanced(snapshot.retirement),
+        "resource balance: every settled cleanup has exactly one attribution",
+        "settled=" + std::to_string(snapshot.retirement.settled) +
+            " finished=" + std::to_string(snapshot.retirement.finished) +
+            " already_ordinary=" +
+            std::to_string(snapshot.retirement.already_ordinary) +
+            " external=" + std::to_string(snapshot.retirement.externally_terminated) +
+            " blocked=" + std::to_string(snapshot.retirement.blocked));
+  if (snapshot.retirement.settled > 0) {
+    Check(coordinator::RetirementCleanupEvidenceConsistent(snapshot.retirement),
+          "resource balance: the last cleanup outcome is backed by its operation evidence",
+          std::string(coordinator::DescribeCleanupState(
+              snapshot.retirement.last_cleanup_state)));
+  }
   Check(snapshot.client_usage_after_drain.live == 0,
         "resource balance: no live engine client remained before StopAndJoin",
         std::to_string(snapshot.client_usage_after_drain.live));

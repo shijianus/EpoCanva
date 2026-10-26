@@ -65,6 +65,18 @@ enum class InputPermission : std::uint8_t {
 
 const char* DescribeInputPermission(InputPermission permission);
 
+// Lifetime evidence of the composition this session's writer owned. `live` is the current
+// hold; the other flags survive the composition reference being released. `ended_by_writer`
+// means the last own composition was closed by this writer's successful EndComposition;
+// `externally_terminated` means TSF reported it terminated by another party.
+struct OwnedCompositionState {
+  bool live = false;
+  bool ever_owned = false;
+  bool externally_terminated = false;
+  bool ended_by_writer = false;
+  std::uint64_t termination_notifications = 0;
+};
+
 struct CompositionEditSessionDiagnostics {
   bool bound = false;
   bool closed = false;
@@ -91,6 +103,15 @@ struct CompositionEditSessionDiagnostics {
   std::uint64_t failed_before_mutation = 0;
   std::uint64_t failed_possibly_mutated = 0;
   std::uint64_t failed_after_mutation = 0;
+  // Composition lifetime evidence (see OwnedCompositionState).
+  bool composition_live = false;
+  bool composition_ever_owned = false;
+  bool composition_externally_terminated = false;
+  bool composition_ended_by_writer = false;
+  std::uint64_t composition_end_calls = 0;
+  std::uint64_t composition_end_successes = 0;
+  std::uint64_t composition_end_failures = 0;
+  std::uint64_t composition_termination_notifications = 0;
 };
 
 class EditSessionCallback;
@@ -161,6 +182,7 @@ class CompositionEditSession {
 
   CompositionEditSessionDiagnostics Snapshot() const;
   bool active_composition() const;
+  OwnedCompositionState composition_state() const;
 
  private:
   friend class EditSessionCallback;

@@ -572,6 +572,7 @@ int RunObservedComposeRetirement(const Options& options) {
   const auto before = env.doc_a->diagnostics().store;
   Check(before.composition_start_calls == 1 && before.composition_end_calls == 0,
         "compose-retirement: A's composition is owned and open", "");
+  const CoordinatorSnapshot before_switch = env.coordinator->Snapshot();
 
   oct::FocusCallResult focus;
   Check(oct::SetThreadFocus(*env.host, doc_b, &focus, &env.error),
@@ -600,11 +601,64 @@ int RunObservedComposeRetirement(const Options& options) {
         "mutations=" + std::to_string(after.text_mutations) +
             " set_text=" + std::to_string(after.set_text_calls));
   const CoordinatorSnapshot retired = env.coordinator->Snapshot();
-  Check(retired.retirement.last_cleanup_state == CleanupState::kFinished &&
-            retired.retirement.finished == 1 &&
-            retired.retirement.blocked == 0,
-        "compose-retirement: the cleanup is Finished, not Blocked",
+  std::printf("[coordinator-win] evidence compose-retirement: %s\n",
+              DescribeSnapshot(retired).c_str());
+  // Both normal timings are legal on this TSF build: the cleanup may end A's composition
+  // itself (Finished), or TSF may report it terminated while the retirement waits
+  // (TerminatedExternally). The expectation is selected by independent operation evidence,
+  // never by "either status passes": Finished requires this cleanup's own successful
+  // EndComposition call; the external branch requires the sink's termination evidence and
+  // forbids any end call by this cleanup.
+  const RetirementSnapshot& r = retired.retirement;
+  const RetirementSnapshot& before_r = before_switch.retirement;
+  const bool finished_now = r.finished > before_r.finished;
+  const bool external_now = r.externally_terminated > before_r.externally_terminated;
+  Check(finished_now != external_now,
+        "compose-retirement: exactly one terminal attribution increased",
         DescribeSnapshot(retired));
+  if (external_now) {
+    Check(r.last_cleanup_state == CleanupState::kTerminatedExternally &&
+              r.last_cleanup_owned_at_start &&
+              !r.last_cleanup_ended_before_at_start &&
+              !r.last_cleanup_end_issued &&
+              r.finished == before_r.finished &&
+              r.already_ordinary == before_r.already_ordinary &&
+              r.cleanup_end_calls == before_r.cleanup_end_calls &&
+              r.blocked == before_r.blocked &&
+              RetirementCleanupEvidenceConsistent(r),
+          "compose-retirement: external TSF termination is attributed, not Finished",
+          DescribeSnapshot(retired));
+  } else {
+    Check(r.last_cleanup_state == CleanupState::kFinished &&
+              r.last_cleanup_plan_submitted && r.last_cleanup_end_issued &&
+              SUCCEEDED(r.last_cleanup_end_hr) &&
+              r.last_cleanup_owned_at_start && r.last_cleanup_live_at_start &&
+              !r.last_cleanup_ended_before_at_start &&
+              r.finished == before_r.finished + 1 &&
+              r.already_ordinary == before_r.already_ordinary &&
+              r.cleanup_end_calls == before_r.cleanup_end_calls + 1 &&
+              r.externally_terminated == before_r.externally_terminated &&
+              r.blocked == before_r.blocked &&
+              RetirementCleanupEvidenceConsistent(r),
+          "compose-retirement: Finished comes from this cleanup's end call",
+          DescribeSnapshot(retired));
+  }
+  Check(r.settled == before_r.settled + 1 &&
+            RetirementAccountingBalanced(r),
+        "compose-retirement: one record settled with exactly one attribution",
+        DescribeSnapshot(retired));
+  // Repeating Pump after the record is terminal must not double-count any terminal state.
+  for (int pump = 0; pump < 3; ++pump) {
+    env.coordinator->Pump();
+  }
+  const RetirementSnapshot repeated = env.coordinator->Snapshot().retirement;
+  Check(repeated.settled == r.settled && repeated.finished == r.finished &&
+            repeated.already_ordinary == r.already_ordinary &&
+            repeated.externally_terminated == r.externally_terminated &&
+            repeated.blocked == r.blocked &&
+            repeated.cleanup_end_calls == r.cleanup_end_calls,
+        "compose-retirement: repeated Pump does not re-settle the record",
+        DescribeSnapshot(env.coordinator->Snapshot()));
 
   const ex::TextKey x = Letter(L'x');
   const DriveResult on_b = TypeKeyAndDrive(*env.coordinator, *env.host,
@@ -647,6 +701,105 @@ int RunObservedComposeRetirement(const Options& options) {
   Check(clients.live == 2,
         "compose-retirement: live clients did not grow with the switches",
         std::to_string(clients.live));
+  return Finish();
+}
+
+int RunObservedComposeRetirementAlreadyOrdinary(const Options& options) {
+  RealHarness harness;
+  if (!CreateRealHarness(options, "observed-compose-already-ordinary", &harness)) {
+    return Finish();
+  }
+  ControlledObservedEnv env;
+  if (!WireObserved(&env, TestDocumentOptions{L"", 0, 0},
+                    "observed-compose-already-ordinary")) {
+    return Finish();
+  }
+  TestDocument* doc_b = env.host->CreateDocument(TestDocumentOptions{}, &env.error);
+  Check(doc_b != nullptr, "already-ordinary: document B created", env.error);
+  if (doc_b == nullptr) {
+    return Finish();
+  }
+  if (!FinishWiring(&env, *harness.executor, "epocanva_test_english", 30000,
+                    "observed-compose-already-ordinary")) {
+    return Finish();
+  }
+
+  for (wchar_t letter : {L'h', L'e'}) {
+    const ex::TextKey key = Letter(letter);
+    TypeKeyAndDrive(*env.coordinator, *env.host, *harness.executor, key.event,
+                    key.text, "already-ordinary: composition letter");
+  }
+  CheckDocText(env.doc_a->text_utf16(), L"he",
+               "already-ordinary: the composition holds he");
+  const input::KeyEventSnapshot enter =
+      ex::MakeKeyEvent(0x0D, false, false, false, false);
+  input::KeyText no_text;
+  no_text.status = input::KeyTextStatus::kNoText;
+  const DriveResult committed = TypeKeyAndDrive(
+      *env.coordinator, *env.host, *harness.executor, enter, no_text,
+      "already-ordinary: Return commit");
+  CheckOutcome(committed.final_state, WorkOutcome::kApplied,
+               "already-ordinary: the composition committed normally");
+  CheckDocText(env.doc_a->text_utf16(), L"he",
+               "already-ordinary: committed text stayed in place");
+  ULONG compositions = 99;
+  Check(SUCCEEDED(oct::CountCompositions(env.doc_a->context(), &compositions)) &&
+            compositions == 0,
+        "already-ordinary: no composition is live before retirement",
+        std::to_string(compositions));
+  const auto before_switch = env.coordinator->Snapshot();
+  const auto before = env.doc_a->diagnostics().store;
+
+  oct::FocusCallResult focus;
+  Check(oct::SetThreadFocus(*env.host, doc_b, &focus, &env.error),
+        "already-ordinary: real SetFocus moved to B", env.error);
+  const oct::ObserverDriveResult rebound =
+      oct::PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(rebound.settled && env.coordinator->bound(),
+        "already-ordinary: the observer bound B",
+        oct::DescribeObserverSnapshot(rebound.final_state));
+  PumpRetirements(&env, *harness.executor, "already-ordinary");
+
+  const CoordinatorSnapshot retired = env.coordinator->Snapshot();
+  const RetirementSnapshot& r = retired.retirement;
+  std::printf("[coordinator-win] evidence compose-already-ordinary: %s\n",
+              DescribeSnapshot(retired).c_str());
+  Check(r.last_cleanup_state == CleanupState::kAlreadyOrdinary &&
+            r.settled == before_switch.retirement.settled + 1 &&
+            r.already_ordinary == before_switch.retirement.already_ordinary + 1 &&
+            r.finished == before_switch.retirement.finished &&
+            r.externally_terminated == before_switch.retirement.externally_terminated &&
+            r.blocked == before_switch.retirement.blocked &&
+            r.cleanup_end_calls == before_switch.retirement.cleanup_end_calls,
+        "already-ordinary: a normally ended composition is AlreadyOrdinary",
+        DescribeSnapshot(retired));
+  Check(r.last_cleanup_owned_at_start && !r.last_cleanup_live_at_start &&
+            r.last_cleanup_ended_before_at_start &&
+            !r.last_cleanup_plan_submitted && !r.last_cleanup_end_issued &&
+            SUCCEEDED(r.last_cleanup_end_hr) &&
+            RetirementCleanupEvidenceConsistent(r) &&
+            RetirementAccountingBalanced(r),
+        "already-ordinary: no plan or end call is invented for a closed composition",
+        DescribeSnapshot(retired));
+  const auto after = env.doc_a->diagnostics().store;
+  Check(after.text_mutations == before.text_mutations &&
+            after.set_text_calls == before.set_text_calls &&
+            after.composition_end_calls == before.composition_end_calls,
+        "already-ordinary: retirement wrote nothing and ended nothing",
+        "mutations=" + std::to_string(after.text_mutations) +
+            " set_text=" + std::to_string(after.set_text_calls) +
+            " end=" + std::to_string(after.composition_end_calls));
+  CheckDocText(env.doc_a->text_utf16(), L"he",
+               "already-ordinary: the committed text survived verbatim");
+
+  const ex::TextKey x = Letter(L'x');
+  const DriveResult on_b = TypeKeyAndDrive(*env.coordinator, *env.host,
+                                           *harness.executor, x.event, x.text,
+                                           "already-ordinary: B types");
+  CheckOutcome(on_b.final_state, WorkOutcome::kApplied,
+               "already-ordinary: B's input resumed");
+  CheckDocText(doc_b->text_utf16(), L"x",
+               "already-ordinary: B holds only its own text");
   return Finish();
 }
 
@@ -696,14 +849,18 @@ int RunObservedComposeRetirementReadOnly(const Options& options) {
         DescribeSnapshot(retired));
   // The record is dropped (completed accounting) but the cleanup did not succeed:
   // finished == 0, the real composition is still live, and no end call was made.
-  Check(retired.retirement.completed == 1 &&
+  Check(retired.retirement.settled == 1 &&
             retired.retirement.finished == 0 &&
             retired.retirement.already_ordinary == 0,
         "compose-readonly: a blocked cleanup is not counted as a finished one",
-        "completed=" + std::to_string(retired.retirement.completed) +
+        "settled=" + std::to_string(retired.retirement.settled) +
             " finished=" + std::to_string(retired.retirement.finished) +
             " already_ordinary=" +
             std::to_string(retired.retirement.already_ordinary));
+  Check(RetirementCleanupEvidenceConsistent(retired.retirement) &&
+            RetirementAccountingBalanced(retired.retirement),
+        "compose-readonly: Blocked carries a reason and no successful end claim",
+        DescribeSnapshot(retired));
   Check(retired.retirement.retiring_bindings == 0 &&
             !retired.retirement.admission_paused,
         "compose-readonly: the terminal record no longer pauses input",
@@ -793,6 +950,14 @@ int RunObservedComposeRetirementUncertain(const Options& options) {
                 CleanupBlockReason::kUncertainTextState,
         "compose-uncertain: cleanup is Blocked on the uncertain text state",
         DescribeSnapshot(retired));
+  Check(retired.retirement.settled == 1 && retired.retirement.blocked == 1 &&
+            retired.retirement.finished == 0 &&
+            retired.retirement.externally_terminated == 0 &&
+            !retired.retirement.last_cleanup_end_issued &&
+            RetirementCleanupEvidenceConsistent(retired.retirement) &&
+            RetirementAccountingBalanced(retired.retirement),
+        "compose-uncertain: the blocked record is settled without an end claim",
+        DescribeSnapshot(retired));
   const auto after = env.doc_a->diagnostics().store;
   Check(after.text_mutations == before.text_mutations &&
             after.set_text_calls == before.set_text_calls,
@@ -863,11 +1028,13 @@ int RunObservedComposeExternalEdit(const Options& options) {
   CheckDocText(env.doc_a->text_utf16(), L"Xhel",
                "compose-external: the existing text survived verbatim");
   const CoordinatorSnapshot retired = env.coordinator->Snapshot();
-  Check(retired.retirement.last_cleanup_state == CleanupState::kFinished ||
-            retired.retirement.last_cleanup_state ==
-                CleanupState::kAlreadyOrdinary ||
-            retired.retirement.last_cleanup_state == CleanupState::kBlocked,
-        "compose-external: cleanup is explicit (Finished/AlreadyOrdinary/Blocked)",
+  const CleanupState cleanup = retired.retirement.last_cleanup_state;
+  Check((cleanup == CleanupState::kFinished ||
+         cleanup == CleanupState::kTerminatedExternally ||
+         cleanup == CleanupState::kBlocked) &&
+            RetirementCleanupEvidenceConsistent(retired.retirement) &&
+            RetirementAccountingBalanced(retired.retirement),
+        "compose-external: cleanup is an evidence-backed Finished/External/Blocked",
         DescribeSnapshot(retired));
   if (retired.retirement.last_cleanup_state != CleanupState::kBlocked) {
     ULONG compositions = 99;
@@ -2706,6 +2873,9 @@ int RunObservedBindingCase(const std::string& case_name, const Options& options)
   }
   if (case_name == "observed-compose-retirement" && !options.rime_dll.empty()) {
     return RunObservedComposeRetirement(options);
+  }
+  if (case_name == "observed-compose-already-ordinary" && !options.rime_dll.empty()) {
+    return RunObservedComposeRetirementAlreadyOrdinary(options);
   }
   if (case_name == "observed-compose-readonly" && !options.rime_dll.empty()) {
     return RunObservedComposeRetirementReadOnly(options);

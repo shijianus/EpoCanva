@@ -578,6 +578,77 @@ HRESULT AssociateDocumentFocus(ITfThreadMgr* thread_manager, HWND window,
   return thread_manager->AssociateFocus(window, document_manager, previous);
 }
 
+bool TerminateTestCompositionAsOwner(ITfContext* context,
+                                     OwnerCompositionEndResult* result,
+                                     std::string* error) {
+  if (context == nullptr || result == nullptr) {
+    if (error != nullptr) {
+      *error = "owner composition termination needs a context and a result";
+    }
+    return false;
+  }
+  *result = OwnerCompositionEndResult{};
+  ITfContextOwnerCompositionServices* services = nullptr;
+  result->query_hr = context->QueryInterface(
+      IID_ITfContextOwnerCompositionServices, reinterpret_cast<void**>(&services));
+  if (FAILED(result->query_hr) || services == nullptr) {
+    if (error != nullptr) {
+      *error = "ITfContextOwnerCompositionServices unavailable: " + HrText(result->query_hr);
+    }
+    return false;
+  }
+  IEnumITfCompositionView* enumerator = nullptr;
+  result->enumerate_hr = services->EnumCompositions(&enumerator);
+  if (FAILED(result->enumerate_hr) || enumerator == nullptr) {
+    services->Release();
+    if (error != nullptr) {
+      *error = "EnumCompositions failed: " + HrText(result->enumerate_hr);
+    }
+    return false;
+  }
+  ITfCompositionView* target = nullptr;
+  for (;;) {
+    ITfCompositionView* view = nullptr;
+    ULONG fetched = 0;
+    const HRESULT next = enumerator->Next(1, &view, &fetched);
+    if (next != S_OK || fetched != 1) {
+      if (view != nullptr) {
+        view->Release();
+      }
+      break;
+    }
+    if (++result->compositions_before == 1) {
+      target = view;  // keep the single confirmed view
+    } else {
+      view->Release();
+    }
+  }
+  enumerator->Release();
+  if (result->compositions_before != 1 || target == nullptr) {
+    services->Release();
+    if (target != nullptr) {
+      target->Release();
+    }
+    if (error != nullptr) {
+      *error = "expected exactly one test composition, found " +
+               std::to_string(result->compositions_before);
+    }
+    return false;
+  }
+  result->found = true;
+  result->end_hr = services->TerminateComposition(target);
+  target->Release();
+  services->Release();
+  result->completed = SUCCEEDED(result->end_hr);
+  if (!result->completed) {
+    if (error != nullptr) {
+      *error = "TerminateComposition failed: " + HrText(result->end_hr);
+    }
+    return false;
+  }
+  return true;
+}
+
 HRESULT CountCompositions(ITfContext* context, ULONG* count) {
   if (context == nullptr || count == nullptr) {
     return E_INVALIDARG;

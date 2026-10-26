@@ -250,6 +250,8 @@ const char* DescribeCleanupState(CleanupState state) {
       return "Finished";
     case CleanupState::kAlreadyOrdinary:
       return "AlreadyOrdinary";
+    case CleanupState::kTerminatedExternally:
+      return "TerminatedExternally";
     case CleanupState::kBlocked:
       return "Blocked";
   }
@@ -603,6 +605,7 @@ void ContextCoordinator::RetireCurrentBinding() {
   }
   record.context = bound_context_;
   record.session = std::move(session_);
+  record.sequence = retirements_started_ + 1;
   bound_context_ = nullptr;
   engine_client_ = engine::ClientId{};
 
@@ -640,6 +643,76 @@ void ContextCoordinator::RetireCurrentBinding() {
   }
   retiring_.push_back(std::move(record));
   ++retirements_started_;
+}
+
+void ContextCoordinator::CaptureCleanupEvidence(RetiringBinding& record) {
+  if (record.cleanup_evidence_captured) {
+    return;
+  }
+  edit::OwnedCompositionState owned;
+  if (record.session != nullptr) {
+    owned = record.session->composition_state();
+  }
+  record.cleanup_evidence_captured = true;
+  record.cleanup_owned_at_start = owned.ever_owned;
+  record.cleanup_live_at_start = owned.live;
+  record.cleanup_external_at_start = owned.externally_terminated;
+  record.cleanup_ended_before_at_start = owned.ended_by_writer;
+  record.cleanup_termination_notifications_at_start = owned.termination_notifications;
+}
+
+void ContextCoordinator::SettleRetirementCleanup(RetiringBinding& record,
+                                                 CleanupState state,
+                                                 CleanupBlockReason reason) {
+  if (record.cleanup_finished) {
+    // A record has exactly one terminal attribution; a repeated Pump, a late result or a
+    // shutdown pass must never add a second one.
+    return;
+  }
+  if (state != CleanupState::kFinished && state != CleanupState::kAlreadyOrdinary &&
+      state != CleanupState::kTerminatedExternally && state != CleanupState::kBlocked) {
+    // Pending/None are not settlements; refusing them keeps the ledger balanced.
+    return;
+  }
+  record.cleanup = state;
+  record.cleanup_block = reason;
+  record.cleanup_finished = true;
+  ++retirements_settled_;
+  switch (state) {
+    case CleanupState::kFinished:
+      ++retirements_finished_;
+      break;
+    case CleanupState::kAlreadyOrdinary:
+      ++retirements_already_ordinary_;
+      break;
+    case CleanupState::kTerminatedExternally:
+      ++retirements_externally_terminated_;
+      break;
+    case CleanupState::kBlocked:
+      ++retirements_blocked_;
+      break;
+    case CleanupState::kNone:
+    case CleanupState::kPending:
+      // Rejected above; kept for an exhaustive switch.
+      break;
+  }
+  last_cleanup_state_ = state;
+  last_cleanup_block_ = reason;
+  last_cleanup_sequence_ = record.sequence;
+  last_cleanup_context_id_ = record.identity.context_id;
+  last_cleanup_generation_ = record.identity.generation;
+  last_cleanup_owned_at_start_ = record.cleanup_owned_at_start;
+  last_cleanup_live_at_start_ = record.cleanup_live_at_start;
+  last_cleanup_external_at_start_ = record.cleanup_external_at_start;
+  last_cleanup_ended_before_at_start_ = record.cleanup_ended_before_at_start;
+  last_cleanup_termination_notifications_at_start_ =
+      record.cleanup_termination_notifications_at_start;
+  last_cleanup_plan_submitted_ = record.cleanup_plan_submitted;
+  last_cleanup_plan_session_id_ = record.cleanup_plan_session_id;
+  last_cleanup_end_issued_ = record.cleanup_end_issued;
+  last_cleanup_end_hr_ = record.cleanup_end_hr;
+  last_cleanup_termination_notifications_after_call_ =
+      record.cleanup_termination_notifications_after_call;
 }
 
 void ContextCoordinator::PumpRetirements() {
@@ -716,10 +789,14 @@ void ContextCoordinator::PumpRetirements() {
       if (record->cleanup == CleanupState::kPending) {
         edit::CompositionEditSession* session = record->session.get();
         if (session == nullptr) {
-          record->cleanup = CleanupState::kAlreadyOrdinary;
-          record->cleanup_finished = true;
-          ++retirements_already_ordinary_;
-          last_cleanup_state_ = CleanupState::kAlreadyOrdinary;
+          // A submitted cleanup plan lives in that session; losing it is a reported
+          // failure, never an ordinary success.
+          SettleRetirementCleanup(
+              *record,
+              record->cleanup_plan_submitted ? CleanupState::kBlocked
+                                             : CleanupState::kAlreadyOrdinary,
+              record->cleanup_plan_submitted ? CleanupBlockReason::kRequestFailed
+                                             : CleanupBlockReason::kNone);
         } else if (!session->HasPending() ||
                    ::WaitForSingleObject(session->CompletionEvent(), 0) ==
                        WAIT_OBJECT_0) {
@@ -727,29 +804,31 @@ void ContextCoordinator::PumpRetirements() {
         }
       } else if (record->cleanup == CleanupState::kNone) {
         edit::CompositionEditSession* session = record->session.get();
+        // Capture what this record owned when the cleanup operation started, before any
+        // decision or TSF call. Later attribution reads this record, not a null member.
+        CaptureCleanupEvidence(*record);
         if (session == nullptr) {
-          record->cleanup = CleanupState::kAlreadyOrdinary;
-          record->cleanup_finished = true;
-          ++retirements_already_ordinary_;
-          last_cleanup_state_ = CleanupState::kAlreadyOrdinary;
+          SettleRetirementCleanup(*record, CleanupState::kAlreadyOrdinary);
         } else if (session->HasUncertainOutcome()) {
           // The previous write's effect was never confirmed. Do not call TSF at all: the
           // unknown composition range must not be ended, committed, cancelled or cleared.
-          record->cleanup = CleanupState::kBlocked;
-          record->cleanup_block = CleanupBlockReason::kUncertainTextState;
-          record->cleanup_finished = true;
-          ++retirements_blocked_;
-          last_cleanup_state_ = CleanupState::kBlocked;
-          last_cleanup_block_ = CleanupBlockReason::kUncertainTextState;
+          SettleRetirementCleanup(*record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kUncertainTextState);
         } else if (!session->active_composition()) {
-          // The composition already ended (or this writer never started one). The text, if
-          // any, is ordinary document text; never trace back and delete it. No cleanup
-          // session is submitted, so an abandoned plan may still be waiting for its lock --
-          // it will see the closed retirement session and write nothing.
-          record->cleanup = CleanupState::kAlreadyOrdinary;
-          record->cleanup_finished = true;
-          ++retirements_already_ordinary_;
-          last_cleanup_state_ = CleanupState::kAlreadyOrdinary;
+          // No live composition now. The text, if any, is ordinary document text; never
+          // trace back and delete it. The operation evidence decides the attribution: a
+          // writer that never owned a composition, or that ended its last one through its
+          // own successful call, leaves AlreadyOrdinary. A composition lost to another
+          // party is an external termination -- never this cleanup's success and never
+          // masked as ordinary. No cleanup session is submitted, so an abandoned plan may
+          // still be waiting for its lock -- it will see the closed retirement session and
+          // write nothing.
+          const edit::OwnedCompositionState owned = session->composition_state();
+          if (owned.ever_owned && !owned.ended_by_writer) {
+            SettleRetirementCleanup(*record, CleanupState::kTerminatedExternally);
+          } else {
+            SettleRetirementCleanup(*record, CleanupState::kAlreadyOrdinary);
+          }
         } else if (session->HasPending()) {
           // A composition must be ended, but an accepted plan from before retirement is
           // still in flight. Let it reach its own Stale terminal first (no write), then a
@@ -762,15 +841,15 @@ void ContextCoordinator::PumpRetirements() {
           edit::EditPlanBuildResult built =
               edit::EditPlan::BuildEndOwnedComposition(record->identity);
           if (!built.ok()) {
-            record->cleanup = CleanupState::kBlocked;
-            record->cleanup_block = CleanupBlockReason::kPlanBuildFailed;
-            record->cleanup_finished = true;
-            ++retirements_blocked_;
-            last_cleanup_state_ = CleanupState::kBlocked;
-            last_cleanup_block_ = CleanupBlockReason::kPlanBuildFailed;
+            SettleRetirementCleanup(*record, CleanupState::kBlocked,
+                                    CleanupBlockReason::kPlanBuildFailed);
           } else {
             const edit::EditResult submitted =
                 session->ApplyAsync(built.plan.value());
+            // A precheck refusal has session_id 0: no edit session was requested. Only a
+            // requested plan may claim that this cleanup's EndComposition was issued.
+            record->cleanup_plan_submitted = submitted.session_id != 0;
+            record->cleanup_plan_session_id = submitted.session_id;
             record->cleanup = submitted.pending() ? CleanupState::kPending
                                                   : CleanupState::kNone;
             if (!submitted.pending()) {
@@ -784,7 +863,6 @@ void ContextCoordinator::PumpRetirements() {
     if (!record->engine_result_pending && record->close_terminal &&
         record->cleanup_finished) {
       CloseRetirementResources(&*record);
-      ++retirements_completed_;
       record = retiring_.erase(record);
       continue;
     }
@@ -794,93 +872,186 @@ void ContextCoordinator::PumpRetirements() {
 
 void ContextCoordinator::ResolveRetirementCleanup(
     RetiringBinding& record, const edit::EditResult& result) {
+  if (record.cleanup_finished) {
+    return;
+  }
   if (result.pending()) {
     record.cleanup = CleanupState::kPending;
     return;
   }
-  auto finish = [&](CleanupState state) {
-    record.cleanup = state;
-    record.cleanup_finished = true;
-    last_cleanup_state_ = state;
-    if (state == CleanupState::kFinished) {
-      ++retirements_finished_;
-    } else if (state == CleanupState::kAlreadyOrdinary) {
-      ++retirements_already_ordinary_;
+  // Record this operation's own end-call evidence before classifying its status. A status
+  // is never used to infer an end call that this operation did not make.
+  record.cleanup_end_issued = result.end_composition_issued;
+  record.cleanup_end_hr = result.end_composition_hr;
+  record.cleanup_termination_notifications_after_call =
+      result.termination_notifications_after_call;
+  if (result.end_composition_issued) {
+    ++retirement_cleanup_end_calls_;
+    if (FAILED(result.end_composition_hr)) {
+      ++retirement_cleanup_end_failures_;
     }
-  };
-  auto block = [&](CleanupBlockReason reason) {
-    record.cleanup = CleanupState::kBlocked;
-    record.cleanup_block = reason;
-    record.cleanup_finished = true;
-    ++retirements_blocked_;
-    last_cleanup_state_ = CleanupState::kBlocked;
-    last_cleanup_block_ = reason;
-  };
+  }
 
   switch (result.status) {
     case edit::EditStatus::kApplied:
+      // Finished requires THIS operation's own successful EndComposition call. An Applied
+      // result without that call is a contract contradiction and is never a success.
+      if (!result.end_composition_issued) {
+        SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                CleanupBlockReason::kRequestFailed);
+        return;
+      }
+      if (FAILED(result.end_composition_hr)) {
+        SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                CleanupBlockReason::kEndCompositionFailed);
+        return;
+      }
       // The composition object was closed and the displayed text remained in place. This
       // is a real finish, not a commit: no text call was issued by the cleanup plan.
-      finish(CleanupState::kFinished);
+      SettleRetirementCleanup(record, CleanupState::kFinished);
       return;
     case edit::EditStatus::kRejected:
       switch (result.reason) {
-        case edit::EditRejectReason::kNoComposition:
         case edit::EditRejectReason::kCompositionTerminated:
-          finish(CleanupState::kAlreadyOrdinary);
+          if (result.end_composition_issued) {
+            // An end call was issued but this result is not its success. Never call that
+            // an external termination.
+            SettleRetirementCleanup(
+                record, CleanupState::kBlocked,
+                FAILED(result.end_composition_hr)
+                    ? CleanupBlockReason::kEndCompositionFailed
+                    : CleanupBlockReason::kRequestFailed);
+            return;
+          }
+          // TSF reported the composition terminated by another party; this cleanup issued
+          // no end call. It is not a success of this operation.
+          SettleRetirementCleanup(record, CleanupState::kTerminatedExternally);
+          return;
+        case edit::EditRejectReason::kNoComposition:
+          if (result.end_composition_issued) {
+            SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                    CleanupBlockReason::kRequestFailed);
+            return;
+          }
+          // The plan was built while the writer held a live composition, so its absence at
+          // callback time means another party took it. Never count that as this cleanup's
+          // success; without any prior ownership it is truly ordinary.
+          SettleRetirementCleanup(
+              record, record.cleanup_owned_at_start
+                          ? CleanupState::kTerminatedExternally
+                          : CleanupState::kAlreadyOrdinary);
           return;
         case edit::EditRejectReason::kPermissionDenied:
-          block(CleanupBlockReason::kPermissionDenied);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kPermissionDenied);
           return;
         case edit::EditRejectReason::kPermissionUnknown:
-          block(CleanupBlockReason::kPermissionUnknown);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kPermissionUnknown);
           return;
         case edit::EditRejectReason::kReadOnlyContext:
-          block(CleanupBlockReason::kReadOnly);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kReadOnly);
           return;
         case edit::EditRejectReason::kContextDisconnected:
-          block(CleanupBlockReason::kContextDisconnected);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kContextDisconnected);
           return;
         case edit::EditRejectReason::kUncertainTextState:
-          block(CleanupBlockReason::kUncertainTextState);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kUncertainTextState);
           return;
         case edit::EditRejectReason::kCompositionRangeMismatch:
-          block(CleanupBlockReason::kRangeMismatch);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kRangeMismatch);
           return;
         case edit::EditRejectReason::kContextLocked:
         case edit::EditRejectReason::kSyncUnavailable:
         case edit::EditRejectReason::kWriteLockRefused:
-          block(CleanupBlockReason::kLockRefused);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kLockRefused);
           return;
         case edit::EditRejectReason::kEndCompositionFailed:
-          block(CleanupBlockReason::kEndCompositionFailed);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kEndCompositionFailed);
           return;
         case edit::EditRejectReason::kStaleGeneration:
         case edit::EditRejectReason::kIdentityMismatch:
         case edit::EditRejectReason::kNotBound:
-          block(CleanupBlockReason::kStale);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kStale);
           return;
         default:
-          block(CleanupBlockReason::kRequestFailed);
+          SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                  CleanupBlockReason::kRequestFailed);
           return;
       }
     case edit::EditStatus::kFailedBeforeMutation:
-      block(result.reason == edit::EditRejectReason::kEndCompositionFailed
-                ? CleanupBlockReason::kEndCompositionFailed
-                : CleanupBlockReason::kRequestFailed);
+      SettleRetirementCleanup(
+          record, CleanupState::kBlocked,
+          result.reason == edit::EditRejectReason::kEndCompositionFailed
+              ? CleanupBlockReason::kEndCompositionFailed
+              : CleanupBlockReason::kRequestFailed);
       return;
     case edit::EditStatus::kFailedPossiblyMutated:
     case edit::EditStatus::kFailedAfterMutation:
-      block(CleanupBlockReason::kUncertainTextState);
+      SettleRetirementCleanup(record, CleanupState::kBlocked,
+                              CleanupBlockReason::kUncertainTextState);
       return;
     case edit::EditStatus::kStale:
-      block(CleanupBlockReason::kStale);
+      SettleRetirementCleanup(record, CleanupState::kBlocked,
+                              CleanupBlockReason::kStale);
       return;
     case edit::EditStatus::kPending:
       record.cleanup = CleanupState::kPending;
       return;
   }
-  block(CleanupBlockReason::kRequestFailed);
+  SettleRetirementCleanup(record, CleanupState::kBlocked,
+                          CleanupBlockReason::kRequestFailed);
+}
+
+bool RetirementAccountingBalanced(const RetirementSnapshot& snapshot) {
+  const std::uint64_t attributed = snapshot.finished + snapshot.already_ordinary +
+                                   snapshot.externally_terminated + snapshot.blocked;
+  return snapshot.settled == attributed;
+}
+
+bool RetirementCleanupEvidenceConsistent(const RetirementSnapshot& snapshot) {
+  switch (snapshot.last_cleanup_state) {
+    case CleanupState::kFinished:
+      // This cleanup's own EndComposition was issued and succeeded, starting from a live
+      // composition the writer had not already ended.
+      return snapshot.last_cleanup_plan_submitted && snapshot.last_cleanup_end_issued &&
+             SUCCEEDED(snapshot.last_cleanup_end_hr) &&
+             snapshot.last_cleanup_owned_at_start &&
+             snapshot.last_cleanup_live_at_start &&
+             !snapshot.last_cleanup_ended_before_at_start;
+    case CleanupState::kAlreadyOrdinary:
+      // No end call by this cleanup, and either there was no owned composition or the
+      // writer had already ended it normally.
+      return !snapshot.last_cleanup_end_issued &&
+             (!snapshot.last_cleanup_owned_at_start ||
+              snapshot.last_cleanup_ended_before_at_start);
+    case CleanupState::kTerminatedExternally:
+      // An owned composition that this writer had not ended, taken by another party.
+      // Either TSF reported it before cleanup started (no plan was submitted), or the
+      // submitted cleanup found it terminated while waiting.
+      return !snapshot.last_cleanup_end_issued &&
+             snapshot.last_cleanup_owned_at_start &&
+             !snapshot.last_cleanup_ended_before_at_start &&
+             (snapshot.last_cleanup_external_at_start ||
+              (snapshot.last_cleanup_plan_submitted &&
+               snapshot.last_cleanup_live_at_start));
+    case CleanupState::kBlocked:
+      // A named reason, and no successful end claimed as the outcome.
+      return snapshot.last_cleanup_block != CleanupBlockReason::kNone &&
+             !(snapshot.last_cleanup_end_issued &&
+               SUCCEEDED(snapshot.last_cleanup_end_hr));
+    case CleanupState::kNone:
+    case CleanupState::kPending:
+      return false;
+  }
+  return false;
 }
 
 RetirementSnapshot ContextCoordinator::BuildRetirementSnapshot() const {
@@ -889,10 +1060,28 @@ RetirementSnapshot ContextCoordinator::BuildRetirementSnapshot() const {
   snapshot.capacity = kRetirementCapacity;
   snapshot.admission_paused = !retiring_.empty();
   snapshot.started = retirements_started_;
-  snapshot.completed = retirements_completed_;
+  snapshot.settled = retirements_settled_;
   snapshot.finished = retirements_finished_;
   snapshot.already_ordinary = retirements_already_ordinary_;
   snapshot.blocked = retirements_blocked_;
+  snapshot.externally_terminated = retirements_externally_terminated_;
+  snapshot.cleanup_end_calls = retirement_cleanup_end_calls_;
+  snapshot.cleanup_end_failures = retirement_cleanup_end_failures_;
+  snapshot.last_cleanup_sequence = last_cleanup_sequence_;
+  snapshot.last_cleanup_context_id = last_cleanup_context_id_;
+  snapshot.last_cleanup_generation = last_cleanup_generation_;
+  snapshot.last_cleanup_owned_at_start = last_cleanup_owned_at_start_;
+  snapshot.last_cleanup_live_at_start = last_cleanup_live_at_start_;
+  snapshot.last_cleanup_external_at_start = last_cleanup_external_at_start_;
+  snapshot.last_cleanup_ended_before_at_start = last_cleanup_ended_before_at_start_;
+  snapshot.last_cleanup_termination_notifications_at_start =
+      last_cleanup_termination_notifications_at_start_;
+  snapshot.last_cleanup_plan_submitted = last_cleanup_plan_submitted_;
+  snapshot.last_cleanup_plan_session_id = last_cleanup_plan_session_id_;
+  snapshot.last_cleanup_end_issued = last_cleanup_end_issued_;
+  snapshot.last_cleanup_end_hr = last_cleanup_end_hr_;
+  snapshot.last_cleanup_termination_notifications_after_call =
+      last_cleanup_termination_notifications_after_call_;
   snapshot.close_requests = retirement_close_requests_;
   snapshot.close_results_taken = retirement_close_results_;
   snapshot.close_failures = retirement_close_failures_;
@@ -1774,27 +1963,26 @@ void ContextCoordinator::Close() {
     }
     if (!record.cleanup_finished) {
       // Close() is terminal and cannot dispatch the STA message loop, so a pending cleanup
-      // edit session cannot be waited for here. Never report it as completed: a composition
-      // that could not be finished is named as blocked at shutdown.
-      if (record.session == nullptr || !record.session->active_composition()) {
-        record.cleanup = CleanupState::kAlreadyOrdinary;
-        record.cleanup_finished = true;
-        ++retirements_already_ordinary_;
-        last_cleanup_state_ = CleanupState::kAlreadyOrdinary;
-      } else if (record.session->HasUncertainOutcome()) {
-        record.cleanup = CleanupState::kBlocked;
-        record.cleanup_block = CleanupBlockReason::kUncertainTextState;
-        record.cleanup_finished = true;
-        ++retirements_blocked_;
-        last_cleanup_state_ = CleanupState::kBlocked;
-        last_cleanup_block_ = CleanupBlockReason::kUncertainTextState;
+      // edit session cannot be waited for here. Never report it as settled success: a
+      // composition that is still live is named as blocked at shutdown.
+      CaptureCleanupEvidence(record);
+      if (record.session != nullptr && record.session->HasUncertainOutcome()) {
+        // The unknown write's effect outranks the current pointer state: a composition that
+        // was closed after an unconfirmed write is still not a normal finish.
+        SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                CleanupBlockReason::kUncertainTextState);
+      } else if (record.session == nullptr || !record.session->active_composition()) {
+        const edit::OwnedCompositionState owned =
+            record.session != nullptr ? record.session->composition_state()
+                                      : edit::OwnedCompositionState{};
+        if (owned.ever_owned && !owned.ended_by_writer) {
+          SettleRetirementCleanup(record, CleanupState::kTerminatedExternally);
+        } else {
+          SettleRetirementCleanup(record, CleanupState::kAlreadyOrdinary);
+        }
       } else {
-        record.cleanup = CleanupState::kBlocked;
-        record.cleanup_block = CleanupBlockReason::kShutdown;
-        record.cleanup_finished = true;
-        ++retirements_blocked_;
-        last_cleanup_state_ = CleanupState::kBlocked;
-        last_cleanup_block_ = CleanupBlockReason::kShutdown;
+        SettleRetirementCleanup(record, CleanupState::kBlocked,
+                                CleanupBlockReason::kShutdown);
       }
     }
     CloseRetirementResources(&record);

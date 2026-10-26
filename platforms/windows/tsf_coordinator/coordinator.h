@@ -221,13 +221,18 @@ enum class CoordinatorGate : std::uint8_t {
 };
 
 // State of one retired binding's TSF-side cleanup. kPending means a cleanup edit session
-// exists and the new binding's input admission is paused. kFinished and kAlreadyOrdinary
-// are terminal successes; kBlocked is a reported failure and is never called Completed.
+// exists and the new binding's input admission is paused. kFinished means THIS cleanup's own
+// EndComposition call was issued and succeeded. kAlreadyOrdinary means there was no own
+// composition to end: none was ever started, or the writer ended it normally before
+// retirement. kTerminatedExternally means an own composition was terminated by another party
+// (TSF or the application) and this cleanup issued no end call. kBlocked is a reported
+// failure. Only kFinished is a cleanup success.
 enum class CleanupState : std::uint8_t {
   kNone = 0,
   kPending,
   kFinished,
   kAlreadyOrdinary,
+  kTerminatedExternally,
   kBlocked,
 };
 
@@ -289,12 +294,37 @@ struct RetirementSnapshot {
   bool admission_paused = false;
   std::uint32_t retiring_compositions = 0;
   std::uint64_t started = 0;
-  // Records fully dropped (close/result consumed AND cleanup terminal). `finished`,
-  // `already_ordinary` and `blocked` are its three cleanup outcomes.
-  std::uint64_t completed = 0;
+  // Cleanup attempts whose attribution is terminal. This is the number of SETTLED cleanup
+  // attempts, never "all succeeded": it is exactly finished + already_ordinary +
+  // externally_terminated + blocked, including every blocked attempt. A record whose
+  // cleanup is settled may still be retiring until its close result is consumed.
+  std::uint64_t settled = 0;
   std::uint64_t finished = 0;
   std::uint64_t already_ordinary = 0;
   std::uint64_t blocked = 0;
+  // Cleanups where TSF reported the composition terminated by another party and this
+  // coordinator issued no end call of its own. Counted separately from Finished.
+  std::uint64_t externally_terminated = 0;
+  // EndComposition calls the cleanup itself issued, and how many failed.
+  std::uint64_t cleanup_end_calls = 0;
+  std::uint64_t cleanup_end_failures = 0;
+  // Per-operation evidence of the most recently settled cleanup, text-free: the ledger
+  // sequence and context identity of the retired binding, what the record owned when
+  // cleanup started, and whether that plan's own EndComposition call was issued and how it
+  // answered. `plan_session_id` is 0 when no edit session was requested.
+  std::uint64_t last_cleanup_sequence = 0;
+  std::uint64_t last_cleanup_context_id = 0;
+  std::uint64_t last_cleanup_generation = 0;
+  bool last_cleanup_owned_at_start = false;          // the writer had owned a composition
+  bool last_cleanup_live_at_start = false;           // that composition was still live
+  bool last_cleanup_external_at_start = false;       // TSF had already reported its termination
+  bool last_cleanup_ended_before_at_start = false;   // the writer had ended it successfully
+  std::uint64_t last_cleanup_termination_notifications_at_start = 0;
+  bool last_cleanup_plan_submitted = false;
+  std::uint64_t last_cleanup_plan_session_id = 0;
+  bool last_cleanup_end_issued = false;
+  HRESULT last_cleanup_end_hr = S_OK;
+  std::uint64_t last_cleanup_termination_notifications_after_call = 0;
   std::uint64_t close_requests = 0;
   std::uint64_t close_results_taken = 0;
   std::uint64_t close_failures = 0;
@@ -310,6 +340,23 @@ struct RetirementSnapshot {
   // A cleanup edit session's completion fact, when one is waiting for its lock.
   HANDLE pending_edit_event = nullptr;
 };
+
+// Shared accounting contract for the retirement snapshot: every settled cleanup has exactly
+// one terminal attribution. The coordinator test and the lab self-test both assert this, so
+// "settled" can never be read as "all cleanups succeeded".
+bool RetirementAccountingBalanced(const RetirementSnapshot& snapshot);
+
+// Shared attribution contract for the most recently settled cleanup. It accepts an outcome
+// only when the recorded operation evidence supports it:
+//   Finished              -> plan submitted, this plan's EndComposition issued and succeeded,
+//                            starting from a live composition the writer had not ended;
+//   AlreadyOrdinary       -> no end call, and no owned composition or one already ended;
+//   TerminatedExternally  -> no end call, an owned composition, and either TSF had already
+//                            reported termination (no plan) or it reported it while the
+//                            submitted plan waited (live, not external at start);
+//   Blocked               -> a named reason, and no successful end claimed.
+// Tests and the lab use this instead of accepting either of two terminal states blindly.
+bool RetirementCleanupEvidenceConsistent(const RetirementSnapshot& snapshot);
 
 // Value-only state for assertions and text-free logging.
 struct CoordinatorSnapshot {
@@ -521,6 +568,7 @@ class ContextCoordinator {
   // cleanup that cannot be performed becomes CleanupState::kBlocked with a named reason and
   // is never reported as Finished.
   struct RetiringBinding {
+    std::uint64_t sequence = 0;  // 1-based order in which this binding entered the ledger
     edit::ContextIdentity identity{};
     ITfContext* context = nullptr;  // owned coordinator reference
     std::unique_ptr<edit::CompositionEditSession> session;
@@ -534,6 +582,18 @@ class ContextCoordinator {
     CleanupState cleanup = CleanupState::kNone;
     CleanupBlockReason cleanup_block = CleanupBlockReason::kNone;
     bool cleanup_finished = false;
+    // Per-record operation evidence, filled when cleanup starts and when its plan answers.
+    bool cleanup_evidence_captured = false;
+    bool cleanup_owned_at_start = false;
+    bool cleanup_live_at_start = false;
+    bool cleanup_external_at_start = false;
+    bool cleanup_ended_before_at_start = false;
+    std::uint64_t cleanup_termination_notifications_at_start = 0;
+    bool cleanup_plan_submitted = false;
+    std::uint64_t cleanup_plan_session_id = 0;
+    bool cleanup_end_issued = false;
+    HRESULT cleanup_end_hr = S_OK;
+    std::uint64_t cleanup_termination_notifications_after_call = 0;
   };
   static constexpr std::size_t kRetirementCapacity = 2;
 
@@ -544,7 +604,12 @@ class ContextCoordinator {
   void PumpRetirements();
   void ResolveRetirementCleanup(RetiringBinding& record,
                                 const edit::EditResult& result);
-  void FinishRetirement(RetiringBinding& record);
+  // Captures what the record's writer owned before any cleanup decision or TSF call.
+  void CaptureCleanupEvidence(RetiringBinding& record);
+  // The only terminal transition for a cleanup. Idempotent: a record already terminal is
+  // never counted again, so repeated Pump or a late result cannot double-settle it.
+  void SettleRetirementCleanup(RetiringBinding& record, CleanupState state,
+                               CleanupBlockReason reason = CleanupBlockReason::kNone);
   RetirementSnapshot BuildRetirementSnapshot() const;
   void CloseRetirementResources(RetiringBinding* record);
   // Shared implementation of Bind/BindObserved. The generation is supplied by the caller;
@@ -659,10 +724,26 @@ class ContextCoordinator {
   // never be used to continue typing into them.
   std::vector<RetiringBinding> retiring_;
   std::uint64_t retirements_started_ = 0;
-  std::uint64_t retirements_completed_ = 0;
+  std::uint64_t retirements_settled_ = 0;
   std::uint64_t retirements_finished_ = 0;
   std::uint64_t retirements_already_ordinary_ = 0;
   std::uint64_t retirements_blocked_ = 0;
+  std::uint64_t retirements_externally_terminated_ = 0;
+  std::uint64_t retirement_cleanup_end_calls_ = 0;
+  std::uint64_t retirement_cleanup_end_failures_ = 0;
+  std::uint64_t last_cleanup_sequence_ = 0;
+  std::uint64_t last_cleanup_context_id_ = 0;
+  std::uint64_t last_cleanup_generation_ = 0;
+  bool last_cleanup_owned_at_start_ = false;
+  bool last_cleanup_live_at_start_ = false;
+  bool last_cleanup_external_at_start_ = false;
+  bool last_cleanup_ended_before_at_start_ = false;
+  std::uint64_t last_cleanup_termination_notifications_at_start_ = 0;
+  bool last_cleanup_plan_submitted_ = false;
+  std::uint64_t last_cleanup_plan_session_id_ = 0;
+  bool last_cleanup_end_issued_ = false;
+  HRESULT last_cleanup_end_hr_ = S_OK;
+  std::uint64_t last_cleanup_termination_notifications_after_call_ = 0;
   std::uint64_t retirement_close_requests_ = 0;
   std::uint64_t retirement_close_results_ = 0;
   std::uint64_t retirement_close_failures_ = 0;

@@ -96,6 +96,24 @@ class RecordingSink final : public ContextObserverSink {
 // really ended"; it is a read-only query and needs no edit cookie.
 HRESULT CountCompositions(ITfContext* context, ULONG* count);
 
+struct OwnerCompositionEndResult {
+  HRESULT query_hr = E_FAIL;
+  HRESULT enumerate_hr = E_FAIL;
+  HRESULT end_hr = E_FAIL;
+  ULONG compositions_before = 0;
+  bool found = false;
+  bool completed = false;
+};
+
+// Ends the TEST document's own composition through the application-side documented API:
+// ITfContextOwnerCompositionServices::TerminateComposition on the single enumerated view of
+// THIS context. It refuses to act unless exactly one composition exists, so it can never end
+// an unknown or foreign composition. This is a real owner termination, not a synthesized
+// notification; the writer's ITfCompositionSink sees whatever TSF delivers.
+bool TerminateTestCompositionAsOwner(ITfContext* context,
+                                     OwnerCompositionEndResult* result,
+                                     std::string* error);
+
 enum class ExternalEditMode {
   kSetCollapsedSelection = 0,
   kInsertText,

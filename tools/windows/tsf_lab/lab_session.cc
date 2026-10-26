@@ -400,8 +400,8 @@ void LabSession::Shutdown() {
   std::printf(
       "[lab] shutdown cleanup: stop=%s drain=%s/%s live_clients=%llu "
       "created/closed=%llu/%llu slots=%zu/%zu retiring=%zu/%zu "
-      "cleanup=%s/%s finished=%llu already_ordinary=%llu blocked=%llu "
-      "assoc_clear=A:%d B:%d stores_alive=%llu advised_sinks_alive=%llu "
+      "cleanup=%s/%s finished=%llu already_ordinary=%llu external=%llu blocked=%llu "
+      "settled=%llu assoc_clear=A:%d B:%d stores_alive=%llu advised_sinks_alive=%llu "
       "thread_mgr_deactivated=%d released=%d foreign_dms=%llu still_enumerated=%llu\n",
       engine::DescribeStopStatus(stop_status_),
       retire_drain_complete_ ? "complete" : "incomplete",
@@ -415,7 +415,9 @@ void LabSession::Shutdown() {
       coordinator::DescribeCleanupBlockReason(retirement_cache_.last_cleanup_block),
       static_cast<unsigned long long>(retirement_cache_.finished),
       static_cast<unsigned long long>(retirement_cache_.already_ordinary),
+      static_cast<unsigned long long>(retirement_cache_.externally_terminated),
       static_cast<unsigned long long>(retirement_cache_.blocked),
+      static_cast<unsigned long long>(retirement_cache_.settled),
       association_cleared_[0] ? 1 : 0, association_cleared_[1] ? 1 : 0,
       static_cast<unsigned long long>(cleanup_report_.store_instances_alive),
       static_cast<unsigned long long>(cleanup_report_.advised_store_sinks_alive),

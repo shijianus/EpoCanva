@@ -59,6 +59,22 @@ namespace edit {
 
 class CompositionSink;
 
+// Lifetime evidence of the composition this writer most recently owned. Every field is
+// recorded by the operation that observed or performed it; none is derived later from a
+// member pointer, which a callback may already have cleared. `externally_terminated` is
+// true only when the last lifetime ended through TSF's termination notification and not
+// through this writer's own successful EndComposition.
+struct CompositionOwnershipEvidence {
+  bool ever_owned = false;             // StartComposition really produced a composition
+  bool live = false;                   // an owned composition is held and not terminated
+  bool externally_terminated = false;  // TSF reported the last own composition terminated elsewhere
+  bool ended_by_writer = false;        // the last own composition ended through this writer's call
+  std::uint64_t end_calls = 0;
+  std::uint64_t end_successes = 0;
+  std::uint64_t end_failures = 0;
+  std::uint64_t termination_notifications = 0;
+};
+
 struct CompositionWriteOutcome {
   EditStatus status = EditStatus::kRejected;
   EditRejectReason reason = EditRejectReason::kNone;
@@ -67,6 +83,12 @@ struct CompositionWriteOutcome {
   // True when EndComposition ran as failure cleanup inside a Begin, not as part of a normal
   // Commit/Cancel. Success closes the composition object only; it is not an Applied claim.
   bool cleanup_end_composition = false;
+  // Per-operation retirement evidence, taken from this operation's own calls/notifications.
+  bool owned_composition_at_entry = false;
+  bool externally_terminated_at_entry = false;
+  bool end_composition_issued = false;
+  std::uint64_t termination_notifications_at_entry = 0;
+  std::uint64_t termination_notifications_after_call = 0;
   LONG composition_start_utf16 = -1;
   LONG composition_length_utf16 = -1;
   bool text_may_have_changed = false;
@@ -90,6 +112,9 @@ class CompositionWriter {
   bool active() const;
   LONG composition_start_utf16() const { return composition_start_utf16_; }
   LONG composition_length_utf16() const { return composition_length_utf16_; }
+  // Lifetime evidence for retirement attribution. Safe to call after the composition
+  // object was released; the flags survive ReleaseCompositionAndSink().
+  CompositionOwnershipEvidence ownership() const;
   // True once a write call failed or a post-write step failed: the backing text's exact
   // state is no longer known. While set, Apply refuses every plan. Not cleared by anything
   // except destruction; the recovery path is a new session.
@@ -117,9 +142,12 @@ class CompositionWriter {
                                                  const std::wstring& new_text,
                                                  bool verify_current_text,
                                                  TfEditCookie edit_cookie);
-  HRESULT EndOwnComposition(TfEditCookie edit_cookie);
+  HRESULT EndOwnComposition(TfEditCookie edit_cookie, CompositionWriteOutcome* outcome);
   void ReleaseCompositionAndSink();
   bool CompositionExternallyTerminated() const;
+  // Copies the sink's termination count into the writer and latches the external state.
+  void ObserveSinkTermination();
+  std::uint64_t TerminationNotifications() const;
   void RefreshCompositionExtent();
   void UpdateCompositionExtent(ITfRange* range);
 
@@ -129,6 +157,14 @@ class CompositionWriter {
   LONG composition_start_utf16_ = -1;
   LONG composition_length_utf16_ = -1;
   bool uncertain_ = false;
+  // Ownership history; deliberately NOT cleared by ReleaseCompositionAndSink().
+  bool ever_owned_ = false;
+  bool externally_terminated_ = false;
+  bool ended_by_writer_ = false;
+  std::uint64_t end_calls_ = 0;
+  std::uint64_t end_successes_ = 0;
+  std::uint64_t end_failures_ = 0;
+  std::uint64_t termination_notifications_ = 0;
 };
 
 }  // namespace edit

@@ -591,12 +591,56 @@ bool ScenarioRunner::RunAbIsolation(std::string* detail) {
               std::to_string(after_switch.documents[0].active_compositions);
     return false;
   }
-  if (after_switch.retirement.finished <= composed.retirement.finished ||
-      after_switch.retirement.blocked != composed.retirement.blocked) {
-    *detail = "A first pass: cleanup was not Finished "
-              "(finished=" + std::to_string(composed.retirement.finished) + "->" +
-              std::to_string(after_switch.retirement.finished) +
-              " blocked=" + std::to_string(after_switch.retirement.blocked) + ")";
+  const coordinator::RetirementSnapshot& retired = after_switch.retirement;
+  const coordinator::RetirementSnapshot& before_switch = composed.retirement;
+  const bool finished_now = retired.finished == before_switch.finished + 1;
+  const bool external_now =
+      retired.externally_terminated == before_switch.externally_terminated + 1;
+  if (finished_now == external_now) {
+    *detail = "A first pass: exactly one of Finished/External must increase "
+              "(finished=" + std::to_string(before_switch.finished) + "->" +
+              std::to_string(retired.finished) + " external=" +
+              std::to_string(before_switch.externally_terminated) + "->" +
+              std::to_string(retired.externally_terminated) + ")";
+    return false;
+  }
+  if (finished_now) {
+    if (retired.last_cleanup_state != coordinator::CleanupState::kFinished ||
+        !retired.last_cleanup_plan_submitted || !retired.last_cleanup_end_issued ||
+        FAILED(retired.last_cleanup_end_hr) ||
+        !retired.last_cleanup_owned_at_start || !retired.last_cleanup_live_at_start ||
+        retired.last_cleanup_ended_before_at_start) {
+      *detail = "A first pass: Finished is not backed by this cleanup's own end call "
+                "(state=" +
+                std::string(coordinator::DescribeCleanupState(
+                    retired.last_cleanup_state)) +
+                " plan=" + std::to_string(retired.last_cleanup_plan_submitted ? 1 : 0) +
+                " end=" + std::to_string(retired.last_cleanup_end_issued ? 1 : 0) +
+                ")";
+      return false;
+    }
+  } else {
+    if (retired.last_cleanup_state !=
+            coordinator::CleanupState::kTerminatedExternally ||
+        retired.last_cleanup_end_issued || !retired.last_cleanup_owned_at_start ||
+        retired.last_cleanup_ended_before_at_start) {
+      *detail = "A first pass: external end was not attributed to the external owner "
+                "(state=" +
+                std::string(coordinator::DescribeCleanupState(
+                    retired.last_cleanup_state)) +
+                " end=" + std::to_string(retired.last_cleanup_end_issued ? 1 : 0) + ")";
+      return false;
+    }
+  }
+  if (retired.settled != before_switch.settled + 1 ||
+      retired.blocked != before_switch.blocked ||
+      !coordinator::RetirementAccountingBalanced(retired) ||
+      !coordinator::RetirementCleanupEvidenceConsistent(retired)) {
+    *detail = "A first pass: the cleanup ledger is not one evidence-backed settlement "
+              "(settled=" + std::to_string(before_switch.settled) + "->" +
+              std::to_string(retired.settled) + " blocked=" +
+              std::to_string(before_switch.blocked) + "->" +
+              std::to_string(retired.blocked) + ")";
     return false;
   }
   const std::wstring before_b = after_switch.documents[1].text_utf16;

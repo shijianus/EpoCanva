@@ -45,14 +45,17 @@ class CompositionSink final : public ITfCompositionSink {
     (void)edit_cookie;
     (void)composition;
     terminated_.store(true);
+    terminations_.fetch_add(1);
     return S_OK;
   }
 
   bool terminated() const { return terminated_.load(); }
+  std::uint64_t termination_count() const { return terminations_.load(); }
 
  private:
   std::atomic<LONG> reference_count_{1};
   std::atomic<bool> terminated_{false};
+  std::atomic<std::uint64_t> terminations_{0};
 };
 
 namespace {
@@ -233,6 +236,45 @@ bool CompositionWriter::CompositionExternallyTerminated() const {
   return composition_sink_ != nullptr && composition_sink_->terminated();
 }
 
+void CompositionWriter::ObserveSinkTermination() {
+  if (composition_sink_ == nullptr) {
+    return;
+  }
+  const std::uint64_t count = composition_sink_->termination_count();
+  if (count > termination_notifications_) {
+    termination_notifications_ = count;
+  }
+  if (count > 0) {
+    externally_terminated_ = true;
+  }
+}
+
+std::uint64_t CompositionWriter::TerminationNotifications() const {
+  if (composition_sink_ == nullptr) {
+    return termination_notifications_;
+  }
+  const std::uint64_t count = composition_sink_->termination_count();
+  return count > termination_notifications_ ? count : termination_notifications_;
+}
+
+CompositionOwnershipEvidence CompositionWriter::ownership() const {
+  CompositionOwnershipEvidence evidence;
+  evidence.ever_owned = ever_owned_;
+  evidence.live = active();
+  evidence.ended_by_writer = ended_by_writer_;
+  evidence.end_calls = end_calls_;
+  evidence.end_successes = end_successes_;
+  evidence.end_failures = end_failures_;
+  evidence.termination_notifications = TerminationNotifications();
+  // A notified termination can arrive before any Apply/End call observes it. Derive it here
+  // from the held sink, but never let a notification that belongs to this writer's own
+  // successful EndComposition masquerade as a third-party end.
+  evidence.externally_terminated =
+      externally_terminated_ ||
+      (!ended_by_writer_ && CompositionExternallyTerminated());
+  return evidence;
+}
+
 void CompositionWriter::ReleaseCompositionAndSink() {
   if (composition_ != nullptr) {
     composition_->Release();
@@ -264,11 +306,16 @@ CompositionWriteOutcome CompositionWriter::Apply(const EditPlan& plan,
     outcome.reason = EditRejectReason::kUncertainTextState;
     return outcome;
   }
+  ObserveSinkTermination();
   if (composition_ != nullptr && CompositionExternallyTerminated()) {
     // The context owner terminated the composition. Do not call any method on the terminated
     // object and do not fall through to the no-preedit insert path.
-    ReleaseCompositionAndSink();
     CompositionWriteOutcome outcome;
+    outcome.owned_composition_at_entry = true;
+    outcome.externally_terminated_at_entry = true;
+    outcome.termination_notifications_at_entry = termination_notifications_;
+    outcome.termination_notifications_after_call = TerminationNotifications();
+    ReleaseCompositionAndSink();
     outcome.status = EditStatus::kRejected;
     outcome.reason = EditRejectReason::kCompositionTerminated;
     return outcome;
@@ -370,6 +417,13 @@ CompositionWriteOutcome CompositionWriter::Begin(const EditPlan& plan,
 
   composition_ = composition;
   composition_sink_ = sink;
+  // A new owned composition starts a new lifetime: previous termination/end evidence does
+  // not describe it. Notification counts are per lifetime as well, so a late notification
+  // from the previous sink cannot be mistaken for one about this composition.
+  ever_owned_ = true;
+  externally_terminated_ = false;
+  ended_by_writer_ = false;
+  termination_notifications_ = 0;
   current_text_utf16_.clear();
   composition_start_utf16_ = start;
   composition_length_utf16_ = 0;
@@ -403,7 +457,7 @@ CompositionWriteOutcome CompositionWriter::Begin(const EditPlan& plan,
     // never clears text whose current value is unknown. A successful cleanup end closes the
     // composition object only; it does not make the plan Applied. If ending fails, the
     // reference stays held and composition_active says so.
-    const HRESULT end_hr = EndOwnComposition(edit_cookie);
+    const HRESULT end_hr = EndOwnComposition(edit_cookie, &replaced);
     replaced.end_composition_hr = end_hr;
     replaced.cleanup_end_composition = true;
     if (FAILED(end_hr)) {
@@ -453,7 +507,7 @@ CompositionWriteOutcome CompositionWriter::Commit(const EditPlan& plan,
     }
     const LONG committed_start = composition_start_utf16_;
     const LONG committed_length = composition_length_utf16_;
-    const HRESULT end_hr = EndOwnComposition(edit_cookie);
+    const HRESULT end_hr = EndOwnComposition(edit_cookie, &outcome);
     outcome.end_composition_hr = end_hr;
     outcome.composition_start_utf16 = committed_start;
     outcome.composition_length_utf16 = committed_length;
@@ -569,7 +623,7 @@ CompositionWriteOutcome CompositionWriter::Cancel(ITfContext* context,
     return outcome;
   }
   const LONG cancelled_start = composition_start_utf16_;
-  const HRESULT end_hr = EndOwnComposition(edit_cookie);
+  const HRESULT end_hr = EndOwnComposition(edit_cookie, &outcome);
   outcome.end_composition_hr = end_hr;
   outcome.composition_start_utf16 = cancelled_start;
   outcome.composition_length_utf16 = 0;
@@ -591,12 +645,18 @@ CompositionWriteOutcome CompositionWriter::FinishOwnedComposition(
     ITfContext* context, TfEditCookie edit_cookie) {
   (void)context;
   CompositionWriteOutcome outcome;
+  ObserveSinkTermination();
+  outcome.owned_composition_at_entry = composition_ != nullptr;
+  outcome.externally_terminated_at_entry = CompositionExternallyTerminated();
+  outcome.termination_notifications_at_entry = termination_notifications_;
+  outcome.termination_notifications_after_call = TerminationNotifications();
   if (composition_ == nullptr) {
     outcome.status = EditStatus::kRejected;
     outcome.reason = EditRejectReason::kNoComposition;
     return outcome;
   }
   if (CompositionExternallyTerminated()) {
+    // TSF (or another party) ended this composition; this operation issued no end call.
     ReleaseCompositionAndSink();
     outcome.status = EditStatus::kRejected;
     outcome.reason = EditRejectReason::kCompositionTerminated;
@@ -631,7 +691,7 @@ CompositionWriteOutcome CompositionWriter::FinishOwnedComposition(
 
   const LONG start_utf16 = composition_start_utf16_;
   const LONG length_utf16 = composition_length_utf16_;
-  const HRESULT end_hr = EndOwnComposition(edit_cookie);
+  const HRESULT end_hr = EndOwnComposition(edit_cookie, &outcome);
   outcome.end_composition_hr = end_hr;
   outcome.composition_start_utf16 = start_utf16;
   outcome.composition_length_utf16 = length_utf16;
@@ -719,14 +779,56 @@ CompositionWriteOutcome CompositionWriter::ReplaceCompositionText(
   return outcome;
 }
 
-HRESULT CompositionWriter::EndOwnComposition(TfEditCookie edit_cookie) {
-  if (composition_ == nullptr) {
+HRESULT CompositionWriter::EndOwnComposition(TfEditCookie edit_cookie,
+                                             CompositionWriteOutcome* outcome) {
+  ITfComposition* composition = composition_;
+  if (composition == nullptr) {
     return E_UNEXPECTED;
   }
-  const HRESULT hr = composition_->EndComposition(edit_cookie);
-  if (SUCCEEDED(hr)) {
-    ReleaseCompositionAndSink();
+  // The call may reenter this writer through the sink or another callback. Hold local COM
+  // references so the objects stay valid even if the member pair is released reentrantly;
+  // the evidence below is recorded from this operation, not from a later member state.
+  CompositionSink* sink = composition_sink_;
+  composition->AddRef();
+  if (sink != nullptr) {
+    sink->AddRef();
   }
+  ++end_calls_;
+  if (outcome != nullptr) {
+    outcome->end_composition_issued = true;
+  }
+  const HRESULT hr = composition->EndComposition(edit_cookie);
+  std::uint64_t notifications = termination_notifications_;
+  if (sink != nullptr) {
+    const std::uint64_t observed = sink->termination_count();
+    if (observed > notifications) {
+      notifications = observed;
+    }
+  }
+  if (outcome != nullptr) {
+    outcome->termination_notifications_after_call = notifications;
+  }
+  if (SUCCEEDED(hr)) {
+    ++end_successes_;
+    // This call is the authority for the end: a notification that arrived while it ran is
+    // the TSF report of this same termination, not a third-party end.
+    ended_by_writer_ = true;
+    externally_terminated_ = false;
+    termination_notifications_ = notifications;
+    if (composition_ == composition && composition_sink_ == sink) {
+      ReleaseCompositionAndSink();
+    }
+  } else {
+    ++end_failures_;
+    if (notifications > termination_notifications_) {
+      termination_notifications_ = notifications;
+      externally_terminated_ = true;
+    }
+  }
+  if (sink != nullptr) {
+    sink->Release();
+  }
+  composition->Release();
   return hr;
 }
 

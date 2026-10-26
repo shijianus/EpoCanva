@@ -126,6 +126,27 @@ epocanva_add_coordinator_case(
 epocanva_add_coordinator_case(
   windows.tsf_coordinator.retirement_compose_withheld retirement-compose-withheld)
 
+# 6d. The application owner ends the test composition. Retirement must attribute the end to
+#     that external operation: no Finished, no AlreadyOrdinary, no end call of ours. One
+#     case terminates before cleanup starts, the other while the cleanup plan is pending.
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.retirement_compose_external_before
+  retirement-compose-external-before)
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.retirement_compose_external_pending
+  retirement-compose-external-pending)
+
+# 6e. A cleanup that is refused by real permission metadata is Blocked, not Finished.
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.retirement_compose_permission_denied
+  retirement-compose-permission-denied)
+
+# 6f. An external edit changed the composition range. Cleanup is Blocked(RangeMismatch),
+#     never deletes or rewrites the foreign text.
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.retirement_compose_range_mismatch
+  retirement-compose-range-mismatch)
+
 # 7. Invalidation while an async edit waits behind a deferred lock: the old callback
 #    refuses, neither document is written, the new binding works.
 epocanva_add_coordinator_case(
@@ -388,6 +409,11 @@ epocanva_add_real_coordinator_case(
 #     zero, and B's input resumes only after the cleanup is terminal.
 epocanva_add_real_coordinator_case(
   windows.tsf_coordinator.observed_compose_retirement observed-compose-retirement)
+# 21b. P3.13-R3: a composition that was committed normally before retirement is
+#      AlreadyOrdinary, not Finished: this cleanup issued no end call.
+epocanva_add_real_coordinator_case(
+  windows.tsf_coordinator.observed_compose_already_ordinary
+  observed-compose-already-ordinary)
 # 22. P3.12: a read-only change blocks the composition cleanup explicitly; the displayed
 #     text is preserved, no destructive cleanup runs, and the block stays visible.
 epocanva_add_real_coordinator_case(
@@ -423,13 +449,14 @@ set_tests_properties(
   windows.tsf_coordinator.observed_real_compose
   windows.tsf_coordinator.observed_retire_roundtrip
   windows.tsf_coordinator.observed_compose_retirement
+  windows.tsf_coordinator.observed_compose_already_ordinary
   windows.tsf_coordinator.observed_compose_readonly
   windows.tsf_coordinator.observed_compose_uncertain
   windows.tsf_coordinator.observed_compose_external
   PROPERTIES TIMEOUT 360
              LABELS "windows;tsf;coordinator;engine;english;real")
 
-message(STATUS "  tsf_coordinator stage-2 cases: 23 (real English engine, real TSF store)")
+message(STATUS "  tsf_coordinator stage-2 cases: 24 (real English engine, real TSF store)")
 
 set_tests_properties(
   windows.tsf_coordinator.conversion_pure
@@ -441,6 +468,10 @@ set_tests_properties(
   windows.tsf_coordinator.engine_pending_invalidate
   windows.tsf_coordinator.retirement_queue_full
   windows.tsf_coordinator.retirement_compose_withheld
+  windows.tsf_coordinator.retirement_compose_external_before
+  windows.tsf_coordinator.retirement_compose_external_pending
+  windows.tsf_coordinator.retirement_compose_permission_denied
+  windows.tsf_coordinator.retirement_compose_range_mismatch
   windows.tsf_coordinator.edit_pending_invalidate
   windows.tsf_coordinator.permission_change_queued
   windows.tsf_coordinator.permission_change_edit_pending
@@ -452,5 +483,5 @@ set_tests_properties(
   PROPERTIES TIMEOUT 240
              LABELS "windows;tsf;coordinator;context;binding;generation")
 
-message(STATUS "  tsf_coordinator stage-1 cases: 14 (13 behavioural + can_fail)")
+message(STATUS "  tsf_coordinator stage-1 cases: 18 (17 behavioural + can_fail)")
 message(STATUS "  tsf_coordinator permission cases: 9 (real TSF metadata, controlled engine)")

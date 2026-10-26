@@ -286,6 +286,13 @@ class EditSessionCallback final : public ITfEditSession {
         result.operation_hr = outcome.operation_hr;
         result.end_composition_hr = outcome.end_composition_hr;
         result.cleanup_end_composition = outcome.cleanup_end_composition;
+        result.owned_composition_at_entry = outcome.owned_composition_at_entry;
+        result.externally_terminated_at_entry = outcome.externally_terminated_at_entry;
+        result.end_composition_issued = outcome.end_composition_issued;
+        result.termination_notifications_at_entry =
+            outcome.termination_notifications_at_entry;
+        result.termination_notifications_after_call =
+            outcome.termination_notifications_after_call;
         result.composition_start_utf16 = outcome.composition_start_utf16;
         result.composition_length_utf16 = outcome.composition_length_utf16;
         result.text_may_have_changed = outcome.text_may_have_changed;
@@ -799,11 +806,32 @@ CompositionEditSessionDiagnostics CompositionEditSession::Snapshot() const {
   snapshot.active_composition = state->writer.active();
   snapshot.composition_start_utf16 = state->writer.composition_start_utf16();
   snapshot.composition_length_utf16 = state->writer.composition_length_utf16();
+  const CompositionOwnershipEvidence ownership = state->writer.ownership();
+  snapshot.composition_live = ownership.live;
+  snapshot.composition_ever_owned = ownership.ever_owned;
+  snapshot.composition_externally_terminated = ownership.externally_terminated;
+  snapshot.composition_ended_by_writer = ownership.ended_by_writer;
+  snapshot.composition_end_calls = ownership.end_calls;
+  snapshot.composition_end_successes = ownership.end_successes;
+  snapshot.composition_end_failures = ownership.end_failures;
+  snapshot.composition_termination_notifications =
+      ownership.termination_notifications;
   return snapshot;
 }
 
 bool CompositionEditSession::active_composition() const {
   return state_->writer.active();
+}
+
+OwnedCompositionState CompositionEditSession::composition_state() const {
+  const CompositionOwnershipEvidence ownership = state_->writer.ownership();
+  OwnedCompositionState state;
+  state.live = ownership.live;
+  state.ever_owned = ownership.ever_owned;
+  state.externally_terminated = ownership.externally_terminated;
+  state.ended_by_writer = ownership.ended_by_writer;
+  state.termination_notifications = ownership.termination_notifications;
+  return state;
 }
 
 }  // namespace edit

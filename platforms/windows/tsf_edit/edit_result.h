@@ -117,6 +117,14 @@ struct EditResult {
   HRESULT operation_hr = S_OK;
   // EndComposition's return value when it was attempted.
   HRESULT end_composition_hr = S_OK;
+  // Per-operation retirement evidence: what this plan found on entry, whether it issued
+  // EndComposition itself, and the sink notification counts around that call. These are
+  // recorded by the operation, never inferred from a later null member.
+  bool owned_composition_at_entry = false;
+  bool externally_terminated_at_entry = false;
+  bool end_composition_issued = false;
+  std::uint64_t termination_notifications_at_entry = 0;
+  std::uint64_t termination_notifications_after_call = 0;
   // True when EndComposition ran as failure cleanup inside a Begin whose insert failed, as
   // opposed to the EndComposition that is part of a normal Commit/Cancel. A successful
   // cleanup end closes the composition object only; it never means the plan was applied.
