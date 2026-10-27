@@ -356,23 +356,67 @@ LPARAM KeyLparam(UINT vk, bool down, bool repeat) {
   return lparam;
 }
 
-bool SendVirtualKey(ITfKeyEventSink* sink, ITfContext* context, UINT vk,
-                    bool expect_eaten, std::string* error) {
+// The controlled host's real keyboard target plus the application's own client id. When the
+// product does not eat a key, the host must perform the same default effect a real
+// application would: insert the translated character through a real TSF edit session with
+// the application's client id (the observer classifies it as external, as it would in a real
+// host). Skipping that effect would make a pass-through look like a no-op and hide the
+// document getting out of order.
+struct InputRoute {
+  TestHost* host = nullptr;
+  TestDocument* doc = nullptr;
+  ITfKeyEventSink* sink = nullptr;
+  ITfContext* context = nullptr;
+};
+
+bool ApplyHostDefault(InputRoute* route, const std::wstring& text, std::string* error) {
+  if (text.empty()) {
+    return true;
+  }
+  std::string client_error;
+  const TfClientId client =
+      epocanva::tsf::context::test::ExternalClientId(
+          route->host->thread_manager_for_test(), &client_error);
+  if (client == 0) {
+    *error = "the host default input has no client id: " + client_error;
+    return false;
+  }
+  ExternalEditResult edit;
+  const LONG caret = route->doc->selection_start_utf16();
+  if (!RunExternalEdit(*route->host, route->doc, client, ExternalEditMode::kInsertText,
+                       caret, caret, text, &edit, error)) {
+    *error = "the host default insert did not run: " + *error;
+    return false;
+  }
+  return true;
+}
+
+// One key through the real sink. OnTestKeyDown is called twice: it must be repeatable and
+// must have no side effect. OnKeyDown must agree with the prediction. When the product does
+// not eat the key, the host applies its default text.
+bool SendVirtualKeyAdaptive(InputRoute* route, UINT vk, const std::wstring& host_text,
+                            bool* eaten_out, std::string* error) {
   const LPARAM down = KeyLparam(vk, true, false);
   BOOL test_eaten = FALSE;
-  HRESULT hr = sink->OnTestKeyDown(context, vk, down, &test_eaten);
+  HRESULT hr = route->sink->OnTestKeyDown(route->context, vk, down, &test_eaten);
   if (FAILED(hr)) {
     *error = "OnTestKeyDown failed";
     return false;
   }
+  BOOL test_again = FALSE;
+  hr = route->sink->OnTestKeyDown(route->context, vk, down, &test_again);
+  if (FAILED(hr) || (test_again != FALSE) != (test_eaten != FALSE)) {
+    *error = "OnTestKeyDown is not repeatable";
+    return false;
+  }
   BOOL eaten = FALSE;
-  hr = sink->OnKeyDown(context, vk, down, &eaten);
+  hr = route->sink->OnKeyDown(route->context, vk, down, &eaten);
   if (FAILED(hr)) {
     *error = "OnKeyDown failed";
     return false;
   }
   BOOL up_eaten = TRUE;
-  hr = sink->OnKeyUp(context, vk, KeyLparam(vk, false, false), &up_eaten);
+  hr = route->sink->OnKeyUp(route->context, vk, KeyLparam(vk, false, false), &up_eaten);
   if (FAILED(hr)) {
     *error = "OnKeyUp failed";
     return false;
@@ -383,21 +427,41 @@ bool SendVirtualKey(ITfKeyEventSink* sink, ITfContext* context, UINT vk,
               << " key=" << (eaten != FALSE) << " vk=" << vk << std::endl;
     return false;
   }
-  if ((eaten != FALSE) != expect_eaten) {
-    *error = expect_eaten ? "a key was not eaten" : "a key was eaten";
-    std::cerr << "  send expectation failed expect=" << expect_eaten
-              << " key=" << (eaten != FALSE) << " vk=" << vk << std::endl;
-    return false;
-  }
   if (up_eaten != FALSE) {
     *error = "a key-up was eaten";
+    return false;
+  }
+  *eaten_out = eaten != FALSE;
+  if (!*eaten_out && !ApplyHostDefault(route, host_text, error)) {
     return false;
   }
   return true;
 }
 
-bool SendChar(ITfKeyEventSink* sink, ITfContext* context, WCHAR ch,
-              bool expect_eaten, std::string* error) {
+bool SendVirtualKey(InputRoute* route, UINT vk, const std::wstring& host_text,
+                    bool expect_eaten, std::string* error) {
+  bool eaten = false;
+  if (!SendVirtualKeyAdaptive(route, vk, host_text, &eaten, error)) {
+    return false;
+  }
+  if (eaten != expect_eaten) {
+    *error = expect_eaten ? "a key was not eaten" : "a key was eaten";
+    std::cerr << "  send expectation failed expect=" << expect_eaten
+              << " key=" << eaten << " vk=" << vk << std::endl;
+    return false;
+  }
+  return true;
+}
+
+// Special keys keep a natural host default: Space inserts one space, every other special key
+// has no text effect in this controlled host. Text keys use SendChar, which passes the exact
+// translated character.
+bool SendVirtualKey(InputRoute* route, UINT vk, bool expect_eaten, std::string* error) {
+  return SendVirtualKey(route, vk, vk == VK_SPACE ? std::wstring(L" ") : std::wstring(),
+                        expect_eaten, error);
+}
+
+bool SendChar(InputRoute* route, WCHAR ch, bool expect_eaten, std::string* error) {
   const SHORT mapped = ::VkKeyScanW(ch);
   if (mapped == -1) {
     *error = "the active layout cannot type a test character";
@@ -408,7 +472,7 @@ bool SendChar(ITfKeyEventSink* sink, ITfContext* context, WCHAR ch,
   const BYTE modifiers = HIBYTE(mapped);
   SetStateForKey(ch, (modifiers & 1) != 0, (modifiers & 2) != 0,
                  (modifiers & 4) != 0);
-  const bool sent = SendVirtualKey(sink, context, vk, expect_eaten, error);
+  const bool sent = SendVirtualKey(route, vk, std::wstring(1, ch), expect_eaten, error);
   if (!sent) {
     std::cerr << "  send char failed codepoint=" << static_cast<unsigned>(ch)
               << " vk=" << vk << " shift=" << (modifiers & 1) << std::endl;
@@ -416,17 +480,44 @@ bool SendChar(ITfKeyEventSink* sink, ITfContext* context, WCHAR ch,
   return sent;
 }
 
-bool SendText(ITfKeyEventSink* sink, ITfContext* context, const std::wstring& text,
+bool SendCharAdaptive(InputRoute* route, WCHAR ch, bool* eaten, std::string* error) {
+  const SHORT mapped = ::VkKeyScanW(ch);
+  if (mapped == -1) {
+    *error = "the active layout cannot type a test character";
+    return false;
+  }
+  const UINT vk = static_cast<UINT>(LOBYTE(mapped));
+  const BYTE modifiers = HIBYTE(mapped);
+  SetStateForKey(ch, (modifiers & 1) != 0, (modifiers & 2) != 0,
+                 (modifiers & 4) != 0);
+  return SendVirtualKeyAdaptive(route, vk, std::wstring(1, ch), eaten, error);
+}
+
+bool SendText(InputRoute* route, const std::wstring& text,
               bool expect_eaten, std::string* error) {
   for (const WCHAR ch : text) {
-    if (!SendChar(sink, context, ch, expect_eaten, error)) {
+    if (!SendChar(route, ch, expect_eaten, error)) {
       return false;
     }
   }
   return true;
 }
 
-bool SendShortcut(ITfKeyEventSink* sink, ITfContext* context, UINT vk,
+bool SendTextAdaptive(InputRoute* route, const std::wstring& text,
+                      std::vector<bool>* eaten, std::string* error) {
+  for (const WCHAR ch : text) {
+    bool key_eaten = false;
+    if (!SendCharAdaptive(route, ch, &key_eaten, error)) {
+      return false;
+    }
+    if (eaten != nullptr) {
+      eaten->push_back(key_eaten);
+    }
+  }
+  return true;
+}
+
+bool SendShortcut(InputRoute* route, UINT vk,
                   bool control, bool alt, bool windows, std::string* error) {
   std::array<std::uint8_t, 256> state = {};
   if (control) {
@@ -441,7 +532,7 @@ bool SendShortcut(ITfKeyEventSink* sink, ITfContext* context, UINT vk,
     state[VK_LWIN] = 0x80;
   }
   ::SetKeyboardState(state.data());
-  return SendVirtualKey(sink, context, vk, false, error);
+  return SendVirtualKey(route, vk, std::wstring(), false, error);
 }
 
 bool ReadyToType(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
@@ -535,6 +626,7 @@ bool RunRawInputCases(const Paths& paths) {
   }
   auto* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "the product controller bound and resolved permission");
   LocalCheck(::GetFileAttributesW(paths.marker.c_str()) == INVALID_FILE_ATTRIBUTES,
@@ -550,50 +642,50 @@ bool RunRawInputCases(const Paths& paths) {
              "the compiled schema carries the configured suggestion count (2, not 1)");
 
   std::string error;
-  LocalCheck(SendText(sink, context, L"Hello", true, &error), "type Hello: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendText(&route, L"Hello", true, &error), "type Hello: " + error);
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space while composing is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc, L"Hello ", 5000),
              "Hello + Space commits the preserved case");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"helo", true, &error), "type helo: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendText(&route, L"helo", true, &error), "type helo: " + error);
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after helo is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc, L"Hello helo ", 5000),
              "default raw input does not auto-correct helo");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"helo", true, &error), "type helo again: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_BACK, true, &error),
+  LocalCheck(SendText(&route, L"helo", true, &error), "type helo again: " + error);
+  LocalCheck(SendVirtualKey(&route, VK_BACK, true, &error),
              "BackSpace while composing is eaten: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after BackSpace is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc, L"Hello helo hel ", 5000),
              "BackSpace edits the composition");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"123-45_67@x.y", true, &error),
+  LocalCheck(SendText(&route, L"123-45_67@x.y", true, &error),
              "digits and technical marks are forwarded: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after marks is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
                          L"Hello helo hel 123-45_67@x.y ", 5000),
              "digits and marks are committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"user@example.com", true, &error),
+  LocalCheck(SendText(&route, L"user@example.com", true, &error),
              "email is accepted: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after email is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
                          L"Hello helo hel 123-45_67@x.y user@example.com ", 5000),
              "email is committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"https://example.com/a?x=1&y=2#z", true, &error),
+  LocalCheck(SendText(&route, L"https://example.com/a?x=1&y=2#z", true, &error),
              "URL is accepted: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after URL is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
                          L"Hello helo hel 123-45_67@x.y user@example.com "
@@ -602,9 +694,9 @@ bool RunRawInputCases(const Paths& paths) {
              "URL is committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"C:\\tmp\\file.txt", true, &error),
+  LocalCheck(SendText(&route, L"C:\\tmp\\file.txt", true, &error),
              "path is accepted: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after path is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
                          L"Hello helo hel 123-45_67@x.y user@example.com "
@@ -613,9 +705,9 @@ bool RunRawInputCases(const Paths& paths) {
              "path is committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"foo_bar123", true, &error),
+  LocalCheck(SendText(&route, L"foo_bar123", true, &error),
              "identifier is accepted: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after identifier is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
                          L"Hello helo hel 123-45_67@x.y user@example.com "
@@ -625,11 +717,11 @@ bool RunRawInputCases(const Paths& paths) {
              "identifier is committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"enter", true, &error),
+  LocalCheck(SendText(&route, L"enter", true, &error),
              "type enter: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_RETURN, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_RETURN, true, &error),
              "Enter while composing is eaten: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after Enter is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
                          L"Hello helo hel 123-45_67@x.y user@example.com "
@@ -639,15 +731,15 @@ bool RunRawInputCases(const Paths& paths) {
              "Enter does not lose the composition and Space commits it");
 
   error.clear();
-  LocalCheck(SendShortcut(sink, context, 'C', true, false, false, &error),
+  LocalCheck(SendShortcut(&route, 'C', true, false, false, &error),
              "Ctrl+C passes to the host: " + error);
-  LocalCheck(SendShortcut(sink, context, 'V', true, false, false, &error),
+  LocalCheck(SendShortcut(&route, 'V', true, false, false, &error),
              "Ctrl+V passes to the host: " + error);
-  LocalCheck(SendShortcut(sink, context, 'Z', true, false, false, &error),
+  LocalCheck(SendShortcut(&route, 'Z', true, false, false, &error),
              "Ctrl+Z passes to the host: " + error);
-  LocalCheck(SendShortcut(sink, context, 'X', false, true, false, &error),
+  LocalCheck(SendShortcut(&route, 'X', false, true, false, &error),
              "Alt+X passes to the host: " + error);
-  LocalCheck(SendShortcut(sink, context, 'R', false, false, true, &error),
+  LocalCheck(SendShortcut(&route, 'R', false, false, true, &error),
              "Win+R passes to the host: " + error);
   LocalCheck(test_case.doc->text_utf16() ==
                  L"Hello helo hel 123-45_67@x.y user@example.com "
@@ -656,9 +748,9 @@ bool RunRawInputCases(const Paths& paths) {
              "shortcut pass-through changed no text");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"quickbrownfox", true, &error),
+  LocalCheck(SendText(&route, L"quickbrownfox", true, &error),
              "fast typing is accepted back to back: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after fast typing is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
                          L"Hello helo hel 123-45_67@x.y user@example.com "
@@ -668,8 +760,8 @@ bool RunRawInputCases(const Paths& paths) {
              "fast typing keeps order and commits once");
 
   error.clear();
-  LocalCheck(SendText(sink, context, L"zzz", true, &error), "type zzz: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_ESCAPE, true, &error),
+  LocalCheck(SendText(&route, L"zzz", true, &error), "type zzz: " + error);
+  LocalCheck(SendVirtualKey(&route, VK_ESCAPE, true, &error),
              "Escape while composing is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
                          L"Hello helo hel 123-45_67@x.y user@example.com "
@@ -686,6 +778,10 @@ bool RunPermissionCase(const Paths& paths, TestDocumentOptions options,
                        const std::string& label) {
   Case test_case;
   options.initial_text_utf16 = L"protected";
+  options.initial_selection_start_utf16 =
+      static_cast<LONG>(options.initial_text_utf16.size());
+  options.initial_selection_end_utf16 =
+      static_cast<LONG>(options.initial_text_utf16.size());
   if (!BeginCase(&test_case, paths.stage, paths.user_root, options, nullptr)) {
     LocalCheck(false, label + ": host and activation");
     EndCase(&test_case);
@@ -699,13 +795,36 @@ bool RunPermissionCase(const Paths& paths, TestDocumentOptions options,
   ITfContext* context = test_case.doc->context();
   const HRESULT hr = test_case.product.sink->OnTestKeyDown(
       context, vk, KeyLparam(vk, true, false), &test_eaten);
-  LocalCheck(SUCCEEDED(hr) && test_eaten == FALSE,
-             label + ": prediction passes through");
+  BOOL test_again = TRUE;
+  const HRESULT hr_again = test_case.product.sink->OnTestKeyDown(
+      context, vk, KeyLparam(vk, true, false), &test_again);
+  LocalCheck(SUCCEEDED(hr) && SUCCEEDED(hr_again) &&
+                 test_eaten == FALSE && test_again == FALSE,
+             label + ": prediction passes through and is repeatable");
   BOOL eaten = TRUE;
   test_case.product.sink->OnKeyDown(context, vk, KeyLparam(vk, true, false), &eaten);
   LocalCheck(eaten == FALSE, label + ": the key is not eaten");
-  LocalCheck(test_case.doc->text_utf16() == L"protected",
-             label + ": the document is unchanged");
+  // pfEaten == FALSE means the host must perform its default input. A read-only store
+  // refuses the write; a password/unknown field receives the host's own character, which is
+  // exactly what the IME must not be credited for.
+  InputRoute route{test_case.host, test_case.doc, test_case.product.sink, context};
+  if (eaten == FALSE) {
+    if (options.read_only) {
+      // The read-only store refuses the host's own write as well; the attempt must not be
+      // skipped, and the refusal must leave the document unchanged.
+      error.clear();
+      (void)ApplyHostDefault(&route, L"a", &error);
+    } else {
+      LocalCheck(ApplyHostDefault(&route, L"a", &error),
+                 label + ": the host default input ran: " + error);
+    }
+  }
+  const std::wstring expected =
+      options.read_only ? L"protected" : L"protecteda";
+  LocalCheck(test_case.doc->text_utf16() == expected,
+             label + (options.read_only
+                          ? ": the product wrote nothing and the read-only host refused"
+                          : ": only the host's own character was inserted"));
   EndCase(&test_case);
   return true;
 }
@@ -723,10 +842,11 @@ bool RunExternalEditCase(const Paths& paths) {
   }
   auto* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "external edit: ready to type");
   std::string error;
-  LocalCheck(SendText(sink, context, L"abc", true, &error), "external edit: type abc: " + error);
+  LocalCheck(SendText(&route, L"abc", true, &error), "external edit: type abc: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc, L"baseabc", 5000),
              "external edit: composition is visible");
   const TfClientId external =
@@ -740,9 +860,9 @@ bool RunExternalEditCase(const Paths& paths) {
              "external edit: the new binding is ready");
   const std::wstring after_external = test_case.doc->text_utf16();
   error.clear();
-  LocalCheck(SendText(sink, context, L"def", true, &error),
+  LocalCheck(SendText(&route, L"def", true, &error),
              "external edit: typing after the external write is accepted: " + error);
-  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "external edit: space is eaten: " + error);
   const std::wstring expected = after_external + L"def ";
   LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 8000),
@@ -795,10 +915,11 @@ void RunSessionWorker(const std::filesystem::path& stage, const std::wstring& wo
     ::Sleep(5);
   }
   ITfContext* context = document->context();
+  InputRoute route{host, document, product.sink, context};
   if (!ReadyToType(*host, product.sink, context, 15000)) {
     result->error = "the session never became ready";
-  } else if (!SendText(product.sink, context, word, true, &result->error) ||
-             !SendVirtualKey(product.sink, context, VK_SPACE, true, &result->error) ||
+  } else if (!SendText(&route, word, true, &result->error) ||
+             !SendVirtualKey(&route, VK_SPACE, true, &result->error) ||
              !WaitForText(*host, document, word + L" ", 8000)) {
     result->error = "the session did not commit its word";
   } else {
@@ -933,8 +1054,9 @@ bool RunFocusSwitchCase(const Paths& paths) {
   LocalCheck(ReadyToType(*test_case.host, sink, parent_context, 15000),
              "focus: the parent context is ready");
   std::string error;
-  LocalCheck(SendText(sink, parent_context, L"one", true, &error) &&
-                 SendVirtualKey(sink, parent_context, VK_SPACE, true, &error) &&
+  InputRoute parent_route{test_case.host, test_case.doc, sink, parent_context};
+  LocalCheck(SendText(&parent_route, L"one", true, &error) &&
+                 SendVirtualKey(&parent_route, VK_SPACE, true, &error) &&
                  WaitForText(*test_case.host, test_case.doc, L"parentone ", 5000),
              "focus: the parent context accepts text");
 
@@ -950,8 +1072,9 @@ bool RunFocusSwitchCase(const Paths& paths) {
     LocalCheck(ReadyToType(*test_case.host, sink, child->context(), 15000),
                "focus: the child context is bound");
     error.clear();
-    LocalCheck(SendText(sink, child->context(), L"child", true, &error) &&
-                   SendVirtualKey(sink, child->context(), VK_SPACE, true, &error) &&
+    InputRoute child_route{test_case.host, child, sink, child->context()};
+    LocalCheck(SendText(&child_route, L"child", true, &error) &&
+                   SendVirtualKey(&child_route, VK_SPACE, true, &error) &&
                    WaitForText(*test_case.host, child, L"child ", 8000),
                "focus: the child context accepts text");
     LocalCheck(test_case.doc->text_utf16() == L"parentone ",
@@ -1032,10 +1155,10 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
   LocalCheck(!std::filesystem::is_regular_file(marker),
              "timing: the marker is retired after the deferred deployment");
   std::string error;
-  LocalCheck(SendText(renewed.product.sink, renewed.doc->context(), L"timing", true,
-                      &error) &&
-                 SendVirtualKey(renewed.product.sink, renewed.doc->context(), VK_SPACE,
-                                true, &error) &&
+  InputRoute renewed_route{renewed.host, renewed.doc, renewed.product.sink,
+                           renewed.doc->context()};
+  LocalCheck(SendText(&renewed_route, L"timing", true, &error) &&
+                 SendVirtualKey(&renewed_route, VK_SPACE, true, &error) &&
                  WaitForText(*renewed.host, renewed.doc, L"timing ", 8000),
              "timing: the restarted engine accepts input");
   EndCase(&renewed);
@@ -1077,6 +1200,295 @@ bool RunEngineMissingCase(const std::filesystem::path& stage,
   return true;
 }
 
+struct DeployChildOutcome {
+  bool launched = false;
+  bool exited = false;
+  bool requested = false;
+  bool completed = false;
+  DWORD code = 1;
+  std::string fingerprint;
+};
+
+DeployChildOutcome RunDeployChild(const std::filesystem::path& exe,
+                                  const std::filesystem::path& user_root,
+                                  const std::filesystem::path& artifact,
+                                  const std::filesystem::path& result) {
+  DeployChildOutcome outcome;
+  std::wstring command = L"\"" + exe.wstring() + L"\" --child";
+  command += L" --user-root \"" + user_root.wstring() + L"\"";
+  command += L" --artifact \"" + artifact.wstring() + L"\"";
+  command += L" --result \"" + result.wstring() + L"\"";
+  command += L" --hold-ms 0";
+  std::vector<wchar_t> buffer(command.begin(), command.end());
+  buffer.push_back(L'\0');
+  STARTUPINFOW startup = {};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process = {};
+  outcome.launched = ::CreateProcessW(exe.c_str(), buffer.data(), nullptr, nullptr,
+                                      FALSE, 0, nullptr, nullptr, &startup,
+                                      &process) != FALSE;
+  if (!outcome.launched) {
+    return outcome;
+  }
+  outcome.exited = ::WaitForSingleObject(process.hProcess, 60000) == WAIT_OBJECT_0;
+  if (outcome.exited) {
+    ::GetExitCodeProcess(process.hProcess, &outcome.code);
+  }
+  ::CloseHandle(process.hThread);
+  ::CloseHandle(process.hProcess);
+  const std::string text = ReadNarrow(result);
+  outcome.requested = text.find("requested=1") != std::string::npos;
+  outcome.completed = text.find("completed=1") != std::string::npos;
+  const std::size_t marker = text.find("fingerprint=");
+  if (marker != std::string::npos) {
+    const std::size_t end = text.find('\n', marker);
+    outcome.fingerprint =
+        text.substr(marker + 12, end == std::string::npos ? std::string::npos
+                                                          : end - marker - 12);
+  }
+  return outcome;
+}
+
+// The product's runtime lease must hold the shared engine.lock across processes. While a
+// live engine exists, a changed settings bundle from another host defers and keeps both the
+// marker and the compiled output; a new host without a change still activates. After the
+// product deactivates, the deferred deployment applies.
+bool RunLeaseLockCase(const std::filesystem::path& stage,
+                      const std::filesystem::path& user_root,
+                      const std::filesystem::path& deployment_exe,
+                      const std::filesystem::path& run_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "lease: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "lease: the product engine is running");
+  PumpSlice(*test_case.host, 300);
+
+  const std::filesystem::path marker = user_root / L"engine" / L"deploy-required";
+  const std::filesystem::path compiled =
+      user_root / L"engine" / L"build" / L"epocanva_english.schema.yaml";
+  const std::filesystem::path state = user_root / L"engine" / L"deployed-state";
+  const std::filesystem::path result = run_root / L"lease-child.txt";
+  std::error_code ec;
+  std::filesystem::remove(result, ec);
+  LocalCheck(std::filesystem::is_regular_file(compiled),
+             "lease: the running engine has a compiled schema");
+
+  epocanva::product::ProductSettings changed;
+  changed.completion_enabled = true;
+  changed.completion_candidates = 6;
+  changed.spelling_enabled = true;
+  changed.spelling_candidates = 3;
+  std::wstring why;
+  LocalCheck(WriteSettingsOnly(user_root, changed, &why),
+             "lease: a changed settings bundle is written for another host");
+  LocalCheck(std::filesystem::is_regular_file(marker),
+             "lease: the settings marker exists while the engine runs");
+
+  const ULONGLONG start = ::GetTickCount64();
+  const DeployChildOutcome deferred =
+      RunDeployChild(deployment_exe, user_root, compiled, result);
+  const ULONGLONG elapsed = ::GetTickCount64() - start;
+  LocalCheck(deferred.launched && deferred.exited && deferred.code == 0 &&
+                 deferred.completed,
+             "lease: the second host activation completes");
+  LocalCheck(!deferred.requested,
+             "lease: the second host defers instead of deploying under the live engine");
+  LocalCheck(elapsed < 15000,
+             "lease: the shared runtime lock does not block the new host");
+  LocalCheck(std::filesystem::is_regular_file(compiled),
+             "lease: the compiled output in use was not deleted");
+  LocalCheck(std::filesystem::is_regular_file(marker),
+             "lease: the deferred marker survives for the next real start");
+  const std::string during = ReadNarrow(state);
+  LocalCheck(during.find(deferred.fingerprint) == std::string::npos,
+             "lease: no new fingerprint was recorded during the deferral");
+  EndCase(&test_case);
+
+  std::filesystem::remove(result, ec);
+  const DeployChildOutcome applied =
+      RunDeployChild(deployment_exe, user_root, compiled, result);
+  LocalCheck(applied.launched && applied.exited && applied.code == 0 &&
+                 applied.requested && applied.completed,
+             "lease: the next activation after deactivation deploys");
+  LocalCheck(!std::filesystem::is_regular_file(marker),
+             "lease: the marker is retired after the applied deployment");
+  const std::string after = ReadNarrow(state);
+  LocalCheck(after.find(applied.fingerprint) != std::string::npos,
+             "lease: the new fingerprint is recorded after the deployment");
+  return true;
+}
+
+// Independent reference edit model. It is written from the documented default English
+// behaviour (raw characters preserved, Space commits and inserts one space) and never calls
+// product code. The final controlled-store text must equal its text.
+struct ReferenceDoc {
+  std::wstring text;
+  void HostInsert(const std::wstring& units) { text += units; }
+  void RawAppend(const std::wstring& units) { text += units; }
+};
+
+bool RunColdTokenCase(const std::filesystem::path& stage,
+                      const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  // The field is first classified as Unknown (the metadata cannot be read), which is the
+  // cold-start shape: the first character must be the host's. After that first insertion the
+  // test flips the metadata to a readable Allowed field, so the old binding is replaced and
+  // a fresh binding would happily take the next character -- unless the host-owned token is
+  // honoured.
+  options.scope_answer = epocanva::tsf::edit::test::TestScopeAnswer::kWrongType;
+  options.initial_text_utf16 = L"";
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "token: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  ReferenceDoc reference;
+  std::string error;
+  bool first_eaten = true;
+  LocalCheck(SendCharAdaptive(&route, L'a', &first_eaten, &error),
+             "token: the first character was typed: " + error);
+  LocalCheck(!first_eaten, "token: the unknown-permission first character stayed with the host");
+  reference.HostInsert(L"a");
+  // The field becomes readable. The host insertion above already invalidated the old
+  // binding; the rebind now resolves Allowed and the engine path is available.
+  test_case.doc->SetScopeAnswer(epocanva::tsf::edit::test::TestScopeAnswer::kNone, {});
+  PumpSlice(*test_case.host, 1000);
+  std::vector<bool> eaten;
+  LocalCheck(SendTextAdaptive(&route, L"bc", &eaten, &error),
+             "token: the rest of the token was typed: " + error);
+  LocalCheck(eaten.size() == 2 && !eaten[0] && !eaten[1],
+             "token: the now-Allowed engine did not take over the middle of the token");
+  reference.HostInsert(L"bc");
+  bool space_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error),
+             "token: the boundary space was typed: " + error);
+  LocalCheck(!space_eaten, "token: the boundary space also stayed with the host");
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "token: the host-owned token is contiguous in the document");
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "token: the engine is ready for the next token");
+  LocalCheck(SendText(&route, L"de", true, &error),
+             "token: a fresh token is eaten: " + error);
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
+             "token: the fresh boundary is eaten: " + error);
+  reference.RawAppend(L"de ");
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
+             "token: the reference document matches (host token + engine token)");
+  EndCase(&test_case);
+  return true;
+}
+
+bool RunPressureCase(const std::filesystem::path& stage,
+                     const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.async_locks = true;
+  options.initial_text_utf16 = L"";
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "pressure: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "pressure: the engine path is ready");
+  ReferenceDoc reference;
+
+  // Phase A -- burst with the first edit deliberately stalled. Every key is eaten while the
+  // document lock is held, so the engine backlog crosses the high water mark and the raw
+  // catch-up takes over. Releasing the locks must apply the exact same text, once.
+  std::wstring burst;
+  for (int repeat = 0; repeat < 5; ++repeat) {
+    burst += L"Aa1@x.y_Z-9";
+  }
+  test_case.host->SetHoldGrantMessages(true);
+  std::string error;
+  LocalCheck(SendText(&route, burst, true, &error),
+             "pressure: the burst was accepted with every key eaten: " + error);
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
+             "pressure: the closing space was eaten: " + error);
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+  reference.RawAppend(burst);
+  reference.RawAppend(L" ");
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 25000),
+             "pressure: the exact burst text was applied once, in order");
+  const std::wstring after_burst = test_case.doc->text_utf16();
+  PumpSlice(*test_case.host, 300);
+  LocalCheck(test_case.doc->text_utf16() == after_burst,
+             "pressure: no late duplicate edit changed the document");
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "pressure: the engine is fresh after the degraded run");
+  LocalCheck(SendText(&route, L"tail", true, &error) &&
+                 SendVirtualKey(&route, VK_SPACE, true, &error),
+             "pressure: the engine path accepts the next token: " + error);
+  reference.RawAppend(L"tail ");
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 10000),
+             "pressure: the next token follows the degraded run in order");
+
+  // Phase B -- sustained typing while the engine consumes results but every edit is
+  // stalled. This exercises the same admission path with a delayed *edit* rather than only
+  // an unpumped burst.
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "pressure: ready for the sustained phase");
+  std::wstring sustained;
+  for (int repeat = 0; repeat < 3; ++repeat) {
+    sustained += L"Qq2#r_s-T7";
+  }
+  test_case.host->SetHoldGrantMessages(true);
+  for (std::size_t offset = 0; offset < sustained.size(); offset += 5) {
+    const std::wstring group = sustained.substr(offset, 5);
+    LocalCheck(SendText(&route, group, true, &error),
+               "pressure: sustained group accepted: " + error);
+    PumpSlice(*test_case.host, 10);
+  }
+  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
+             "pressure: the sustained closing space was eaten: " + error);
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+  reference.RawAppend(sustained);
+  reference.RawAppend(L" ");
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 25000),
+             "pressure: the sustained text was applied once, in order");
+  EndCase(&test_case);
+
+  // Deactivation while a degraded run is pending and the document lock is held must return
+  // without waiting for the engine. The process surviving its own teardown is the assertion.
+  Case stopping;
+  TestDocumentOptions stop_options;
+  stop_options.async_locks = true;
+  if (BeginCase(&stopping, stage, user_root, stop_options, nullptr)) {
+    InputRoute stop_route{stopping.host, stopping.doc, stopping.product.sink,
+                          stopping.doc->context()};
+    if (ReadyToType(*stopping.host, stopping.product.sink, stopping.doc->context(),
+                    15000)) {
+      stopping.host->SetHoldGrantMessages(true);
+      std::string stop_error;
+      (void)SendText(&stop_route, L"pending-degraded-run", true, &stop_error);
+      LocalCheck(true, "pressure: a degraded run is pending at deactivation");
+    }
+    EndCase(&stopping);
+    LocalCheck(true, "pressure: deactivation with a pending run returned");
+  } else {
+    LocalCheck(false, "pressure: the stop-race case activated");
+  }
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1085,6 +1497,7 @@ int main(int argc, char** argv) {
   std::filesystem::path data_dir;
   std::filesystem::path lexicon;
   std::filesystem::path run_root;
+  std::filesystem::path deployment_exe;
   std::string mode = "input";
   for (int index = 1; index < argc; ++index) {
     const std::string arg = argv[index];
@@ -1100,6 +1513,8 @@ int main(int argc, char** argv) {
       run_root = std::filesystem::path(argv[++index]);
     } else if (arg == "--mode" && index + 1 < argc) {
       mode = argv[++index];
+    } else if (arg == "--deployment-exe" && index + 1 < argc) {
+      deployment_exe = std::filesystem::path(argv[++index]);
     }
   }
   if (product_dll.empty() || rime_dll.empty() || data_dir.empty() ||
@@ -1127,7 +1542,33 @@ int main(int argc, char** argv) {
   settings.spelling_enabled = true;
   settings.spelling_candidates = 2;
 
-  if (mode == "focus") {
+  if (mode == "lease") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "lease: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "lease: settings and marker written");
+    LocalCheck(std::filesystem::is_regular_file(deployment_exe),
+               "lease: the deployment test executable is available");
+    RunLeaseLockCase(stage, user_root, deployment_exe, run_root);
+  } else if (mode == "token") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "token: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "token: settings and marker written");
+    RunColdTokenCase(stage, user_root);
+  } else if (mode == "pressure") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "pressure: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "pressure: settings and marker written");
+    RunPressureCase(stage, user_root);
+  } else if (mode == "focus") {
     std::wstring why;
     LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
                            &why),

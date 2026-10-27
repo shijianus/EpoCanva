@@ -99,6 +99,96 @@ void TestLifecycle() {
   Check(queue.Snapshot().failed == 1, "release does not count a second failure");
 }
 
+void TestHostTokenOwnership() {
+  using epocanva::tsf::product::HostTokenOwnership;
+  input::KeyText letter = Text();
+  input::KeyText mark = Text();
+  mark.utf16_code_units = u"@";
+  input::KeyText path = Text();
+  path.utf16_code_units = u"\\";
+  input::KeyText space = Text();
+  space.utf16_code_units = u" ";
+  input::KeyText comma = Text();
+  comma.utf16_code_units = u",";
+
+  HostTokenOwnership token;
+  Check(!token.owned(), "a fresh token is host-neutral");
+  token.HostKept(letter, false);
+  Check(token.owned(), "a host-kept letter starts a host-owned token");
+  Check(HostTokenOwnership::IsTokenText(mark) &&
+            HostTokenOwnership::IsTokenText(path),
+        "protected marks and path separators are token characters");
+  token.HostKept(space, false);
+  Check(!token.owned(), "a space ends the host-owned token");
+  token.HostKept(letter, false);
+  token.HostKept(mark, false);
+  Check(token.owned(), "a mark keeps the token host-owned");
+  token.HostKept(comma, false);
+  Check(!token.owned(), "a non-token punctuation ends the token");
+  token.HostKept(letter, false);
+  token.HostKept(letter, /*shortcut=*/true);
+  Check(token.owned(), "a shortcut does not end the token");
+  token.EngineKept();
+  Check(!token.owned(), "an engine-consumed key ends host ownership");
+  token.HostKept(letter, false);
+  token.Reset();
+  Check(!token.owned(), "an explicit reset clears ownership");
+}
+
+void TestHighWaterAndWithdraw() {
+  Check(KeyAdmissionQueue::kHighWater < KeyAdmissionQueue::kNonComposingLimit &&
+            KeyAdmissionQueue::kNonComposingLimit < KeyAdmissionQueue::kCapacity,
+        "high water is below both hard limits");
+  KeyAdmissionQueue queue;
+  for (int index = 0; index < 3; ++index) {
+    input::KeyText text = Text();
+    text.utf16_code_units = std::u16string(1, static_cast<char16_t>(u'a' + index));
+    queue.Push(Key(), text, Decision(), 9, 2);
+  }
+  queue.ConfirmEaten(1);
+  queue.ConfirmEaten(2);
+  queue.ConfirmEaten(3);
+  const std::deque<AdmissionKey> withdrawn = queue.WithdrawQueued();
+  Check(withdrawn.size() == 3, "withdraw removes the whole queued tail");
+  Check(queue.empty(), "the engine queue is empty after a withdraw");
+  Check(withdrawn[0].text.utf16_code_units == u"a" &&
+            withdrawn[1].text.utf16_code_units == u"b" &&
+            withdrawn[2].text.utf16_code_units == u"c",
+        "withdraw preserves FIFO order of the captured text");
+  Check(withdrawn[0].id < withdrawn[1].id && withdrawn[1].id < withdrawn[2].id,
+        "withdrawn ids keep their admission order");
+  queue.RecordDeferredRaw(withdrawn.size(), 3);
+  KeyAdmissionSnapshot snapshot = queue.Snapshot();
+  Check(snapshot.deferred_raw_keys == 3 && snapshot.deferred_raw_units == 3,
+        "withdrawn keys are staged as deferred raw, not failed");
+  Check(snapshot.failed == 0, "a withdraw counts no failure");
+}
+
+void TestRawAccounting() {
+  KeyAdmissionQueue queue;
+  queue.RecordRawApplied(4, 9);
+  KeyAdmissionSnapshot snapshot = queue.Snapshot();
+  Check(snapshot.raw_applied_keys == 4 && snapshot.raw_applied_units == 9,
+        "an applied raw run is counted with its units");
+  Check(snapshot.failed == 0, "an applied raw run is not a failure");
+
+  queue.RecordRawFailed(2, 5);
+  snapshot = queue.Snapshot();
+  Check(snapshot.raw_failed_keys == 2 && snapshot.raw_failed_units == 5 &&
+            snapshot.failed == 2 && snapshot.failed_raw_commit == 2,
+        "a refused raw run is an explicit named failure");
+  Check(snapshot.last_failure == KeyFailure::kRawCommitFailed,
+        "the last failure names the raw commit refusal");
+
+  queue.RecordRawDropped(1, 1);
+  snapshot = queue.Snapshot();
+  Check(snapshot.raw_dropped_keys == 1 && snapshot.failed_raw_capacity == 1,
+        "a run that exceeds its bound is reported as raw-capacity, not hidden");
+  Check(std::string(epocanva::tsf::product::DescribeKeyFailure(
+                KeyFailure::kRawCapacity)) == "raw-capacity",
+        "the raw-capacity failure has a stable name");
+}
+
 void TestFailures() {
   KeyAdmissionQueue queue;
   queue.Push(Key(), Text(), Decision(), 1, 1);
@@ -142,6 +232,9 @@ int main(int argc, char** argv) {
   (void)argv;
   TestCapacity();
   TestLifecycle();
+  TestHostTokenOwnership();
+  TestHighWaterAndWithdraw();
+  TestRawAccounting();
   TestFailures();
   if (g_failures != 0) {
     std::cout << "FAILED: " << g_failures << " check(s)\n";

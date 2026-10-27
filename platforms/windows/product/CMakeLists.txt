@@ -299,6 +299,7 @@ target_link_libraries(epocanva_product_sink_tests PRIVATE
   ole32 uuid user32 bcrypt shell32)
 add_dependencies(epocanva_product_sink_tests epocanva_tsf_product)
 add_dependencies(epocanva_product_sink_tests epocanva_tsf_direct_sink_test)
+add_dependencies(epocanva_product_sink_tests epocanva_product_deployment_tests)
 
 add_executable(epocanva_ui_tests
   tests/ui_tests.cc)
@@ -327,7 +328,8 @@ target_link_libraries(epocanva_sta_waker_tests PRIVATE epocanva_sta_waker)
 
 add_executable(epocanva_key_admission_tests
   "${_tsf_product_source_dir}/tests/key_admission_tests.cc"
-  "${_tsf_product_source_dir}/key_admission.cc")
+  "${_tsf_product_source_dir}/key_admission.cc"
+  "${_input_source_dir}/key_decision.cc")
 target_compile_definitions(epocanva_key_admission_tests PRIVATE ${_product_definitions})
 target_compile_options(epocanva_key_admission_tests PRIVATE ${_product_options})
 target_include_directories(epocanva_key_admission_tests PRIVATE
@@ -502,6 +504,51 @@ add_test(
 set_tests_properties(product.integration.sink_focus_switch
   PROPERTIES TIMEOUT 300
              LABELS "windows;product;sink;focus;generation;no-registration")
+
+add_test(
+  NAME product.integration.sink_token
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-token
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-token;--mode;token"
+    -DTIMEOUT_SECONDS=300
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_token
+  PROPERTIES TIMEOUT 360
+             LABELS "windows;product;sink;cold-start;token;permission;no-registration")
+
+add_test(
+  NAME product.integration.sink_pressure
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-pressure
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-pressure;--mode;pressure"
+    -DTIMEOUT_SECONDS=420
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_pressure
+  PROPERTIES TIMEOUT 480
+             LABELS "windows;product;sink;queue;pressure;raw;no-registration")
+
+add_test(
+  NAME product.integration.sink_lease_lock
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-lease-lock
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-lease;--mode;lease;--deployment-exe;$<TARGET_FILE:epocanva_product_deployment_tests>"
+    -DTIMEOUT_SECONDS=300
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_lease_lock
+  PROPERTIES TIMEOUT 360
+             LABELS "windows;product;sink;deployment;lease;cross-process;no-registration")
 
 add_test(
   NAME product.integration.sink_strict_unregistered
