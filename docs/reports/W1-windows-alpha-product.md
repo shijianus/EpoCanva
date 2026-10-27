@@ -166,10 +166,12 @@ not mistaken for a passing ACL test.
   `engine/build/default.yaml` and `engine/build/epocanva_english.schema.yaml`; the compiled
   schema carried the non-default patch values and the marker was gone. With `rime.dll`
   removed, activation failed and the marker remained.
-- **Package contents:** 21 files: `EpoCanva.exe`, `epocanva_tsf.dll`, `rime.dll`,
-  `NOTICE.txt`, `VERSION.txt`, `data/default.yaml`, `data/epocanva_english.schema.yaml`,
-  `data/lexicon/README.txt`, the 42,356-row TSV, its provenance, `licenses/*` (11 files) and
-  `package.manifest`. No PDB, test DLL, log, scratch or object file is present.
+- **Package contents:** 21 verified payload files: `EpoCanva.exe`, `epocanva_tsf.dll`,
+  `rime.dll`, `NOTICE.txt`, `VERSION.txt`, `data/default.yaml`,
+  `data/epocanva_english.schema.yaml`, `data/lexicon/README.txt`, the 42,356-row TSV, its
+  provenance and `licenses/*` (11 files). `package.manifest` itself is the 22nd file on
+  disk and is not one of its own rows. No PDB, test DLL, log, scratch or object file is
+  present.
 - **Lexicon identity:** TSV SHA-256 `6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b`,
   502,333 bytes, 42,356 rows, ASCII, LF; matches the provenance and the package manifest.
   Source commit `7bbe293...`, source SHA-256 `76dc8ed...`.
