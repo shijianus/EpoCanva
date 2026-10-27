@@ -1,9 +1,16 @@
 # W1 -- Windows English Alpha product shell, real settings and offline package
 
 Base HEAD: `6bb21244b8db7b4002b71c1b45b7391d08b40ab0`.
+Product source commit: `508e663` (the final W1 package was rebuilt after the W1 commits,
+so its embedded commit and `package.manifest` both name `508e663`).
+W1 local commits: `7f67046` (UTF-8 engine paths), `f168e5d` (engine host deployment
+request), `e9e149a` (settings shell + product TSF DLL), `508e663` (offline staging +
+hand-off report). This report is refreshed in a follow-up documentation commit; nothing
+was pushed or tagged.
+
 W1 is an **internal alpha** productization step, not a system input method release and not
-the final Alpha. The work was committed locally in small modules; the hand-off message and
-`git log` carry the W1 commit SHAs. Nothing was pushed or tagged.
+the final Alpha. The settings shell and the unregistered product TSF DLL do not make system
+input available; W2/W3 own the keyboard sink, candidate UI, registration and installer.
 
 ## 1. Environment (sanitized)
 
@@ -146,13 +153,13 @@ not mistaken for a passing ACL test.
 - **English regression:** 35/35 formal English integration cases, including pilot manifest
   identity, spelling toggles and real lexicon cases.
 - **Root and standalone TSF:** 8/8 root cases; 3/3 P3.1 lifecycle cases.
-- **GUI:** the screenshot at `build/product/run/stage-ui2/settings.png` was captured from a
-  real `EpoCanva.exe` process. The window reports `Package ready - 21 files verified`,
-  version `0.1.0-w1 (6bb2124)`, Windows 11 x64, and the saved settings (completion off,
+- **GUI:** the screenshot at `build/product/run/stage-ui-final/settings.png` was captured
+  from a real `EpoCanva.exe` process. The window reports `Package ready - 21 files verified`,
+  version `0.1.0-w1 (508e663)`, Windows 11 x64, and the saved settings (completion off,
   3 candidates; spelling on, 2 suggestions). The UI test additionally exercised Tab focus
   changes, DPI awareness, the About/licences dialog, Save, process exit and relaunch.
-- **Settings persistence evidence:** `build/product/run/stage-ui2/user/settings.ini`,
-  `build/product/run/stage-ui2/user/engine/epocanva_english.custom.yaml` and
+- **Settings persistence evidence:** `build/product/run/stage-ui-final/user/settings.ini`,
+  `build/product/run/stage-ui-final/user/engine/epocanva_english.custom.yaml` and
   `.../engine/deploy-required`. The marker token was checked to equal SHA-256 of the
   exact settings bytes.
 - **Product TSF deployment:** after activation, the user data contained
@@ -214,8 +221,8 @@ install matrix. Do not use this host's system input settings or registry for tho
 | Settings EXE | `build/product/stage/EpoCanva-0.1.0-w1/EpoCanva.exe` |
 | Product TSF DLL | `build/product/stage/EpoCanva-0.1.0-w1/epocanva_tsf.dll` |
 | Full offline stage | `build/product/stage/EpoCanva-0.1.0-w1/` |
-| Window screenshot | `build/product/run/stage-ui2/settings.png` |
-| Saved settings evidence | `build/product/run/stage-ui2/user/` |
+| Window screenshot | `build/product/run/stage-ui-final/settings.png` |
+| Saved settings evidence | `build/product/run/stage-ui-final/user/` |
 | Product test logs | `build/product/logs/` |
 | Product data | `build/product-data/` (generated, not committed) |
 
