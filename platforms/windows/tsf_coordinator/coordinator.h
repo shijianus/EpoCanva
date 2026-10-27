@@ -325,6 +325,11 @@ struct RetirementSnapshot {
   bool last_cleanup_end_issued = false;
   HRESULT last_cleanup_end_hr = S_OK;
   std::uint64_t last_cleanup_termination_notifications_after_call = 0;
+  // Termination notifications observed by the settling operation (or by the final
+  // composition-state check when no cleanup plan was submitted). An increase over at_start
+  // is the direct notification evidence for an external termination that arrived while the
+  // retirement was still waiting for an older plan's terminal.
+  std::uint64_t last_cleanup_termination_notifications_at_settle = 0;
   std::uint64_t close_requests = 0;
   std::uint64_t close_results_taken = 0;
   std::uint64_t close_failures = 0;
@@ -351,9 +356,11 @@ bool RetirementAccountingBalanced(const RetirementSnapshot& snapshot);
 //   Finished              -> plan submitted, this plan's EndComposition issued and succeeded,
 //                            starting from a live composition the writer had not ended;
 //   AlreadyOrdinary       -> no end call, and no owned composition or one already ended;
-//   TerminatedExternally  -> no end call, an owned composition, and either TSF had already
-//                            reported termination (no plan) or it reported it while the
-//                            submitted plan waited (live, not external at start);
+//   TerminatedExternally  -> no end call, an owned composition, and termination-notification
+//                            evidence: TSF had already reported it before cleanup, or the
+//                            notification count rose while cleanup waited (including while
+//                            an older accepted plan still owed its Stale terminal, before
+//                            any cleanup plan could be submitted);
 //   Blocked               -> a named reason, and no successful end claimed.
 // Tests and the lab use this instead of accepting either of two terminal states blindly.
 bool RetirementCleanupEvidenceConsistent(const RetirementSnapshot& snapshot);
@@ -594,6 +601,11 @@ class ContextCoordinator {
     bool cleanup_end_issued = false;
     HRESULT cleanup_end_hr = S_OK;
     std::uint64_t cleanup_termination_notifications_after_call = 0;
+    // Sink termination notifications observed when this cleanup settled. A value greater than
+    // at_start is direct evidence that TSF terminated the composition while cleanup was
+    // waiting, including while an older accepted plan still owed its Stale terminal and no
+    // cleanup plan had been submitted yet.
+    std::uint64_t cleanup_termination_notifications_at_settle = 0;
   };
   static constexpr std::size_t kRetirementCapacity = 2;
 
@@ -739,6 +751,7 @@ class ContextCoordinator {
   bool last_cleanup_external_at_start_ = false;
   bool last_cleanup_ended_before_at_start_ = false;
   std::uint64_t last_cleanup_termination_notifications_at_start_ = 0;
+  std::uint64_t last_cleanup_termination_notifications_at_settle_ = 0;
   bool last_cleanup_plan_submitted_ = false;
   std::uint64_t last_cleanup_plan_session_id_ = 0;
   bool last_cleanup_end_issued_ = false;

@@ -136,6 +136,13 @@ epocanva_add_coordinator_case(
   windows.tsf_coordinator.retirement_compose_external_pending
   retirement-compose-external-pending)
 
+# 6d2. The owner ends the composition while a pre-retirement accepted plan still waits for
+#      its grant, before any cleanup plan can be submitted. The termination notification
+#      itself (not a cleanup end call) must carry the attribution.
+epocanva_add_coordinator_case(
+  windows.tsf_coordinator.retirement_compose_external_prior_pending
+  retirement-compose-external-prior-pending)
+
 # 6e. A cleanup that is refused by real permission metadata is Blocked, not Finished.
 epocanva_add_coordinator_case(
   windows.tsf_coordinator.retirement_compose_permission_denied
@@ -470,6 +477,7 @@ set_tests_properties(
   windows.tsf_coordinator.retirement_compose_withheld
   windows.tsf_coordinator.retirement_compose_external_before
   windows.tsf_coordinator.retirement_compose_external_pending
+  windows.tsf_coordinator.retirement_compose_external_prior_pending
   windows.tsf_coordinator.retirement_compose_permission_denied
   windows.tsf_coordinator.retirement_compose_range_mismatch
   windows.tsf_coordinator.edit_pending_invalidate
@@ -483,5 +491,5 @@ set_tests_properties(
   PROPERTIES TIMEOUT 240
              LABELS "windows;tsf;coordinator;context;binding;generation")
 
-message(STATUS "  tsf_coordinator stage-1 cases: 18 (17 behavioural + can_fail)")
+message(STATUS "  tsf_coordinator stage-1 cases: 19 (18 behavioural + can_fail)")
 message(STATUS "  tsf_coordinator permission cases: 9 (real TSF metadata, controlled engine)")

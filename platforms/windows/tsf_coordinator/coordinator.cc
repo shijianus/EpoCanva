@@ -713,6 +713,8 @@ void ContextCoordinator::SettleRetirementCleanup(RetiringBinding& record,
   last_cleanup_end_hr_ = record.cleanup_end_hr;
   last_cleanup_termination_notifications_after_call_ =
       record.cleanup_termination_notifications_after_call;
+  last_cleanup_termination_notifications_at_settle_ =
+      record.cleanup_termination_notifications_at_settle;
 }
 
 void ContextCoordinator::PumpRetirements() {
@@ -824,6 +826,8 @@ void ContextCoordinator::PumpRetirements() {
           // still be waiting for its lock -- it will see the closed retirement session and
           // write nothing.
           const edit::OwnedCompositionState owned = session->composition_state();
+          record->cleanup_termination_notifications_at_settle =
+              owned.termination_notifications;
           if (owned.ever_owned && !owned.ended_by_writer) {
             SettleRetirementCleanup(*record, CleanupState::kTerminatedExternally);
           } else {
@@ -884,6 +888,8 @@ void ContextCoordinator::ResolveRetirementCleanup(
   record.cleanup_end_issued = result.end_composition_issued;
   record.cleanup_end_hr = result.end_composition_hr;
   record.cleanup_termination_notifications_after_call =
+      result.termination_notifications_after_call;
+  record.cleanup_termination_notifications_at_settle =
       result.termination_notifications_after_call;
   if (result.end_composition_issued) {
     ++retirement_cleanup_end_calls_;
@@ -1033,15 +1039,17 @@ bool RetirementCleanupEvidenceConsistent(const RetirementSnapshot& snapshot) {
              (!snapshot.last_cleanup_owned_at_start ||
               snapshot.last_cleanup_ended_before_at_start);
     case CleanupState::kTerminatedExternally:
-      // An owned composition that this writer had not ended, taken by another party.
-      // Either TSF reported it before cleanup started (no plan was submitted), or the
-      // submitted cleanup found it terminated while waiting.
+      // An owned composition that this writer had not ended, taken by another party. The
+      // termination is evidenced either by the state observed when cleanup started or by a
+      // termination notification that arrived while cleanup was waiting. The latter also
+      // covers the window in which an older accepted plan still owed its Stale terminal and
+      // no cleanup plan had been submitted yet.
       return !snapshot.last_cleanup_end_issued &&
              snapshot.last_cleanup_owned_at_start &&
              !snapshot.last_cleanup_ended_before_at_start &&
              (snapshot.last_cleanup_external_at_start ||
-              (snapshot.last_cleanup_plan_submitted &&
-               snapshot.last_cleanup_live_at_start));
+              snapshot.last_cleanup_termination_notifications_at_settle >
+                  snapshot.last_cleanup_termination_notifications_at_start);
     case CleanupState::kBlocked:
       // A named reason, and no successful end claimed as the outcome.
       return snapshot.last_cleanup_block != CleanupBlockReason::kNone &&
@@ -1082,6 +1090,8 @@ RetirementSnapshot ContextCoordinator::BuildRetirementSnapshot() const {
   snapshot.last_cleanup_end_hr = last_cleanup_end_hr_;
   snapshot.last_cleanup_termination_notifications_after_call =
       last_cleanup_termination_notifications_after_call_;
+  snapshot.last_cleanup_termination_notifications_at_settle =
+      last_cleanup_termination_notifications_at_settle_;
   snapshot.close_requests = retirement_close_requests_;
   snapshot.close_results_taken = retirement_close_results_;
   snapshot.close_failures = retirement_close_failures_;
@@ -1975,6 +1985,8 @@ void ContextCoordinator::Close() {
         const edit::OwnedCompositionState owned =
             record.session != nullptr ? record.session->composition_state()
                                       : edit::OwnedCompositionState{};
+        record.cleanup_termination_notifications_at_settle =
+            owned.termination_notifications;
         if (owned.ever_owned && !owned.ended_by_writer) {
           SettleRetirementCleanup(record, CleanupState::kTerminatedExternally);
         } else {

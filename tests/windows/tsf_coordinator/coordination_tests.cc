@@ -1021,6 +1021,8 @@ int RunRetirementComposeExternallyTerminatedWhilePending() {
   Check(retired.last_cleanup_owned_at_start &&
             !retired.last_cleanup_ended_before_at_start &&
             !retired.last_cleanup_end_issued &&
+            retired.last_cleanup_termination_notifications_at_settle >
+                retired.last_cleanup_termination_notifications_at_start &&
             RetirementCleanupEvidenceConsistent(retired) &&
             RetirementAccountingBalanced(retired),
         "external-pending: the pending cleanup issued no end call",
@@ -1035,6 +1037,114 @@ int RunRetirementComposeExternallyTerminatedWhilePending() {
             " end=" + std::to_string(after.composition_end_calls));
   CheckDocText(setup.document->text_utf16(), L"he",
                "external-pending: the displayed text survived verbatim");
+  return Finish();
+}
+
+// --- 6d2. an external termination before any cleanup plan could be submitted -------------
+
+int RunRetirementComposeExternallyTerminatedWhilePriorPlanPending() {
+  ControlledCase setup;
+  TestDocumentOptions options;
+  options.async_locks = true;
+  if (!SetupControlledCase(&setup, options, "retire-external-prior-pending")) {
+    return Finish();
+  }
+  ContextCoordinator& coordinator = *setup.coordinator;
+  for (wchar_t letter : {L'h', L'e'}) {
+    const executor_tests::TextKey key = Letter(letter);
+    TypeKeyAndDrive(coordinator, *setup.host, *setup.harness.executor, key.event,
+                    key.text, "external-prior-pending: composition letter");
+  }
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "external-prior-pending: the composition holds he");
+
+  // Park a pre-retirement accepted plan behind a held grant. Retirement then waits for its
+  // Stale terminal before it may submit its own cleanup plan.
+  setup.host->SetHoldGrantMessages(true);
+  const executor_tests::TextKey l = Letter(L'l');
+  WorkId held_id;
+  Check(coordinator.SubmitKey(l.event, l.text, &held_id) == SubmitStatus::kAccepted,
+        "external-prior-pending: the third letter was accepted", "");
+  const ULONGLONG phase_deadline = ::GetTickCount64() + 20000;
+  CoordinatorSnapshot snapshot = coordinator.Snapshot();
+  while (snapshot.phase != WorkPhase::kEditPending) {
+    coordinator.Pump();
+    snapshot = coordinator.Snapshot();
+    if (snapshot.phase == WorkPhase::kIdle || ::GetTickCount64() >= phase_deadline) {
+      break;
+    }
+    setup.harness.executor->WaitForResult(snapshot.engine_request,
+                                          std::chrono::milliseconds(50));
+  }
+  Check(snapshot.phase == WorkPhase::kEditPending,
+        "external-prior-pending: the abandoned plan waits behind the held grant",
+        DescribeSnapshot(snapshot));
+  setup.host->DispatchQueuedMessages();
+  Check(setup.host->held_grant_messages() >= 1,
+        "external-prior-pending: the abandoned plan's grant is parked",
+        std::to_string(setup.host->held_grant_messages()));
+
+  coordinator.InvalidateBinding();
+  coordinator.Pump();
+  snapshot = coordinator.Snapshot();
+  Check(snapshot.retirement.retiring_bindings == 1 &&
+            snapshot.retirement.pending_edit_event != nullptr,
+        "external-prior-pending: cleanup still waits for the abandoned plan's terminal",
+        DescribeSnapshot(snapshot));
+  ULONG compositions = 0;
+  Check(SUCCEEDED(oct::CountCompositions(setup.document->context(), &compositions)) &&
+            compositions == 1,
+        "external-prior-pending: the composition is still live before the owner ends it",
+        std::to_string(compositions));
+
+  // Terminate before the abandoned plan is released, so no cleanup plan exists yet. The
+  // only evidence is the termination notification that arrives while cleanup waits.
+  if (!TerminateOwnedTestComposition(setup, "external-prior-pending")) {
+    return Finish();
+  }
+  const auto after_owner = setup.document->diagnostics().store;
+
+  setup.host->SetHoldGrantMessages(false);
+  const std::size_t released = setup.host->ReleaseHeldGrantMessages();
+  Check(released >= 1, "external-prior-pending: the abandoned grant was released",
+        std::to_string(released));
+  const DriveResult drained =
+      DriveToCompletion(coordinator, *setup.host, *setup.harness.executor, 20000);
+  Check(drained.completed && drained.final_state.retirement.retiring_bindings == 0,
+        "external-prior-pending: the retirement reached a terminal state",
+        DescribeSnapshot(drained.final_state));
+  const RetirementSnapshot& retired = drained.final_state.retirement;
+  std::printf("[coordinator-win] evidence retire-external-prior-pending: %s\n",
+              DescribeSnapshot(drained.final_state).c_str());
+  Check(retired.last_cleanup_state == CleanupState::kTerminatedExternally &&
+            retired.settled == 1 && retired.externally_terminated == 1 &&
+            retired.finished == 0 && retired.already_ordinary == 0 &&
+            retired.blocked == 0 && retired.cleanup_end_calls == 0,
+        "external-prior-pending: the external end is attributed, never Finished",
+        DescribeSnapshot(drained.final_state));
+  Check(retired.last_cleanup_owned_at_start &&
+            retired.last_cleanup_live_at_start &&
+            !retired.last_cleanup_external_at_start &&
+            !retired.last_cleanup_ended_before_at_start &&
+            !retired.last_cleanup_plan_submitted &&
+            !retired.last_cleanup_end_issued &&
+            retired.last_cleanup_termination_notifications_at_start == 0 &&
+            retired.last_cleanup_termination_notifications_at_settle > 0 &&
+            RetirementCleanupEvidenceConsistent(retired) &&
+            RetirementAccountingBalanced(retired),
+        "external-prior-pending: the notification that arrived while waiting is the "
+        "evidence; no cleanup plan or end call existed",
+        DescribeSnapshot(drained.final_state));
+  const auto after = setup.document->diagnostics().store;
+  Check(after.text_mutations == after_owner.text_mutations &&
+            after.set_text_calls == after_owner.set_text_calls &&
+            after.composition_end_calls == after_owner.composition_end_calls,
+        "external-prior-pending: cleanup issued no SetText and no end call",
+        "mutations=" + std::to_string(after.text_mutations) +
+            " set_text=" + std::to_string(after.set_text_calls) +
+            " end=" + std::to_string(after.composition_end_calls));
+  CheckDocText(setup.document->text_utf16(), L"he",
+               "external-prior-pending: the displayed text survived verbatim");
   return Finish();
 }
 
@@ -1820,6 +1930,9 @@ int RunCoordinationCase(const std::string& case_name) {
   }
   if (case_name == "retirement-compose-external-pending") {
     return RunRetirementComposeExternallyTerminatedWhilePending();
+  }
+  if (case_name == "retirement-compose-external-prior-pending") {
+    return RunRetirementComposeExternallyTerminatedWhilePriorPlanPending();
   }
   if (case_name == "retirement-compose-permission-denied") {
     return RunRetirementComposePermissionDenied();

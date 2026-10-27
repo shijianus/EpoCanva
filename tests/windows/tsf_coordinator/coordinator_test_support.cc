@@ -105,6 +105,9 @@ std::string DescribeSnapshot(const CoordinatorSnapshot& snapshot) {
               snapshot.retirement.last_cleanup_termination_notifications_at_start) +
           "/" +
           std::to_string(
+              snapshot.retirement.last_cleanup_termination_notifications_at_settle) +
+          "/" +
+          std::to_string(
               snapshot.retirement.last_cleanup_termination_notifications_after_call) +
           " last_retire=" + std::to_string(snapshot.retirement.last_cleanup_sequence) +
           " last_ctx=" + std::to_string(snapshot.retirement.last_cleanup_context_id) +
