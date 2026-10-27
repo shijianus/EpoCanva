@@ -49,12 +49,18 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
   没有专名/品牌词大小写恢复（`iPhone`、`GitHub` 一类仍不补全）；
   词形方面**只有**"至多一个 ASCII 分隔符、不在首尾、不两种混用"这一条有限规则——
   没有多分隔符词形、没有 Unicode 弯撇号/破折号规范化、没有自动标点替换、
-  没有 URL/邮箱/代码解析器；也没有 TSF / Android 平台前端与安装器。
+  没有 URL/邮箱/代码解析器；没有**系统注册**的 TSF 输入法、候选 UI、Android 前端与安装器；
+  W1 只交付未注册的产品 TSF DLL 与设置壳（系统键盘/焦点/候选 UI 是 W2，注册/安装器是 W3）。
 - 因此此刻仓库能演示的输入仍极其有限：默认集成测试补全的是那 54 个词，
   但可以连续打多个词并用空格逐个提交（`Hello world `）；
   pilot 模式补全的是那 42,356 个词，但它是**验证装置**，没有前端、不在分发包里。
   在 `rime_raw` / `rime_probe` 两个夹具里候选文本仍与按键逐字节相同——
   那是链路证明；只有 `english_completion` / `english_pilot` 夹具的候选来自词表查询。
+- W1 起另有一条**内部 Alpha 产品壳**：原生 Win32 的 `EpoCanva.exe`（设置、状态、离线/隐私说明、
+  数据位置、许可入口）、未注册的产品 TSF DLL、`%LOCALAPPDATA%\EpoCanva` 用户数据、
+  只读安装数据与白名单离线暂存包。它**不是**系统输入法：不注册、无键盘 sink、无候选 UI，
+  这些是 W2/W3 的工作；也不要把内部 Alpha 包当作可公开分发的版本。
+
 
 ## 阶段状态
 
@@ -71,7 +77,8 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 | P2.4 | 真实英文词表试验接入：来源锁定 + 授权记录 + 确定性转换 + 42k 行上的引擎集成与规模测量 | 已交付 | `docs/reports/P2.4-english-pilot-lexicon.md` |
 | P2.5 | 英文空格分词与连续多词输入（三条空格规则、真实 commit 逐事件读取、最小编译进引擎的 Processor） | 已交付 | `docs/reports/P2.5-english-space-boundaries.md` |
 | P2.6 | 一次编辑拼写建议：门槛表、四类编辑、`spell` 标签列、预算与长度窗口、提交边界（默认不自动替换） | 引擎与夹具已交付；集成测试走正式入口 `tools/test_english_integration.ps1` | `docs/reports/integration-harness-recovery-status.md`（逐条能力的恢复覆盖矩阵） |
-| 之后 | 其余英文能力、C ABI 边界、TSF / Android 适配、打包 | 未开始 | — |
+| W1 | Windows 英文 Alpha 产品壳：设置/状态 EXE、产品 TSF DLL 配置与部署标记、离线数据与白名单暂存 | 已交付（内部 Alpha；未注册系统输入） | `docs/reports/W1-windows-alpha-product.md` |
+| 之后 | 系统键盘/焦点/候选 UI（W2）、注册/卸载/安装器（W3）、其余英文能力、Android | 未开始 | — |
 
 ## 目录结构
 
@@ -84,7 +91,15 @@ engine/
     probe/                  P1.4 可达性探针组件（编译进 rime.dll）
     english/                P2.1 英文组件（模块 epocanva_english）：Translator + P2.5 空格 Processor
   languages/en/             英文语言核心：词表、大小写、词形(token)、空格与提交边界、前缀查询，不含 Rime 头
+platforms/windows/
+  product/                  W1 产品壳：EpoCanva.exe、产品 TSF 配置、设置/清单/诊断、GUI 与引擎测试
+  tsf/ engine_bridge/ ...   P3 的 TSF 骨架、引擎桥、executor、coordinator 与既有测试
+data/
+  product/                  W1 产品 schema/default/NOTICE（只读安装数据源）
+  manifests/                english-pilot.sources.lock.json：试验/产品词表的固定来源
 tools/
+  product/                  W1 构建入口（build_product.ps1）与白名单暂存（stage_product.ps1）
+  data/build_product_lexicon.py  W1 产品词表生成器（复用 P2.4 转换，独立 provenance，不联网）
   toolchain_probe/          C++17 工具链探针
   rime_lifecycle_smoke/     引擎生命周期冒烟（P1.2）
   rime_input_replay/        无界面按键回放（P1.3）
@@ -95,7 +110,6 @@ tools/
   data/build_english_pilot.py  真实词表的确定性离线转换器（P2.4，默认不联网）
   build_librime_baseline.ps1  唯一的 librime 原生构建入口，-Mode baseline|component-probe|english-completion
   cmake/                    项目侧 CMake 适配输入（登记在 third_party/sources.lock.json）
-data/manifests/             english-pilot.sources.lock.json：试验词表的来源、固定提交、授权与产物身份
 tests/
   infrastructure/           CTest 基础设施用例 + assert_probe.cmake 包装件
   english_core/             英文核心单元测试（4 条 CTest，内部 1566 条断言）+ 可失败用例；第 4 条需真实词表在位才注册
@@ -184,6 +198,31 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/test_english_integ
 
 该入口自带失败纪律：工具缺失就指名缺哪个并退出（不安装、不改 PATH），构建失败**不会**去跑
 上一轮的旧可执行文件，零条匹配的用例一律判不通过，日志按 `-LogTag` 落到新路径且**拒绝覆盖**。
+
+### 4. Windows 产品壳与离线暂存包（W1，内部 Alpha）
+
+前置：P2.4 的固定 ESDB 检出（默认 `build/third-party-fetch/esdb`，见
+`docs/compliance/english-pilot-data.md`）与本机已验证的 librime 构建。产品词表**不直接复制**
+pilot 文件，而是由独立工具重新验证固定提交后生成并记录 provenance：
+
+```powershell
+python tools/data/build_product_lexicon.py `
+  --source-root build/third-party-fetch/esdb --out-dir build/product-data
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/product/build_product.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/product/stage_product.ps1 -Replace
+```
+
+产物在 `build/product/stage/EpoCanva-<version>/`：`EpoCanva.exe`、`epocanva_tsf.dll`、
+`rime.dll`、`data/`、`licenses/`、`NOTICE.txt`、`VERSION.txt`、`package.manifest`。
+`EpoCanva.exe` 从自身模块目录定位数据，从 `%LOCALAPPDATA%\EpoCanva` 读取设置/写入 Rime 用户目录；
+可用 `--user-data-root <绝对路径>` 为自测重定向用户数据，`--diagnose <文件>` 输出键值状态报告。
+暂存脚本只接受白名单文件，拒绝 PDB、测试 DLL、日志与文本路径；它对 rime.dll 内嵌的本机
+`__FILE__` 构建前缀给出警告（公开分发前的构建修复项，见 W1 报告）。
+
+**这不是系统输入法**：本轮不注册 CLSID、不安装键盘 sink、没有候选 UI。设置 EXE 可以保存
+并回读真实设置，产品 TSF DLL 会在下一次被宿主加载/激活时部署设置补丁；不要描述成
+“系统输入已经可用”。设置项之外的预测、学习和其他语言没有可点击的假开关。
 
 ## 许可证
 
