@@ -29,6 +29,8 @@ namespace product {
 //   <user root>/engine/                       (Rime user data)
 //   <user root>/engine/epocanva_english.custom.yaml
 //   <user root>/engine/deploy-required
+//   <user root>/engine/deployed-state          (W2 deployment snapshot record)
+//   <user root>/engine/build/epocanva_english.schema.yaml  (compiled schema)
 struct ProductPaths {
   std::filesystem::path module_path;
   std::filesystem::path product_root;
@@ -47,6 +49,9 @@ struct ProductPaths {
   std::filesystem::path settings_file;
   std::filesystem::path schema_patch_file;
   std::filesystem::path deploy_marker_file;
+  std::filesystem::path deployed_state_file;
+  std::filesystem::path compiled_schema_file;
+  std::filesystem::path compiled_schema_binary;
 };
 
 // `module` is nullptr for the executable or the DLL's HINSTANCE for the text service.

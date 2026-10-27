@@ -8,11 +8,13 @@
 // first lease starts one executor, later leases share it, the last release stops and joins
 // it, and a later activation creates a NEW executor instance.
 //
-// WHAT A CALLER CAN AND CANNOT GET. A caller can acquire an opaque EngineLease and read a
-// value-only EngineHostDiagnostics snapshot. There is no accessor returning EngineExecutor,
-// RimeRuntime, RimeSession, InputController, a DLL handle, an ITf* object or a borrowed
-// engine buffer. The executor lives in the .cc implementation; this header deliberately
-// does not include engine_executor.h.
+// WHAT A CALLER CAN AND CANNOT GET. A caller can acquire an EngineLease, read a value-only
+// EngineHostDiagnostics snapshot, and -- W2 product wiring -- borrow the EngineExecutor
+// pointer that the lease keeps alive. The pointer is valid only while this lease is held
+// and must not be stored after Release()/Abandon(); it is not a second owner. There is no
+// accessor returning RimeRuntime, RimeSession, InputController, a DLL handle, an ITf*
+// object or a borrowed engine buffer. This header forward-declares EngineExecutor rather
+// than including engine_executor.h.
 //
 // THREADING AND LOCKS. One broker mutex protects the state machine, configuration identity
 // and lease table. Start and StopAndJoin are ALWAYS called with that mutex released. The
@@ -44,6 +46,14 @@
 #include <memory>
 #include <optional>
 #include <vector>
+
+namespace epocanva {
+namespace windows {
+namespace engine {
+class EngineExecutor;
+}
+}
+}
 
 namespace epocanva {
 namespace tsf {
@@ -165,6 +175,10 @@ class EngineLease {
   bool valid() const { return broker_ != nullptr; }
   std::uint64_t id() const { return id_; }
 
+  // Borrowed executor kept alive by this lease. Null for an invalid/released lease or when
+  // the broker is no longer Running. The caller must not submit after releasing the lease.
+  ::epocanva::windows::engine::EngineExecutor* executor() const;
+
  private:
   friend class EngineHostBroker;
   EngineLease(EngineHostBroker* broker, std::uint64_t id) : broker_(broker), id_(id) {}
@@ -190,6 +204,12 @@ class EngineHostBroker {
   // lease handle can stay pointer-free at the ABI boundary; callers use the lease.
   EngineLeaseReleaseStatus ReleaseLease(std::uint64_t id);
 
+  // W2: true when this broker is Running with the same engine paths/capacity as `config`.
+  // The deployment request is deliberately ignored: it is a one-shot preparation input,
+  // not part of the running environment's identity. Used by the product activation to
+  // decide whether a deployment can still be applied (it cannot while this engine runs).
+  bool IsRunningFor(const EngineHostConfig& config) const;
+
   void Snapshot(EngineHostDiagnostics* diagnostics) const;
 
  private:
@@ -197,6 +217,8 @@ class EngineHostBroker {
 
   void AbandonLease(std::uint64_t id) noexcept;
   void StopOnCaller();
+  ::epocanva::windows::engine::EngineExecutor* ExecutorForLease(
+      std::uint64_t id) const;
 
   struct Impl;
   std::unique_ptr<Impl> impl_;

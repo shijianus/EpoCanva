@@ -344,6 +344,10 @@ EngineLeaseStatus EngineHostBroker::Acquire(const EngineHostConfig& config,
             // break. Fall through to the failure cleanup rather than claiming a lease.
             lock.unlock();
           } else {
+            // W2: deployment is a one-shot preparation input. The compiled output now
+            // exists, so the running environment's identity no longer includes it and a
+            // later lease with the same paths/capacity must match.
+            s.config.deployment.reset();
             s.state = EngineHostState::kRunning;
             s.worker_thread_id = s.executor->worker_thread_id();
             s.last_report = report;
@@ -596,6 +600,22 @@ void EngineHostBroker::StopOnCaller() {
   }
 }
 
+bool EngineHostBroker::IsRunningFor(const EngineHostConfig& config) const {
+  if (!config.valid()) {
+    return false;
+  }
+  const Impl& s = *impl_;
+  std::lock_guard<std::mutex> guard(s.mutex);
+  if (s.state != EngineHostState::kRunning) {
+    return false;
+  }
+  EngineHostConfig requested = config;
+  EngineHostConfig running = s.config;
+  requested.deployment.reset();
+  running.deployment.reset();
+  return requested == running;
+}
+
 void EngineHostBroker::Snapshot(EngineHostDiagnostics* diagnostics) const {
   if (diagnostics == nullptr) {
     return;
@@ -676,6 +696,22 @@ void EngineLease::Abandon() noexcept {
   broker_ = nullptr;
   id_ = 0;
   broker->AbandonLease(id);
+}
+
+engine::EngineExecutor* EngineLease::executor() const {
+  if (broker_ == nullptr) {
+    return nullptr;
+  }
+  return broker_->ExecutorForLease(id_);
+}
+
+engine::EngineExecutor* EngineHostBroker::ExecutorForLease(std::uint64_t id) const {
+  Impl& s = *impl_;
+  std::lock_guard<std::mutex> guard(s.mutex);
+  if (id == 0 || s.leases.count(id) == 0 || s.state != EngineHostState::kRunning) {
+    return nullptr;
+  }
+  return s.executor.get();
 }
 
 #ifdef EPOCANVA_TSF_TEST_SEAM

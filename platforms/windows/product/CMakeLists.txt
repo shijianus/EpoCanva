@@ -166,6 +166,52 @@ target_link_libraries(epocanva_product_engine_tests PRIVATE
   epocanva_product_state
   bcrypt shell32 ole32)
 
+# W2: deployment snapshot, marker retirement and named-mutex coordination. The executable
+# uses its own directory as the product root, so CMake copies the shipped data next to it.
+set(_deployment_test_dir "${CMAKE_BINARY_DIR}/product/deployment-tests")
+add_executable(epocanva_product_deployment_tests
+  tests/deployment_tests.cc
+  product_engine_config.cc
+  "${_tsf_source_dir}/engine_host.cc"
+  "${_tsf_source_dir}/module_state.cc")
+target_compile_definitions(epocanva_product_deployment_tests PRIVATE
+  ${_product_definitions} ${_product_defines})
+target_compile_options(epocanva_product_deployment_tests PRIVATE ${_product_options})
+target_include_directories(epocanva_product_deployment_tests PRIVATE
+  "${_product_source_dir}"
+  "${_tsf_source_dir}"
+  "${_executor_source_dir}"
+  "${_bridge_source_dir}"
+  "${_input_source_dir}")
+target_link_libraries(epocanva_product_deployment_tests PRIVATE
+  epocanva_engine_executor
+  epocanva_product_state
+  bcrypt shell32 ole32)
+set_target_properties(epocanva_product_deployment_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${_deployment_test_dir}"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_deployment_test_dir}"
+  RUNTIME_OUTPUT_DIRECTORY_DEBUG "${_deployment_test_dir}")
+add_custom_command(TARGET epocanva_product_deployment_tests POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${_deployment_test_dir}/data/lexicon"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_CURRENT_LIST_DIR}/../../../data/product/default.yaml"
+          "${_deployment_test_dir}/data/default.yaml"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_CURRENT_LIST_DIR}/../../../data/product/epocanva_english.schema.yaml"
+          "${_deployment_test_dir}/data/epocanva_english.schema.yaml"
+  COMMENT "Staging the product data next to the deployment tests")
+if(EXISTS "${EPOCANVA_PRODUCT_LEXICON}")
+  add_custom_command(TARGET epocanva_product_deployment_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${EPOCANVA_PRODUCT_LEXICON}"
+            "${_deployment_test_dir}/data/lexicon/epocanva_en_alpha.tsv")
+else()
+  message(WARNING
+    "the deployment test will fail because the product lexicon is missing: "
+    "${EPOCANVA_PRODUCT_LEXICON}")
+endif()
+
 add_executable(epocanva_ui_tests
   tests/ui_tests.cc)
 target_compile_definitions(epocanva_ui_tests PRIVATE ${_product_definitions})
@@ -215,6 +261,21 @@ add_test(
 set_tests_properties(product.integration.engine_settings
   PROPERTIES TIMEOUT 360
              LABELS "windows;product;engine;settings;unicode;real;no-ui")
+
+add_test(
+  NAME product.integration.deployment_snapshot
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_deployment_tests>
+    -DCASE=product-deployment
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--run-root;${_product_run}/deployment"
+    -DTIMEOUT_SECONDS=180
+    -P ${_product_assert})
+set_tests_properties(product.integration.deployment_snapshot
+  PROPERTIES TIMEOUT 240
+             LABELS "windows;product;deployment;cross-process;marker")
 
 add_test(
   NAME product.ui.settings_window

@@ -155,6 +155,11 @@ bool ResolveProductPaths(HMODULE module, ProductPaths* paths, std::wstring* why)
   resolved.schema_patch_file =
       resolved.engine_user_dir / L"epocanva_english.custom.yaml";
   resolved.deploy_marker_file = resolved.engine_user_dir / L"deploy-required";
+  resolved.deployed_state_file = resolved.engine_user_dir / L"deployed-state";
+  resolved.compiled_schema_file =
+      resolved.engine_user_dir / L"build" / L"epocanva_english.schema.yaml";
+  resolved.compiled_schema_binary =
+      resolved.engine_user_dir / L"build" / L"epocanva_english.schema.bin";
 
   *paths = std::move(resolved);
   return true;

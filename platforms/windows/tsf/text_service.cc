@@ -166,18 +166,33 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
   EngineLease new_lease;
   try {
     EngineHostConfig config;
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+    // One activation-scoped transaction: it re-reads the settings/deployment snapshot,
+    // holds the cross-process start lock and installs the configuration Acquire must use.
+    epocanva::product::EngineStartTransaction deployment;
+    if (!deployment.Prepare(nullptr)) {
+      return E_UNEXPECTED;
+    }
+#endif
     if (!GetEngineHostConfig(&config)) {
       return E_UNEXPECTED;
     }
     const EngineLeaseStatus status =
         EngineHostBroker::Instance().Acquire(config, &new_lease);
     if (status != EngineLeaseStatus::kAcquired) {
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+      deployment.Abort();
+#endif
       return LeaseFailureToHresult(status);
     }
 #ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
-    // The broker has finished starting and deploying, so a settings marker whose token
-    // still matches can be retired. A newer save leaves a different token and survives.
-    epocanva::product::NotifyEngineStarted();
+    // The broker has finished starting and deploying. This verifies that a requested
+    // deployment produced a compiled schema and records the exact snapshot; the settings
+    // marker is retired only after that record. A missing artefact fails the activation.
+    if (!deployment.Complete(nullptr)) {
+      (void)new_lease.Release();
+      return E_FAIL;
+    }
 #endif
   } catch (const std::bad_alloc&) {
     return E_OUTOFMEMORY;
