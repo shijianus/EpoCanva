@@ -9,6 +9,9 @@
 #ifdef EPOCANVA_TSF_ENGINE_HOST
 #include "engine_host.h"
 #endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+#include "product_engine_config.h"
+#endif
 
 namespace epocanva {
 namespace tsf {
@@ -171,6 +174,11 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
     if (status != EngineLeaseStatus::kAcquired) {
       return LeaseFailureToHresult(status);
     }
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+    // The broker has finished starting and deploying, so a settings marker whose token
+    // still matches can be retired. A newer save leaves a different token and survives.
+    epocanva::product::NotifyEngineStarted();
+#endif
   } catch (const std::bad_alloc&) {
     return E_OUTOFMEMORY;
   } catch (...) {

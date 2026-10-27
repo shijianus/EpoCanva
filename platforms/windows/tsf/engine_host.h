@@ -31,9 +31,10 @@
 // every waiter; there is no implicit retry.
 //
 // CONFIGURATION. EngineHostConfig is copied at every entry point. Comparisons are exact
-// (all four absolute paths and the capacity): two services that disagree are never silently
-// merged into one engine environment. The real product still has to decide where these
-// paths come from; this round only provides the storage seam and the test injection point.
+// (all four absolute paths, the capacity and the optional deployment request): two services
+// that disagree are never silently merged into one engine environment. The product DLL now
+// supplies the paths from its own module location and the per-user data root; the test seam
+// remains only in the hosted test variant.
 #ifndef EPOCANVA_TSF_ENGINE_HOST_H_
 #define EPOCANVA_TSF_ENGINE_HOST_H_
 
@@ -41,6 +42,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <vector>
 
 namespace epocanva {
 namespace tsf {
@@ -73,16 +76,27 @@ enum class EngineLeaseReleaseStatus {
   kAlreadyReleased,  // idempotent second release, or an unknown id; never decrements twice
 };
 
+// One deployment request the broker performs before the runtime is declared running. It is
+// product wiring, not a test convenience: the product DLL supplies these files when settings
+// changed, so the next activation compiles the schema and applies the user's patch. Every
+// path is absolute and inside shared_data_dir; the runtime remains the authority on whether
+// the files exist and are readable.
+struct EngineHostDeployment {
+  std::filesystem::path config_file;                 // e.g. <shared>/default.yaml
+  std::vector<std::filesystem::path> schema_files;   // e.g. <shared>/epocanva_english.schema.yaml
+};
+
 struct EngineHostConfig {
   std::filesystem::path rime_dll_path;
   std::filesystem::path shared_data_dir;
   std::filesystem::path user_data_dir;
   std::filesystem::path log_dir;
   std::size_t capacity = 32;
+  std::optional<EngineHostDeployment> deployment;
 
   // Absolute, non-empty paths and a bounded non-zero capacity. This is structural
   // validation only; the executor's RuntimeOptions validation remains the authority on
-  // whether the directories exist and whether their names are ASCII.
+  // whether the directories exist.
   bool valid() const;
 };
 

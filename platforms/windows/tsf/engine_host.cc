@@ -131,19 +131,52 @@ bool CleanStop(engine::StopStatus stop,
 
 }  // namespace
 
+namespace {
+
+bool DeploymentEqual(const std::optional<EngineHostDeployment>& left,
+                     const std::optional<EngineHostDeployment>& right) {
+  if (left.has_value() != right.has_value()) {
+    return false;
+  }
+  if (!left.has_value()) {
+    return true;
+  }
+  return left->config_file == right->config_file &&
+         left->schema_files == right->schema_files;
+}
+
+bool DeploymentValid(const EngineHostDeployment& deployment) {
+  if (!deployment.config_file.is_absolute() ||
+      !deployment.config_file.has_filename() || deployment.schema_files.empty()) {
+    return false;
+  }
+  for (const std::filesystem::path& schema : deployment.schema_files) {
+    if (!schema.is_absolute()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
 bool EngineHostConfig::valid() const {
-  return !rime_dll_path.empty() && rime_dll_path.is_absolute() &&
-         !shared_data_dir.empty() && shared_data_dir.is_absolute() &&
-         !user_data_dir.empty() && user_data_dir.is_absolute() &&
-         !log_dir.empty() && log_dir.is_absolute() &&
-         capacity > 0 && capacity <= kMaxCapacity;
+  if (!(rime_dll_path.is_absolute() && !rime_dll_path.empty() &&
+        shared_data_dir.is_absolute() && !shared_data_dir.empty() &&
+        user_data_dir.is_absolute() && !user_data_dir.empty() &&
+        log_dir.is_absolute() && !log_dir.empty() && capacity > 0 &&
+        capacity <= kMaxCapacity)) {
+    return false;
+  }
+  return !deployment.has_value() || DeploymentValid(*deployment);
 }
 
 bool operator==(const EngineHostConfig& left, const EngineHostConfig& right) {
   return left.rime_dll_path == right.rime_dll_path &&
          left.shared_data_dir == right.shared_data_dir &&
          left.user_data_dir == right.user_data_dir &&
-         left.log_dir == right.log_dir && left.capacity == right.capacity;
+         left.log_dir == right.log_dir && left.capacity == right.capacity &&
+         DeploymentEqual(left.deployment, right.deployment);
 }
 
 bool operator!=(const EngineHostConfig& left, const EngineHostConfig& right) {
@@ -265,6 +298,13 @@ EngineLeaseStatus EngineHostBroker::Acquire(const EngineHostConfig& config,
           options.runtime.shared_data_dir = config.shared_data_dir;
           options.runtime.user_data_dir = config.user_data_dir;
           options.runtime.log_dir = config.log_dir;
+          if (config.deployment.has_value()) {
+            engine::DeploymentOptions deployment;
+            deployment.config_file_name =
+                config.deployment->config_file.filename().u8string();
+            deployment.schema_files = config.deployment->schema_files;
+            options.runtime.deployment = std::move(deployment);
+          }
           options.capacity = config.capacity;
           s.executor.reset(new engine::EngineExecutor(std::move(options)));
         } catch (...) {

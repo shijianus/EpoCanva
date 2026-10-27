@@ -32,6 +32,9 @@
 #include "class_factory.h"
 #include "identifiers.h"
 #include "module_state.h"
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+#include "product_engine_config.h"
+#endif
 
 namespace {
 
@@ -46,6 +49,12 @@ HRESULT GetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* object) {
   if (!IsEqualGUID(rclsid, epocanva::tsf::kTextServiceClsid)) {
     return CLASS_E_CLASSNOTAVAILABLE;
   }
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  // Explicit startup step outside DllMain. A failure leaves no engine configuration,
+  // so Activate reports E_UNEXPECTED instead of starting with guessed paths.
+  epocanva::product::ApplyProductEngineConfig(epocanva::tsf::ModuleInstance(),
+                                              nullptr);
+#endif
   auto* factory = new (std::nothrow) epocanva::tsf::EpoCanvaClassFactory();
   if (factory == nullptr) {
     return E_OUTOFMEMORY;
