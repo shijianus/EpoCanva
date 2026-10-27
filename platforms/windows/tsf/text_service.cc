@@ -55,6 +55,9 @@ EpoCanvaTextService::EpoCanvaTextService()
 
 EpoCanvaTextService::~EpoCanvaTextService() {
   ITfThreadMgr* thread_manager = nullptr;
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  void* abandoned_lease_lock = nullptr;
+#endif
   {
     std::lock_guard<std::mutex> guard(state_mutex_);
     thread_manager = thread_manager_;
@@ -67,10 +70,20 @@ EpoCanvaTextService::~EpoCanvaTextService() {
       engine_lease_.Abandon();
     }
 #endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+    abandoned_lease_lock = engine_lease_lock_;
+    engine_lease_lock_ = nullptr;
+#endif
     client_id_ = 0;
     activation_flags_ = 0;
     active_ = false;
   }
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  if (abandoned_lease_lock != nullptr) {
+    // The engine lease was abandoned, so the shared lock must not outlive this object.
+    ::CloseHandle(static_cast<HANDLE>(abandoned_lease_lock));
+  }
+#endif
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
   {
     std::lock_guard<std::mutex> guard(controller_mutex_);
@@ -254,6 +267,15 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
           (void)new_lease.Release();
       return E_FAIL;
     }
+    // W2-A-R: take ownership of the shared engine.lock handle for exactly as long as this
+    // engine lease. Without this handoff the shared lock died with the transaction, so a
+    // cross-process deployment could take the exclusive lock and delete the compiled output
+    // underneath a live engine.
+    new_lease_lock = deployment.TakeLeaseLock();
+    if (new_lease_lock == nullptr) {
+      (void)new_lease.Release();
+      return E_UNEXPECTED;
+    }
   #endif
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
     // Build the complete STA pipeline before touching the current activation. It subscribes
@@ -266,6 +288,12 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
     controller_options.executor = new_lease.executor();
       if (!new_controller->Start(controller_options, &start_why)) {
           (void)new_lease.Release();
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+        if (new_lease_lock != nullptr) {
+          ::CloseHandle(static_cast<HANDLE>(new_lease_lock));
+          new_lease_lock = nullptr;
+        }
+#endif
       return HRESULT_FROM_WIN32(ERROR_NOT_READY);
     }
       {
