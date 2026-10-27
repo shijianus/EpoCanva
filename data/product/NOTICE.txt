@@ -1,0 +1,66 @@
+EpoCanva - Windows English Alpha (W1)
+=====================================
+
+Project licence
+---------------
+EpoCanva's own licence is undecided. This package is an internal alpha build and is not
+cleared for public redistribution. No LICENSE file or licence header is added by this
+build (AGENTS.md section 8).
+
+Runtime offline statement
+-------------------------
+The product runtime performs no network I/O: no telemetry, crash reporting, update check,
+dictionary sync or cloud lookup. This is an architectural guarantee for the Windows DLL
+and EXE (our code and dependencies make no socket calls), not an OS sandbox. It is checked
+by the package import scan and by review, not enforced by the operating system.
+
+No keystroke, composition buffer, committed text, clipboard content, focused-field name or
+application identifier is logged. This build stores no input history and implements no
+learning.
+
+Bundled engine and libraries
+----------------------------
+The package includes a statically linked librime 1.17.0 (commit 33e7814) build and the
+following build dependencies. Full licence texts are in the licences/ directory.
+
+  librime        BSD-3-Clause    Copyright (c) 2014, RIME Developers
+  yaml-cpp       MIT
+  leveldb        BSD-3-Clause
+  marisa-trie    BSD-2-Clause (dual-licensed BSD-2 / LGPL-2.1+; the BSD-2 branch is used)
+  OpenCC         Apache-2.0
+  Boost 1.89.0   Boost Software License 1.0
+  utfcpp         MIT
+  darts-clone    BSD-3-Clause
+  X11 keysym.h   X11/MIT-style notice (header only)
+
+No upstream source file was modified for this package. The engine is built from the pinned
+librime checkout; EpoCanva's own English component is compiled into rime.dll from
+engine/rime_components/english and engine/languages/en.
+
+Bundled word list
+-----------------
+The English word list is generated from the Alt12Dicts package file
+alt12dicts/2of12full.txt at ESDB commit 7bbe293425d48a1210bf17aaf156b28ade5c2de1.
+
+  "All of these files have been explicitly placed in the Public Domain by Alan Beale."
+  -- alt12dicts/README:28-29
+
+  "The 12dicts lists were compiled by Alan Beale. I explicitly release them to the public
+   domain, but request acknowledgment of their use. (Actually, the dependency of the
+   2of12inf list and the 2+2+3 lists on AGID prevents their release into the public domain.
+   However, I do not impose any additional requirements on their use beyond those imposed
+   by AGID and its sources, as described in agid.txt.)"
+  -- alt12dicts/README-orig:1441-1446
+
+AGID-derived files are not inputs. The exact source file, hashes, conversion policy, output
+hash and exclusion tally are recorded in the shipped provenance file
+data/lexicon/epocanva_en_alpha.provenance.txt. The EpoCanva source repository keeps the
+authoritative source lock in data/manifests/english-pilot.sources.lock.json.
+
+Public domain is a US-law concept. Redistribution outside this internal alpha requires an
+owner/legal decision for the target jurisdictions; this notice does not make that decision.
+
+Data locations
+--------------
+Install data (engine, schema, word list, licences) is read-only. Settings, logs and the
+Rime user directory live under %LOCALAPPDATA%\EpoCanva, never in the install directory.

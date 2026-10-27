@@ -1,0 +1,55 @@
+# EpoCanva W1 product schema -- English prefix completion plus one-edit suggestions.
+#
+# The component chain is the same one verified in tests/fixtures/english_completion and
+# tests/fixtures/english_spelling. The only product-specific inputs are the word list
+# path and the user patch written by EpoCanva.exe:
+#
+#   <user>/engine/epocanva_english.custom.yaml
+#     patch:
+#       english/max_completions: 0..7
+#       english/enable_suggestions: true|false
+#       english/max_suggestions: 0..3
+#
+# The settings window writes that patch and a deploy marker; the product text service
+# deploys it once at the next engine start.
+schema:
+  schema_id: epocanva_english
+  name: EpoCanva English
+  version: "0.1.0-w1"
+
+menu:
+  page_size: 8
+
+engine:
+  processors:
+    - epocanva_english_space
+    - speller
+    - fluid_editor
+  segmentors:
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - epocanva_english_translator@english
+
+speller:
+  # The ASCII alphabet, the two word delimiters and the eleven technical marks are the
+  # P2.3 protection mechanism: protected text stays in one segment and is refused whole
+  # by the token layer instead of being partially completed.
+  alphabet: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'@._:/\\?&=#%+-"
+  delimiter: ""
+
+editor:
+  char_handler: noop
+  bindings:
+    space: noop
+
+english:
+  # Resolved against RimeTraits.shared_data_dir (<product>/data), never the current
+  # directory. The build tool writes the file into the offline package.
+  lexicon_path: "lexicon/epocanva_en_alpha.tsv"
+  # 7 is the component's ceiling and the schema may only lower it. The user patch may
+  # lower it further, down to 0 (completion off).
+  max_completions: 7
+  # Spelling suggestions are opt-in. The user patch enables them and selects 1..3.
+  enable_suggestions: false
+  max_suggestions: 3

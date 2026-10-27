@@ -32,6 +32,8 @@ project(epocanva_windows_engine_bridge VERSION 0.1.0 LANGUAGES CXX)
 
 option(EPOCANVA_BUILD_TSF_LAB
        "Build the optional visible TSF integration lab (not part of normal CTest)" OFF)
+option(EPOCANVA_BUILD_PRODUCT
+       "Build the W1 product shell (EpoCanva.exe), product TSF DLL and product tests" OFF)
 
 if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   message(FATAL_ERROR
@@ -243,6 +245,15 @@ if(EPOCANVA_BUILD_TSF_LAB)
   add_subdirectory(
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/windows/tsf_lab"
     "${CMAKE_CURRENT_BINARY_DIR}/tsf_lab")
+endif()
+
+# --- W1: product shell, product TSF DLL (no test seam) and product tests ---------------
+# The product DLL reuses the same TSF sources and the already built executor; the EXE
+# links only the product state/diagnostics libraries and Win32.
+if(EPOCANVA_BUILD_PRODUCT)
+  add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../product"
+    "${CMAKE_CURRENT_BINARY_DIR}/product")
 endif()
 
 enable_testing()
