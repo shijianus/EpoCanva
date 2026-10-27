@@ -43,6 +43,7 @@
 
 #include <msctf.h>
 
+#include <memory>
 #include <mutex>
 
 #ifdef EPOCANVA_TSF_ENGINE_HOST
@@ -52,7 +53,20 @@
 namespace epocanva {
 namespace tsf {
 
-class EpoCanvaTextService : public ITfTextInputProcessorEx {
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+namespace product {
+class ProductTextController;
+}
+#endif
+
+class EpoCanvaTextService
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+    : public ITfTextInputProcessorEx,
+      public ITfKeyEventSink
+#else
+    : public ITfTextInputProcessorEx
+#endif
+{
  public:
   EpoCanvaTextService();
 
@@ -74,12 +88,33 @@ class EpoCanvaTextService : public ITfTextInputProcessorEx {
   HRESULT STDMETHODCALLTYPE ActivateEx(ITfThreadMgr* thread_manager,
                                        TfClientId client_id, DWORD flags) override;
 
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  // ITfKeyEventSink. Test callbacks predict only; key-down reports eaten only when the
+  // controller really accepted the key into its bounded admission; key-up is never eaten.
+  HRESULT STDMETHODCALLTYPE OnSetFocus(BOOL foreground) override;
+  HRESULT STDMETHODCALLTYPE OnTestKeyDown(ITfContext* context, WPARAM wparam,
+                                          LPARAM lparam, BOOL* eaten) override;
+  HRESULT STDMETHODCALLTYPE OnTestKeyUp(ITfContext* context, WPARAM wparam,
+                                        LPARAM lparam, BOOL* eaten) override;
+  HRESULT STDMETHODCALLTYPE OnKeyDown(ITfContext* context, WPARAM wparam,
+                                      LPARAM lparam, BOOL* eaten) override;
+  HRESULT STDMETHODCALLTYPE OnKeyUp(ITfContext* context, WPARAM wparam,
+                                    LPARAM lparam, BOOL* eaten) override;
+  HRESULT STDMETHODCALLTYPE OnPreservedKey(ITfContext* context, REFGUID guid,
+                                           BOOL* eaten) override;
+#endif
+
  private:
   ~EpoCanvaTextService();  // Release()-only lifecycle; never joins an engine worker
 
   // The one activation path both Activate and ActivateEx run.
   HRESULT ActivateInternal(ITfThreadMgr* thread_manager, TfClientId client_id,
                            DWORD flags);
+
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  HRESULT AdviseKeySink(ITfThreadMgr* thread_manager, TfClientId client_id);
+  void UnadviseKeySink(ITfThreadMgr* thread_manager, TfClientId client_id);
+#endif
 
   std::mutex state_mutex_;  // guards every field below; held during no COM/broker call
   volatile LONG reference_count_;
@@ -89,6 +124,13 @@ class EpoCanvaTextService : public ITfTextInputProcessorEx {
   bool active_;
 #ifdef EPOCANVA_TSF_ENGINE_HOST
   EngineLease engine_lease_;  // one process-broker lease per activation
+#endif
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  // Serializes sink callbacks against the controller swap/teardown. TSF normally calls
+  // both on one STA; this mutex also makes a cross-thread Deactivate safe.
+  std::mutex controller_mutex_;
+  std::unique_ptr<product::ProductTextController> controller_;
+  bool key_sink_advised_ = false;
 #endif
 };
 

@@ -508,6 +508,13 @@ class ContextCoordinator {
   // Allowed/Denied knob exists only as a test-owned PermissionSource implementation.
   edit::InputPermission permission() const { return permission_; }
 
+  // W2 product bootstrap: resolve the binding's permission before the first key is offered.
+  // The real source's InputScope read may be synchronous or may park in kPermissionPending;
+  // in the latter case Pump() advances it. This performs no engine call and no edit. It is
+  // accepted only while idle, bound, not retiring and not gated; a completed refresh ends
+  // as kNoEdit (the document was not touched).
+  bool RefreshPermission();
+
   // --- evaluation (pure) -----------------------------------------------------------------
   // The local P3.3 decision over the coordinator's own context facts. Submits nothing to
   // the engine, requests no edit, queries no permission, changes no state. DecideKey's
@@ -715,6 +722,12 @@ class ContextCoordinator {
   // The work item parked in kPermissionPending: the submitted key/candidate, or the
   // engine observation held for its apply-time re-verification.
   PendingPermissionWork pending_permission_;
+  // True while the kPermissionPending phase belongs to RefreshPermission rather than a
+  // work item. The pending_permission_ slot is empty in that case.
+  bool permission_refresh_ = false;
+  // One proactive resolution per binding. A source that cannot produce a usable verdict
+  // must not be re-queried on every pump; the next binding tries again.
+  bool permission_refresh_attempted_ = false;
   // The plan of the edit currently pending (EditPlan's constructors are private to its
   // factory, so the slot is an optional rather than a pre-built value).
   std::optional<edit::EditPlan> pending_plan_;

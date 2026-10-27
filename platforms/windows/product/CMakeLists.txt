@@ -105,23 +105,80 @@ add_library(epocanva_tsf_product SHARED
   "${_tsf_source_dir}/text_service.cc"
   "${_tsf_source_dir}/engine_host.cc"
   "${_tsf_source_dir}/epocanva_tsf.def"
+  "${_tsf_product_source_dir}/key_admission.cc"
+  "${_tsf_product_source_dir}/key_admission.h"
+  "${_tsf_product_source_dir}/text_service_controller.cc"
+  "${_tsf_product_source_dir}/text_service_controller.h"
   product_engine_config.cc
   product_engine_config.h)
 target_compile_definitions(epocanva_tsf_product PRIVATE
   ${_product_definitions}
   ${_product_defines}
   EPOCANVA_TSF_ENGINE_HOST=1
-  EPOCANVA_TSF_PRODUCT_LAYOUT=1)
+  EPOCANVA_TSF_PRODUCT_LAYOUT=1
+  EPOCANVA_TSF_PRODUCT_CONTROLLER=1)
 target_compile_options(epocanva_tsf_product PRIVATE ${_product_options})
 target_include_directories(epocanva_tsf_product PRIVATE
   "${_product_source_dir}"
   "${_tsf_source_dir}"
+  "${_tsf_product_source_dir}"
   "${_bridge_source_dir}"
   "${_executor_source_dir}"
   "${_input_source_dir}"
-  "${_text_source_dir}")
+  "${_text_source_dir}"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_coordinator"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_context"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_edit")
 target_link_libraries(epocanva_tsf_product PRIVATE
   epocanva_engine_executor
+  epocanva_engine_keyboard_adapters
+  epocanva_tsf_coordinator
+  epocanva_sta_waker
+  epocanva_product_state
+  ole32 uuid bcrypt shell32)
+
+# W2 controlled test variant. It compiles the same product sources and is NOT staged or
+# shipped. An unregistered TIP cannot advise a real key sink (AdviseKeyEventSink answers
+# E_INVALIDARG for a synthetic client id), so this variant lets the test call the sink
+# directly; the strict product DLL above still fails activation when advice is refused.
+add_library(epocanva_tsf_direct_sink_test SHARED
+  "${_tsf_source_dir}/dll_main.cc"
+  "${_tsf_source_dir}/identifiers.cc"
+  "${_tsf_source_dir}/module_state.cc"
+  "${_tsf_source_dir}/class_factory.cc"
+  "${_tsf_source_dir}/text_service.cc"
+  "${_tsf_source_dir}/engine_host.cc"
+  "${_tsf_source_dir}/epocanva_tsf.def"
+  "${_tsf_product_source_dir}/key_admission.cc"
+  "${_tsf_product_source_dir}/key_admission.h"
+  "${_tsf_product_source_dir}/text_service_controller.cc"
+  "${_tsf_product_source_dir}/text_service_controller.h"
+  product_engine_config.cc
+  product_engine_config.h)
+target_compile_definitions(epocanva_tsf_direct_sink_test PRIVATE
+  ${_product_definitions}
+  ${_product_defines}
+  EPOCANVA_TSF_ENGINE_HOST=1
+  EPOCANVA_TSF_PRODUCT_LAYOUT=1
+  EPOCANVA_TSF_PRODUCT_CONTROLLER=1
+  EPOCANVA_TSF_DIRECT_SINK_TEST=1)
+target_compile_options(epocanva_tsf_direct_sink_test PRIVATE ${_product_options})
+target_include_directories(epocanva_tsf_direct_sink_test PRIVATE
+  "${_product_source_dir}"
+  "${_tsf_source_dir}"
+  "${_tsf_product_source_dir}"
+  "${_bridge_source_dir}"
+  "${_executor_source_dir}"
+  "${_input_source_dir}"
+  "${_text_source_dir}"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_coordinator"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_context"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_edit")
+target_link_libraries(epocanva_tsf_direct_sink_test PRIVATE
+  epocanva_engine_executor
+  epocanva_engine_keyboard_adapters
+  epocanva_tsf_coordinator
+  epocanva_sta_waker
   epocanva_product_state
   ole32 uuid bcrypt shell32)
 
@@ -134,6 +191,11 @@ set_target_properties(EpoCanva epocanva_tsf_product PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_product_bin_dir}"
   RUNTIME_OUTPUT_DIRECTORY_DEBUG "${_product_bin_dir_debug}")
 set_target_properties(epocanva_tsf_product PROPERTIES OUTPUT_NAME epocanva_tsf)
+set_target_properties(epocanva_tsf_direct_sink_test PROPERTIES
+  OUTPUT_NAME epocanva_tsf_direct_sink_test
+  RUNTIME_OUTPUT_DIRECTORY "${_product_bin_dir}"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_product_bin_dir}"
+  RUNTIME_OUTPUT_DIRECTORY_DEBUG "${_product_bin_dir_debug}")
 
 add_executable(epocanva_product_unit_tests
   tests/product_unit_tests.cc
@@ -213,6 +275,31 @@ else()
     "${EPOCANVA_PRODUCT_LEXICON}")
 endif()
 
+add_executable(epocanva_product_sink_tests
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_product/product_sink_tests.cc"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_edit/test_host.cc"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_edit/test_text_store.cc"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_edit/inputscope_test_guids.cc"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_context_observer/observer_test_support.cc"
+  "${_tsf_source_dir}/identifiers.cc")
+target_compile_definitions(epocanva_product_sink_tests PRIVATE ${_product_definitions})
+target_compile_options(epocanva_product_sink_tests PRIVATE ${_product_options})
+target_include_directories(epocanva_product_sink_tests PRIVATE
+  "${_product_source_dir}"
+  "${_tsf_source_dir}"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_context"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_edit"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_coordinator"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_product"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_edit"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_context_observer")
+target_link_libraries(epocanva_product_sink_tests PRIVATE
+  epocanva_tsf_context
+  epocanva_product_state
+  ole32 uuid user32 bcrypt shell32)
+add_dependencies(epocanva_product_sink_tests epocanva_tsf_product)
+add_dependencies(epocanva_product_sink_tests epocanva_tsf_direct_sink_test)
+
 add_executable(epocanva_ui_tests
   tests/ui_tests.cc)
 target_compile_definitions(epocanva_ui_tests PRIVATE ${_product_definitions})
@@ -238,8 +325,26 @@ target_include_directories(epocanva_sta_waker_tests PRIVATE
   "${_tsf_product_source_dir}")
 target_link_libraries(epocanva_sta_waker_tests PRIVATE epocanva_sta_waker)
 
+add_executable(epocanva_key_admission_tests
+  "${_tsf_product_source_dir}/tests/key_admission_tests.cc"
+  "${_tsf_product_source_dir}/key_admission.cc")
+target_compile_definitions(epocanva_key_admission_tests PRIVATE ${_product_definitions})
+target_compile_options(epocanva_key_admission_tests PRIVATE ${_product_options})
+target_include_directories(epocanva_key_admission_tests PRIVATE
+  "${_tsf_product_source_dir}"
+  "${_tsf_source_dir}"
+  "${_bridge_source_dir}"
+  "${_executor_source_dir}"
+  "${_input_source_dir}"
+  "${_text_source_dir}"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_coordinator"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_context"
+  "${CMAKE_CURRENT_LIST_DIR}/../tsf_edit")
+
 set_target_properties(epocanva_product_unit_tests epocanva_product_engine_tests
-                      epocanva_ui_tests epocanva_sta_waker_tests PROPERTIES
+                      epocanva_ui_tests epocanva_sta_waker_tests
+                      epocanva_key_admission_tests
+                      epocanva_product_sink_tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${_product_bin_dir}"
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_product_bin_dir}"
   RUNTIME_OUTPUT_DIRECTORY_DEBUG "${_product_bin_dir_debug}")
@@ -308,6 +413,80 @@ add_test(
     -P ${_product_assert})
 set_tests_properties(product.unit.sta_waker
   PROPERTIES TIMEOUT 180 LABELS "windows;product;sta;wake;thread")
+
+add_test(
+  NAME product.unit.key_admission
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_key_admission_tests>
+    -DCASE=product-key-admission
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--self-test"
+    -DTIMEOUT_SECONDS=60
+    -P ${_product_assert})
+set_tests_properties(product.unit.key_admission
+  PROPERTIES TIMEOUT 120 LABELS "windows;product;keyboard;admission;queue")
+
+add_test(
+  NAME product.integration.sink_raw
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-raw
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink;--mode;input"
+    -DTIMEOUT_SECONDS=600
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_raw
+  PROPERTIES TIMEOUT 660
+             LABELS "windows;product;sink;keyboard;textstore;real;no-registration")
+
+add_test(
+  NAME product.integration.sink_engine_missing
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-engine-missing
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_product>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-missing;--mode;engine-missing"
+    -DTIMEOUT_SECONDS=180
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_engine_missing
+  PROPERTIES TIMEOUT 240
+             LABELS "windows;product;sink;engine-failure;no-registration")
+
+add_test(
+  NAME product.integration.sink_multi
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-multi
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-multi;--mode;multi"
+    -DTIMEOUT_SECONDS=300
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_multi
+  PROPERTIES TIMEOUT 360
+             LABELS "windows;product;sink;multi-sta;shared-engine;no-registration")
+
+add_test(
+  NAME product.integration.sink_strict_unregistered
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-strict-unregistered
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_product>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-strict;--mode;strict-unregistered"
+    -DTIMEOUT_SECONDS=180
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_strict_unregistered
+  PROPERTIES TIMEOUT 240
+             LABELS "windows;product;sink;strict;unregistered;environment-limited")
 
 add_test(
   NAME product.ui.settings_window

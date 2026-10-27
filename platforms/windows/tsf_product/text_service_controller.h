@@ -1,0 +1,196 @@
+// EpoCanva W2 -- the STA product controller behind the real TSF key sink.
+//
+// WHAT THIS OWNS. One activation's complete input pipeline on the STA:
+//   ContextObserver (StrictTsf focus policy) -> ObservedBindingController ->
+//   ContextCoordinator (single flight) -> CompositionEditSession -> the application.
+// It also owns the bounded keyboard admission queue and the fixed STA wake channel. It
+// never creates a second engine, a second translation rule set, or a second permission
+// reader: every allowed text key travels through the existing coordinator path.
+//
+// KEY CONTRACT.
+//   TestKey / OnTestKeyDown: prediction only. It captures keyboard state, translates with
+//     ToUnicodeEx (no state change), asks the coordinator's pure Evaluate(), and checks the
+//     queue capacity. It never submits a command, starts a query or requests an edit.
+//   HandleKeyDown: accepts the key into the bounded queue and, when the coordinator is
+//     idle, tries one immediate submission. pfEaten is TRUE only when the key is really
+//     queued/submitted. A key the coordinator refuses before any engine call is NOT eaten
+//     when no composition exists, so the host keeps it. With a live composition the
+//     controller eats it and records an explicit failure instead of inserting the
+//     character inside our preedit.
+//   Key-up: never eaten, never translated, never dispatched.
+//
+// FOCUS AND GENERATION. Every accepted key stores the context id and generation that were
+// current when it was accepted. Dispatch requires the coordinator's live identity to match;
+// a focus change fails the queued tail and never delivers it to the new document. An
+// in-flight key whose target was lost stays in flight until the coordinator is idle again,
+// so the next key cannot overtake it.
+//
+// WAKE. The controller implements StaWakeTarget. The waker posts a generation-only message;
+// OnStaWake verifies it and calls PumpNow(), which advances retirements, permission reads,
+// engine results, edits, rebinds and the next queued key. Repeated wakes are harmless.
+//
+// LIFECYCLE. Start() subscribes the observer and starts the waker; Stop() unregisters the
+// waker target first, then fails every queued key explicitly, closes the coordinator
+// (release-only, no commits) and shuts the observer down. Stop never waits for the engine:
+// the service releases its lease after Stop returns. The destructor does not call Stop.
+#ifndef EPOCANVA_WINDOWS_TSF_PRODUCT_TEXT_SERVICE_CONTROLLER_H_
+#define EPOCANVA_WINDOWS_TSF_PRODUCT_TEXT_SERVICE_CONTROLLER_H_
+
+#include <windows.h>
+#include <msctf.h>
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "context_observer.h"
+#include "context_registry.h"
+#include "coordinator.h"
+#include "engine_executor.h"
+#include "key_admission.h"
+#include "observed_binding.h"
+#include "permission_query.h"
+#include "sta_result_waker.h"
+
+namespace epocanva {
+namespace tsf {
+namespace product {
+
+struct ControllerDiagnostics {
+  bool started = false;
+  bool stopping = false;
+  bool subscribed = false;
+  bool coordinator_bound = false;
+  bool observer_closed = false;
+  std::uint64_t generation = 0;
+  std::uint64_t pumps = 0;
+  std::uint64_t wakes = 0;
+  std::uint64_t stale_wakes = 0;
+  std::uint64_t predictions = 0;
+  std::uint64_t predicted_eaten = 0;
+  std::uint64_t key_downs = 0;
+  std::uint64_t eaten = 0;
+  std::uint64_t not_eaten = 0;
+  std::uint64_t overflow_eaten = 0;
+  std::uint64_t engine_client_requests = 0;
+  std::uint64_t engine_client_results = 0;
+  std::uint64_t engine_client_failures = 0;
+  std::uint64_t target_losses = 0;
+  std::uint64_t target_binds = 0;
+  std::uint64_t rebind_requests = 0;
+  bool pacing = false;
+  KeyAdmissionSnapshot keys;
+  coordinator::CoordinatorSnapshot coordinator;
+  context::ContextObserverSnapshot observer;
+};
+
+class ProductTextController final : public StaWakeTarget,
+                                    public context::ContextObserverSink {
+ public:
+  struct Options {
+    ITfThreadMgr* thread_manager = nullptr;
+    TfClientId client_id = 0;
+    ::epocanva::windows::engine::EngineExecutor* executor = nullptr;
+  };
+
+  ProductTextController();
+  ~ProductTextController() override;
+
+  ProductTextController(const ProductTextController&) = delete;
+  ProductTextController& operator=(const ProductTextController&) = delete;
+
+  // Both run on the activating STA. Start subscribes the observer before the key sink is
+  // advised; a failure leaves nothing subscribed or running.
+  bool Start(const Options& options, std::wstring* why);
+  void Stop();
+
+  // OnTestKeyDown: prediction only, no engine/query/edit.
+  bool PredictKey(WPARAM wparam, LPARAM lparam);
+  // OnKeyDown: returns TRUE only when the key was accepted/eaten.
+  bool HandleKeyDown(WPARAM wparam, LPARAM lparam, std::wstring* why);
+
+  void PumpNow();
+
+  std::uint64_t generation() const { return generation_; }
+  bool started() const { return started_; }
+  bool stopping() const { return stopping_; }
+
+  // StaWakeTarget. Called on the STA from the message-only window.
+  void OnStaWake(std::uint64_t generation) override;
+
+  // ContextObserverSink. Every method runs on the STA; OnTargetLost performs no TSF write.
+  void OnTargetLost(context::ContextDropReason reason) override;
+  void OnTargetBound(ITfContext* context,
+                     const context::ObservedTarget& target) override;
+  void OnOwnEditCompleted(ITfContext* context,
+                          const context::ObservedTarget& target,
+                          const context::SelectionSnapshot& selection) override;
+
+  ControllerDiagnostics Snapshot() const;
+
+ private:
+  class ClientProvider;
+
+  struct BuiltKey {
+    input::KeyEventSnapshot event;
+    input::KeyText text;
+    input::KeyDecision decision;
+    bool composition_active = false;
+  };
+
+  enum class SubmitAttempt {
+    kNoHead = 0,
+    kSubmitted,
+    kWaited,
+    kNotEatenHostKeeps,
+    kFailedEaten,
+  };
+
+  bool BuildKey(WPARAM wparam, LPARAM lparam, bool key_down, BuiltKey* key) const;
+  bool AdmissionAvailable(bool composition_active) const;
+  SubmitAttempt SubmitHead(bool immediate);
+  void ResolveInFlight();
+  void UpdatePacing();
+  void FailQueuedAndMaybeInvalidate(KeyFailure failure, bool invalidate);
+  void RequestRebindSoon();
+  void ResetObjects();
+
+  ITfThreadMgr* thread_manager_ = nullptr;
+  TfClientId client_id_ = 0;
+  ::epocanva::windows::engine::EngineExecutor* executor_ = nullptr;
+  std::uint64_t generation_ = 0;
+  bool started_ = false;
+  bool stopping_ = false;
+  bool subscribed_ = false;
+  bool rebind_soon_ = false;
+
+  // Destruction order is deliberate: the registry outlives the coordinator and observer.
+  std::unique_ptr<context::ContextRegistry> registry_;
+  std::unique_ptr<context::PermissionSource> permission_;
+  std::unique_ptr<coordinator::ContextCoordinator> coordinator_;
+  std::unique_ptr<context::ContextObserver> observer_;
+  std::unique_ptr<ClientProvider> clients_;
+  std::unique_ptr<coordinator::ObservedBindingController> binding_;
+  StaResultWaker waker_;
+  KeyAdmissionQueue queue_;
+
+  std::uint64_t wakes_ = 0;
+  std::uint64_t stale_wakes_ = 0;
+  std::uint64_t predictions_ = 0;
+  std::uint64_t predicted_eaten_ = 0;
+  std::uint64_t key_downs_ = 0;
+  std::uint64_t eaten_ = 0;
+  std::uint64_t not_eaten_ = 0;
+  std::uint64_t overflow_eaten_ = 0;
+  std::uint64_t target_losses_ = 0;
+  std::uint64_t target_binds_ = 0;
+  std::uint64_t rebind_requests_ = 0;
+  std::uint64_t pumps_ = 0;
+};
+
+}  // namespace product
+}  // namespace tsf
+}  // namespace epocanva
+
+#endif  // EPOCANVA_WINDOWS_TSF_PRODUCT_TEXT_SERVICE_CONTROLLER_H_

@@ -562,6 +562,8 @@ BindStatus ContextCoordinator::BindImpl(ITfContext* context,
   // Every new binding starts from the safe refusal; the first work item replaces it with
   // a verdict resolved from the real context metadata.
   CachePermission(context::PermissionState::kUnknown);
+  permission_refresh_ = false;
+  permission_refresh_attempted_ = false;
   view_ = LocalDocumentView{};
   view_.caret_utf16 = initial_caret_utf16;
   return BindStatus::kOk;
@@ -583,6 +585,7 @@ void ContextCoordinator::InvalidateBinding() {
     cause_ = RejectCause::kNone;
   }
   pending_permission_ = PendingPermissionWork{};
+  permission_refresh_ = false;
   observed_caret_pending_ = false;
   // A permission read session that is still queued publishes nothing from now on.
   permission_source_.Abandon();
@@ -1140,6 +1143,30 @@ bool ContextCoordinator::StartPermissionQuery() {
   return true;
 }
 
+bool ContextCoordinator::RefreshPermission() {
+  if (closed_ || phase_ != WorkPhase::kIdle || !bound_ || RetirementPausesInput() ||
+      permission_refresh_attempted_) {
+    return false;
+  }
+  SubmitStatus blocked = SubmitStatus::kAccepted;
+  if (GateBlocksSubmit(&blocked)) {
+    return false;
+  }
+  if (!StartPermissionQuery()) {
+    return false;
+  }
+  permission_refresh_attempted_ = true;
+  if (permission_source_.Status() == context::PermissionQueryStatus::kPending) {
+    permission_refresh_ = true;
+    pending_permission_ = PendingPermissionWork{};
+    phase_ = WorkPhase::kPermissionPending;
+    return true;
+  }
+  bool identity_current = false;
+  (void)PermissionVerdictAllows(&identity_current);
+  return true;
+}
+
 bool ContextCoordinator::PermissionVerdictAllows(bool* identity_current) {
   *identity_current = false;
   const context::PermissionQueryResult verdict = permission_source_.Result();
@@ -1433,6 +1460,18 @@ void ContextCoordinator::AdvancePermissionStage() {
   const context::PermissionQueryStatus status = permission_source_.Status();
   if (status == context::PermissionQueryStatus::kPending) {
     return;  // the real read session has not completed; the host bounded-waits
+  }
+  if (permission_refresh_) {
+    permission_refresh_ = false;
+    if (status == context::PermissionQueryStatus::kIdle) {
+      EndWork(WorkOutcome::kRejected, RejectCause::kPermissionUnknown);
+    } else {
+      bool refresh_current = false;
+      (void)PermissionVerdictAllows(&refresh_current);
+      EndWork(WorkOutcome::kNoEdit, RejectCause::kNone);
+    }
+    pending_permission_ = PendingPermissionWork{};
+    return;
   }
   if (status == context::PermissionQueryStatus::kIdle) {
     // The query was terminated without a verdict; nothing was sent to the engine.
