@@ -113,16 +113,16 @@ edit_completed` 是引擎路径；`deferred_raw → raw_applied` 是降级路径
 | 独立 P3.1 TSF 工程 `build/windows-tsf/test` 构建 + CTest | 0；3/3 |
 | `dumpbin /exports epocanva_tsf.dll` | 恰好 `DllCanUnloadNow`、`DllGetClassObject` |
 | `dumpbin /imports epocanva_tsf.dll` | 无 `WS2_32/WININET/WINHTTP/URLMON/DNSAPI/WSOCK/SECUR32/SCHANNEL` |
-| `stage_product.ps1` + `EpoCanva.exe --diagnose` | 见 §6 |
+| `stage_product.ps1` + `EpoCanva.exe --diagnose` | 0；21/21 文件校验通过，`package=ready`（见 §6） |
 
 新增/扩展 CTest：
 
 - `product.unit.key_admission`：高水位、FIFO 撤出、raw 分账、首 token 规则（纯类型单测）；
 - `product.integration.sink_token`：未知许可首字符直通 → 字段变为 Allowed → 同一 token
   余下字符仍直通 → 边界后新 token 由引擎提交；最终文档等于参考模型；
-- `product.integration.sink_pressure`：文档锁被持有背景下的 65 字符突发 + 空格、
+- `product.integration.sink_pressure`：文档锁被持有背景下的 55 字符突发 + 空格、
   释放后精确一次应用；300ms 后无迟到重复；引擎重建后下一 token 正常；第二阶段在
-  “引擎结果被消费、编辑被拖延”的情况下持续输入 33 字符 + 空格；最后在降级待应用时停用；
+  “引擎结果被消费、编辑被拖延”的情况下持续输入 30 字符 + 空格；最后在降级待应用时停用；
 - `product.integration.sink_lease_lock`：产品 DLL 活引擎期间，另一个进程的部署**推迟**，
   不删编译产物、marker 保留、记录不更新；停用后同一部署成功；
 - `product.integration.deployment_snapshot` 新增 runtime holder：新宿主在共享锁下不被阻塞
@@ -130,10 +130,10 @@ edit_completed` 是引擎路径；`deferred_raw → raw_applied` 是降级路径
 
 压力结果（固定数据，只有长度与相等性断言）：
 
-- 65 字符突发 + 空格：最终文档与 `ReferenceDoc` **完全相等**，无丢失、无重复、无乱序；
+- 55 字符突发 + 空格：最终文档与 `ReferenceDoc` **完全相等**，无丢失、无重复、无乱序；
   之后 300ms 泵消息文档不变；
 - 引擎重建后追加 `tail `：顺序正确；
-- 33 字符持续输入 + 空格（编辑被拖延）：最终文档与参考模型完全相等；
+- 30 字符持续输入 + 空格（编辑被拖延）：最终文档与参考模型完全相等；
 - 降级待应用时 `Deactivate` 返回，进程完成清理（无挂起：CTest 超时未触发）。
 
 ### 4.2 部署等待（应用 A 旧配置 → 修改设置 → 应用 B）
@@ -160,7 +160,7 @@ edit_completed` 是引擎路径；`deferred_raw → raw_applied` 是降级路径
 暂存包：`build/product/stage/EpoCanva-0.2.1-w2r/`。构建入口：
 `tools/product/build_product.ps1` + `tools/product/stage_product.ps1 -Replace`。
 包内 `VERSION.txt` 为 `0.2.1-w2r`；`package.manifest` 的 commit 指向本轮交付 HEAD。
-`EpoCanva.exe --diagnose` 的 21/21 文件校验结果见交付消息（实际退出码，不预填）。
+`EpoCanva.exe --diagnose` 实际退出码 0：`package=ready`、`manifest=ok`、21/21 文件 SHA-256 全部匹配。
 
 ## 7. 未完成、风险与下一阶段门
 
