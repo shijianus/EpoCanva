@@ -211,6 +211,7 @@ void ProductTextController::Stop() {
   stopping_ = true;
   // Unregister the wake target before any object it can reach is destroyed.
   waker_.Stop();
+  FailRawState(KeyFailure::kShutdown);
   queue_.FailQueued(KeyFailure::kShutdown);
   if (queue_.HasInFlight()) {
     queue_.MarkInFlightFailed(KeyFailure::kShutdown);
@@ -250,6 +251,49 @@ bool ProductTextController::AdmissionAvailable(bool composition_active) const {
   return queue_.CanAccept(composition_active);
 }
 
+bool ProductTextController::IsTextKey(const BuiltKey& key) const {
+  return key.text.status == input::KeyTextStatus::kText &&
+         !key.text.utf16_code_units.empty();
+}
+
+bool ProductTextController::IsTokenText(const BuiltKey& key) const {
+  return HostTokenOwnership::IsTokenText(key.text);
+}
+
+bool ProductTextController::RawCaptureWorthy(const BuiltKey& key) const {
+  if (!IsTextKey(key)) {
+    return false;
+  }
+  switch (key.decision.reason) {
+    case input::KeyDecisionReason::kPermissionForbidden:
+    case input::KeyDecisionReason::kPermissionUnknown:
+    case input::KeyDecisionReason::kInputDisabled:
+    case input::KeyDecisionReason::kShortcutModifier:
+    case input::KeyDecisionReason::kKeyRelease:
+    case input::KeyDecisionReason::kNoText:
+    case input::KeyDecisionReason::kDeadKey:
+    case input::KeyDecisionReason::kTranslationFailed:
+    case input::KeyDecisionReason::kUnsupportedModifierCombination:
+      return false;
+    default:
+      // kEngineNotReady is deliberately capturable: a raw commit needs no engine call, so
+      // the degraded run can still apply the text.
+      return true;
+  }
+}
+
+bool ProductTextController::RawUnapplied() const {
+  return raw_active_ || raw_submitted_ || !raw_text_.empty();
+}
+
+bool ProductTextController::HasPendingEngineInput() const {
+  return queue_.HasInFlight() || !queue_.empty();
+}
+
+std::size_t ProductTextController::QueueDepth() const {
+  return queue_.size() + (queue_.HasInFlight() ? 1 : 0);
+}
+
 bool ProductTextController::PredictKey(WPARAM wparam, LPARAM lparam) {
   if (!started_ || stopping_) {
     return false;
@@ -267,13 +311,46 @@ bool ProductTextController::PredictKey(WPARAM wparam, LPARAM lparam) {
   if (queue_.HasInFlight() && queue_.in_flight_failed()) {
     return false;
   }
-  if (!key.decision.is_engine_candidate()) {
+  // A token the host already started is never handed to the engine mid-token. The test is
+  // on the character class, not on the decision, because the permission verdict can change
+  // between two characters of the same token.
+  if (host_token_.owned() && IsTokenText(key)) {
     return false;
   }
+  if (RawUnapplied()) {
+    // The degraded run eats captured text and the four special keys; shortcuts, privacy
+    // refusals and untranslatable keys stay with the host. This must agree exactly with
+    // HandleKeyDown.
+    const std::uint32_t vk = key.event.virtual_key;
+    if (key.decision.reason != input::KeyDecisionReason::kPermissionForbidden &&
+        key.decision.reason != input::KeyDecisionReason::kPermissionUnknown &&
+        key.decision.reason != input::KeyDecisionReason::kInputDisabled &&
+        key.decision.disposition != input::KeyDisposition::kShortcutPassThrough &&
+        (vk == input::kVirtualKeySpace || vk == input::kVirtualKeyReturn ||
+         vk == input::kVirtualKeyEscape || vk == input::kVirtualKeyBack)) {
+      return true;
+    }
+    return RawCaptureWorthy(key);
+  }
+  if (!key.decision.is_engine_candidate()) {
+    // Translated text the decision layer does not offer to the engine is still eaten when
+    // earlier input is pending, because a host insertion now would be placed after text the
+    // engine has not applied yet. HandleKeyDown enters the raw catch-up for it.
+    if (HasPendingEngineInput() && RawCaptureWorthy(key)) {
+      return true;
+    }
+    return false;
+  }
+  if (QueueDepth() >= KeyAdmissionQueue::kHighWater) {
+    return true;  // the degraded catch-up eats it
+  }
   if (!AdmissionAvailable(key.composition_active)) {
-    // Full without a composition is a safe pass-through. Full inside a composition has no
-    // safe pass-through; the key is eaten and recorded as an explicit overflow failure.
-    return key.composition_active;
+    // Full without pending input is a safe pass-through. Full with pending input has no safe
+    // pass-through; the key is eaten into the degraded run.
+    if (!HasPendingEngineInput() && !key.composition_active) {
+      return false;
+    }
+    return true;
   }
   ++predicted_eaten_;
   return true;
@@ -295,26 +372,97 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
   if (!snapshot.bound || snapshot.closed ||
       snapshot.gate != coordinator::CoordinatorGate::kOpen ||
       (queue_.HasInFlight() && queue_.in_flight_failed())) {
+    // No live binding. Captured text cannot be applied to a context it was not typed into,
+    // so it is reported as an explicit failure rather than replayed elsewhere.
+    if (RawUnapplied()) {
+      FailRawState(KeyFailure::kFocusChanged);
+    }
+    host_token_.HostKept(
+        key.text, key.decision.disposition == input::KeyDisposition::kShortcutPassThrough);
+    if (host_token_.owned()) {
+      ++token_host_keys_;
+    }
+    ++not_eaten_;
+    return false;
+  }
+  if (host_token_.owned() && IsTokenText(key)) {
+    ++token_host_keys_;
+    ++not_eaten_;
+    return false;
+  }
+  if (RawUnapplied()) {
+    if (HandleRawKey(key)) {
+      host_token_.EngineKept();
+      ++eaten_;
+      waker_.SetPacing(true);
+      return true;
+    }
+    const input::KeyDecisionReason reason = key.decision.reason;
+    const bool shortcut =
+        key.decision.disposition == input::KeyDisposition::kShortcutPassThrough;
+    if (reason == input::KeyDecisionReason::kPermissionForbidden ||
+        reason == input::KeyDecisionReason::kPermissionUnknown ||
+        reason == input::KeyDecisionReason::kInputDisabled) {
+      // The field changed class while a raw run was pending. Nothing captured may be written
+      // there any more; the loss is reported and the host gets its own key.
+      FailRawState(KeyFailure::kPermissionRefused);
+      host_token_.HostKept(key.text, shortcut);
+    } else if (!shortcut) {
+      // A shortcut does not end a word. Every other non-captured key does.
+      host_token_.HostKept(key.text, false);
+    }
+    if (host_token_.owned() && IsTokenText(key)) {
+      ++token_host_keys_;
+    }
     ++not_eaten_;
     return false;
   }
   if (!key.decision.is_engine_candidate()) {
-    // A shortcut, a key-up-shaped event, or unsupported text is never admitted. Prediction
-    // and execution must agree even when the coordinator is busy or retiring.
+    if (HasPendingEngineInput() && RawCaptureWorthy(key)) {
+      // Earlier input is still queued for the engine; letting the host insert this character
+      // now would place it before text that has not been applied yet. Capture it in order.
+      EnterRawMode();
+      if (HandleRawKey(key)) {
+        ++eaten_;
+        waker_.SetPacing(true);
+        return true;
+      }
+    }
+    // A shortcut, key-up-shaped event, or untranslatable key is never admitted. Translated
+    // text here is a genuine pass-through: the host owns the token and keeps owning it.
+    const bool shortcut =
+        key.decision.disposition == input::KeyDisposition::kShortcutPassThrough;
+    host_token_.HostKept(key.text, shortcut);
+    if (host_token_.owned() && !shortcut) {
+      ++token_host_keys_;
+    }
     ++not_eaten_;
     return false;
   }
+  if (QueueDepth() >= KeyAdmissionQueue::kHighWater) {
+    // High water: the queued tail moves to the raw run before the engine can stall further.
+    EnterRawMode();
+    if (HandleRawKey(key)) {
+      host_token_.EngineKept();
+      ++eaten_;
+      waker_.SetPacing(true);
+      return true;
+    }
+  }
   if (!AdmissionAvailable(key.composition_active)) {
-    if (!key.composition_active) {
+    if (!HasPendingEngineInput() && !key.composition_active) {
+      host_token_.HostKept(key.text, /*shortcut=*/false);
+      ++token_host_keys_;
       ++not_eaten_;
       return false;
     }
-    // See PredictKey: bounded exhaustion inside a composition is an explicit failure.
-    queue_.RecordOverflowEaten();
-    ++overflow_eaten_;
-    ++eaten_;
-    waker_.SetPacing(true);
-    return true;
+    EnterRawMode();
+    if (HandleRawKey(key)) {
+      host_token_.EngineKept();
+      ++eaten_;
+      waker_.SetPacing(true);
+      return true;
+    }
   }
 
   const bool was_empty = queue_.empty() && !queue_.HasInFlight();
@@ -324,21 +472,289 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
   const SubmitAttempt attempt =
       was_empty ? SubmitHead(true) : SubmitAttempt::kWaited;
   if (attempt == SubmitAttempt::kNotEatenHostKeeps) {
+    // The key was never queued (SubmitHead dropped it) and no earlier input is pending, so
+    // the host owns this token from its first character.
+    host_token_.HostKept(key.text, /*shortcut=*/false);
+    ++token_host_keys_;
     ++not_eaten_;
     return false;
   }
   if (attempt == SubmitAttempt::kFailedEaten) {
+    host_token_.EngineKept();
     ++eaten_;
     waker_.SetPacing(true);
     return true;
   }
   queue_.ConfirmEaten(id);
+  host_token_.EngineKept();
   ++eaten_;
   waker_.SetPacing(true);
   return true;
 }
 
+void ProductTextController::EnterRawMode() {
+  if (raw_active_) {
+    return;
+  }
+  raw_active_ = true;
+  ++raw_entered_;
+  host_token_.Reset();
+  std::deque<AdmissionKey> withdrawn = queue_.WithdrawQueued();
+  const std::size_t before = raw_text_.size();
+  for (const AdmissionKey& key : withdrawn) {
+    FoldWithdrawnKey(key);
+  }
+  queue_.RecordDeferredRaw(withdrawn.size(), raw_text_.size() - before);
+}
+
+void ProductTextController::FoldWithdrawnKey(const AdmissionKey& key) {
+  switch (key.decision.disposition) {
+    case input::KeyDisposition::kEngineTextCandidate:
+    case input::KeyDisposition::kEngineSpaceCandidate:
+      CaptureRawText(key.decision.disposition == input::KeyDisposition::kEngineSpaceCandidate
+                         ? std::u16string_view(u" ")
+                         : std::u16string_view(key.text.utf16_code_units));
+      break;
+    case input::KeyDisposition::kEngineEnterCandidate:
+      raw_end_requested_ = true;
+      ++raw_chunk_keys_;
+      break;
+    case input::KeyDisposition::kEngineEscapeCandidate:
+      // Degraded mode keeps the captured text; Escape ends the run without cancelling it.
+      raw_end_requested_ = true;
+      ++raw_ignored_edits_;
+      ++raw_chunk_keys_;
+      break;
+    case input::KeyDisposition::kEngineBackSpaceCandidate:
+      if (!raw_text_.empty()) {
+        raw_text_.pop_back();
+      } else {
+        ++raw_ignored_edits_;
+      }
+      ++raw_chunk_keys_;
+      break;
+    default:
+      ++raw_ignored_edits_;
+      break;
+  }
+}
+
+void ProductTextController::CaptureRawText(std::u16string_view text) {
+  if (text.empty()) {
+    return;
+  }
+  if (raw_text_.size() + text.size() > kRawCapacityUtf16) {
+    // The bounded run is exhausted. The key is still eaten so the already captured run keeps
+    // its order, and the loss is reported as an explicit unrecoverable failure.
+    queue_.RecordRawDropped(1, text.size());
+    ++raw_unrecoverable_;
+    return;
+  }
+  raw_text_.append(text.begin(), text.end());
+  ++raw_chunk_keys_;
+  ++raw_keys_;
+  raw_chars_ += text.size();
+}
+
+bool ProductTextController::HandleRawKey(const BuiltKey& key) {
+  switch (key.decision.reason) {
+    case input::KeyDecisionReason::kPermissionForbidden:
+    case input::KeyDecisionReason::kPermissionUnknown:
+    case input::KeyDecisionReason::kInputDisabled:
+    case input::KeyDecisionReason::kShortcutModifier:
+    case input::KeyDecisionReason::kKeyRelease:
+      // Never captured: privacy, disabled input or a host-owned chord.
+      return false;
+    default:
+      break;
+  }
+  const std::uint32_t vk = key.event.virtual_key;
+  if (vk == input::kVirtualKeySpace) {
+    CaptureRawText(u" ");
+    raw_end_requested_ = true;
+    host_token_.Reset();
+    FlushRaw();
+    return true;
+  }
+  if (vk == input::kVirtualKeyReturn) {
+    // Same visible effect as the engine path today: eaten, no text change.
+    raw_end_requested_ = true;
+    ++raw_chunk_keys_;
+    FlushRaw();
+    return true;
+  }
+  if (vk == input::kVirtualKeyEscape) {
+    // The first version does not cancel captured text in degraded mode: cancelling would
+    // need the whole token's history, which the capture does not re-read. Reported, not
+    // hidden.
+    raw_end_requested_ = true;
+    ++raw_ignored_edits_;
+    ++raw_chunk_keys_;
+    FlushRaw();
+    return true;
+  }
+  if (vk == input::kVirtualKeyBack) {
+    if (!raw_text_.empty()) {
+      raw_text_.pop_back();
+    } else {
+      ++raw_ignored_edits_;
+    }
+    ++raw_chunk_keys_;
+    FlushRaw();
+    return true;
+  }
+  if (RawCaptureWorthy(key)) {
+    if (!IsTokenText(key)) {
+      // e.g. a comma the engine would not consume: still captured raw, in order.
+      host_token_.Reset();
+    }
+    CaptureRawText(key.text.utf16_code_units);
+    FlushRaw();
+    return true;
+  }
+  return false;  // shortcuts and untranslatable keys stay with the host
+}
+
+void ProductTextController::FlushRaw() {
+  if (!raw_active_ || raw_submitted_ || raw_text_.empty()) {
+    return;
+  }
+  if (HasPendingEngineInput()) {
+    return;  // the in-flight engine key must resolve before the raw run can be applied
+  }
+  const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
+  if (!snapshot.bound || snapshot.closed ||
+      snapshot.gate != coordinator::CoordinatorGate::kOpen ||
+      snapshot.phase != coordinator::WorkPhase::kIdle ||
+      snapshot.retirement.retiring_bindings != 0 ||
+      snapshot.retirement.admission_paused) {
+    return;
+  }
+  if (snapshot.permission != edit::InputPermission::kAllowed) {
+    return;  // a pending refresh resolves; nothing is written under Unknown/Denied
+  }
+  coordinator::WorkId work;
+  const coordinator::SubmitStatus status =
+      coordinator_->SubmitRawCommit(raw_text_, &work);
+  switch (status) {
+    case coordinator::SubmitStatus::kAccepted:
+      raw_submitted_ = true;
+      raw_work_id_ = work.value;
+      raw_submitted_keys_ = raw_chunk_keys_;
+      raw_submitted_units_ = raw_text_.size();
+      raw_chunk_keys_ = 0;
+      raw_text_.clear();
+      ++raw_commits_;
+      waker_.SetPacing(true);
+      return;
+    case coordinator::SubmitStatus::kBusy:
+    case coordinator::SubmitStatus::kRetiring:
+    case coordinator::SubmitStatus::kPermissionUnknown:
+      return;  // retried by the next pump
+    case coordinator::SubmitStatus::kPermissionDenied:
+      FailRawState(KeyFailure::kPermissionRefused);
+      return;
+    case coordinator::SubmitStatus::kClosed:
+      FailRawState(KeyFailure::kShutdown);
+      return;
+    case coordinator::SubmitStatus::kNotBound:
+    case coordinator::SubmitStatus::kTargetChanged:
+    case coordinator::SubmitStatus::kThreadFocusLost:
+    case coordinator::SubmitStatus::kTargetUnverified:
+    case coordinator::SubmitStatus::kBlockedUncertain:
+    case coordinator::SubmitStatus::kBlockedNeedsResync:
+    case coordinator::SubmitStatus::kBlockedUnsupportedShape:
+      FailRawState(KeyFailure::kTargetChanged);
+      if (coordinator_->bound()) {
+        coordinator_->InvalidateBinding();
+      }
+      RequestRebindSoon();
+      return;
+    case coordinator::SubmitStatus::kEngineNotRunning:
+    case coordinator::SubmitStatus::kQueueFull:
+    case coordinator::SubmitStatus::kEngineClientUnavailable:
+    case coordinator::SubmitStatus::kEngineSubmitFailed:
+    case coordinator::SubmitStatus::kNotEngineCandidate:
+    case coordinator::SubmitStatus::kInvalidRequest:
+      FailRawState(KeyFailure::kInternal);
+      return;
+  }
+}
+
+void ProductTextController::ResolveRaw() {
+  if (raw_submitted_) {
+    const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
+    if (snapshot.work_id != raw_work_id_) {
+      FailRawState(KeyFailure::kRawCommitFailed);
+      if (queue_.HasInFlight() && !queue_.in_flight_failed()) {
+        queue_.MarkInFlightFailed(KeyFailure::kRawCommitFailed);
+      }
+    } else if (snapshot.phase == coordinator::WorkPhase::kIdle) {
+      const bool applied = snapshot.outcome == coordinator::WorkOutcome::kApplied;
+      if (applied) {
+        queue_.RecordRawApplied(raw_submitted_keys_, raw_submitted_units_);
+        engine_stale_ = true;
+        raw_submitted_ = false;
+        raw_work_id_ = 0;
+        raw_submitted_keys_ = 0;
+        raw_submitted_units_ = 0;
+      } else {
+        // FailRawState records exactly this submitted chunk and any later captured text.
+        FailRawState(KeyFailure::kRawCommitFailed);
+        if (coordinator_->bound()) {
+          coordinator_->InvalidateBinding();
+        }
+        RequestRebindSoon();
+      }
+      waker_.SetPacing(true);
+    }
+  }
+  FlushRaw();
+  if (raw_active_ && !raw_submitted_ && raw_text_.empty() &&
+      !HasPendingEngineInput() && raw_end_requested_) {
+    FinishRawRun();
+  }
+}
+
+void ProductTextController::FinishRawRun() {
+  raw_active_ = false;
+  raw_end_requested_ = false;
+  ++raw_exits_;
+  if (engine_stale_) {
+    // The engine client never saw the captured keys. It must not be used again on this
+    // binding; a fresh client is built for the same context by the normal rebind path.
+    if (coordinator_->bound()) {
+      coordinator_->InvalidateBinding();
+    }
+    RequestRebindSoon();
+  }
+  waker_.SetPacing(true);
+}
+
+void ProductTextController::FailRawState(KeyFailure failure) {
+  if (raw_submitted_) {
+    queue_.RecordRawFailed(raw_submitted_keys_, raw_submitted_units_);
+  }
+  if (raw_chunk_keys_ != 0 || !raw_text_.empty()) {
+    queue_.RecordRawFailed(raw_chunk_keys_, raw_text_.size());
+  }
+  raw_submitted_ = false;
+  raw_work_id_ = 0;
+  raw_submitted_keys_ = 0;
+  raw_submitted_units_ = 0;
+  raw_chunk_keys_ = 0;
+  raw_text_.clear();
+  raw_end_requested_ = false;
+  raw_active_ = false;
+  (void)failure;
+  waker_.SetPacing(true);
+}
+
 ProductTextController::SubmitAttempt ProductTextController::SubmitHead(bool immediate) {
+  if (RawUnapplied()) {
+    // While a degraded run owns the caret order, no engine key may overtake it.
+    return SubmitAttempt::kWaited;
+  }
   AdmissionKey* head = queue_.head();
   if (head == nullptr) {
     return SubmitAttempt::kNoHead;
@@ -557,6 +973,7 @@ void ProductTextController::PumpNow() {
   coordinator_->Pump();
   const ClientProvider::Harvest harvest = clients_->TakeReady();
   if (harvest.failed && harvest.failed_client == clients_->last_client()) {
+    FailRawState(KeyFailure::kEngineUnavailable);
     FailQueuedAndMaybeInvalidate(KeyFailure::kEngineUnavailable, true);
     if (queue_.HasInFlight()) {
       queue_.MarkInFlightFailed(KeyFailure::kEngineUnavailable);
@@ -566,10 +983,20 @@ void ProductTextController::PumpNow() {
   observer_->Pump();
   if (coordinator_->bound() &&
       coordinator_->permission() == edit::InputPermission::kUnknown &&
-      !queue_.HasInFlight() && queue_.empty()) {
+      !queue_.HasInFlight() && queue_.empty() && !RawUnapplied()) {
     coordinator_->RefreshPermission();
   }
   ResolveInFlight();
+  if (RawUnapplied()) {
+    const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
+    if (!snapshot.bound || snapshot.closed ||
+        snapshot.gate != coordinator::CoordinatorGate::kOpen) {
+      // The binding that owned the captured run is gone or blocked; its text cannot be
+      // written anywhere else, so the loss is reported explicitly.
+      FailRawState(KeyFailure::kTargetChanged);
+    }
+  }
+  ResolveRaw();
   SubmitHead(false);
   UpdatePacing();
 }
@@ -602,6 +1029,14 @@ void ProductTextController::OnStaWake(std::uint64_t generation) {
 
 void ProductTextController::OnTargetLost(ctx::ContextDropReason reason) {
   ++target_losses_;
+  FailRawState(KeyFailure::kFocusChanged);
+  // A host-owned token survives an external edit caused by the host inserting the very
+  // characters we passed through; it ends only when the token itself ends or the target
+  // really moves to another document.
+  if (reason != ctx::ContextDropReason::kExternalTextEdit &&
+      reason != ctx::ContextDropReason::kExternalSelectionEdit) {
+    host_token_.Reset();
+  }
   queue_.FailQueued(KeyFailure::kFocusChanged);
   if (queue_.HasInFlight() && !queue_.in_flight_failed()) {
     queue_.MarkInFlightFailed(KeyFailure::kFocusChanged);
@@ -613,6 +1048,10 @@ void ProductTextController::OnTargetLost(ctx::ContextDropReason reason) {
 void ProductTextController::OnTargetBound(ITfContext* context,
                                           const ctx::ObservedTarget& target) {
   ++target_binds_;
+  // A fresh binding starts with a fresh engine client. The host-owned token is NOT a
+  // binding fact: a rebind caused by the host inserting passed-through text must not
+  // reopen the token to the engine.
+  engine_stale_ = false;
   binding_->OnTargetBound(context, target);
   waker_.SetPacing(true);
 }
@@ -642,6 +1081,18 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   diagnostics.target_losses = target_losses_;
   diagnostics.target_binds = target_binds_;
   diagnostics.rebind_requests = rebind_requests_;
+  diagnostics.raw_mode = raw_active_;
+  diagnostics.raw_submitted = raw_submitted_;
+  diagnostics.engine_stale = engine_stale_;
+  diagnostics.raw_unapplied_units =
+      static_cast<std::uint64_t>(raw_text_.size());
+  diagnostics.raw_keys = raw_keys_;
+  diagnostics.raw_commits = raw_commits_;
+  diagnostics.raw_entered = raw_entered_;
+  diagnostics.raw_exits = raw_exits_;
+  diagnostics.raw_ignored_edits = raw_ignored_edits_;
+  diagnostics.raw_unrecoverable = raw_unrecoverable_;
+  diagnostics.token_host_keys = token_host_keys_;
   if (clients_) {
     diagnostics.engine_client_requests = clients_->requests();
     diagnostics.engine_client_results = clients_->results();

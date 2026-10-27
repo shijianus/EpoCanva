@@ -158,6 +158,8 @@ const char* DescribeWorkKind(WorkKind kind) {
       return "Key";
     case WorkKind::kCandidate:
       return "Candidate";
+    case WorkKind::kRaw:
+      return "Raw";
   }
   return "UnknownWorkKind";
 }
@@ -1248,6 +1250,7 @@ void ContextCoordinator::FinishWorkLedger(WorkKind kind) {
   work_generation_ = identity_.generation;
   work_abandoned_ = false;
   observed_caret_pending_ = false;
+  raw_terminal_noted_ = false;
   pending_plan_.reset();
   last_edit_status_ = edit::EditStatus::kRejected;
   last_edit_reason_ = edit::EditRejectReason::kNone;
@@ -1424,6 +1427,65 @@ SubmitStatus ContextCoordinator::SubmitCandidate(std::size_t candidate_index, Wo
   }
 }
 
+SubmitStatus ContextCoordinator::SubmitRawCommit(std::u16string_view raw_utf16,
+                                                 WorkId* id) {
+  if (id == nullptr) {
+    return RecordSubmit(SubmitStatus::kInvalidRequest);
+  }
+  id->value = 0;
+  if (raw_utf16.empty()) {
+    return RecordSubmit(SubmitStatus::kInvalidRequest);
+  }
+  if (closed_) {
+    return RecordSubmit(SubmitStatus::kClosed);
+  }
+  if (phase_ != WorkPhase::kIdle) {
+    return RecordSubmit(SubmitStatus::kBusy);
+  }
+  if (!bound_) {
+    return RecordSubmit(SubmitStatus::kNotBound);
+  }
+  if (RetirementPausesInput()) {
+    return RecordSubmit(SubmitStatus::kRetiring);
+  }
+  SubmitStatus blocked = SubmitStatus::kAccepted;
+  if (GateBlocksSubmit(&blocked)) {
+    return RecordSubmit(blocked);
+  }
+  const SubmitStatus target = RevalidateForSubmit();
+  if (target != SubmitStatus::kAccepted) {
+    return RecordSubmit(target);
+  }
+  if (!StartPermissionQuery()) {
+    return RecordSubmit(SubmitStatus::kPermissionUnknown);
+  }
+  if (permission_source_.Status() == context::PermissionQueryStatus::kPending) {
+    FinishWorkLedger(WorkKind::kRaw);
+    phase_ = WorkPhase::kPermissionPending;
+    engine_request_ = engine::RequestId{};
+    pending_permission_ = PendingPermissionWork{};
+    pending_permission_.kind = WorkKind::kRaw;
+    pending_permission_.raw_text = std::u16string(raw_utf16);
+    *id = WorkId{work_id_};
+    last_submit_status_ = SubmitStatus::kAccepted;
+    return SubmitStatus::kAccepted;
+  }
+  bool identity_current = false;
+  if (!PermissionVerdictAllows(&identity_current)) {
+    if (!identity_current) {
+      return RecordSubmit(SubmitStatus::kPermissionUnknown);
+    }
+    return RecordSubmit(permission_ == edit::InputPermission::kDenied
+                            ? SubmitStatus::kPermissionDenied
+                            : SubmitStatus::kPermissionUnknown);
+  }
+  FinishWorkLedger(WorkKind::kRaw);
+  SubmitRawPlan(std::u16string(raw_utf16));
+  *id = WorkId{work_id_};
+  last_submit_status_ = SubmitStatus::kAccepted;
+  return SubmitStatus::kAccepted;
+}
+
 // --- the permission stage ----------------------------------------------------------------
 
 // Continues a permission-allowed, already-accepted work item into the engine. Used only
@@ -1506,6 +1568,11 @@ void ContextCoordinator::AdvancePermissionStage() {
   if (work.has_plan) {
     // The apply-time re-verification finished Allowed; the already-decided edit is built.
     SubmitEditPlan(work.plan);
+    return;
+  }
+  if (work.kind == WorkKind::kRaw) {
+    // The degraded run's permission read finished Allowed; no engine call exists for it.
+    SubmitRawPlan(std::move(work.raw_text));
     return;
   }
   if (work.kind == WorkKind::kKey &&
@@ -1700,11 +1767,46 @@ void ContextCoordinator::BeginApplyAfterEngine(const EngineObservation& observat
   SubmitEditPlan(decision);
 }
 
-void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision) {
+void ContextCoordinator::SubmitRawPlan(std::u16string raw_utf16) {
+  PlanDecision decision;
+  decision.kind = PlanDecisionKind::kCommit;
+  last_raw_units_ = raw_utf16.size();
+  ++raw_commits_begun_;
+  if (view_.composition_active) {
+    // Preserve what the engine already displayed (the applied part of the token) and append
+    // the captured suffix in one commit. The engine never saw the suffix; that divergence is
+    // exactly why the host must rebuild the binding after this work applies.
+    decision.text_utf16 = view_.composition_text_utf16;
+    decision.text_utf16 += raw_utf16;
+    decision.caret_utf16 = view_.composition_start_utf16;
+  } else {
+    decision.text_utf16 = std::move(raw_utf16);
+    decision.caret_utf16 = view_.caret_utf16;
+  }
+  SubmitEditPlan(decision, false);
+}
+
+void ContextCoordinator::NoteRawTerminal(bool applied) {
+  if (work_kind_ != WorkKind::kRaw || raw_terminal_noted_) {
+    return;
+  }
+  raw_terminal_noted_ = true;
+  if (applied) {
+    ++raw_commits_applied_;
+    raw_units_applied_ += last_raw_units_;
+  } else {
+    ++raw_commits_failed_;
+    raw_units_refused_ += last_raw_units_;
+  }
+}
+
+void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision,
+                                        bool engine_already_ran) {
   // The last synchronous check before a TSF request. The P3.7 session repeats the live
   // target check before requesting a lock and again inside the granted callback; this one
   // keeps an already-moved target from even reaching RequestEditSession.
-  if (!EnsureTargetCurrent("target-changed-before-edit", true)) {
+  if (!EnsureTargetCurrent("target-changed-before-edit", engine_already_ran)) {
+    NoteRawTerminal(false);
     return;
   }
   // The plan builders take UTF-8 bytes; the engine text is UTF-16 code units. The strict
@@ -1714,6 +1816,7 @@ void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision) {
   const auto utf8 =
       epocanva::windows::text::ConvertUtf16CodeUnitsToUtf8Bytes(widened);
   if (!utf8.ok()) {
+    NoteRawTerminal(false);
     EnterNeedsResync("engine-text-conversion-refused", RejectCause::kNone);
     return;
   }
@@ -1736,6 +1839,7 @@ void ContextCoordinator::SubmitEditPlan(const PlanDecision& decision) {
         }
       }();
   if (!built.ok()) {
+    NoteRawTerminal(false);
     EnterNeedsResync("plan-build-refused", RejectCause::kNone);
     return;
   }
@@ -1867,6 +1971,7 @@ void ContextCoordinator::ApplyViewUpdate(const EditPlan& plan) {
 // --- terminal helpers --------------------------------------------------------------------
 
 void ContextCoordinator::EndWork(WorkOutcome outcome, RejectCause cause) {
+  NoteRawTerminal(outcome == WorkOutcome::kApplied);
   outcome_ = outcome;
   cause_ = cause;
   phase_ = WorkPhase::kIdle;
@@ -1887,6 +1992,7 @@ void ContextCoordinator::EndWork(WorkOutcome outcome, RejectCause cause) {
 
 void ContextCoordinator::EnterNeedsResync(const char* why, RejectCause cause) {
   (void)why;
+  NoteRawTerminal(false);
   outcome_ = WorkOutcome::kNeedsResync;
   cause_ = cause;
   phase_ = WorkPhase::kIdle;
@@ -1895,6 +2001,7 @@ void ContextCoordinator::EnterNeedsResync(const char* why, RejectCause cause) {
 }
 
 void ContextCoordinator::EnterUncertainLockdown() {
+  NoteRawTerminal(false);
   uncertain_blocked_context_id_ = identity_.context_id;
   // Record the latch against the real context identity so a replacement coordinator
   // sharing the registry cannot clear or bypass it with another integer id.
@@ -2100,6 +2207,11 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.composition_length_utf16 =
       static_cast<LONG>(view_.composition_text_utf16.size());
   snapshot.works_accepted = works_accepted_;
+  snapshot.raw_commits_begun = raw_commits_begun_;
+  snapshot.raw_commits_applied = raw_commits_applied_;
+  snapshot.raw_commits_failed = raw_commits_failed_;
+  snapshot.raw_units_applied = raw_units_applied_;
+  snapshot.raw_units_refused = raw_units_refused_;
   snapshot.engine_results_taken = engine_results_taken_;
   snapshot.plans_submitted = plans_submitted_;
   snapshot.edits_applied = edits_applied_;

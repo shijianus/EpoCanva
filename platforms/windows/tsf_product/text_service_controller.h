@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "context_observer.h"
@@ -79,6 +80,19 @@ struct ControllerDiagnostics {
   std::uint64_t target_losses = 0;
   std::uint64_t target_binds = 0;
   std::uint64_t rebind_requests = 0;
+  // W2-A-R degraded catch-up and first-token ownership. All counts are text-free; the
+  // unapplied units are a length, never text.
+  bool raw_mode = false;
+  bool raw_submitted = false;
+  bool engine_stale = false;
+  std::uint64_t raw_unapplied_units = 0;
+  std::uint64_t raw_keys = 0;
+  std::uint64_t raw_commits = 0;
+  std::uint64_t raw_entered = 0;
+  std::uint64_t raw_exits = 0;
+  std::uint64_t raw_ignored_edits = 0;
+  std::uint64_t raw_unrecoverable = 0;
+  std::uint64_t token_host_keys = 0;
   bool pacing = false;
   KeyAdmissionSnapshot keys;
   coordinator::CoordinatorSnapshot coordinator;
@@ -156,6 +170,34 @@ class ProductTextController final : public StaWakeTarget,
   void RequestRebindSoon();
   void ResetObjects();
 
+  // W2-A-R degraded catch-up. Admitted input that cannot be given to the engine without
+  // waiting is withdrawn from the queue in FIFO order and captured as raw UTF-16; it is
+  // committed through the coordinator with NO engine call, replacing the owned composition
+  // (when one exists) with its displayed text plus the captured suffix. Once such a commit
+  // applied, the engine client is stale and the binding is rebuilt before engine input
+  // resumes. The run is bounded; a run that exceeds the bound is reported, never hidden.
+  static constexpr std::size_t kRawCapacityUtf16 = 1024;
+
+  bool IsTextKey(const BuiltKey& key) const;
+  // True when every translated UTF-16 code unit is in the English schema alphabet (letters,
+  // digits and the protected marks ' - @ . _ : / \ ? & = # % +). Those marks are token
+  // characters, never boundaries, so a host-owned token stays host-owned across them.
+  bool IsTokenText(const BuiltKey& key) const;
+  // True only for translated characters the degraded run may capture. Shortcuts, privacy
+  // refusals, disabled input, dead keys and untranslatable events are never captured.
+  bool RawCaptureWorthy(const BuiltKey& key) const;
+  bool RawUnapplied() const;
+  bool HasPendingEngineInput() const;
+  std::size_t QueueDepth() const;
+  void EnterRawMode();
+  void FoldWithdrawnKey(const AdmissionKey& key);
+  void CaptureRawText(std::u16string_view text);
+  bool HandleRawKey(const BuiltKey& key);
+  void FlushRaw();
+  void ResolveRaw();
+  void FailRawState(KeyFailure failure);
+  void FinishRawRun();
+
   ITfThreadMgr* thread_manager_ = nullptr;
   TfClientId client_id_ = 0;
   ::epocanva::windows::engine::EngineExecutor* executor_ = nullptr;
@@ -175,6 +217,19 @@ class ProductTextController final : public StaWakeTarget,
   StaResultWaker waker_;
   KeyAdmissionQueue queue_;
 
+  bool raw_active_ = false;
+  bool raw_submitted_ = false;
+  bool raw_end_requested_ = false;
+  bool engine_stale_ = false;
+  std::uint64_t raw_work_id_ = 0;
+  std::u16string raw_text_;
+  std::size_t raw_chunk_keys_ = 0;
+  std::size_t raw_submitted_keys_ = 0;
+  std::size_t raw_submitted_units_ = 0;
+  // A token the host already started. Its remaining characters are never offered to the
+  // engine; the host inserts them, so the field's text stays contiguous.
+  HostTokenOwnership host_token_;
+
   std::uint64_t wakes_ = 0;
   std::uint64_t stale_wakes_ = 0;
   std::uint64_t predictions_ = 0;
@@ -187,6 +242,14 @@ class ProductTextController final : public StaWakeTarget,
   std::uint64_t target_binds_ = 0;
   std::uint64_t rebind_requests_ = 0;
   std::uint64_t pumps_ = 0;
+  std::uint64_t raw_entered_ = 0;
+  std::uint64_t raw_exits_ = 0;
+  std::uint64_t raw_commits_ = 0;
+  std::uint64_t raw_keys_ = 0;
+  std::uint64_t raw_chars_ = 0;
+  std::uint64_t raw_ignored_edits_ = 0;
+  std::uint64_t raw_unrecoverable_ = 0;
+  std::uint64_t token_host_keys_ = 0;
 };
 
 }  // namespace product

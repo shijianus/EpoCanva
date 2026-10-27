@@ -19,13 +19,14 @@
 // The in-flight entry is kept separate so a focus change can fail the queued tail without
 // disturbing the coordinator's ownership of the submitted work.
 //
-// CAPACITY POLICY. The limit is 64 entries. While no composition is active only 48 may be
-// used; the last 16 are reserved for input that is already inside a composition. If the
-// queue is completely exhausted while a composition is active there is no safe pass-through
-// (the host would insert a character inside our preedit). The controller eats the key and
-// records an explicit kQueueOverflow failure; this is reported as an unresolved blocker for
-// "natural input complete under a stalled engine", never hidden. An unpaced engine event
-// cannot make this unreachable by design, only unlikely.
+// CAPACITY AND HIGH WATER. The hard limit is 64 entries. While no composition is active only
+// 48 may be used; the last 16 are reserved for input that is already inside a composition.
+// W2-A-R adds a high-water mark: the controller converts the queued (not in-flight) tail into
+// a raw-text catch-up run long before the hard limit, so the hard limit is only reachable when
+// the raw run itself exceeds its own bound. Withdrawing keeps the FIFO order, and the entries
+// are reported as deferred_raw, never as failed: they were eaten and will be applied as raw
+// text, not dropped. A raw run that cannot be committed is reported with an explicit named
+// failure; the queue is never allowed to silently discard an eaten key.
 #ifndef EPOCANVA_WINDOWS_TSF_PRODUCT_KEY_ADMISSION_H_
 #define EPOCANVA_WINDOWS_TSF_PRODUCT_KEY_ADMISSION_H_
 
@@ -65,12 +66,35 @@ enum class KeyFailure : std::uint8_t {
   kPredictionMismatch,
   kEngineUnavailable,
   kBlockedGate,
+  kRawCommitFailed,
+  kRawCapacity,
   kShutdown,
   kInternal,
 };
 
 const char* DescribeKeyState(KeyState state);
 const char* DescribeKeyFailure(KeyFailure failure);
+
+// W2-A-R first-token rule: once the first character of a token was handed to the host, the
+// rest of that token is never handed to the engine. Without this, a permission verdict that
+// resolves between two characters would let the engine take over mid-word, splitting the
+// field text between the host insertion and an engine composition. Token characters are the
+// English schema alphabet (letters, digits and the protected marks); space, punctuation
+// outside that alphabet, navigation and editing keys end the token. A shortcut does not.
+class HostTokenOwnership {
+ public:
+  static bool IsTokenText(const input::KeyText& text);
+  bool owned() const { return owned_; }
+  // The host kept this key. Text continues ownership; a shortcut leaves it unchanged; any
+  // other key ends it.
+  void HostKept(const input::KeyText& text, bool shortcut);
+  // The engine or a raw catch-up consumed the key.
+  void EngineKept() { owned_ = false; }
+  void Reset() { owned_ = false; }
+
+ private:
+  bool owned_ = false;
+};
 
 struct AdmissionKey {
   std::uint64_t id = 0;
@@ -98,7 +122,19 @@ struct KeyAdmissionSnapshot {
   std::uint64_t dispatched = 0;
   std::uint64_t engine_completed = 0;
   std::uint64_t edit_completed = 0;
+  // W2-A-R staging: keys accepted but moved from the engine path into a raw catch-up run
+  // (deferred_raw), raw runs confirmed applied (raw_applied), and reported failures that
+  // name why a captured key could not be applied (raw_failed / raw_dropped).
+  std::uint64_t deferred_raw_keys = 0;
+  std::uint64_t deferred_raw_units = 0;
+  std::uint64_t raw_applied_keys = 0;
+  std::uint64_t raw_applied_units = 0;
+  std::uint64_t raw_failed_keys = 0;
+  std::uint64_t raw_failed_units = 0;
+  std::uint64_t raw_dropped_keys = 0;
   std::uint64_t failed = 0;
+  std::uint64_t failed_raw_commit = 0;
+  std::uint64_t failed_raw_capacity = 0;
   std::uint64_t not_eaten_after_prediction = 0;
   std::uint64_t overflow_eaten = 0;
   std::uint64_t failed_focus = 0;
@@ -120,6 +156,10 @@ class KeyAdmissionQueue {
  public:
   static constexpr std::size_t kCapacity = 64;
   static constexpr std::size_t kNonComposingLimit = 48;
+  // The controller stops feeding the engine path at this depth and withdraws the queued tail
+  // into a raw catch-up run. Chosen below both limits so the hard limits stay unreachable in
+  // the normal degraded flow.
+  static constexpr std::size_t kHighWater = 24;
 
   bool CanAccept(bool composition_active) const;
   // Appends one accepted key. The caller must have checked CanAccept first.
@@ -147,10 +187,21 @@ class KeyAdmissionQueue {
   void ReleaseFailedInFlight();
   // Fails and removes every queued (not in-flight) key. Returns the count.
   std::size_t FailQueued(KeyFailure failure);
+  // Moves every queued (not in-flight) entry out of the engine path, preserving FIFO order.
+  // The caller applies their text through the raw catch-up run; the entries are never counted
+  // as failed here. The in-flight entry is deliberately left alone.
+  std::deque<AdmissionKey> WithdrawQueued();
   void RecordOverflowEaten();
   void RecordNotEatenAfterPrediction();
+  // Raw catch-up accounting. Units are UTF-16 code units. `keys` is the number of accepted
+  // keys represented by the run (text keys and the special keys the run folded in).
+  void RecordDeferredRaw(std::size_t keys, std::size_t units);
+  void RecordRawApplied(std::size_t keys, std::size_t units);
+  void RecordRawFailed(std::size_t keys, std::size_t units);
+  void RecordRawDropped(std::size_t keys, std::size_t units);
 
   bool empty() const { return queue_.empty(); }
+  std::size_t size() const { return queue_.size(); }
   bool HasInFlight() const { return in_flight_.has_value(); }
   AdmissionKey* head();
   AdmissionKey* in_flight();

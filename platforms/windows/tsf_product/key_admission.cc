@@ -45,12 +45,35 @@ const char* DescribeKeyFailure(KeyFailure failure) {
       return "engine-unavailable";
     case KeyFailure::kBlockedGate:
       return "blocked-gate";
+    case KeyFailure::kRawCommitFailed:
+      return "raw-commit-failed";
+    case KeyFailure::kRawCapacity:
+      return "raw-capacity";
     case KeyFailure::kShutdown:
       return "shutdown";
     case KeyFailure::kInternal:
       return "internal";
   }
   return "unknown";
+}
+
+bool HostTokenOwnership::IsTokenText(const input::KeyText& text) {
+  if (text.status != input::KeyTextStatus::kText || text.utf16_code_units.empty()) {
+    return false;
+  }
+  for (const char16_t unit : text.utf16_code_units) {
+    if (unit > 0x7F || !input::IsForwardableAscii(unit)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void HostTokenOwnership::HostKept(const input::KeyText& text, bool shortcut) {
+  if (shortcut) {
+    return;  // a chord does not change what the current token is
+  }
+  owned_ = IsTokenText(text);
 }
 
 bool KeyAdmissionQueue::CanAccept(bool composition_active) const {
@@ -179,6 +202,12 @@ void KeyAdmissionQueue::CountFailure(KeyFailure failure) {
     case KeyFailure::kBlockedGate:
       ++counters_.failed_gate;
       break;
+    case KeyFailure::kRawCommitFailed:
+      ++counters_.failed_raw_commit;
+      break;
+    case KeyFailure::kRawCapacity:
+      ++counters_.failed_raw_capacity;
+      break;
     case KeyFailure::kShutdown:
       ++counters_.failed_shutdown;
       break;
@@ -242,6 +271,45 @@ std::size_t KeyAdmissionQueue::FailQueued(KeyFailure failure) {
     ++count;
   }
   return count;
+}
+
+std::deque<AdmissionKey> KeyAdmissionQueue::WithdrawQueued() {
+  std::deque<AdmissionKey> withdrawn;
+  withdrawn.swap(queue_);
+  return withdrawn;
+}
+
+void KeyAdmissionQueue::RecordDeferredRaw(std::size_t keys, std::size_t units) {
+  counters_.deferred_raw_keys += keys;
+  counters_.deferred_raw_units += units;
+}
+
+void KeyAdmissionQueue::RecordRawApplied(std::size_t keys, std::size_t units) {
+  counters_.raw_applied_keys += keys;
+  counters_.raw_applied_units += units;
+}
+
+void KeyAdmissionQueue::RecordRawFailed(std::size_t keys, std::size_t units) {
+  counters_.raw_failed_keys += keys;
+  counters_.raw_failed_units += units;
+  for (std::size_t index = 0; index < keys; ++index) {
+    CountFailure(KeyFailure::kRawCommitFailed);
+  }
+  if (keys == 0 && units != 0) {
+    CountFailure(KeyFailure::kRawCommitFailed);
+  }
+  counters_.last_terminal_state = KeyState::kFailed;
+  counters_.last_failure = KeyFailure::kRawCommitFailed;
+}
+
+void KeyAdmissionQueue::RecordRawDropped(std::size_t keys, std::size_t units) {
+  counters_.raw_dropped_keys += keys;
+  counters_.raw_failed_units += units;
+  for (std::size_t index = 0; index < keys; ++index) {
+    CountFailure(KeyFailure::kRawCapacity);
+  }
+  counters_.last_terminal_state = KeyState::kFailed;
+  counters_.last_failure = KeyFailure::kRawCapacity;
 }
 
 void KeyAdmissionQueue::RecordOverflowEaten() {

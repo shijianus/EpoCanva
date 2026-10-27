@@ -187,7 +187,11 @@ enum class SubmitStatus : std::uint8_t {
   kInvalidRequest,         // null out id
 };
 
-enum class WorkKind : std::uint8_t { kNone = 0, kKey, kCandidate };
+// kRaw is the W2-A-R degraded path: an ordered run of raw UTF-16 text is committed
+// directly into the bound document (replacing the owned composition when one exists)
+// without any engine call, because the engine backlog could not be serviced in time.
+// It exists only for text the host already ate; it never replays a refused key.
+enum class WorkKind : std::uint8_t { kNone = 0, kKey, kCandidate, kRaw };
 
 enum class WorkPhase : std::uint8_t {
   kIdle = 0,
@@ -407,6 +411,13 @@ struct CoordinatorSnapshot {
   LONG composition_length_utf16 = 0;
   // Counters.
   std::uint64_t works_accepted = 0;
+  // W2-A-R raw degradation accounting. Units are UTF-16 code units of the text the host
+  // captured while the engine path was backlogged; the counts are text-free.
+  std::uint64_t raw_commits_begun = 0;
+  std::uint64_t raw_commits_applied = 0;
+  std::uint64_t raw_commits_failed = 0;
+  std::uint64_t raw_units_applied = 0;
+  std::uint64_t raw_units_refused = 0;
   std::uint64_t engine_results_taken = 0;
   std::uint64_t plans_submitted = 0;
   std::uint64_t edits_applied = 0;
@@ -528,6 +539,17 @@ class ContextCoordinator {
                          WorkId* id);
   SubmitStatus SubmitCandidate(std::size_t candidate_index, WorkId* id);
 
+  // W2-A-R degraded terminal: commit `raw_utf16` (UTF-16 code units) into the bound
+  // document without an engine call. When the coordinator's writer owns a composition, the
+  // plan replaces that composition with its current displayed text plus `raw_utf16` and
+  // ends it; otherwise the text is inserted at the tracked caret. Admission runs the same
+  // gates as a key (closed/busy/bound/retiring/gate/target/permission). The permission read
+  // may park the work in kPermissionPending exactly like a key; no engine call is made.
+  // The engine client's state is stale after an applied raw commit (it never saw the
+  // bypassed keys), so the host must rebuild the binding before sending engine input again;
+  // the snapshot counters under raw_* make that requirement observable.
+  SubmitStatus SubmitRawCommit(std::u16string_view raw_utf16, WorkId* id);
+
   // --- non-blocking advance --------------------------------------------------------------
   // Advances a pending permission query whose real read session completed, takes a ready
   // engine result (once), converts it, submits the edit, and harvests an edit result
@@ -560,6 +582,8 @@ class ContextCoordinator {
     // kKey: the submitted key, held for its dispatch decision.
     input::KeyEventSnapshot event{};
     input::KeyText text{};
+    // kRaw: the degraded raw run, held until its permission verdict arrives.
+    std::u16string raw_text;
     // kCandidate: the accepted index.
     std::size_t candidate_index = 0;
     // The apply-time re-verification: the edit plan whose submission is held until the
@@ -659,6 +683,11 @@ class ContextCoordinator {
   void AdvancePermissionStage();
   // Continues a permission-allowed work item into the engine dispatch.
   void DispatchPendingWork(const PendingPermissionWork& work);
+  // Builds and submits the raw commit plan for one degraded run. The caller owns the work
+  // ledger entry (FinishWorkLedger already ran) and the permission verdict.
+  void SubmitRawPlan(std::u16string raw_utf16);
+  // Terminal accounting for a raw work item. Never touches the document.
+  void NoteRawTerminal(bool applied);
   void FinishWorkLedger(WorkKind kind);
   SubmitStatus FinishSubmit(engine::RequestId request, WorkKind kind);
   void ResolveEngineResult(const engine::CommandResult& result);
@@ -666,7 +695,9 @@ class ContextCoordinator {
   // the permission again before submitting. NoEdit/InvalidObservation/UnsupportedShape are
   // decided first so a permission answer cannot hide an unreadable engine result.
   void BeginApplyAfterEngine(const EngineObservation& observation);
-  void SubmitEditPlan(const PlanDecision& decision);
+  // `engine_already_ran` is false only for the raw degraded path, where no engine call
+  // exists and a target move is a clean refusal rather than a divergence.
+  void SubmitEditPlan(const PlanDecision& decision, bool engine_already_ran = true);
   void ResolveEditResult(const edit::EditResult& result);
   void ApplyViewUpdate(const edit::EditPlan& plan);
   void EndWork(WorkOutcome outcome, RejectCause cause);
@@ -784,6 +815,13 @@ class ContextCoordinator {
   RetirementSnapshot closed_retirement_{};
 
   std::uint64_t works_accepted_ = 0;
+  std::uint64_t raw_commits_begun_ = 0;
+  std::uint64_t raw_commits_applied_ = 0;
+  std::uint64_t raw_commits_failed_ = 0;
+  std::uint64_t raw_units_applied_ = 0;
+  std::uint64_t raw_units_refused_ = 0;
+  std::uint64_t last_raw_units_ = 0;
+  bool raw_terminal_noted_ = false;
   std::uint64_t engine_results_taken_ = 0;
   std::uint64_t plans_submitted_ = 0;
   std::uint64_t edits_applied_ = 0;
