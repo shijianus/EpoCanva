@@ -155,6 +155,33 @@ edit_completed` 是引擎路径；`deferred_raw → raw_applied` 是降级路径
 
 没有空提交、没有 amend/reset --hard/clean、没有 push/tag。
 
+### 5.1 变更文件
+
+新增：
+
+- `docs/reports/W2-A-R-input-reliability.md`（本报告）
+
+修改：
+
+- `platforms/windows/tsf_coordinator/coordinator.h`
+- `platforms/windows/tsf_coordinator/coordinator.cc`
+- `platforms/windows/tsf_product/key_admission.h`
+- `platforms/windows/tsf_product/key_admission.cc`
+- `platforms/windows/tsf_product/text_service_controller.h`
+- `platforms/windows/tsf_product/text_service_controller.cc`
+- `platforms/windows/tsf/text_service.cc`
+- `platforms/windows/tsf_product/tests/key_admission_tests.cc`
+- `tests/windows/tsf_product/product_sink_tests.cc`
+- `platforms/windows/product/tests/deployment_tests.cc`
+- `platforms/windows/product/CMakeLists.txt`
+- `platforms/windows/product/VERSION`
+- `docs/windows/tsf-keyboard-input-contract.md`
+- `docs/reports/W2-A-product-input.md`
+- `README.md`
+
+未改：`product_engine_config.cc` 的指纹/marker/降级判断在起点已是正确的；缺的是
+`text_service.cc` 从未把共享锁句柄接管到租约生命周期。测试阈值、词表与其排序未改。
+
 ## 6. 运行包
 
 暂存包：`build/product/stage/EpoCanva-0.2.1-w2r/`。构建入口：
