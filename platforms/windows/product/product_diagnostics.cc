@@ -33,8 +33,9 @@ constexpr std::array<RequiredFile, 8> kRequiredFiles = {{
 }};
 
 constexpr const char* kCapabilities =
-    "English prefix completion and one-edit spelling suggestions. No candidate window, "
-    "prediction, learning, other languages or system-wide input in this build.";
+    "English natural keyboard input through a TSF key sink, prefix completion and "
+    "one-edit spelling suggestions. No candidate window, registration, installer, "
+    "learning, other languages or system-wide input in this build.";
 
 struct WindowsVersion {
   DWORD major = 0;
@@ -319,7 +320,8 @@ bool CollectProductStatusForPaths(const ProductPaths& paths, ProductStatus* stat
   AddItem(&collected, L"Text service registration",
           collected.tsf_registered
               ? (L"CLSID is registered: " + server_path)
-              : L"not registered - system-wide input is the next phase (W2)",
+              : L"not registered - the key sink is wired, but system registration is "
+                L"the W3 installer step",
           collected.tsf_registered ? StatusLevel::kOk : StatusLevel::kWarning);
 
   const WindowsVersion version = ReadWindowsVersion();

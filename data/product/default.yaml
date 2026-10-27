@@ -3,7 +3,7 @@
 # This file ships read-only in <product>/data. User settings are not written here:
 # EpoCanva.exe writes settings.ini and epocanva_english.custom.yaml below the per-user
 # data root, and the text service deploys that patch at the next engine start.
-config_version: "0.1.0-w1"
+config_version: "0.2.0-w2"
 
 schema_list:
   - schema: epocanva_english

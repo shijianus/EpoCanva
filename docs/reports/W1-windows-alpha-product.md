@@ -129,7 +129,7 @@ are recorded in the git-ignored `docs/reports/environment.local.md`.
 | staged `EpoCanva.exe --diagnose <report>` | 0; `package=ready`, 21/21 manifest files verified |
 | staged UI automation (`epocanva_ui_tests.exe`) | 0; `RESULT PASS`; 1372x1052 window at 144 DPI, Tab traversal, Save/read-back, About dialog, screenshot |
 | non-ASCII install + user path diagnose | 0; `package=ready` |
-| non-ASCII install + user path product TSF activation (`tsf_lifecycle_hosted_compat --mode threadmgr`) | 0; 16/16 checks, compiled schema 0/true/1, marker removed |
+| non-ASCII install + user path product TSF activation (`tsf_lifecycle_hosted_compat --mode threadmgr`) | 0; 16/16 checks, compiled schema 0/true/2 (corrected in W2-A: the same-scenario artefacts show settings 0/true/2 and compiled 0/true/2; the W1 text said 1), marker removed |
 | missing `rime.dll` diagnose | 2; `package=incomplete`, `manifest_failures=1` |
 | missing product lexicon diagnose | 2; `package=incomplete`, `manifest_failures=1` |
 | corrupt settings diagnose | 0; `package=ready`, `settings=corrupt` |

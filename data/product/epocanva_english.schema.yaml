@@ -15,7 +15,7 @@
 schema:
   schema_id: epocanva_english
   name: EpoCanva English
-  version: "0.1.0-w1"
+  version: "0.2.0-w2"
 
 menu:
   page_size: 8

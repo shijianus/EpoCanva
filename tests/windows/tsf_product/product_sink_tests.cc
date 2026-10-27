@@ -72,6 +72,12 @@ bool CopyFileTo(const std::filesystem::path& from, const std::filesystem::path& 
   return true;
 }
 
+std::string ReadNarrow(const std::filesystem::path& path) {
+  std::ifstream stream(path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(stream),
+                     std::istreambuf_iterator<char>());
+}
+
 bool StageProduct(const std::filesystem::path& stage, const std::filesystem::path& dll,
                   const std::filesystem::path& rime_dll,
                   const std::filesystem::path& data_dir,
@@ -97,8 +103,7 @@ bool StageProduct(const std::filesystem::path& stage, const std::filesystem::pat
 
 bool PrepareUserRoot(const std::filesystem::path& user_root,
                      const epocanva::product::ProductSettings& settings,
-                     std::wstring* why) {
-  std::error_code ec;
+                     std::wstring* why) {  std::error_code ec;
   std::filesystem::remove_all(user_root, ec);
   std::filesystem::create_directories(user_root / L"engine", ec);
   std::filesystem::create_directories(user_root / L"logs", ec);
@@ -119,6 +124,25 @@ bool PrepareUserRoot(const std::filesystem::path& user_root,
     return false;
   }
   return true;
+}
+
+bool WriteSettingsOnly(const std::filesystem::path& user_root,
+                       const epocanva::product::ProductSettings& settings,
+                       std::wstring* why) {
+  epocanva::product::ProductPaths paths;
+  paths.user_root = user_root;
+  paths.engine_user_dir = user_root / L"engine";
+  paths.log_dir = user_root / L"logs";
+  paths.settings_file = user_root / L"settings.ini";
+  paths.schema_patch_file = paths.engine_user_dir / L"epocanva_english.custom.yaml";
+  paths.deploy_marker_file = paths.engine_user_dir / L"deploy-required";
+  paths.deployed_state_file = paths.engine_user_dir / L"deployed-state";
+  paths.compiled_schema_file =
+      paths.engine_user_dir / L"build" / L"epocanva_english.schema.yaml";
+  paths.compiled_schema_binary =
+      paths.engine_user_dir / L"build" / L"epocanva_english.schema.bin";
+  std::string token;
+  return epocanva::product::SaveSettingsBundle(paths, settings, &token, why);
 }
 
 struct LoadedProduct {
@@ -251,6 +275,23 @@ void PumpSlice(TestHost& host, DWORD milliseconds) {
   host.PumpUntil(g_pump_event, milliseconds);
 }
 
+void PrintTextDiff(const std::wstring& actual, const std::wstring& expected) {
+  std::size_t first = 0;
+  while (first < actual.size() && first < expected.size() &&
+         actual[first] == expected[first]) {
+    ++first;
+  }
+  std::cout << "  text mismatch actual_len=" << actual.size()
+            << " expected_len=" << expected.size() << " first_diff=" << first;
+  if (first < actual.size()) {
+    std::cout << " actual_cp=" << static_cast<unsigned>(actual[first]);
+  }
+  if (first < expected.size()) {
+    std::cout << " expected_cp=" << static_cast<unsigned>(expected[first]);
+  }
+  std::cout << std::endl;
+}
+
 bool WaitForText(TestHost& host, TestDocument* document,
                  const std::wstring& expected, DWORD timeout_ms) {
   const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
@@ -259,7 +300,10 @@ bool WaitForText(TestHost& host, TestDocument* document,
       return true;
     }
     if (::GetTickCount64() >= deadline) {
-      return document->text_utf16() == expected;
+      if (document->text_utf16() != expected) {
+        PrintTextDiff(document->text_utf16(), expected);
+      }
+      return false;
     }
     PumpSlice(host, 10);
   }
@@ -357,13 +401,19 @@ bool SendChar(ITfKeyEventSink* sink, ITfContext* context, WCHAR ch,
   const SHORT mapped = ::VkKeyScanW(ch);
   if (mapped == -1) {
     *error = "the active layout cannot type a test character";
+    std::cerr << "  untypable codepoint=" << static_cast<unsigned>(ch) << std::endl;
     return false;
   }
   const UINT vk = static_cast<UINT>(LOBYTE(mapped));
   const BYTE modifiers = HIBYTE(mapped);
   SetStateForKey(ch, (modifiers & 1) != 0, (modifiers & 2) != 0,
                  (modifiers & 4) != 0);
-  return SendVirtualKey(sink, context, vk, expect_eaten, error);
+  const bool sent = SendVirtualKey(sink, context, vk, expect_eaten, error);
+  if (!sent) {
+    std::cerr << "  send char failed codepoint=" << static_cast<unsigned>(ch)
+              << " vk=" << vk << " shift=" << (modifiers & 1) << std::endl;
+  }
+  return sent;
 }
 
 bool SendText(ITfKeyEventSink* sink, ITfContext* context, const std::wstring& text,
@@ -493,6 +543,11 @@ bool RunRawInputCases(const Paths& paths) {
              "the deployment snapshot was recorded");
   LocalCheck(std::filesystem::is_regular_file(paths.compiled),
              "the compiled schema exists in the user engine directory");
+  const std::string compiled_text = ReadNarrow(paths.compiled);
+  LocalCheck(compiled_text.find("max_completions: 4") != std::string::npos,
+             "the compiled schema carries the configured completion count");
+  LocalCheck(compiled_text.find("max_suggestions: 2") != std::string::npos,
+             "the compiled schema carries the configured suggestion count (2, not 1)");
 
   std::string error;
   LocalCheck(SendText(sink, context, L"Hello", true, &error), "type Hello: " + error);
@@ -536,6 +591,54 @@ bool RunRawInputCases(const Paths& paths) {
              "email is committed unchanged");
 
   error.clear();
+  LocalCheck(SendText(sink, context, L"https://example.com/a?x=1&y=2#z", true, &error),
+             "URL is accepted: " + error);
+  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+             "space after URL is eaten: " + error);
+  LocalCheck(WaitForText(*test_case.host, test_case.doc,
+                         L"Hello helo hel 123-45_67@x.y user@example.com "
+                         L"https://example.com/a?x=1&y=2#z ",
+                         5000),
+             "URL is committed unchanged");
+
+  error.clear();
+  LocalCheck(SendText(sink, context, L"C:\\tmp\\file.txt", true, &error),
+             "path is accepted: " + error);
+  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+             "space after path is eaten: " + error);
+  LocalCheck(WaitForText(*test_case.host, test_case.doc,
+                         L"Hello helo hel 123-45_67@x.y user@example.com "
+                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt ",
+                         5000),
+             "path is committed unchanged");
+
+  error.clear();
+  LocalCheck(SendText(sink, context, L"foo_bar123", true, &error),
+             "identifier is accepted: " + error);
+  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+             "space after identifier is eaten: " + error);
+  LocalCheck(WaitForText(*test_case.host, test_case.doc,
+                         L"Hello helo hel 123-45_67@x.y user@example.com "
+                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
+                         L"foo_bar123 ",
+                         5000),
+             "identifier is committed unchanged");
+
+  error.clear();
+  LocalCheck(SendText(sink, context, L"enter", true, &error),
+             "type enter: " + error);
+  LocalCheck(SendVirtualKey(sink, context, VK_RETURN, true, &error),
+             "Enter while composing is eaten: " + error);
+  LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
+             "space after Enter is eaten: " + error);
+  LocalCheck(WaitForText(*test_case.host, test_case.doc,
+                         L"Hello helo hel 123-45_67@x.y user@example.com "
+                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
+                         L"foo_bar123 enter ",
+                         5000),
+             "Enter does not lose the composition and Space commits it");
+
+  error.clear();
   LocalCheck(SendShortcut(sink, context, 'C', true, false, false, &error),
              "Ctrl+C passes to the host: " + error);
   LocalCheck(SendShortcut(sink, context, 'V', true, false, false, &error),
@@ -547,7 +650,9 @@ bool RunRawInputCases(const Paths& paths) {
   LocalCheck(SendShortcut(sink, context, 'R', false, false, true, &error),
              "Win+R passes to the host: " + error);
   LocalCheck(test_case.doc->text_utf16() ==
-                 L"Hello helo hel 123-45_67@x.y user@example.com ",
+                 L"Hello helo hel 123-45_67@x.y user@example.com "
+                 L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
+                 L"foo_bar123 enter ",
              "shortcut pass-through changed no text");
 
   error.clear();
@@ -556,7 +661,9 @@ bool RunRawInputCases(const Paths& paths) {
   LocalCheck(SendVirtualKey(sink, context, VK_SPACE, true, &error),
              "space after fast typing is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y user@example.com quickbrownfox ",
+                         L"Hello helo hel 123-45_67@x.y user@example.com "
+                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
+                         L"foo_bar123 enter quickbrownfox ",
                          8000),
              "fast typing keeps order and commits once");
 
@@ -565,7 +672,9 @@ bool RunRawInputCases(const Paths& paths) {
   LocalCheck(SendVirtualKey(sink, context, VK_ESCAPE, true, &error),
              "Escape while composing is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y user@example.com quickbrownfox ",
+                         L"Hello helo hel 123-45_67@x.y user@example.com "
+                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
+                         L"foo_bar123 enter quickbrownfox ",
                          5000),
              "Escape cancels the composition without changing committed text");
 
@@ -760,6 +869,179 @@ bool RunStrictUnregisteredCase(const std::filesystem::path& stage,
   return true;
 }
 
+struct HoldSessionResult {
+  std::atomic<bool> ready{false};
+  std::atomic<bool> ok{false};
+  std::string error;
+};
+
+void HoldSessionWorker(const std::filesystem::path& stage, HANDLE ready_event,
+                       HANDLE release_event, HoldSessionResult* result) {
+  TestHost* host = TestHost::Create(&result->error).release();
+  if (host == nullptr) {
+    ::SetEvent(ready_event);
+    return;
+  }
+  TestDocumentOptions options;
+  TestDocument* document = host->CreateDocument(options, &result->error);
+  HWND window = nullptr;
+  if (document == nullptr ||
+      !epocanva::tsf::context::test::CreateVisibleTestWindow(&window, &result->error) ||
+      ::SetFocus(window) == nullptr) {
+    ::SetEvent(ready_event);
+    delete host;
+    return;
+  }
+  epocanva::tsf::context::test::FocusCallResult focus;
+  if (!SetThreadFocus(*host, document, &focus, &result->error)) {
+    ::SetEvent(ready_event);
+    ::DestroyWindow(window);
+    delete host;
+    return;
+  }
+  LoadedProduct product;
+  if (!ActivateProduct(&product, host->thread_manager_for_test(), stage, nullptr)) {
+    result->error = "the deferred session did not activate";
+    ::SetEvent(ready_event);
+    ::DestroyWindow(window);
+    delete host;
+    return;
+  }
+  result->ready.store(true);
+  result->ok.store(ReadyToType(*host, product.sink, document->context(), 15000));
+  ::SetEvent(ready_event);
+  (void)::WaitForSingleObject(release_event, 30000);
+  ReleaseProduct(&product, true);
+  ::DestroyWindow(window);
+  delete host;
+}
+
+
+bool RunFocusSwitchCase(const Paths& paths) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.initial_text_utf16 = L"parent";
+  options.initial_selection_start_utf16 = 6;
+  options.initial_selection_end_utf16 = 6;
+  if (!BeginCase(&test_case, paths.stage, paths.user_root, options, nullptr)) {
+    LocalCheck(false, "focus: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  auto* sink = test_case.product.sink;
+  ITfContext* parent_context = test_case.doc->context();
+  LocalCheck(ReadyToType(*test_case.host, sink, parent_context, 15000),
+             "focus: the parent context is ready");
+  std::string error;
+  LocalCheck(SendText(sink, parent_context, L"one", true, &error) &&
+                 SendVirtualKey(sink, parent_context, VK_SPACE, true, &error) &&
+                 WaitForText(*test_case.host, test_case.doc, L"parentone ", 5000),
+             "focus: the parent context accepts text");
+
+  TestDocumentOptions child_options;
+  child_options.initial_text_utf16 = L"";
+  child_options.initial_selection_start_utf16 = 0;
+  child_options.initial_selection_end_utf16 = 0;
+  TestDocument* child =
+      test_case.host->CreateChildContext(test_case.doc, child_options, &error);
+  LocalCheck(child != nullptr, "focus: a child context is pushed");
+  if (child != nullptr) {
+    PumpSlice(*test_case.host, 300);
+    LocalCheck(ReadyToType(*test_case.host, sink, child->context(), 15000),
+               "focus: the child context is bound");
+    error.clear();
+    LocalCheck(SendText(sink, child->context(), L"child", true, &error) &&
+                   SendVirtualKey(sink, child->context(), VK_SPACE, true, &error) &&
+                   WaitForText(*test_case.host, child, L"child ", 8000),
+               "focus: the child context accepts text");
+    LocalCheck(test_case.doc->text_utf16() == L"parentone ",
+               "focus: the parent document was not written after the switch");
+  }
+  EndCase(&test_case);
+  return true;
+}
+
+bool RunSettingsTimingCase(const std::filesystem::path& stage,
+                            const std::filesystem::path& user_root,
+                            const std::filesystem::path& marker,
+                            const std::filesystem::path& compiled,
+                            std::wstring* why) {
+  epocanva::product::ProductSettings first;
+  first.completion_enabled = true;
+  first.completion_candidates = 4;
+  first.spelling_enabled = false;
+  first.spelling_candidates = 2;
+  epocanva::product::ProductSettings second;
+  second.completion_enabled = true;
+  second.completion_candidates = 6;
+  second.spelling_enabled = true;
+  second.spelling_candidates = 2;
+
+  if (!PrepareUserRoot(user_root, first, why)) {
+    return false;
+  }
+  Paths paths;
+  paths.stage = stage;
+  paths.user_root = user_root;
+  paths.marker = marker;
+  paths.compiled = compiled;
+  Case held;
+  TestDocumentOptions options;
+  if (!BeginCase(&held, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "timing: the first session activates");
+    return false;
+  }
+  LocalCheck(ReadyToType(*held.host, held.product.sink, held.doc->context(), 15000),
+             "timing: the first session is ready");
+  const std::string before = ReadNarrow(compiled);
+  LocalCheck(before.find("max_completions: 4") != std::string::npos,
+             "timing: the first engine compiled the first settings");
+
+  LocalCheck(WriteSettingsOnly(user_root, second, why),
+             "timing: new settings are saved while the engine runs");
+  HANDLE ready_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  HANDLE release_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  HoldSessionResult deferred;
+  std::thread waiter(HoldSessionWorker, stage, ready_event, release_event, &deferred);
+  const bool ready_signalled = ::WaitForSingleObject(ready_event, 25000) == WAIT_OBJECT_0;
+  LocalCheck(ready_signalled && deferred.ok.load(),
+             "timing: the second session joins the running engine");
+  LocalCheck(std::filesystem::is_regular_file(marker),
+             "timing: the new settings marker survives while the engine runs");
+  const std::string during = ReadNarrow(compiled);
+  LocalCheck(during.find("max_completions: 4") != std::string::npos,
+             "timing: the running engine is not redeployed underneath itself");
+  ::SetEvent(release_event);
+  waiter.join();
+  ::CloseHandle(release_event);
+  ::CloseHandle(ready_event);
+  EndCase(&held);
+
+  Case renewed;
+  if (!BeginCase(&renewed, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "timing: the restarted engine activates");
+    return false;
+  }
+  LocalCheck(ReadyToType(*renewed.host, renewed.product.sink, renewed.doc->context(),
+                         15000),
+             "timing: the restarted engine is ready");
+  const std::string after = ReadNarrow(compiled);
+  LocalCheck(after.find("max_completions: 6") != std::string::npos &&
+                 after.find("max_suggestions: 2") != std::string::npos,
+             "timing: the restarted engine compiled the saved settings");
+  LocalCheck(!std::filesystem::is_regular_file(marker),
+             "timing: the marker is retired after the deferred deployment");
+  std::string error;
+  LocalCheck(SendText(renewed.product.sink, renewed.doc->context(), L"timing", true,
+                      &error) &&
+                 SendVirtualKey(renewed.product.sink, renewed.doc->context(), VK_SPACE,
+                                true, &error) &&
+                 WaitForText(*renewed.host, renewed.doc, L"timing ", 8000),
+             "timing: the restarted engine accepts input");
+  EndCase(&renewed);
+  return true;
+}
+
 bool RunEngineMissingCase(const std::filesystem::path& stage,
                           const std::filesystem::path& user_root,
                           const std::filesystem::path& marker,
@@ -833,7 +1115,7 @@ int main(int argc, char** argv) {
   std::error_code ec;
   std::filesystem::create_directories(run_root, ec);
   const std::filesystem::path stage = run_root / L"stage";
-  const std::filesystem::path user_root = run_root / L"user";
+  const std::filesystem::path user_root = run_root / L"鐢ㄦ埛 鏁版嵁";
   const std::filesystem::path marker = user_root / L"engine" / L"deploy-required";
   const std::filesystem::path state = user_root / L"engine" / L"deployed-state";
   const std::filesystem::path compiled =
@@ -842,10 +1124,27 @@ int main(int argc, char** argv) {
   epocanva::product::ProductSettings settings;
   settings.completion_enabled = true;
   settings.completion_candidates = 4;
-  settings.spelling_enabled = false;
+  settings.spelling_enabled = true;
   settings.spelling_candidates = 2;
 
-  if (mode == "multi") {
+  if (mode == "focus") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                           &why),
+               "focus: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "focus: settings and marker written");
+    Paths focus_paths;
+    focus_paths.stage = stage;
+    focus_paths.user_root = user_root;
+    RunFocusSwitchCase(focus_paths);
+  } else if (mode == "timing") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                           &why),
+               "timing: product staged");
+    RunSettingsTimingCase(stage, user_root, marker, compiled, &why);
+  } else if (mode == "multi") {
     std::wstring why;
     LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
                            &why),

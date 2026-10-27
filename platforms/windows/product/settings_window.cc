@@ -225,7 +225,7 @@ bool SettingsWindow::OnCreate() {
   CreateControl(L"BUTTON", L"Candidate display", BS_GROUPBOX, 0, margin, 348,
                 left_width, 90);
   CreateControl(L"STATIC",
-                L"Candidate window: not available in this build (planned for W2).\r\n"
+                L"Candidate window: not available in this build (planned for W2-B).\r\n"
                 L"Page size: 8 candidates, fixed by the deployed schema.\r\n"
                 L"No candidate-layout option is exposed yet.",
                 SS_LEFT, 0, margin + 14, 372, left_width - 28, 58);

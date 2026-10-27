@@ -474,6 +474,36 @@ set_tests_properties(product.integration.sink_multi
              LABELS "windows;product;sink;multi-sta;shared-engine;no-registration")
 
 add_test(
+  NAME product.integration.sink_settings_timing
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-settings-timing
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-timing;--mode;timing"
+    -DTIMEOUT_SECONDS=300
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_settings_timing
+  PROPERTIES TIMEOUT 360
+             LABELS "windows;product;sink;deployment;settings;timing;no-registration")
+
+add_test(
+  NAME product.integration.sink_focus_switch
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-focus
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-focus;--mode;focus"
+    -DTIMEOUT_SECONDS=240
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_focus_switch
+  PROPERTIES TIMEOUT 300
+             LABELS "windows;product;sink;focus;generation;no-registration")
+
+add_test(
   NAME product.integration.sink_strict_unregistered
   COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
