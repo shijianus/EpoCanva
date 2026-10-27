@@ -90,7 +90,8 @@ int main(int argc, char** argv) {
 
   StaResultWaker waker;
   std::wstring why;
-  Check(waker.Start(&target, executor_event, 77, &why), "waker starts on this STA");
+  Check(waker.Start(&target, executor_event, ::GetModuleHandleW(nullptr), 77, &why),
+        "waker starts on this STA");
   Check(waker.window_for_test() != nullptr, "a message-only window exists");
 
   ::SetEvent(executor_event);

@@ -62,8 +62,10 @@ class StaResultWaker {
 
   // `target` must outlive Stop(). `executor_event` may be null; pacing then relies on the
   // short interval alone. `generation` is copied into every wake and checked on receipt.
-  bool Start(StaWakeTarget* target, HANDLE executor_event, std::uint64_t generation,
-             std::wstring* why);
+  // `module` owns the window class and its WndProc: the text-service DLL must pass its own
+  // HINSTANCE, never the host EXE's, or unloading the DLL would leave a dangling class.
+  bool Start(StaWakeTarget* target, HANDLE executor_event, HMODULE module,
+             std::uint64_t generation, std::wstring* why);
   void Stop();
   bool started() const { return started_; }
 
@@ -86,6 +88,7 @@ class StaResultWaker {
   void RequestWatcherReconfigure();
 
   StaWakeTarget* target_ = nullptr;
+  HMODULE module_ = nullptr;
   HWND window_ = nullptr;
   HANDLE stop_event_ = nullptr;
   HANDLE reconfigure_event_ = nullptr;

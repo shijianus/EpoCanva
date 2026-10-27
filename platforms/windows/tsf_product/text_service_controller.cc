@@ -6,6 +6,7 @@
 
 #include "key_text_translation.h"
 #include "keyboard_state.h"
+#include "module_state.h"
 
 namespace epocanva {
 namespace tsf {
@@ -177,7 +178,8 @@ bool ProductTextController::Start(const Options& options, std::wstring* why) {
     return false;
   }
   subscribed_ = true;
-  if (!waker_.Start(this, executor_->ResultReadyEvent(), generation_, why)) {
+  if (!waker_.Start(this, executor_->ResultReadyEvent(), ModuleInstance(),
+                    generation_, why)) {
     ResetObjects();
     return false;
   }

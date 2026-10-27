@@ -62,21 +62,56 @@ LRESULT CALLBACK WakeWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM
   return ::DefWindowProcW(window, message, wparam, lparam);
 }
 
-bool EnsureWindowClass(HINSTANCE instance, std::wstring* why) {
+std::mutex g_class_mutex;
+HMODULE g_class_module = nullptr;
+int g_class_refcount = 0;
+
+bool EnsureWindowClass(HMODULE module, std::wstring* why) {
+  if (module == nullptr) {
+    if (why != nullptr) {
+      *why = L"the STA waker needs the owning module instance";
+    }
+    return false;
+  }
+  std::lock_guard<std::mutex> guard(g_class_mutex);
+  if (g_class_refcount > 0) {
+    if (g_class_module != module) {
+      if (why != nullptr) {
+        *why = L"the STA wake window class is already owned by another loaded module";
+      }
+      return false;
+    }
+    ++g_class_refcount;
+    return true;
+  }
   WNDCLASSEXW window_class = {};
   window_class.cbSize = sizeof(window_class);
   window_class.lpfnWndProc = WakeWindowProc;
-  window_class.hInstance = instance;
+  window_class.hInstance = module;
   window_class.lpszClassName = kWakeWindowClass;
   const ATOM atom = ::RegisterClassExW(&window_class);
-  if (atom == 0 && ::GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+  if (atom == 0) {
     if (why != nullptr) {
       *why = L"RegisterClassExW failed with error " +
              std::to_wstring(::GetLastError());
     }
     return false;
   }
+  g_class_module = module;
+  g_class_refcount = 1;
   return true;
+}
+
+void ReleaseWindowClass(HMODULE module) {
+  std::lock_guard<std::mutex> guard(g_class_mutex);
+  if (g_class_refcount == 0 || g_class_module != module) {
+    return;
+  }
+  --g_class_refcount;
+  if (g_class_refcount == 0) {
+    (void)::UnregisterClassW(kWakeWindowClass, g_class_module);
+    g_class_module = nullptr;
+  }
 }
 
 }  // namespace
@@ -90,7 +125,8 @@ StaResultWaker::StaResultWaker() : impl_(new Impl) {}
 StaResultWaker::~StaResultWaker() { Stop(); }
 
 bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
-                           std::uint64_t generation, std::wstring* why) {
+                           HMODULE module, std::uint64_t generation,
+                           std::wstring* why) {
   if (started_) {
     if (why != nullptr) {
       *why = L"the STA waker is already started";
@@ -103,10 +139,10 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
     }
     return false;
   }
-  const HINSTANCE instance = ::GetModuleHandleW(nullptr);
-  if (!EnsureWindowClass(instance, why)) {
+  if (!EnsureWindowClass(module, why)) {
     return false;
   }
+  const HINSTANCE instance = module;
   stop_event_ = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
   reconfigure_event_ = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (stop_event_ == nullptr || reconfigure_event_ == nullptr) {
@@ -134,12 +170,14 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
     ::CloseHandle(reconfigure_event_);
     stop_event_ = nullptr;
     reconfigure_event_ = nullptr;
+    ReleaseWindowClass(module);
     return false;
   }
   ::SetWindowLongPtrW(window_, GWLP_USERDATA,
                       reinterpret_cast<LONG_PTR>(this));
 
   target_ = target;
+  module_ = module;
   executor_event_ = executor_event;
   generation_ = generation;
   stop_requested_.store(false);
@@ -199,6 +237,8 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
     reconfigure_event_ = nullptr;
     target_ = nullptr;
     executor_event_ = nullptr;
+    ReleaseWindowClass(module_);
+    module_ = nullptr;
     if (why != nullptr) {
       *why = L"std::thread construction failed for the STA waker";
     }
@@ -251,6 +291,10 @@ void StaResultWaker::Stop() {
   }
   executor_event_ = nullptr;
   target_ = nullptr;
+  if (module_ != nullptr) {
+    ReleaseWindowClass(module_);
+    module_ = nullptr;
+  }
   started_ = false;
   stops_.fetch_add(1);
 }
