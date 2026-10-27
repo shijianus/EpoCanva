@@ -22,8 +22,9 @@
 // DIRECTORIES. shared_data_dir, user_data_dir and log_dir are absolute and supplied by the
 // caller. Nothing here reads %APPDATA%, the current directory or an existing Rime installation,
 // and nothing downloads, scans for language packs or deploys data implicitly. RimeTraits
-// carries narrow strings, so the three directories must be ASCII; a non-ASCII path is refused
-// instead of being handed to an encoding this layer cannot verify.
+// carries UTF-8 strings and librime converts them with std::filesystem::u8path on Windows
+// (third_party/librime/src/rime/common.h:84-96), so this bridge converts each native wide path
+// to UTF-8 with WideCharToMultiByte instead of refusing non-ASCII directories.
 //
 // DEPLOYMENT IS NOT RUNTIME USE. A runtime may be asked, once during Start, to deploy named
 // files that are already in shared_data_dir. This exists for test preparation and for an
@@ -53,7 +54,7 @@ enum class RuntimeStartStatus {
   kOk = 0,
   kAlreadyStarted,   // this object's Start was already attempted
   kAnotherRuntimeActive,  // a process-global RimeInitialize is already live
-  kInvalidOptions,   // relative path, missing directory, non-ASCII engine directory, ...
+  kInvalidOptions,   // relative path, missing directory, path not encodable as UTF-8, ...
   kDllLoadFailed,    // LoadLibraryExW failed; diagnostic carries GetLastError()
   kDllIdentityMismatch,  // the module that owns rime_get_api() is not the requested file
   kApiSymbolMissing,     // rime_get_api is not exported

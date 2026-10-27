@@ -84,22 +84,32 @@ bool SamePath(const std::wstring& left, const std::wstring& right) {
          CSTR_EQUAL;
 }
 
-bool IsAsciiPath(const std::filesystem::path& path) {
-  const std::wstring& native = path.native();
-  for (const wchar_t ch : native) {
-    if (ch < 0 || ch > 0x7F) {
-      return false;
-    }
+bool WideToUtf8(const std::wstring& wide, std::string* out) {
+  out->clear();
+  if (wide.empty()) {
+    return true;
+  }
+  const int bytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                          wide.data(), static_cast<int>(wide.size()),
+                                          nullptr, 0, nullptr, nullptr);
+  if (bytes <= 0) {
+    return false;
+  }
+  out->resize(static_cast<std::size_t>(bytes));
+  const int written = ::WideCharToMultiByte(
+      CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), static_cast<int>(wide.size()),
+      out->data(), bytes, nullptr, nullptr);
+  if (written != bytes) {
+    out->clear();
+    return false;
   }
   return true;
 }
 
-std::string NarrowAsciiPath(const std::filesystem::path& path) {
-  const std::wstring& native = path.native();
+std::string WidePathToUtf8(const std::filesystem::path& path) {
   std::string out;
-  out.reserve(native.size());
-  for (const wchar_t ch : native) {
-    out.push_back(static_cast<char>(ch));
+  if (!WideToUtf8(path.native(), &out)) {
+    return std::string();
   }
   return out;
 }
@@ -124,9 +134,9 @@ bool ValidateDirectory(const std::filesystem::path& path, const char* name,
     *why = std::string(name) + " must be absolute";
     return false;
   }
-  if (!IsAsciiPath(path)) {
-    *why = std::string(name) + " must be ASCII: librime's C traits take narrow paths and "
-                               "this bridge will not guess an encoding";
+  std::string utf8;
+  if (!WideToUtf8(path.native(), &utf8)) {
+    *why = std::string(name) + " cannot be encoded as UTF-8";
     return false;
   }
   std::error_code ec;
@@ -174,8 +184,8 @@ bool ValidateOptions(const RuntimeOptions& options, std::string* why) {
       *why = "every deployment schema path must be absolute";
       return false;
     }
-    if (!IsAsciiPath(schema)) {
-      *why = "every deployment schema path must be ASCII";
+    if (WidePathToUtf8(schema).empty()) {
+      *why = "every deployment schema path must be encodable as UTF-8";
       return false;
     }
     if (!std::filesystem::is_regular_file(schema, ec) || ec) {
@@ -367,9 +377,6 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
     g_runtime_slot_held.store(false);
     return RuntimeStartStatus::kInvalidOptions;
   }
-  core.shared_data_dir_utf8 = NarrowAsciiPath(options.shared_data_dir);
-  core.user_data_dir_utf8 = NarrowAsciiPath(options.user_data_dir);
-  core.log_dir_utf8 = NarrowAsciiPath(options.log_dir);
 
   auto fail = [&](RuntimeStartStatus status, std::string diagnostic) {
     if (impl.initialize_entered) {
@@ -400,6 +407,13 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
     g_runtime_slot_held.store(false);
     return status;
   };
+
+  if (!WideToUtf8(options.shared_data_dir.native(), &core.shared_data_dir_utf8) ||
+      !WideToUtf8(options.user_data_dir.native(), &core.user_data_dir_utf8) ||
+      !WideToUtf8(options.log_dir.native(), &core.log_dir_utf8)) {
+    return fail(RuntimeStartStatus::kInvalidOptions,
+                "a runtime directory cannot be encoded as UTF-8");
+  }
 
   const DWORD load_flags =
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
@@ -532,7 +546,7 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
                   "deploy_config_file refused " + options.deployment->config_file_name);
     }
     for (const std::filesystem::path& schema : options.deployment->schema_files) {
-      const std::string schema_utf8 = NarrowAsciiPath(schema);
+      const std::string schema_utf8 = WidePathToUtf8(schema);
       core.counts.deploy_calls += 1;
       core.deploy_calls += 1;
       if (api->deploy_schema(schema_utf8.c_str()) == False) {
@@ -619,9 +633,9 @@ RuntimeInfo RimeRuntime::Info() const {
   RuntimeInfo info;
   info.requested_dll_path = core.requested_dll_path;
   info.loaded_dll_path = core.loaded_dll_path;
-  info.shared_data_dir = std::filesystem::path(core.shared_data_dir_utf8).wstring();
-  info.user_data_dir = std::filesystem::path(core.user_data_dir_utf8).wstring();
-  info.log_dir = std::filesystem::path(core.log_dir_utf8).wstring();
+  info.shared_data_dir = std::filesystem::u8path(core.shared_data_dir_utf8).wstring();
+  info.user_data_dir = std::filesystem::u8path(core.user_data_dir_utf8).wstring();
+  info.log_dir = std::filesystem::u8path(core.log_dir_utf8).wstring();
   info.librime_version = core.librime_version;
   info.initialized = core.initialized;
   info.api_complete = core.api_complete;
@@ -669,10 +683,10 @@ SessionCreateResult RimeRuntime::CreateSession(const std::string& schema_id) {
   std::error_code ec;
   const std::filesystem::path compiled_name = schema_id + ".schema.yaml";
   std::filesystem::path compiled_schema =
-      std::filesystem::path(core.user_data_dir_utf8) / "build" / compiled_name;
+      std::filesystem::u8path(core.user_data_dir_utf8) / "build" / compiled_name;
   if (!std::filesystem::is_regular_file(compiled_schema, ec) || ec) {
     compiled_schema =
-        std::filesystem::path(core.shared_data_dir_utf8) / "build" / compiled_name;
+        std::filesystem::u8path(core.shared_data_dir_utf8) / "build" / compiled_name;
     if (!std::filesystem::is_regular_file(compiled_schema, ec) || ec) {
       result.status = SessionCreateStatus::kSchemaUnavailable;
       result.diagnostic =
