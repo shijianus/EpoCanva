@@ -106,7 +106,18 @@ struct EngineExecutor::Impl {
   Impl(ExecutorOptions options, std::unique_ptr<EngineBackend> backend)
       : options_(std::move(options)),
         backend_(std::move(backend)),
-        capacity_(options_.capacity) {}
+        capacity_(options_.capacity) {
+    // Auto-reset: one wait consumes one wake. Results are never lost because the STA
+    // drains everything it can take, and a later publication sets the event again.
+    result_event_ = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  }
+
+  ~Impl() {
+    if (result_event_ != nullptr) {
+      ::CloseHandle(result_event_);
+      result_event_ = nullptr;
+    }
+  }
 
   // --- lifecycle -----------------------------------------------------------------------
   StartStatus Start();
@@ -160,6 +171,7 @@ struct EngineExecutor::Impl {
   std::unordered_map<std::uint64_t, ClientLifecycle> clients_;
   std::unordered_map<std::uint64_t, OutstandingMeta> outstanding_;
   std::unordered_map<std::uint64_t, CommandResult> results_;
+  HANDLE result_event_ = nullptr;
 
   std::uint64_t next_request_ = 1;
   std::uint64_t last_submitted_ = 0;
@@ -368,6 +380,9 @@ void EngineExecutor::Impl::WorkerMain() {
       } catch (...) {
         fatal_ = true;
       }
+      if (result_event_ != nullptr) {
+        ::SetEvent(result_event_);
+      }
       result_cv_.notify_all();
     }
   }
@@ -446,6 +461,9 @@ void EngineExecutor::Impl::FinishStop(bool runtime_started) {
     }
     outstanding_.clear();
 
+    if (result_event_ != nullptr) {
+      ::SetEvent(result_event_);
+    }
     lifecycle_cv_.notify_all();
     result_cv_.notify_all();
   }
@@ -945,6 +963,8 @@ WaitStatus EngineExecutor::WaitForResult(RequestId request,
 TakeStatus EngineExecutor::TakeResult(RequestId request, CommandResult* result) {
   return impl_->Take(request, result);
 }
+
+HANDLE EngineExecutor::ResultReadyEvent() const { return impl_->result_event_; }
 
 CapacityUsage EngineExecutor::capacity() const { return impl_->Capacity(); }
 ClientUsage EngineExecutor::clients() const { return impl_->ClientCounts(); }

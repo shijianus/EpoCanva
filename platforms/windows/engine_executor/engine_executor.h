@@ -60,6 +60,8 @@
 #include <string>
 #include <variant>
 
+#include <windows.h>
+
 #include "engine_update.h"
 #include "input_controller.h"
 #include "key_event.h"
@@ -306,6 +308,11 @@ class EngineExecutor {
   WaitStatus WaitForResult(RequestId request, std::chrono::milliseconds timeout);
   // Consumes the result exactly once. A second take reports kAlreadyTaken.
   TakeStatus TakeResult(RequestId request, CommandResult* result);
+
+  // W2: one auto-reset Win32 event signalled whenever a terminal result is published.
+  // It is a wake hint, not a result: waiting on it does not consume or reorder anything,
+  // and the caller still takes each result by id. Null only if CreateEvent failed.
+  HANDLE ResultReadyEvent() const;
 
   CapacityUsage capacity() const;
   // Client lifecycle counts. Reading them never waits and never consumes anything.

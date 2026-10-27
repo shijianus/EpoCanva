@@ -47,6 +47,7 @@ set(_product_defines
 
 set(_product_source_dir "${CMAKE_CURRENT_LIST_DIR}")
 set(_tsf_source_dir "${CMAKE_CURRENT_LIST_DIR}/../tsf")
+set(_tsf_product_source_dir "${CMAKE_CURRENT_LIST_DIR}/../tsf_product")
 set(_bridge_source_dir "${CMAKE_CURRENT_LIST_DIR}/../engine_bridge")
 set(_executor_source_dir "${CMAKE_CURRENT_LIST_DIR}/../engine_executor")
 set(_input_source_dir "${CMAKE_CURRENT_LIST_DIR}/../input")
@@ -220,8 +221,25 @@ target_include_directories(epocanva_ui_tests PRIVATE "${_product_source_dir}")
 target_link_libraries(epocanva_ui_tests PRIVATE
   epocanva_product_state user32 gdi32 ole32 shell32 bcrypt)
 
+# W2: the fixed STA wake channel. Library code only; the test drives a real message queue.
+add_library(epocanva_sta_waker STATIC
+  "${_tsf_product_source_dir}/sta_result_waker.cc"
+  "${_tsf_product_source_dir}/sta_result_waker.h")
+target_compile_definitions(epocanva_sta_waker PRIVATE ${_product_definitions})
+target_compile_options(epocanva_sta_waker PRIVATE ${_product_options})
+target_include_directories(epocanva_sta_waker PUBLIC "${_tsf_product_source_dir}")
+target_link_libraries(epocanva_sta_waker PUBLIC user32)
+
+add_executable(epocanva_sta_waker_tests
+  "${_tsf_product_source_dir}/tests/sta_waker_tests.cc")
+target_compile_definitions(epocanva_sta_waker_tests PRIVATE ${_product_definitions})
+target_compile_options(epocanva_sta_waker_tests PRIVATE ${_product_options})
+target_include_directories(epocanva_sta_waker_tests PRIVATE
+  "${_tsf_product_source_dir}")
+target_link_libraries(epocanva_sta_waker_tests PRIVATE epocanva_sta_waker)
+
 set_target_properties(epocanva_product_unit_tests epocanva_product_engine_tests
-                      epocanva_ui_tests PROPERTIES
+                      epocanva_ui_tests epocanva_sta_waker_tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${_product_bin_dir}"
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_product_bin_dir}"
   RUNTIME_OUTPUT_DIRECTORY_DEBUG "${_product_bin_dir_debug}")
@@ -276,6 +294,20 @@ add_test(
 set_tests_properties(product.integration.deployment_snapshot
   PROPERTIES TIMEOUT 240
              LABELS "windows;product;deployment;cross-process;marker")
+
+add_test(
+  NAME product.unit.sta_waker
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_sta_waker_tests>
+    -DCASE=product-sta-waker
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--self-test"
+    -DTIMEOUT_SECONDS=120
+    -P ${_product_assert})
+set_tests_properties(product.unit.sta_waker
+  PROPERTIES TIMEOUT 180 LABELS "windows;product;sta;wake;thread")
 
 add_test(
   NAME product.ui.settings_window
