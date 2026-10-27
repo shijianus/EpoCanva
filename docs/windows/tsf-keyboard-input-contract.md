@@ -46,12 +46,32 @@
 Focus/generation 变化时：排队项全部记为 `kFocusChanged` 失败；在途项立即标失败但保留到
 协调器回到 `Idle` 才释放，下一键不可能越过它。永远不会把旧 generation 的键投递到新文档。
 
-### 溢出策略（未完成项）
+### 压力降级（W2-A-R）
 
-- 无组合且队列达上限：`OnTestKeyDown/OnKeyDown` 返回 `FALSE`，宿主保留按键；
-- 组合进行中且队列达上限：没有安全的 pass-through（宿主会把字符插进 preedit）。
-  实现选择是**吃下并记录 `kQueueOverflow` 失败**，同时报告为未解决阻塞；
-  这不是“自然输入已完成”的声明。见 W2-A 报告 §7。
+只增大容量不是解决。控制器在**高水位**（`KeyAdmissionQueue::kHighWater = 24`）切换策略：
+
+1. 队列中的**未提交**尾部按 FIFO 撤出（`WithdrawQueued`），逐键折算成一段 UTF-16 原样文本；
+   在途的单个引擎键保持不动。被撤出的键记为 `deferred_raw`，**不是失败**。
+2. 降级期间的文本键、Space、Enter、Escape、BackSpace 继续被吃下并折叠进这段文本：
+   Space 追加 U+0020 并结束 token；Enter/Escape 结束 token 但不取消已捕获文本（记为
+   `raw_ignored_edits`）；BackSpace 只回退捕获文本中的最后一个 code unit，捕获为空时记为
+   被忽略的编辑。快捷键与隐私拒绝永远不进入捕获。
+3. 协调器空闲时用新的 `SubmitRawCommit` 把这段文本一次提交到文档：若写者仍拥有组合，
+   plan 用“当前显示文本 + 捕获后缀”替换并结束组合；否则在跟踪的 caret 处插入。
+   **这次提交不调用引擎**，因此没有补全/拼写建议——原文优先。
+4. 提交成功后引擎客户端状态已过期，控制器使绑定退役并重建；重建完成后引擎路径恢复。
+   降级不会把后续字符散给宿主，也不会在超时后自动重放。
+5. 捕获上限 `kRawCapacityUtf16 = 1024`。超过上限的键仍被吃下以保住已有顺序，但会记入
+   `raw_dropped_keys` / `failed_raw_capacity`（`last_failure=raw-capacity`），
+   **不声称该键已应用**。提交失败同样走 `raw-commit-failed` 计数并以明确失败结束该段。
+6. 隐私/许可在降级途中变成 Denied/Unknown 时，已捕获文本无法再写入：整段记为
+   `kPermissionRefused` 失败，宿主获得之后的按键。这是不可恢复故障的明确报告，不是静默丢弃。
+
+**首 token 规则**（`HostTokenOwnership`，`platforms/windows/tsf_product/key_admission.h`）：
+一旦某个 token 的第一个字符交给宿主（许可 Unknown/Denied、引擎未就绪、队列满且无待应用
+输入等），该 token 余下字符一律直通，直到空格、非 token 标点、编辑键或焦点真正移走。
+`@ . _ : / \ ? & = # % + -` 与字母数字一样是 token 字符，不是边界；快捷键不结束 token。
+许可在 token 中途变为 Allowed 也不会让引擎接管该 token。Unknown/Denied 从不向引擎发送输入。
 
 ## 4. 固定 STA 唤醒
 
@@ -78,5 +98,10 @@ Focus/generation 变化时：排队项全部记为 `kFocusChanged` 失败；在�
 - 同一进程：`EngineHostBroker` 成功后清掉配置中的一次性 `deployment`，后续租约不重复部署；
 - 跨进程：命名互斥量序列化启动/部署；`engine.lock` 的字节范围锁区分
   **独占部署**（先删除派生的 `engine/build` 强制重编译）与 **共享运行**（每个活动引擎持有）；
-  有其它进程运行时，新设置标记保留，推迟到下一个真正的引擎启动；
+- W2-A-R：`ActivateInternal` 在 `Complete` 之后调用 `EngineStartTransaction::TakeLeaseLock()`，
+  共享锁句柄由激活状态持有到 `Deactivate`（或异常析构）；没有这一步时共享锁随事务结束而释放，
+  另一个进程的部署会取得独占锁并删除仍在使用的编译产物。`Deactivate` 先释放引擎租约
+  （停止/加入执行器）再关闭锁句柄；
+- 有其它进程运行时，独占锁失败，本次部署明确**降级为共享执行**：新宿主仍可激活/输入旧配置，
+  设置 marker 保留，推迟到下一个真正的引擎启动；不会无限等待，也不会把共享锁升级为独占；
 - 运行中的引擎不会被重新部署；设置修改在下一次引擎启动/宿主重启生效，界面文案已按此声明。

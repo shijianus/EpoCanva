@@ -51,7 +51,8 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
   没有多分隔符词形、没有 Unicode 弯撇号/破折号规范化、没有自动标点替换、
   没有 URL/邮箱/代码解析器；没有**系统注册**的 TSF 输入法、候选 UI、Android 前端与安装器；
   W1 只交付未注册的产品 TSF DLL 与设置壳；W2-A 已把产品 TSF DLL 接到真实
-  `ITfKeyEventSink`、上下文观察、真实许可、协调器、固定 STA 唤醒与有界输入队列，
+  `ITfKeyEventSink`、上下文观察、真实许可、协调器、固定 STA 唤醒与有界输入队列；
+  W2-A-R 又补上高水位原样降级（文本不丢/不重/不乱序）、首 token 宿主归属与运行期共享锁，
   但**仍未注册**、未改系统输入法、没有候选 UI（W2-B）与安装器（W3）。
 - 因此此刻仓库能演示的输入仍极其有限：默认集成测试补全的是那 54 个词，
   但可以连续打多个词并用空格逐个提交（`Hello world `）；
@@ -81,7 +82,8 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 | P2.6 | 一次编辑拼写建议：门槛表、四类编辑、`spell` 标签列、预算与长度窗口、提交边界（默认不自动替换） | 引擎与夹具已交付；集成测试走正式入口 `tools/test_english_integration.ps1` | `docs/reports/integration-harness-recovery-status.md`（逐条能力的恢复覆盖矩阵） |
 | W1 | Windows 英文 Alpha 产品壳：设置/状态 EXE、产品 TSF DLL 配置与部署标记、离线数据与白名单暂存 | 已交付（内部 Alpha；未注册系统输入） | `docs/reports/W1-windows-alpha-product.md` |
 | W2-A | 产品 TSF 生命周期接线：真实 key sink、上下文/许可/协调器、固定 STA 唤醒、有界输入准入、部署指纹与跨进程一致性 | 已交付（内部 W2 运行包；未注册，候选 UI 留给 W2-B） | `docs/reports/W2-A-product-input.md` |
-| 之后 | 系统键盘/焦点/候选 UI（W2）、注册/卸载/安装器（W3）、其余英文能力、Android | 未开始 | — |
+| W2-A-R | 输入可靠性收敛：高水位原样降级（原文优先于补全/拼写建议）、首 token 宿主归属、宿主默认输入与参考文档模型、运行期共享锁取证 | 已交付（内部运行包 `0.2.1-w2r`；未注册） | `docs/reports/W2-A-R-input-reliability.md` |
+| 之后 | 系统键盘/焦点/候选 UI（W2-B）、注册/卸载/安装器（W3）、其余英文能力、Android | 未开始 | — |
 
 ## 目录结构
 
