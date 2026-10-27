@@ -41,6 +41,13 @@ void WriteText(const std::filesystem::path& path, const std::string& text) {
   stream.write(text.data(), static_cast<std::streamsize>(text.size()));
 }
 
+void ReleaseLeaseLock(epocanva::product::EngineStartTransaction* transaction) {
+  void* lock = transaction->TakeLeaseLock();
+  if (lock != nullptr) {
+    ::CloseHandle(static_cast<HANDLE>(lock));
+  }
+}
+
 bool Exists(const std::filesystem::path& path) {
   std::error_code ec;
   return std::filesystem::is_regular_file(path, ec) && !ec;
@@ -185,6 +192,7 @@ void TestFingerprintLifecycle(const std::filesystem::path& user_root) {
   WriteText(paths.compiled_schema_file, "simulated compiled schema\n");
   const std::string expected_fingerprint = second.fingerprint();
   Check(second.Complete(&why), "Complete accepts the compiled artefact");
+  ReleaseLeaseLock(&second);
   Check(!Exists(paths.deploy_marker_file), "the marker is retired after the record");
   Check(Exists(paths.deployed_state_file), "the deployment snapshot record exists");
   const std::string state = ReadText(paths.deployed_state_file);
@@ -196,6 +204,7 @@ void TestFingerprintLifecycle(const std::filesystem::path& user_root) {
   Check(!third.deployment_requested(),
         "an unchanged snapshot does not request a second deployment");
   Check(third.Complete(&why), "third Complete succeeds without writing");
+  ReleaseLeaseLock(&third);
 
   settings.spelling_enabled = true;
   settings.spelling_candidates = 3;
@@ -204,7 +213,10 @@ void TestFingerprintLifecycle(const std::filesystem::path& user_root) {
   epocanva::product::EngineStartTransaction changed;
   Check(changed.Prepare(&why), "Prepare after a settings change succeeds");
   Check(changed.deployment_requested(), "a changed settings snapshot requests deployment");
+  std::filesystem::create_directories(paths.compiled_schema_file.parent_path(), ec);
+  WriteText(paths.compiled_schema_file, "simulated compiled schema\n");
   Check(changed.Complete(&why), "Complete after a settings change succeeds");
+  ReleaseLeaseLock(&changed);
   Check(!Exists(paths.deploy_marker_file), "the new marker is retired");
   const std::string changed_state = ReadText(paths.deployed_state_file);
   Check(changed_state.find(changed.fingerprint()) != std::string::npos,

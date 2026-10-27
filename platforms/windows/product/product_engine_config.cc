@@ -218,6 +218,38 @@ void ReleaseStartLock(void** mutex) {
   g_lock_owner.store(0);
 }
 
+bool TryLockFile(HANDLE file, bool exclusive) {
+  OVERLAPPED overlapped = {};
+  DWORD flags = LOCKFILE_FAIL_IMMEDIATELY;
+  if (exclusive) {
+    flags |= LOCKFILE_EXCLUSIVE_LOCK;
+  }
+  return ::LockFileEx(file, flags, 0, 1, 0, &overlapped) != FALSE;
+}
+
+bool AcquireSharedLock(HANDLE file, DWORD timeout_ms) {
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  for (;;) {
+    if (TryLockFile(file, false)) {
+      return true;
+    }
+    if (::GetTickCount64() >= deadline) {
+      return false;
+    }
+    ::Sleep(10);
+  }
+}
+
+void CloseLockFile(void** file) {
+  if (*file == nullptr) {
+    return;
+  }
+  OVERLAPPED overlapped = {};
+  (void)::UnlockFileEx(static_cast<HANDLE>(*file), 0, 1, 0, &overlapped);
+  ::CloseHandle(static_cast<HANDLE>(*file));
+  *file = nullptr;
+}
+
 }  // namespace
 
 bool ApplyProductEngineConfig(HMODULE module, std::wstring* why) {
@@ -303,6 +335,7 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
     if (target != nullptr) {
       *target = message;
     }
+    CloseLockFile(&lock_file_);
     ReleaseStartLock(&mutex_);
     return false;
   };
@@ -350,8 +383,47 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
   const bool snapshot_current = state_matched && artifact_present;
   const bool deployment_needed = !snapshot_current;
 
+  HANDLE lock_file =
+      ::CreateFileW(paths.engine_lock_file.c_str(), GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (lock_file == INVALID_HANDLE_VALUE) {
+    if (why != nullptr) {
+      *why = L"cannot open the per-user engine lock file (error " +
+             std::to_wstring(::GetLastError()) + L")";
+    }
+    ReleaseStartLock(&mutex_);
+    return false;
+  }
+  lock_file_ = lock_file;
+
+  // A deployment needs exclusive access to the compiled output. A running engine in this
+  // or another process holds a shared lock; in that case the change is deferred and its
+  // marker survives. This is what makes "applies at the next engine start" true without
+  // ever rewriting a compiled schema underneath a live engine.
+  bool can_deploy = deployment_needed && !running;
+  if (can_deploy && !TryLockFile(lock_file, true)) {
+    can_deploy = false;
+  }
+  if (can_deploy) {
+    // rime's schema update compares only whole-second source timestamps, so two settings
+    // saves inside one second can be considered "unchanged". Removing the derived build
+    // directory forces a full compile from the exact current inputs.
+    std::error_code remove_ec;
+    std::filesystem::remove_all(paths.engine_user_dir / L"build", remove_ec);
+    if (remove_ec) {
+      return fail(why, L"cannot reset the compiled schema output for deployment");
+    }
+  } else {
+    exclusive_ = false;
+    if (!AcquireSharedLock(lock_file, kStartLockTimeoutMs)) {
+      return fail(why, L"the per-user engine lock is busy; retry the activation");
+    }
+  }
+  exclusive_ = can_deploy;
+
   epocanva::tsf::EngineHostConfig config = base;
-  if (deployment_needed && !running) {
+  if (can_deploy) {
     epocanva::tsf::EngineHostDeployment deployment;
     deployment.config_file = paths.default_config;
     deployment.schema_files.push_back(paths.schema_file);
@@ -362,8 +434,8 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
   }
 
   prepared_ = true;
-  deployment_requested_ = deployment_needed && !running;
-  deferred_while_running_ = deployment_needed && running;
+  deployment_requested_ = can_deploy;
+  deferred_while_running_ = deployment_needed && !can_deploy;
   token_ = std::move(token);
   fingerprint_ = std::move(fingerprint);
   return true;
@@ -415,12 +487,37 @@ bool EngineStartTransaction::Complete(std::wstring* why) {
     (void)epocanva::tsf::SetEngineHostConfig(BaseConfig(paths));
   }
 
+  if (exclusive_) {
+    // Downgrade: the compile is over, but the engine is about to run and must keep other
+    // processes from deleting its compiled output.
+    OVERLAPPED overlapped = {};
+    (void)::UnlockFileEx(static_cast<HANDLE>(lock_file_), 0, 1, 0, &overlapped);
+    exclusive_ = false;
+    if (!AcquireSharedLock(static_cast<HANDLE>(lock_file_), kStartLockTimeoutMs)) {
+      deployment_ok = false;
+      if (why != nullptr) {
+        *why = L"the engine started but its shared user lock could not be reacquired";
+      }
+    }
+  }
+
   ReleaseStartLock(&mutex_);
   prepared_ = false;
+  if (!deployment_ok) {
+    CloseLockFile(&lock_file_);
+  }
   return deployment_ok;
 }
 
+void* EngineStartTransaction::TakeLeaseLock() {
+  void* lock = lock_file_;
+  lock_file_ = nullptr;
+  return lock;
+}
+
 void EngineStartTransaction::Abort() {
+  CloseLockFile(&lock_file_);
+  exclusive_ = false;
   if (!prepared_) {
     ReleaseStartLock(&mutex_);
     return;

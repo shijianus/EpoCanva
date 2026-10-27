@@ -125,6 +125,11 @@ class EpoCanvaTextService
 #ifdef EPOCANVA_TSF_ENGINE_HOST
   EngineLease engine_lease_;  // one process-broker lease per activation
 #endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  // Shared lock on <user>/engine/engine.lock, held exactly as long as the lease. It keeps
+  // another process from deleting the compiled schema while this engine is running.
+  void* engine_lease_lock_ = nullptr;
+#endif
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
   // Serializes sink callbacks against the controller swap/teardown. TSF normally calls
   // both on one STA; this mutex also makes a cross-thread Deactivate safe.

@@ -143,6 +143,9 @@ HRESULT STDMETHODCALLTYPE EpoCanvaTextService::Deactivate() {
 #ifdef EPOCANVA_TSF_ENGINE_HOST
   EngineLease lease;
 #endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  void* lease_lock = nullptr;
+#endif
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
   std::unique_ptr<product::ProductTextController> controller;
   bool key_sink_advised = false;
@@ -154,6 +157,10 @@ HRESULT STDMETHODCALLTYPE EpoCanvaTextService::Deactivate() {
     client_id = client_id_;
 #ifdef EPOCANVA_TSF_ENGINE_HOST
     lease = std::move(engine_lease_);
+#endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+    lease_lock = engine_lease_lock_;
+    engine_lease_lock_ = nullptr;
 #endif
     client_id_ = 0;
     activation_flags_ = 0;
@@ -182,6 +189,11 @@ HRESULT STDMETHODCALLTYPE EpoCanvaTextService::Deactivate() {
 #ifdef EPOCANVA_TSF_ENGINE_HOST
   (void)lease.Release();
 #endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  if (lease_lock != nullptr) {
+    ::CloseHandle(static_cast<HANDLE>(lease_lock));
+  }
+#endif
   if (thread_manager != nullptr) {
     thread_manager->Release();
   }
@@ -205,6 +217,9 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
   // this object happens on a failure, so a rejected Activate leaves the old activation
   // intact. The configuration is copied into the broker; the path storage is not shared.
   EngineLease new_lease;
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  void* new_lease_lock = nullptr;
+#endif
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
   std::unique_ptr<product::ProductTextController> new_controller;
   bool same_identity = false;
@@ -271,6 +286,12 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
 #else
         new_controller->Stop();
         (void)new_lease.Release();
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+        if (new_lease_lock != nullptr) {
+          ::CloseHandle(static_cast<HANDLE>(new_lease_lock));
+          new_lease_lock = nullptr;
+        }
+#endif
         return HRESULT_FROM_WIN32(ERROR_INVALID_FUNCTION);
 #endif
       } else {
@@ -284,11 +305,29 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
       new_controller->Stop();
     }
 #endif
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+    (void)new_lease.Release();
+#endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+    if (new_lease_lock != nullptr) {
+      ::CloseHandle(static_cast<HANDLE>(new_lease_lock));
+      new_lease_lock = nullptr;
+    }
+#endif
     return E_OUTOFMEMORY;
   } catch (...) {
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
     if (new_controller) {
       new_controller->Stop();
+    }
+#endif
+#ifdef EPOCANVA_TSF_ENGINE_HOST
+    (void)new_lease.Release();
+#endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+    if (new_lease_lock != nullptr) {
+      ::CloseHandle(static_cast<HANDLE>(new_lease_lock));
+      new_lease_lock = nullptr;
     }
 #endif
     return E_FAIL;
@@ -303,6 +342,9 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
   ITfThreadMgr* old_thread_manager = nullptr;
 #ifdef EPOCANVA_TSF_ENGINE_HOST
   EngineLease old_lease;
+#endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  void* old_lease_lock = nullptr;
 #endif
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
   std::unique_ptr<product::ProductTextController> old_controller;
@@ -322,6 +364,11 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
 #ifdef EPOCANVA_TSF_ENGINE_HOST
     old_lease = std::move(engine_lease_);
     engine_lease_ = std::move(new_lease);
+#endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+    old_lease_lock = engine_lease_lock_;
+    engine_lease_lock_ = new_lease_lock;
+    new_lease_lock = nullptr;
 #endif
   }
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
@@ -353,6 +400,11 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
   // successful reactivation.
 #ifdef EPOCANVA_TSF_ENGINE_HOST
   (void)old_lease.Release();
+#endif
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  if (old_lease_lock != nullptr) {
+    ::CloseHandle(static_cast<HANDLE>(old_lease_lock));
+  }
 #endif
   if (old_thread_manager != nullptr) {
     old_thread_manager->Release();

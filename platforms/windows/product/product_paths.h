@@ -50,6 +50,7 @@ struct ProductPaths {
   std::filesystem::path schema_patch_file;
   std::filesystem::path deploy_marker_file;
   std::filesystem::path deployed_state_file;
+  std::filesystem::path engine_lock_file;
   std::filesystem::path compiled_schema_file;
   std::filesystem::path compiled_schema_binary;
 };

@@ -8,7 +8,7 @@
 #include <vector>
 
 #ifndef EPOCANVA_PRODUCT_VERSION
-#define EPOCANVA_PRODUCT_VERSION "0.1.0-w1"
+#define EPOCANVA_PRODUCT_VERSION "0.2.0-w2"
 #endif
 #ifndef EPOCANVA_PRODUCT_COMMIT
 #define EPOCANVA_PRODUCT_COMMIT ""
@@ -156,6 +156,7 @@ bool ResolveProductPaths(HMODULE module, ProductPaths* paths, std::wstring* why)
       resolved.engine_user_dir / L"epocanva_english.custom.yaml";
   resolved.deploy_marker_file = resolved.engine_user_dir / L"deploy-required";
   resolved.deployed_state_file = resolved.engine_user_dir / L"deployed-state";
+  resolved.engine_lock_file = resolved.engine_user_dir / L"engine.lock";
   resolved.compiled_schema_file =
       resolved.engine_user_dir / L"build" / L"epocanva_english.schema.yaml";
   resolved.compiled_schema_binary =

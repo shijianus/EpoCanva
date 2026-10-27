@@ -63,6 +63,12 @@ class EngineStartTransaction {
   // anything; the marker remains the retry evidence.
   void Abort();
 
+  // Transfers the shared engine.lock handle acquired for this activation. The caller must
+  // hold it exactly as long as the engine lease: closing it while the engine runs would
+  // let another process delete the compiled output underneath it. Returns null after a
+  // failed Complete or a previous transfer.
+  void* TakeLeaseLock();
+
   bool prepared() const { return prepared_; }
   bool deployment_requested() const { return deployment_requested_; }
   // True when a settings/data change could not be applied because another activation is
@@ -74,9 +80,11 @@ class EngineStartTransaction {
   bool prepared_ = false;
   bool deployment_requested_ = false;
   bool deferred_while_running_ = false;
+  bool exclusive_ = false;
   std::string token_;
   std::string fingerprint_;
-  void* mutex_ = nullptr;  // HANDLE; void* keeps <windows.h> out of the ABI surface
+  void* mutex_ = nullptr;      // named start mutex HANDLE
+  void* lock_file_ = nullptr;  // engine.lock HANDLE (shared or exclusive)
 };
 
 }  // namespace product
