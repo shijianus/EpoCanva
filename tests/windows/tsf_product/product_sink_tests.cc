@@ -369,6 +369,9 @@ struct InputRoute {
   ITfContext* context = nullptr;
 };
 
+bool ReadyToType(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
+                 DWORD timeout_ms);
+
 bool ApplyHostDefault(InputRoute* route, const std::wstring& text, std::string* error) {
   if (text.empty()) {
     return true;
@@ -495,6 +498,20 @@ bool SendCharAdaptive(InputRoute* route, WCHAR ch, bool* eaten, std::string* err
 
 bool SendText(InputRoute* route, const std::wstring& text,
               bool expect_eaten, std::string* error) {
+bool SendTextWhenReady(InputRoute* route, const std::wstring& text,
+                       bool expect_eaten, std::string* error) {
+  // Fixed expectations are valid only while the engine path is known to be live. A target
+  // revalidation or selection read can legitimately drop and rebuild the binding between
+  // two sections; that pass-through is not what these sections test, so wait for readiness
+  // again instead of sending into an unbound window.
+  if (expect_eaten &&
+      !ReadyToType(*route->host, route->sink, route->context, 15000)) {
+    *error = "the engine path did not become ready";
+    return false;
+  }
+  return SendText(route, text, expect_eaten, error);
+}
+
   for (const WCHAR ch : text) {
     if (!SendChar(route, ch, expect_eaten, error)) {
       return false;
@@ -642,21 +659,21 @@ bool RunRawInputCases(const Paths& paths) {
              "the compiled schema carries the configured suggestion count (2, not 1)");
 
   std::string error;
-  LocalCheck(SendText(&route, L"Hello", true, &error), "type Hello: " + error);
+  LocalCheck(SendTextWhenReady(&route, L"Hello", true, &error), "type Hello: " + error);
   LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space while composing is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc, L"Hello ", 5000),
              "Hello + Space commits the preserved case");
 
   error.clear();
-  LocalCheck(SendText(&route, L"helo", true, &error), "type helo: " + error);
+  LocalCheck(SendTextWhenReady(&route, L"helo", true, &error), "type helo: " + error);
   LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after helo is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc, L"Hello helo ", 5000),
              "default raw input does not auto-correct helo");
 
   error.clear();
-  LocalCheck(SendText(&route, L"helo", true, &error), "type helo again: " + error);
+  LocalCheck(SendTextWhenReady(&route, L"helo", true, &error), "type helo again: " + error);
   LocalCheck(SendVirtualKey(&route, VK_BACK, true, &error),
              "BackSpace while composing is eaten: " + error);
   LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
@@ -665,7 +682,7 @@ bool RunRawInputCases(const Paths& paths) {
              "BackSpace edits the composition");
 
   error.clear();
-  LocalCheck(SendText(&route, L"123-45_67@x.y", true, &error),
+  LocalCheck(SendTextWhenReady(&route, L"123-45_67@x.y", true, &error),
              "digits and technical marks are forwarded: " + error);
   LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after marks is eaten: " + error);
@@ -674,7 +691,7 @@ bool RunRawInputCases(const Paths& paths) {
              "digits and marks are committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(&route, L"user@example.com", true, &error),
+  LocalCheck(SendTextWhenReady(&route, L"user@example.com", true, &error),
              "email is accepted: " + error);
   LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after email is eaten: " + error);
@@ -683,7 +700,7 @@ bool RunRawInputCases(const Paths& paths) {
              "email is committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(&route, L"https://example.com/a?x=1&y=2#z", true, &error),
+  LocalCheck(SendTextWhenReady(&route, L"https://example.com/a?x=1&y=2#z", true, &error),
              "URL is accepted: " + error);
   LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after URL is eaten: " + error);
@@ -694,7 +711,7 @@ bool RunRawInputCases(const Paths& paths) {
              "URL is committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(&route, L"C:\\tmp\\file.txt", true, &error),
+  LocalCheck(SendTextWhenReady(&route, L"C:\\tmp\\file.txt", true, &error),
              "path is accepted: " + error);
   LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after path is eaten: " + error);
@@ -705,7 +722,7 @@ bool RunRawInputCases(const Paths& paths) {
              "path is committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(&route, L"foo_bar123", true, &error),
+  LocalCheck(SendTextWhenReady(&route, L"foo_bar123", true, &error),
              "identifier is accepted: " + error);
   LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after identifier is eaten: " + error);
@@ -717,7 +734,7 @@ bool RunRawInputCases(const Paths& paths) {
              "identifier is committed unchanged");
 
   error.clear();
-  LocalCheck(SendText(&route, L"enter", true, &error),
+  LocalCheck(SendTextWhenReady(&route, L"enter", true, &error),
              "type enter: " + error);
   LocalCheck(SendVirtualKey(&route, VK_RETURN, true, &error),
              "Enter while composing is eaten: " + error);
@@ -748,7 +765,7 @@ bool RunRawInputCases(const Paths& paths) {
              "shortcut pass-through changed no text");
 
   error.clear();
-  LocalCheck(SendText(&route, L"quickbrownfox", true, &error),
+  LocalCheck(SendTextWhenReady(&route, L"quickbrownfox", true, &error),
              "fast typing is accepted back to back: " + error);
   LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
              "space after fast typing is eaten: " + error);
@@ -760,7 +777,7 @@ bool RunRawInputCases(const Paths& paths) {
              "fast typing keeps order and commits once");
 
   error.clear();
-  LocalCheck(SendText(&route, L"zzz", true, &error), "type zzz: " + error);
+  LocalCheck(SendTextWhenReady(&route, L"zzz", true, &error), "type zzz: " + error);
   LocalCheck(SendVirtualKey(&route, VK_ESCAPE, true, &error),
              "Escape while composing is eaten: " + error);
   LocalCheck(WaitForText(*test_case.host, test_case.doc,
