@@ -498,6 +498,14 @@ bool SendCharAdaptive(InputRoute* route, WCHAR ch, bool* eaten, std::string* err
 
 bool SendText(InputRoute* route, const std::wstring& text,
               bool expect_eaten, std::string* error) {
+  for (const WCHAR ch : text) {
+    if (!SendChar(route, ch, expect_eaten, error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool SendTextWhenReady(InputRoute* route, const std::wstring& text,
                        bool expect_eaten, std::string* error) {
   // Fixed expectations are valid only while the engine path is known to be live. A target
@@ -510,14 +518,6 @@ bool SendTextWhenReady(InputRoute* route, const std::wstring& text,
     return false;
   }
   return SendText(route, text, expect_eaten, error);
-}
-
-  for (const WCHAR ch : text) {
-    if (!SendChar(route, ch, expect_eaten, error)) {
-      return false;
-    }
-  }
-  return true;
 }
 
 bool SendTextAdaptive(InputRoute* route, const std::wstring& text,
