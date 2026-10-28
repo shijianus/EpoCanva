@@ -115,6 +115,12 @@ edit_completed` 是引擎路径；`deferred_raw → raw_applied` 是降级路径
 | `dumpbin /imports epocanva_tsf.dll` | 无 `WS2_32/WININET/WINHTTP/URLMON/DNSAPI/WSOCK/SECUR32/SCHANNEL` |
 | `stage_product.ps1` + `EpoCanva.exe --diagnose` | 0；21/21 文件校验通过，`package=ready`（见 §6） |
 
+**一次中间全量运行的抖动（如实记录）**：同一二进制（`8ecbc92` 的构建）的一次全量运行中，
+6 个依赖真实引擎编辑的 sink 用例在既有 5s/8s 等待内未完成（文档只应用了首字符；
+`product.integration.sink_raw` 用时 66.6s）。单独重跑 `sink_raw` 4.5s 通过，随后同一
+二进制的下一次全量 138 项全部按预期通过。未修改任何测试等待阈值；判断为构建/运行目录
+位于 OneDrive 同步卷时的 I/O 抖动，而不是可复现的代码回归。保留为环境风险（§7）。
+
 新增/扩展 CTest：
 
 - `product.unit.key_admission`：高水位、FIFO 撤出、raw 分账、首 token 规则（纯类型单测）；
@@ -208,3 +214,6 @@ edit_completed` 是引擎路径；`deferred_raw → raw_applied` 是降级路径
 9. `rime.dll` 内嵌构建路径仍为 68 处；公开分发前必须 `/pathmap` 重建；词表再分发仍待
    owner/legal 决定；DPI 仅 150% 已验。
 10. 设置修改仍在下一次引擎启动/宿主重启生效，没有跨宿主热更新（沿用 W2-A 声明）。
+11. **真实引擎用例的等待对 I/O 抖动敏感**：本仓库位于 OneDrive 同步目录；一次全量运行
+    出现 6 个真实引擎 sink 用例超时，单独与后续全量重跑均通过。没有调低/调高现有阈值，
+    也没有把这次抖动当作通过证据；CI 或后续阶段应把构建目录放到非同步卷，或另立性能门。
