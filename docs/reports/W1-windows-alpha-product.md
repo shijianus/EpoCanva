@@ -12,6 +12,12 @@ W1 is an **internal alpha** productization step, not a system input method relea
 the final Alpha. The settings shell and the unregistered product TSF DLL do not make system
 input available; W2/W3 own the keyboard sink, candidate UI, registration and installer.
 
+> **Status update (W2-B).** The historical statements below that say "no candidate UI" were
+> true for W1. W2-A added the real key sink and W2-B added the native candidate window and
+> the TSF candidate-list UIElement; see `docs/reports/W2-B-candidates.md` and
+> `docs/windows/candidate-ui-contract.md`. The product is still unregistered, so W1's
+> "not a system IME" conclusion is unchanged.
+
 ## 1. Environment (sanitized)
 
 | Item | Observed |

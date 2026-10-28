@@ -1,25 +1,34 @@
-# W2-A 键盘输入与 STA 唤醒契约
+# W2-A/W2-B 键盘输入与 STA 唤醒契约
 
-本文件只写 **W2-A 已实现的产品契约**。它不是任务书，也不替代 `AGENTS.md` 的永久规则。
+本文件只写 **已实现的产品契约**（W2-A，W2-B 增补）。它不是任务书，也不替代 `AGENTS.md` 的永久规则。
 涉及 librime/TSF 行为的断言以磁盘源码为准（librime `33e7814`，Windows SDK 10.0.26100.0）。
 
 ## 1. 生命周期
 
-`EpoCanvaTextService::ActivateInternal`（`platforms/windows/tsf/text_service.cc:209`）的顺序是：
+`EpoCanvaTextService::ActivateInternal`（`platforms/windows/tsf/text_service.cc`）的顺序是：
 
-1. 产品部署事务 `Prepare`：读取设置/部署快照、取得跨进程启动锁、安装引擎配置；
-2. `EngineHostBroker::Acquire`：启动或共享进程内唯一引擎；
-3. 产品事务 `Complete`：校验编译产物、记录部署快照、按 token 退役标记；
-4. 构造 `ProductTextController` 并订阅 `ContextObserver`（**StrictTsf**）；
-5. `ITfKeystrokeMgr::AdviseKeyEventSink`；
-6. 提交新状态、释放旧租约/旧线程管理器。
+1. 构造 `ProductTextController` 并以**字面（literal）模式**启动唤醒通道；
+2. `ProductEngineBootstrap::RequestStart()` 在后台线程执行部署事务 `Prepare`、
+   `EngineHostBroker::Acquire`、`Complete` 与租约锁交接；**Activate 不等待它**；
+3. `ITfKeystrokeMgr::AdviseKeyEventSink`；
+4. 提交新状态、释放旧控制器/旧线程管理器。
 
-任一步失败都不修改当前活动状态；新租约、新控制器、新锁会按相反顺序释放。
-`Deactivate`（`:140`）先 `UnadviseKeyEventSink`，再 `ProductTextController::Stop`，
-然后释放线程管理器与引擎租约。`DllMain` 仍只保存 HINSTANCE。
+引擎启动完成后，后台线程唤醒 STA；STA 在自己的 `PumpNow` 中采纳租约、构造
+`ContextObserver`（**StrictTsf**）与协调器。启动期间的每个键保持宿主默认效果（原文路径），
+不排队、不组合、不写文档；`HostTokenOwnership` 防止启动完成时接管半个 token。
+
+任一步失败都不修改当前活动状态。`Deactivate` 先 `UnadviseKeyEventSink`，再停止控制器；
+它**不 join** 仍在进行的引擎启动，也不在 STA 上释放可能阻塞的租约（租约释放被移到
+持有模块引用的后台线程）。`DllMain` 仍只保存 HINSTANCE。
+
+启动等待（命名互斥量/共享锁最长 60 s，以及 `Acquire` 内的部署）只在后台启动线程发生；
+`Activate`、`OnKeyDown`、`Deactivate` 与卸载检查都不承受它。失败由
+`EngineBootstrapState::kFailed` 与 `ControllerDiagnostics::engine_state/failure` 报告，
+下一次激活可重试；`DllCanUnloadNow` 在启动线程退出前保持 `S_FALSE`。
 
 产品导出只有 `DllCanUnloadNow` 与 `DllGetClassObject`（`epocanva_tsf.def`）。
-直接 sink 测试变体多一个编译宏，不导出任何测试符号，也不进入暂存包。
+直接 sink 测试变体（`epocanva_tsf_direct_sink_test.dll`）额外导出受控测试符号
+（`EpoCanvaTest*`），只用于 `tests/windows/tsf_product`，不进入产品 DLL，也不进入暂存包。
 
 ## 2. 按键语义
 
@@ -52,18 +61,25 @@ Focus/generation 变化时：排队项全部记为 `kFocusChanged` 失败；在�
 
 1. 队列中的**未提交**尾部按 FIFO 撤出（`WithdrawQueued`），逐键折算成一段 UTF-16 原样文本；
    在途的单个引擎键保持不动。被撤出的键记为 `deferred_raw`，**不是失败**。
-2. 降级期间的文本键、Space、Enter、Escape、BackSpace 继续被吃下并折叠进这段文本：
-   Space 追加 U+0020 并结束 token；Enter/Escape 结束 token 但不取消已捕获文本（记为
-   `raw_ignored_edits`）；BackSpace 只回退捕获文本中的最后一个 code unit，捕获为空时记为
-   被忽略的编辑。快捷键与隐私拒绝永远不进入捕获。
+2. 降级期间的文本键、Space、Enter、Escape、BackSpace 的语义是明确的：
+   - Space 追加 U+0020 并结束该段（随后按原文提交）；
+   - Enter 结束该段并提交已捕获后缀，不插入换行（与引擎路径提交组合一致）；
+   - Escape **取消尚未提交的后缀**：清空捕获并记为 `raw_cancelled`，不把它写成迟到文本；
+     已经交给协调器的块不会被撤回，它会按提交时的一次写入生效。取消后该段在块解决时结束；
+   - BackSpace 只回退尚未提交后缀中的**一个 code point**（代理项对整体回退）；后缀为空时
+     记为被忽略的编辑并被吃掉。它**从不**删除已显示组合、已提交文本或宿主既有文本。
+   快捷键与隐私拒绝永远不进入捕获。
 3. 协调器空闲时用新的 `SubmitRawCommit` 把这段文本一次提交到文档：若写者仍拥有组合，
    plan 用“当前显示文本 + 捕获后缀”替换并结束组合；否则在跟踪的 caret 处插入。
    **这次提交不调用引擎**，因此没有补全/拼写建议——原文优先。
 4. 提交成功后引擎客户端状态已过期，控制器使绑定退役并重建；重建完成后引擎路径恢复。
    降级不会把后续字符散给宿主，也不会在超时后自动重放。
-5. 捕获上限 `kRawCapacityUtf16 = 1024`。超过上限的键仍被吃下以保住已有顺序，但会记入
+5. 捕获按块进行，每块上限 `kRawTextRun::kDefaultCapacityUtf16 = 1024`。块满时先把整块
+   交给协调器，再让下一个键开启新块；追加是原子的，**不会截断代理项对**。只有当当前块
+   无法交出（前一引擎键或块仍未解决）而新键又放不下时，后续键才继续被吃下并记入
    `raw_dropped_keys` / `failed_raw_capacity`（`last_failure=raw-capacity`），
-   **不声称该键已应用**。提交失败同样走 `raw-commit-failed` 计数并以明确失败结束该段。
+   **不声称该键已应用**；已保留的块按 FIFO 应用，不重放、不重复。提交失败同样走
+   `raw-commit-failed` 计数并以明确失败结束该段。
 6. 隐私/许可在降级途中变成 Denied/Unknown 时，已捕获文本无法再写入：整段记为
    `kPermissionRefused` 失败，宿主获得之后的按键。这是不可恢复故障的明确报告，不是静默丢弃。
 
@@ -72,6 +88,14 @@ Focus/generation 变化时：排队项全部记为 `kFocusChanged` 失败；在�
 输入等），该 token 余下字符一律直通，直到空格、非 token 标点、编辑键或焦点真正移走。
 `@ . _ : / \ ? & = # % + -` 与字母数字一样是 token 字符，不是边界；快捷键不结束 token。
 许可在 token 中途变为 Allowed 也不会让引擎接管该 token。Unknown/Denied 从不向引擎发送输入。
+
+## 3.1 候选选择
+
+候选菜单的读取与选择路径见 `docs/windows/candidate-ui-contract.md`。输入侧只做三件事：
+方向键（无修饰）在菜单打开时由控制器吃掉并移动显式选择；Enter 在有显式选择时走
+`SubmitCandidateSelection`（快照版本 + 快照 context/generation + 页内索引），没有显式选择时
+保持原引擎 Enter 契约；Escape 关闭菜单并走引擎 Escape 取消组合。Space **不**被候选层拦截，
+始终按原文提交契约处理。初始没有显式选择，建议不会被自动接受。
 
 ## 4. 固定 STA 唤醒
 
