@@ -98,6 +98,8 @@ const char* DescribeSubmitStatus(SubmitStatus status) {
       return "TargetUnverified";
     case SubmitStatus::kNotEngineCandidate:
       return "NotEngineCandidate";
+    case SubmitStatus::kCandidateStale:
+      return "CandidateStale";
     case SubmitStatus::kEngineNotRunning:
       return "EngineNotRunning";
     case SubmitStatus::kQueueFull:
@@ -138,6 +140,8 @@ const char* DescribeSubmitStage(SubmitStatus status) {
       return "needs-resync";
     case SubmitStatus::kNotEngineCandidate:
       return "not-applicable";
+    case SubmitStatus::kCandidateStale:
+      return "candidate-stale";
     case SubmitStatus::kEngineNotRunning:
     case SubmitStatus::kEngineClientUnavailable:
       return "engine-not-ready";
@@ -148,6 +152,27 @@ const char* DescribeSubmitStage(SubmitStatus status) {
       return "request";
   }
   return "unknown";
+}
+
+const char* DescribeCandidateKind(CandidateKind kind) {
+  switch (kind) {
+    case CandidateKind::kLiteral:
+      return "literal";
+    case CandidateKind::kCompletion:
+      return "completion";
+    case CandidateKind::kSpelling:
+      return "spelling";
+  }
+  return "unknown";
+}
+
+bool CandidateSnapshot::has_literal() const {
+  for (const CandidateItem& item : items) {
+    if (item.kind == CandidateKind::kLiteral) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const char* DescribeWorkKind(WorkKind kind) {
@@ -632,6 +657,7 @@ void ContextCoordinator::RetireCurrentBinding() {
   bound_ = false;
   identity_ = edit::ContextIdentity{};
   view_ = LocalDocumentView{};
+  InvalidateCandidateSnapshot();
   // NeedsResync / UnsupportedShape describe the engine view of one binding; an explicit
   // invalidation is the documented way out of them. The uncertain block is not cleared
   // here: it belongs to the context's document, whose text state is still unknown.
@@ -1460,6 +1486,7 @@ SubmitStatus ContextCoordinator::SubmitRawCommit(std::u16string_view raw_utf16,
     return RecordSubmit(SubmitStatus::kPermissionUnknown);
   }
   if (permission_source_.Status() == context::PermissionQueryStatus::kPending) {
+    InvalidateCandidateSnapshot();
     FinishWorkLedger(WorkKind::kRaw);
     phase_ = WorkPhase::kPermissionPending;
     engine_request_ = engine::RequestId{};
@@ -1479,6 +1506,7 @@ SubmitStatus ContextCoordinator::SubmitRawCommit(std::u16string_view raw_utf16,
                             ? SubmitStatus::kPermissionDenied
                             : SubmitStatus::kPermissionUnknown);
   }
+  InvalidateCandidateSnapshot();
   FinishWorkLedger(WorkKind::kRaw);
   SubmitRawPlan(std::u16string(raw_utf16));
   *id = WorkId{work_id_};
@@ -1656,6 +1684,68 @@ HANDLE ContextCoordinator::PermissionCompletionEvent() const {
 
 // --- engine result resolution ------------------------------------------------------------
 
+void ContextCoordinator::InvalidateCandidateSnapshot() {
+  candidate_snapshot_ = CandidateSnapshot{};
+  candidate_snapshot_.version = ++candidate_version_;
+  candidate_snapshot_.identity = identity_;
+  candidate_snapshot_.generation = identity_.generation;
+}
+
+void ContextCoordinator::UpdateCandidateSnapshot(const engine::EngineState& state) {
+  CandidateSnapshot snapshot;
+  snapshot.version = ++candidate_version_;
+  snapshot.identity = identity_;
+  snapshot.generation = work_generation_;
+  snapshot.work_id = work_id_;
+  if (state.valid && state.is_composing && state.has_menu &&
+      !state.candidates.empty() && state.page_size > 0 && state.page_no >= 0) {
+    snapshot.valid = true;
+    snapshot.page_no = state.page_no;
+    snapshot.page_size = state.page_size;
+    snapshot.is_last_page = state.is_last_page;
+    snapshot.highlighted_page_index = state.highlighted_candidate_index_on_page;
+    snapshot.input_utf16_code_units = state.raw_input.utf16_code_units;
+    snapshot.items.reserve(state.candidates.size());
+    for (std::size_t index = 0; index < state.candidates.size(); ++index) {
+      CandidateItem item;
+      item.text_utf16_code_units = state.candidates[index].text_utf16_code_units;
+      item.comment_utf16_code_units = state.candidates[index].comment_utf16_code_units;
+      item.kind = ClassifyCandidate(static_cast<std::size_t>(state.page_no), index,
+                                    item.comment_utf16_code_units);
+      item.page_index = index;
+      item.menu_index =
+          static_cast<std::size_t>(state.page_no) *
+              static_cast<std::size_t>(state.page_size) +
+          index;
+      snapshot.items.push_back(std::move(item));
+    }
+    ++candidate_snapshots_;
+  }
+  candidate_snapshot_ = std::move(snapshot);
+}
+
+SubmitStatus ContextCoordinator::SubmitCandidateSelection(
+    const CandidateSelectionRequest& request, WorkId* id) {
+  if (id == nullptr) {
+    return RecordSubmit(SubmitStatus::kInvalidRequest);
+  }
+  id->value = 0;
+  // Every check below is about the DISPLAYED menu, not about the engine's current state:
+  // an old click must never commit into a newer document, page or binding.
+  if (!candidate_snapshot_.valid ||
+      candidate_snapshot_.version != request.snapshot_version ||
+      candidate_snapshot_.identity.context_id != request.context_id ||
+      candidate_snapshot_.identity.generation != request.generation ||
+      !bound_ || identity_.context_id != request.context_id ||
+      identity_.generation != request.generation ||
+      !view_.composition_active ||
+      request.page_index >= candidate_snapshot_.items.size()) {
+    ++candidate_stale_refusals_;
+    return RecordSubmit(SubmitStatus::kCandidateStale);
+  }
+  return SubmitCandidate(request.page_index, id);
+}
+
 void ContextCoordinator::ResolveEngineResult(const engine::CommandResult& result) {
   if (work_abandoned_) {
     // Consumed once and discarded: an old generation's result never reaches any context.
@@ -1664,6 +1754,7 @@ void ContextCoordinator::ResolveEngineResult(const engine::CommandResult& result
   }
 
   if (!result.ok()) {
+    InvalidateCandidateSnapshot();
     switch (result.status) {
       case engine::CommandStatus::kClientUnavailable:
         EndWork(WorkOutcome::kRejected, RejectCause::kEngineUnavailable);
@@ -1708,10 +1799,12 @@ void ContextCoordinator::ResolveEngineResult(const engine::CommandResult& result
     observation.state = outcome.state;
     observation.commit = outcome.pending_commit;
   } else {
+    InvalidateCandidateSnapshot();
     EnterNeedsResync("unexpected-command-kind", RejectCause::kNone);
     return;
   }
 
+  UpdateCandidateSnapshot(observation.state);
   BeginApplyAfterEngine(observation);
 }
 
@@ -1771,6 +1864,9 @@ void ContextCoordinator::SubmitRawPlan(std::u16string raw_utf16) {
   PlanDecision decision;
   decision.kind = PlanDecisionKind::kCommit;
   last_raw_units_ = raw_utf16.size();
+  last_raw_composition_start_ = view_.composition_start_utf16;
+  last_raw_composition_units_ = view_.composition_text_utf16.size();
+  last_raw_input_units_ = raw_utf16.size();
   ++raw_commits_begun_;
   if (view_.composition_active) {
     // Preserve what the engine already displayed (the applied part of the token) and append
@@ -1783,6 +1879,7 @@ void ContextCoordinator::SubmitRawPlan(std::u16string raw_utf16) {
     decision.text_utf16 = std::move(raw_utf16);
     decision.caret_utf16 = view_.caret_utf16;
   }
+  last_raw_plan_units_ = decision.text_utf16.size();
   SubmitEditPlan(decision, false);
 }
 
@@ -1992,6 +2089,7 @@ void ContextCoordinator::EndWork(WorkOutcome outcome, RejectCause cause) {
 
 void ContextCoordinator::EnterNeedsResync(const char* why, RejectCause cause) {
   (void)why;
+  InvalidateCandidateSnapshot();
   NoteRawTerminal(false);
   outcome_ = WorkOutcome::kNeedsResync;
   cause_ = cause;
@@ -2001,6 +2099,7 @@ void ContextCoordinator::EnterNeedsResync(const char* why, RejectCause cause) {
 }
 
 void ContextCoordinator::EnterUncertainLockdown() {
+  InvalidateCandidateSnapshot();
   NoteRawTerminal(false);
   uncertain_blocked_context_id_ = identity_.context_id;
   // Record the latch against the real context identity so a replacement coordinator
@@ -2074,6 +2173,7 @@ void ContextCoordinator::Close() {
   permission_source_.Abandon();
   pending_permission_ = PendingPermissionWork{};
   observed_caret_pending_ = false;
+  InvalidateCandidateSnapshot();
 
   // Give the executor one synchronous chance to publish each outstanding result, then
   // consume everything that is ready. Anything still outstanding is reported, not hidden:
@@ -2212,6 +2312,14 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.raw_commits_failed = raw_commits_failed_;
   snapshot.raw_units_applied = raw_units_applied_;
   snapshot.raw_units_refused = raw_units_refused_;
+  snapshot.last_raw_composition_start = last_raw_composition_start_;
+  snapshot.last_raw_composition_units = last_raw_composition_units_;
+  snapshot.last_raw_input_units = last_raw_input_units_;
+  snapshot.last_raw_plan_units = last_raw_plan_units_;
+  snapshot.candidate_version = candidate_version_;
+  snapshot.candidate_snapshots = candidate_snapshots_;
+  snapshot.candidate_items = candidate_snapshot_.items.size();
+  snapshot.candidate_stale_refusals = candidate_stale_refusals_;
   snapshot.engine_results_taken = engine_results_taken_;
   snapshot.plans_submitted = plans_submitted_;
   snapshot.edits_applied = edits_applied_;

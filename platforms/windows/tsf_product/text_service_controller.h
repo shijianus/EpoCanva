@@ -41,10 +41,12 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "candidate_ui.h"
 #include "context_observer.h"
 #include "context_registry.h"
 #include "coordinator.h"
@@ -52,11 +54,15 @@
 #include "key_admission.h"
 #include "observed_binding.h"
 #include "permission_query.h"
+#include "product_engine_bootstrap.h"
 #include "sta_result_waker.h"
 
 namespace epocanva {
 namespace tsf {
 namespace product {
+
+using ProductEngineAttachment = ::epocanva::product::ProductEngineAttachment;
+using ProductEngineBootstrap = ::epocanva::product::ProductEngineBootstrap;
 
 struct ControllerDiagnostics {
   bool started = false;
@@ -64,6 +70,15 @@ struct ControllerDiagnostics {
   bool subscribed = false;
   bool coordinator_bound = false;
   bool observer_closed = false;
+  // W2-B engine startup. A controller starts in literal mode immediately; the engine is
+  // adopted later on this STA when the asynchronous start reports ready.
+  bool engine_ready = false;
+  bool engine_attaching = false;
+  std::string engine_state;    // idle/starting/ready/failed, from the bootstrap
+  std::string engine_failure;  // text-free status/path message, empty while healthy
+  std::uint64_t literal_key_downs = 0;
+  std::uint64_t engine_attach_attempts = 0;
+  std::uint64_t engine_attach_failures = 0;
   std::uint64_t generation = 0;
   std::uint64_t pumps = 0;
   std::uint64_t wakes = 0;
@@ -91,8 +106,20 @@ struct ControllerDiagnostics {
   std::uint64_t raw_entered = 0;
   std::uint64_t raw_exits = 0;
   std::uint64_t raw_ignored_edits = 0;
+  std::uint64_t raw_cancelled_keys = 0;
+  std::uint64_t raw_cancelled_units = 0;
   std::uint64_t raw_unrecoverable = 0;
+  std::uint64_t raw_reason_unapplied = 0;
+  std::uint64_t raw_reason_not_candidate = 0;
+  std::uint64_t raw_reason_high_water = 0;
+  std::uint64_t raw_reason_admission = 0;
   std::uint64_t token_host_keys = 0;
+  bool candidate_menu_open = false;
+  std::uint64_t candidate_version = 0;
+  int candidate_selected = -1;
+  std::size_t candidate_items = 0;
+  std::uint64_t candidate_stale_selections = 0;
+  CandidateUiDiagnostics candidate_ui;
   bool pacing = false;
   KeyAdmissionSnapshot keys;
   coordinator::CoordinatorSnapshot coordinator;
@@ -100,12 +127,12 @@ struct ControllerDiagnostics {
 };
 
 class ProductTextController final : public StaWakeTarget,
-                                    public context::ContextObserverSink {
+                                    public context::ContextObserverSink,
+                                    public CandidateUiHost {
  public:
   struct Options {
     ITfThreadMgr* thread_manager = nullptr;
     TfClientId client_id = 0;
-    ::epocanva::windows::engine::EngineExecutor* executor = nullptr;
   };
 
   ProductTextController();
@@ -114,8 +141,10 @@ class ProductTextController final : public StaWakeTarget,
   ProductTextController(const ProductTextController&) = delete;
   ProductTextController& operator=(const ProductTextController&) = delete;
 
-  // Both run on the activating STA. Start subscribes the observer before the key sink is
-  // advised; a failure leaves nothing subscribed or running.
+  // Both run on the activating STA. Start never waits for the engine: it subscribes the
+  // asynchronous engine start, opens the wake channel and returns in literal mode. The
+  // engine pipeline is built on this STA by the first pump after the bootstrap reports
+  // ready; until then every key keeps the host's own default effect.
   bool Start(const Options& options, std::wstring* why);
   void Stop();
 
@@ -141,7 +170,19 @@ class ProductTextController final : public StaWakeTarget,
                           const context::ObservedTarget& target,
                           const context::SelectionSnapshot& selection) override;
 
+  // CandidateUiHost. The UI never calls the engine or writes text itself: every click or
+  // host-drawn selection arrives here and is validated against the snapshot version and the
+  // identity/generation that snapshot was read on.
+  void OnUiSelectionChanged(const CandidateUiSelection& selection) override;
+  void OnUiFinalize(const CandidateUiSelection& selection) override;
+  void OnUiAbort(std::uint64_t snapshot_version, std::uint64_t context_id,
+                 std::uint64_t generation) override;
+
   ControllerDiagnostics Snapshot() const;
+  // Test support only: a copy of the coordinator's current menu. No product caller uses
+  // this; it lets the controlled direct-sink tests assert selection behaviour without
+  // reaching into the coordinator.
+  coordinator::CandidateSnapshot CandidateSnapshotForTest() const;
 
  private:
   class ClientProvider;
@@ -169,14 +210,32 @@ class ProductTextController final : public StaWakeTarget,
   void FailQueuedAndMaybeInvalidate(KeyFailure failure, bool invalidate);
   void RequestRebindSoon();
   void ResetObjects();
+  // W2-B candidate presentation and selection. UpdateCandidateUi copies the coordinator's
+  // current snapshot into the TSF element/window; it is called from Pump (STA) only.
+  void UpdateCandidateUi();
+  void MoveCandidateSelection(int delta);
+  bool FinalizeCandidateSelection(const CandidateUiSelection& selection);
+  bool CandidatesOpen() const;
+  // W2-B asynchronous engine adoption. Runs on the STA outside every TSF notification. It
+  // takes the pending lease (or a fast lease on an already running engine) and builds the
+  // observer/coordinator pipeline. Failure leaves the controller in literal mode with a
+  // named status; it never blocks and never retries inside a key callback.
+  void TryAttachEngine();
+  bool BuildEnginePipeline(std::wstring* why);
+  // Literal mode: track a host-kept token so a later attach cannot take over the middle of
+  // a word, and count the key. No engine, query or edit is touched.
+  void TrackLiteralKey(WPARAM wparam, LPARAM lparam);
 
-  // W2-A-R degraded catch-up. Admitted input that cannot be given to the engine without
-  // waiting is withdrawn from the queue in FIFO order and captured as raw UTF-16; it is
-  // committed through the coordinator with NO engine call, replacing the owned composition
-  // (when one exists) with its displayed text plus the captured suffix. Once such a commit
-  // applied, the engine client is stale and the binding is rebuilt before engine input
-  // resumes. The run is bounded; a run that exceeds the bound is reported, never hidden.
-  static constexpr std::size_t kRawCapacityUtf16 = 1024;
+  // W2-A-R/W2-B degraded catch-up. Admitted input that cannot be given to the engine
+  // without waiting is withdrawn from the queue in FIFO order and captured as raw UTF-16;
+  // it is committed through the coordinator with NO engine call, replacing the owned
+  // composition (when one exists) with its displayed text plus the captured suffix. Once
+  // such a commit applied, the engine client is stale and the binding is rebuilt before
+  // engine input resumes. The run is a sequence of bounded chunks: a full chunk is flushed
+  // to the coordinator and the next key starts a new chunk, so the bound never splits a key
+  // or a surrogate pair. A chunk that cannot be flushed (the document is not accepting
+  // writes) is the only case that reports an explicit capacity loss.
+  static constexpr std::size_t kRawCapacityUtf16 = RawTextRun::kDefaultCapacityUtf16;
 
   bool IsTextKey(const BuiltKey& key) const;
   // True when every translated UTF-16 code unit is in the English schema alphabet (letters,
@@ -191,7 +250,10 @@ class ProductTextController final : public StaWakeTarget,
   std::size_t QueueDepth() const;
   void EnterRawMode();
   void FoldWithdrawnKey(const AdmissionKey& key);
-  void CaptureRawText(std::u16string_view text);
+  bool CaptureRawText(std::u16string_view text);
+  // Escape cancels exactly the accepted-but-not-yet-submitted suffix. An already submitted
+  // chunk is not retracted; it applies once and the run ends after it resolves.
+  void CancelRawSuffix();
   bool HandleRawKey(const BuiltKey& key);
   void FlushRaw();
   void ResolveRaw();
@@ -200,12 +262,22 @@ class ProductTextController final : public StaWakeTarget,
 
   ITfThreadMgr* thread_manager_ = nullptr;
   TfClientId client_id_ = 0;
-  ::epocanva::windows::engine::EngineExecutor* executor_ = nullptr;
   std::uint64_t generation_ = 0;
   bool started_ = false;
   bool stopping_ = false;
   bool subscribed_ = false;
   bool rebind_soon_ = false;
+  bool attaching_ = false;
+
+  // The engine lease and its shared lock, owned for exactly this activation. The lease is
+  // released off the STA (ReleaseAttachmentAsync): stopping the engine can join its worker.
+  std::shared_ptr<ProductEngineAttachment> engine_;
+  std::uint64_t bootstrap_waiter_ = 0;
+  struct BootstrapWake {
+    std::mutex mutex;
+    StaResultWaker* waker = nullptr;
+  };
+  std::shared_ptr<BootstrapWake> bootstrap_wake_;
 
   // Destruction order is deliberate: the registry outlives the coordinator and observer.
   std::unique_ptr<context::ContextRegistry> registry_;
@@ -216,13 +288,21 @@ class ProductTextController final : public StaWakeTarget,
   std::unique_ptr<coordinator::ObservedBindingController> binding_;
   StaResultWaker waker_;
   KeyAdmissionQueue queue_;
+  std::unique_ptr<CandidateUi> candidate_ui_;
+  // The context the UI reads its caret rectangle from. Owned for the binding's duration and
+  // released on target loss/Stop; never used off the STA.
+  ITfContext* ui_context_ = nullptr;
+  int candidate_selection_ = -1;
+  std::uint64_t candidate_ui_version_ = 0;
+  std::uint64_t candidate_dismissed_version_ = 0;
+  std::uint64_t candidate_stale_selections_ = 0;
 
   bool raw_active_ = false;
   bool raw_submitted_ = false;
   bool raw_end_requested_ = false;
   bool engine_stale_ = false;
   std::uint64_t raw_work_id_ = 0;
-  std::u16string raw_text_;
+  RawTextRun raw_run_;
   std::size_t raw_chunk_keys_ = 0;
   std::size_t raw_submitted_keys_ = 0;
   std::size_t raw_submitted_units_ = 0;
@@ -248,8 +328,18 @@ class ProductTextController final : public StaWakeTarget,
   std::uint64_t raw_keys_ = 0;
   std::uint64_t raw_chars_ = 0;
   std::uint64_t raw_ignored_edits_ = 0;
+  std::uint64_t raw_cancelled_keys_ = 0;
+  std::uint64_t raw_cancelled_units_ = 0;
   std::uint64_t raw_unrecoverable_ = 0;
+  std::uint64_t raw_reason_unapplied_ = 0;
+  std::uint64_t raw_reason_not_candidate_ = 0;
+  std::uint64_t raw_reason_high_water_ = 0;
+  std::uint64_t raw_reason_admission_ = 0;
   std::uint64_t token_host_keys_ = 0;
+  std::uint64_t literal_key_downs_ = 0;
+  std::uint64_t engine_attach_attempts_ = 0;
+  std::uint64_t engine_attach_failures_ = 0;
+  std::string engine_failure_;
 };
 
 }  // namespace product

@@ -12,6 +12,7 @@ using epocanva::tsf::product::KeyAdmissionQueue;
 using epocanva::tsf::product::KeyAdmissionSnapshot;
 using epocanva::tsf::product::KeyFailure;
 using epocanva::tsf::product::KeyState;
+using epocanva::tsf::product::RawTextRun;
 namespace coordinator = epocanva::tsf::product::coordinator;
 namespace input = ::epocanva::windows::input;
 
@@ -46,6 +47,74 @@ input::KeyDecision Decision() {
   decision.text_class = input::TextClass::kAsciiLetter;
   decision.ascii_code_point = 'a';
   return decision;
+}
+
+void TestRawTextRunBoundary() {
+  constexpr std::size_t kCapacity = RawTextRun::kDefaultCapacityUtf16;
+  RawTextRun run;
+  Check(run.empty() && run.size() == 0, "a raw run starts empty");
+
+  // Exactly at the boundary: the text fits and no chunk is requested.
+  std::u16string exactly(kCapacity, u'a');
+  Check(run.Append(exactly, kCapacity) == RawTextRun::AppendStatus::kAppended,
+        "a chunk of exactly the capacity is accepted");
+  Check(run.size() == kCapacity, "the accepted chunk keeps every UTF-16 code unit");
+
+  // One more unit cannot be appended: the caller must flush first. Nothing is truncated.
+  Check(run.Append(u"b", kCapacity) == RawTextRun::AppendStatus::kNeedsFlush,
+        "one unit beyond the capacity asks for a flush instead of truncating");
+  Check(run.size() == kCapacity, "a refused append leaves the chunk unchanged");
+
+  // A key that is itself larger than the capacity is refused, not split.
+  RawTextRun tiny;
+  std::u16string too_large(kCapacity + 1, u'x');
+  Check(tiny.Append(too_large, kCapacity) == RawTextRun::AppendStatus::kTooLarge,
+        "a key larger than the capacity is refused as a whole");
+  Check(tiny.empty(), "a too-large key appends nothing");
+
+  // A surrogate pair is atomic: make the chunk one unit short, then append the pair.
+  RawTextRun pair;
+  Check(pair.Append(std::u16string(kCapacity - 1, u'a'), kCapacity) ==
+            RawTextRun::AppendStatus::kAppended,
+        "the chunk is filled to one unit below the capacity");
+  const std::u16string smiley = u"\U0001F600";  // one code point, two UTF-16 units
+  Check(pair.Append(smiley, kCapacity) == RawTextRun::AppendStatus::kNeedsFlush,
+        "a two-unit key at the one-unit boundary asks for a flush");
+  Check(pair.size() == kCapacity - 1,
+        "the pair is not split across the capacity boundary");
+  pair.Clear();
+  Check(pair.Append(smiley, kCapacity) == RawTextRun::AppendStatus::kAppended &&
+            pair.size() == 2,
+        "the pair is accepted whole in a fresh chunk");
+
+  // Backspace removes a code point, never half a surrogate pair.
+  Check(pair.BackspaceOneCodePoint() && pair.empty(),
+        "backspace removes a whole surrogate pair");
+  RawTextRun trailing;
+  std::u16string unpaired = u"ab";
+  unpaired.push_back(static_cast<char16_t>(0xD83D));
+  trailing.Append(unpaired, kCapacity);
+  Check(trailing.BackspaceOneCodePoint() && trailing.size() == 2,
+        "backspace removes an unpaired trailing unit without touching the rest");
+
+  RawTextRun taken;
+  taken.Append(u"hello", kCapacity);
+  Check(taken.Take() == u"hello" && taken.empty(),
+        "taking a chunk clears the run exactly once");
+}
+
+void TestRawCancelAccounting() {
+  KeyAdmissionQueue queue;
+  queue.RecordDeferredRaw(3, 3);
+  queue.RecordRawCancelled(2, 2);
+  KeyAdmissionSnapshot snapshot = queue.Snapshot();
+  Check(snapshot.raw_cancelled_keys == 2 && snapshot.raw_cancelled_units == 2,
+        "a cancelled suffix is counted separately from applied and failed text");
+  Check(snapshot.failed == 0,
+        "cancelling text the document never received is not a failure");
+  Check(snapshot.last_terminal_state == KeyState::kEditCompleted &&
+            snapshot.last_failure == KeyFailure::kNone,
+        "cancellation is a user-terminal success, not a failure");
 }
 
 void TestCapacity() {
@@ -235,6 +304,8 @@ int main(int argc, char** argv) {
   TestHostTokenOwnership();
   TestHighWaterAndWithdraw();
   TestRawAccounting();
+  TestRawTextRunBoundary();
+  TestRawCancelAccounting();
   TestFailures();
   if (g_failures != 0) {
     std::cout << "FAILED: " << g_failures << " check(s)\n";

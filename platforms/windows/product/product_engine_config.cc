@@ -436,8 +436,17 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
   prepared_ = true;
   deployment_requested_ = can_deploy;
   deferred_while_running_ = deployment_needed && !can_deploy;
+  config_ = config;
   token_ = std::move(token);
   fingerprint_ = std::move(fingerprint);
+  return true;
+}
+
+bool EngineStartTransaction::config(epocanva::tsf::EngineHostConfig* out) const {
+  if (!prepared_ || out == nullptr) {
+    return false;
+  }
+  *out = config_;
   return true;
 }
 

@@ -2,6 +2,7 @@
 #include "text_service_controller.h"
 
 #include <atomic>
+#include <cstdio>
 #include <utility>
 
 #include "key_text_translation.h"
@@ -17,6 +18,8 @@ namespace engine = ::epocanva::windows::engine;
 namespace input = ::epocanva::windows::input;
 namespace ctx = ::epocanva::tsf::context;
 namespace edit = ::epocanva::tsf::edit;
+using ::epocanva::product::DescribeEngineBootstrapState;
+using ::epocanva::product::ReleaseAttachmentAsync;
 
 constexpr char kProductSchema[] = "epocanva_english";
 constexpr std::uint32_t kVirtualKeyProcessKey = 0xE5;
@@ -142,48 +145,42 @@ bool ProductTextController::Start(const Options& options, std::wstring* why) {
     }
     return false;
   }
-  if (options.thread_manager == nullptr || options.client_id == 0 ||
-      options.executor == nullptr) {
+  if (options.thread_manager == nullptr || options.client_id == 0) {
     if (why != nullptr) {
-      *why = L"the product controller needs a thread manager, client id and executor";
+      *why = L"the product controller needs a thread manager and client id";
     }
     return false;
   }
   thread_manager_ = options.thread_manager;
   client_id_ = options.client_id;
-  executor_ = options.executor;
 
-  registry_.reset(new ctx::ContextRegistry(8));
-  permission_ = ctx::CreateRealPermissionSource(client_id_);
-  coordinator_.reset(
-      new coordinator::ContextCoordinator(*executor_, client_id_, *permission_));
-  ctx::ThreadFocusPolicy focus_policy = ctx::ThreadFocusPolicy::kStrictTsf;
-#ifdef EPOCANVA_TSF_DIRECT_SINK_TEST
-  // Controlled direct-sink tests run in a headless STA with no OS foreground focus. The
-  // product DLL (which never defines this macro) keeps the StrictTsf policy.
-  focus_policy = ctx::ThreadFocusPolicy::kLabWin32Fallback;
-#endif
-  observer_.reset(
-      new ctx::ContextObserver(*registry_, client_id_, focus_policy));
-  clients_.reset(new ClientProvider(*executor_));
-  binding_.reset(new coordinator::ObservedBindingController(
-      *observer_, *coordinator_, *registry_, *clients_));
-
-  std::string subscribe_error;
-  if (!observer_->Subscribe(thread_manager_, this, &subscribe_error)) {
-    if (why != nullptr) {
-      *why = std::wstring(subscribe_error.begin(), subscribe_error.end());
+  // The wake channel exists before the engine does: the asynchronous bootstrap posts the
+  // same generation-only message, and the first pump that observes readiness builds the
+  // engine pipeline. No engine event is installed yet.
+  if (!waker_.Start(this, nullptr, ModuleInstance(), generation_, why)) {
+    return false;
+  }
+  bootstrap_wake_ = std::make_shared<BootstrapWake>();
+  bootstrap_wake_->waker = &waker_;
+  std::weak_ptr<BootstrapWake> weak_wake = bootstrap_wake_;
+  bootstrap_waiter_ = ProductEngineBootstrap::Instance().AddWaiter([weak_wake]() {
+    const std::shared_ptr<BootstrapWake> wake = weak_wake.lock();
+    if (!wake) {
+      return;
     }
-    ResetObjects();
-    return false;
-  }
-  subscribed_ = true;
-  if (!waker_.Start(this, executor_->ResultReadyEvent(), ModuleInstance(),
-                    generation_, why)) {
-    ResetObjects();
-    return false;
-  }
+    std::lock_guard<std::mutex> guard(wake->mutex);
+    if (wake->waker != nullptr) {
+      wake->waker->Notify();
+    }
+  });
   started_ = true;
+  candidate_ui_.reset(new CandidateUi(client_id_, this, ModuleInstance()));
+  std::wstring candidate_why;
+  if (!candidate_ui_->Start(thread_manager_, &candidate_why)) {
+    candidate_ui_.reset();
+  }
+  ProductEngineBootstrap::Instance().RequestStart();
+  TryAttachEngine();
   PumpNow();
   return true;
 }
@@ -196,6 +193,15 @@ void ProductTextController::ResetObjects() {
   if (coordinator_) {
     coordinator_->Close();
   }
+  if (ui_context_ != nullptr) {
+    ui_context_->Release();
+    ui_context_ = nullptr;
+  }
+  if (candidate_ui_) {
+    candidate_ui_->End();
+  }
+  candidate_selection_ = -1;
+  candidate_ui_version_ = 0;
   coordinator_.reset();
   observer_.reset();
   permission_.reset();
@@ -204,13 +210,99 @@ void ProductTextController::ResetObjects() {
   subscribed_ = false;
 }
 
+void ProductTextController::TryAttachEngine() {
+  if (!started_ || stopping_ || engine_ || attaching_) {
+    return;
+  }
+  attaching_ = true;
+  ++engine_attach_attempts_;
+  std::shared_ptr<ProductEngineAttachment> attachment;
+  bool engine_running = false;
+  const bool took_pending =
+      ProductEngineBootstrap::Instance().TakeAttachment(&attachment, &engine_running);
+  if (!took_pending && engine_running) {
+    std::wstring acquire_why;
+    if (!ProductEngineBootstrap::Instance().AcquireRunning(&attachment, &acquire_why)) {
+      engine_failure_ = std::string(acquire_why.begin(), acquire_why.end());
+      attaching_ = false;
+      return;
+    }
+  }
+  if (!attachment) {
+    attaching_ = false;
+    return;
+  }
+  engine_ = std::move(attachment);
+  std::wstring build_why;
+  if (!BuildEnginePipeline(&build_why)) {
+    ++engine_attach_failures_;
+    engine_failure_ = std::string(build_why.begin(), build_why.end());
+    ResetObjects();
+    std::shared_ptr<ProductEngineAttachment> failed = std::move(engine_);
+    attaching_ = false;
+    ReleaseAttachmentAsync(std::move(failed));
+    return;
+  }
+  engine_failure_.clear();
+  attaching_ = false;
+  PumpNow();
+}
+
+bool ProductTextController::BuildEnginePipeline(std::wstring* why) {
+  if (!engine_ || engine_->executor() == nullptr) {
+    if (why != nullptr) {
+      *why = L"the engine attachment has no executor";
+    }
+    return false;
+  }
+  engine::EngineExecutor* executor = engine_->executor();
+  registry_.reset(new ctx::ContextRegistry(8));
+  permission_ = ctx::CreateRealPermissionSource(client_id_);
+  coordinator_.reset(
+      new coordinator::ContextCoordinator(*executor, client_id_, *permission_));
+  ctx::ThreadFocusPolicy focus_policy = ctx::ThreadFocusPolicy::kStrictTsf;
+#ifdef EPOCANVA_TSF_DIRECT_SINK_TEST
+  // Controlled direct-sink tests run in a headless STA with no OS foreground focus. The
+  // product DLL (which never defines this macro) keeps the StrictTsf policy.
+  focus_policy = ctx::ThreadFocusPolicy::kLabWin32Fallback;
+#endif
+  observer_.reset(
+      new ctx::ContextObserver(*registry_, client_id_, focus_policy));
+  clients_.reset(new ClientProvider(*executor));
+  binding_.reset(new coordinator::ObservedBindingController(
+      *observer_, *coordinator_, *registry_, *clients_));
+
+  std::string subscribe_error;
+  if (!observer_->Subscribe(thread_manager_, this, &subscribe_error)) {
+    if (why != nullptr) {
+      *why = std::wstring(subscribe_error.begin(), subscribe_error.end());
+    }
+    return false;
+  }
+  subscribed_ = true;
+  // Engine results now arrive through the existing watcher thread; the window is unchanged.
+  waker_.SetExecutorEvent(executor->ResultReadyEvent());
+  return true;
+}
+
 void ProductTextController::Stop() {
-  if (!started_ && !binding_) {
+  if (!started_ && !binding_ && !engine_) {
     return;
   }
   stopping_ = true;
+  if (bootstrap_waiter_ != 0) {
+    ProductEngineBootstrap::Instance().RemoveWaiter(bootstrap_waiter_);
+    bootstrap_waiter_ = 0;
+  }
+  if (bootstrap_wake_) {
+    std::lock_guard<std::mutex> guard(bootstrap_wake_->mutex);
+    bootstrap_wake_->waker = nullptr;
+  }
   // Unregister the wake target before any object it can reach is destroyed.
   waker_.Stop();
+  if (candidate_ui_) {
+    candidate_ui_->Stop();
+  }
   FailRawState(KeyFailure::kShutdown);
   queue_.FailQueued(KeyFailure::kShutdown);
   if (queue_.HasInFlight()) {
@@ -218,6 +310,12 @@ void ProductTextController::Stop() {
   }
   ResetObjects();
   queue_.ReleaseFailedInFlight();
+  candidate_ui_.reset();
+  if (engine_) {
+    // Stopping the engine can join its worker. The STA must not carry that wait, so the
+    // lease release is detached; the thread holds a module reference while it runs.
+    ReleaseAttachmentAsync(std::move(engine_));
+  }
   started_ = false;
   stopping_ = false;
 }
@@ -240,11 +338,26 @@ bool ProductTextController::BuildKey(WPARAM wparam, LPARAM lparam, bool key_down
   const input::KeyTranslationResult translation =
       input::TranslateKeyEvent(key->event, captured.snapshot);
   key->text = translation.text;
-  key->decision = coordinator_->Evaluate(key->event, key->text);
-  const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
-  key->composition_active =
-      snapshot.composition_active || snapshot.owned_composition_active;
+  if (coordinator_) {
+    key->decision = coordinator_->Evaluate(key->event, key->text);
+    const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
+    key->composition_active =
+        snapshot.composition_active || snapshot.owned_composition_active;
+  }
   return true;
+}
+
+void ProductTextController::TrackLiteralKey(WPARAM wparam, LPARAM lparam) {
+  BuiltKey key;
+  if (!BuildKey(wparam, lparam, true, &key)) {
+    return;
+  }
+  const bool shortcut = key.event.modifiers.control || key.event.modifiers.alt ||
+                        key.event.modifiers.windows;
+  host_token_.HostKept(key.text, shortcut);
+  if (host_token_.owned() && !shortcut) {
+    ++token_host_keys_;
+  }
 }
 
 bool ProductTextController::AdmissionAvailable(bool composition_active) const {
@@ -283,7 +396,7 @@ bool ProductTextController::RawCaptureWorthy(const BuiltKey& key) const {
 }
 
 bool ProductTextController::RawUnapplied() const {
-  return raw_active_ || raw_submitted_ || !raw_text_.empty();
+  return raw_active_ || raw_submitted_ || !raw_run_.empty();
 }
 
 bool ProductTextController::HasPendingEngineInput() const {
@@ -298,10 +411,24 @@ bool ProductTextController::PredictKey(WPARAM wparam, LPARAM lparam) {
   if (!started_ || stopping_) {
     return false;
   }
+  if (!engine_ || !coordinator_) {
+    // Literal mode: the key keeps the host's own effect. Prediction stays FALSE, exactly
+    // like the eventual HandleKeyDown answer.
+    return false;
+  }
   ++predictions_;
   BuiltKey key;
   if (!BuildKey(wparam, lparam, true, &key)) {
     return false;
+  }
+  // Candidate navigation is owned by this controller while a real menu is open: the host
+  // must not move its caret, and no engine key is involved.
+  const std::uint32_t vk = key.event.virtual_key;
+  const bool plain_arrow = (vk == VK_UP || vk == VK_DOWN) &&
+                           !key.event.modifiers.control && !key.event.modifiers.alt &&
+                           !key.event.modifiers.shift && !key.event.modifiers.windows;
+  if (plain_arrow && CandidatesOpen()) {
+    return true;
   }
   const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
   if (!snapshot.bound || snapshot.closed ||
@@ -363,6 +490,14 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
     return false;
   }
   ++key_downs_;
+  if (!engine_ || !coordinator_) {
+    // Literal mode while the engine starts, is unavailable, or failed. Every key keeps the
+    // host's own default effect: no queue, no composition, no edit, nothing reordered. The
+    // host-owned token is tracked so a later attach cannot take over mid-word.
+    ++literal_key_downs_;
+    TrackLiteralKey(wparam, lparam);
+    return false;
+  }
   BuiltKey key;
   if (!BuildKey(wparam, lparam, true, &key)) {
     ++not_eaten_;
@@ -385,12 +520,49 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
     ++not_eaten_;
     return false;
   }
+  // W2-B candidate navigation and acceptance. Arrow keys never reach the host while a real
+  // menu is open; Enter with an explicit selection is a validated selection, not an engine
+  // Return. Space is deliberately not intercepted: it keeps the existing literal-commit
+  // contract. Escape dismisses the menu and then follows the normal engine Escape path.
+  const std::uint32_t vk = key.event.virtual_key;
+  const bool plain_arrow = (vk == VK_UP || vk == VK_DOWN) &&
+                           !key.event.modifiers.control && !key.event.modifiers.alt &&
+                           !key.event.modifiers.shift && !key.event.modifiers.windows;
+  if (CandidatesOpen() && plain_arrow) {
+    MoveCandidateSelection(vk == VK_DOWN ? 1 : -1);
+    host_token_.EngineKept();
+    ++eaten_;
+    return true;
+  }
+  if (CandidatesOpen() && vk == VK_RETURN && candidate_selection_ >= 0) {
+    const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
+    CandidateUiSelection selection;
+    selection.snapshot_version = snapshot.version;
+    selection.context_id = snapshot.identity.context_id;
+    selection.generation = snapshot.identity.generation;
+    selection.page_index = candidate_selection_;
+    (void)FinalizeCandidateSelection(selection);
+    host_token_.EngineKept();
+    ++eaten_;
+    return true;
+  }
+  if (CandidatesOpen() && vk == VK_ESCAPE) {
+    // The window closes here; the composition is cancelled through the engine path below,
+    // which also clears the preedit. No captured text is written after this point.
+    candidate_dismissed_version_ = coordinator_->candidate_snapshot().version;
+    candidate_selection_ = -1;
+    if (candidate_ui_) {
+      candidate_ui_->SetSelection(-1);
+      candidate_ui_->End();
+    }
+  }
   if (host_token_.owned() && IsTokenText(key)) {
     ++token_host_keys_;
     ++not_eaten_;
     return false;
   }
   if (RawUnapplied()) {
+    ++raw_reason_unapplied_;
     if (HandleRawKey(key)) {
       host_token_.EngineKept();
       ++eaten_;
@@ -421,6 +593,7 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
     if (HasPendingEngineInput() && RawCaptureWorthy(key)) {
       // Earlier input is still queued for the engine; letting the host insert this character
       // now would place it before text that has not been applied yet. Capture it in order.
+      ++raw_reason_not_candidate_;
       EnterRawMode();
       if (HandleRawKey(key)) {
         ++eaten_;
@@ -441,6 +614,7 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
   }
   if (QueueDepth() >= KeyAdmissionQueue::kHighWater) {
     // High water: the queued tail moves to the raw run before the engine can stall further.
+    ++raw_reason_high_water_;
     EnterRawMode();
     if (HandleRawKey(key)) {
       host_token_.EngineKept();
@@ -456,6 +630,7 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
       ++not_eaten_;
       return false;
     }
+    ++raw_reason_admission_;
     EnterRawMode();
     if (HandleRawKey(key)) {
       host_token_.EngineKept();
@@ -500,11 +675,11 @@ void ProductTextController::EnterRawMode() {
   ++raw_entered_;
   host_token_.Reset();
   std::deque<AdmissionKey> withdrawn = queue_.WithdrawQueued();
-  const std::size_t before = raw_text_.size();
+  const std::size_t before = raw_run_.size();
   for (const AdmissionKey& key : withdrawn) {
     FoldWithdrawnKey(key);
   }
-  queue_.RecordDeferredRaw(withdrawn.size(), raw_text_.size() - before);
+  queue_.RecordDeferredRaw(withdrawn.size(), raw_run_.size() - before);
 }
 
 void ProductTextController::FoldWithdrawnKey(const AdmissionKey& key) {
@@ -520,15 +695,13 @@ void ProductTextController::FoldWithdrawnKey(const AdmissionKey& key) {
       ++raw_chunk_keys_;
       break;
     case input::KeyDisposition::kEngineEscapeCandidate:
-      // Degraded mode keeps the captured text; Escape ends the run without cancelling it.
+      // Escape inside an already-withdrawn run cancels only what is not yet submitted.
+      CancelRawSuffix();
       raw_end_requested_ = true;
-      ++raw_ignored_edits_;
       ++raw_chunk_keys_;
       break;
     case input::KeyDisposition::kEngineBackSpaceCandidate:
-      if (!raw_text_.empty()) {
-        raw_text_.pop_back();
-      } else {
+      if (!raw_run_.BackspaceOneCodePoint()) {
         ++raw_ignored_edits_;
       }
       ++raw_chunk_keys_;
@@ -539,21 +712,42 @@ void ProductTextController::FoldWithdrawnKey(const AdmissionKey& key) {
   }
 }
 
-void ProductTextController::CaptureRawText(std::u16string_view text) {
+bool ProductTextController::CaptureRawText(std::u16string_view text) {
   if (text.empty()) {
-    return;
+    return true;
   }
-  if (raw_text_.size() + text.size() > kRawCapacityUtf16) {
-    // The bounded run is exhausted. The key is still eaten so the already captured run keeps
-    // its order, and the loss is reported as an explicit unrecoverable failure.
+  RawTextRun::AppendStatus status = raw_run_.Append(text, kRawCapacityUtf16);
+  if (status == RawTextRun::AppendStatus::kNeedsFlush) {
+    // Hand the full chunk to the coordinator and retry this key in a new chunk. This is
+    // what keeps the bound from turning into a loss while the document is still draining.
+    FlushRaw();
+    if (raw_submitted_) {
+      status = raw_run_.Append(text, kRawCapacityUtf16);
+    }
+  }
+  if (status != RawTextRun::AppendStatus::kAppended) {
+    // The current chunk could not be flushed (an earlier chunk or engine key is still
+    // unresolved). The key is still eaten so the text that IS captured keeps its order; the
+    // loss is reported as an explicit unrecoverable capacity failure, never hidden.
     queue_.RecordRawDropped(1, text.size());
     ++raw_unrecoverable_;
-    return;
+    return false;
   }
-  raw_text_.append(text.begin(), text.end());
   ++raw_chunk_keys_;
   ++raw_keys_;
   raw_chars_ += text.size();
+  return true;
+}
+
+void ProductTextController::CancelRawSuffix() {
+  if (raw_run_.empty()) {
+    return;
+  }
+  raw_cancelled_keys_ += raw_chunk_keys_;
+  raw_cancelled_units_ += raw_run_.size();
+  queue_.RecordRawCancelled(raw_chunk_keys_, raw_run_.size());
+  raw_run_.Clear();
+  raw_chunk_keys_ = 0;
 }
 
 bool ProductTextController::HandleRawKey(const BuiltKey& key) {
@@ -577,26 +771,29 @@ bool ProductTextController::HandleRawKey(const BuiltKey& key) {
     return true;
   }
   if (vk == input::kVirtualKeyReturn) {
-    // Same visible effect as the engine path today: eaten, no text change.
+    // Enter ends the run and applies the captured suffix; it inserts no newline, exactly as
+    // the engine path commits a composition without adding a line break.
     raw_end_requested_ = true;
     ++raw_chunk_keys_;
     FlushRaw();
     return true;
   }
   if (vk == input::kVirtualKeyEscape) {
-    // The first version does not cancel captured text in degraded mode: cancelling would
-    // need the whole token's history, which the capture does not re-read. Reported, not
-    // hidden.
+    // Escape cancels the accepted-but-not-yet-submitted suffix. A chunk already handed to
+    // the coordinator before this key is not retracted (there is no safe cancel for a TSF
+    // write that may be in flight); it applies exactly once. Nothing captured earlier is
+    // submitted later: the suffix is cleared here and the run ends when the chunk resolves.
+    CancelRawSuffix();
     raw_end_requested_ = true;
-    ++raw_ignored_edits_;
     ++raw_chunk_keys_;
+    ++raw_ignored_edits_;
     FlushRaw();
     return true;
   }
   if (vk == input::kVirtualKeyBack) {
-    if (!raw_text_.empty()) {
-      raw_text_.pop_back();
-    } else {
+    // Backspace edits only the captured suffix. It never deletes displayed composition text
+    // or host text: when the suffix is empty, the key is eaten and counted, not forwarded.
+    if (!raw_run_.BackspaceOneCodePoint()) {
       ++raw_ignored_edits_;
     }
     ++raw_chunk_keys_;
@@ -616,7 +813,7 @@ bool ProductTextController::HandleRawKey(const BuiltKey& key) {
 }
 
 void ProductTextController::FlushRaw() {
-  if (!raw_active_ || raw_submitted_ || raw_text_.empty()) {
+  if (!raw_active_ || raw_submitted_ || raw_run_.empty()) {
     return;
   }
   if (HasPendingEngineInput()) {
@@ -635,15 +832,15 @@ void ProductTextController::FlushRaw() {
   }
   coordinator::WorkId work;
   const coordinator::SubmitStatus status =
-      coordinator_->SubmitRawCommit(raw_text_, &work);
+      coordinator_->SubmitRawCommit(raw_run_.text(), &work);
   switch (status) {
     case coordinator::SubmitStatus::kAccepted:
       raw_submitted_ = true;
       raw_work_id_ = work.value;
       raw_submitted_keys_ = raw_chunk_keys_;
-      raw_submitted_units_ = raw_text_.size();
+      raw_submitted_units_ = raw_run_.size();
+      raw_run_.Clear();
       raw_chunk_keys_ = 0;
-      raw_text_.clear();
       ++raw_commits_;
       waker_.SetPacing(true);
       return;
@@ -710,7 +907,7 @@ void ProductTextController::ResolveRaw() {
     }
   }
   FlushRaw();
-  if (raw_active_ && !raw_submitted_ && raw_text_.empty() &&
+  if (raw_active_ && !raw_submitted_ && raw_run_.empty() &&
       !HasPendingEngineInput() && raw_end_requested_) {
     FinishRawRun();
   }
@@ -735,15 +932,15 @@ void ProductTextController::FailRawState(KeyFailure failure) {
   if (raw_submitted_) {
     queue_.RecordRawFailed(raw_submitted_keys_, raw_submitted_units_);
   }
-  if (raw_chunk_keys_ != 0 || !raw_text_.empty()) {
-    queue_.RecordRawFailed(raw_chunk_keys_, raw_text_.size());
+  if (raw_chunk_keys_ != 0 || !raw_run_.empty()) {
+    queue_.RecordRawFailed(raw_chunk_keys_, raw_run_.size());
   }
   raw_submitted_ = false;
   raw_work_id_ = 0;
   raw_submitted_keys_ = 0;
   raw_submitted_units_ = 0;
   raw_chunk_keys_ = 0;
-  raw_text_.clear();
+  raw_run_.Clear();
   raw_end_requested_ = false;
   raw_active_ = false;
   (void)failure;
@@ -963,6 +1160,18 @@ void ProductTextController::PumpNow() {
     return;
   }
   ++pumps_;
+  if (!engine_ || !coordinator_) {
+    // The engine start is asynchronous; this pump is the STA-side adoption point. It is
+    // non-blocking: a not-yet-ready start simply leaves the controller literal.
+    TryAttachEngine();
+    if (!engine_ || !coordinator_) {
+      if (candidate_ui_) {
+        candidate_ui_->End();
+      }
+      waker_.SetPacing(false);
+      return;
+    }
+  }
   if (rebind_soon_) {
     rebind_soon_ = false;
     if (observer_) {
@@ -998,12 +1207,13 @@ void ProductTextController::PumpNow() {
   }
   ResolveRaw();
   SubmitHead(false);
+  UpdateCandidateUi();
   UpdatePacing();
 }
 
 void ProductTextController::UpdatePacing() {
   bool pace = false;
-  if (started_ && !stopping_) {
+  if (started_ && !stopping_ && engine_ && coordinator_ && observer_ && clients_) {
     const coordinator::CoordinatorSnapshot coordinator = coordinator_->Snapshot();
     const ctx::ContextObserverSnapshot observer = observer_->Snapshot();
     if (queue_.HasInFlight() || !queue_.empty() ||
@@ -1018,6 +1228,169 @@ void ProductTextController::UpdatePacing() {
   waker_.SetPacing(pace);
 }
 
+bool ProductTextController::CandidatesOpen() const {
+  if (!engine_ || !coordinator_ || raw_active_ || raw_submitted_) {
+    return false;
+  }
+  if (!coordinator_->candidate_menu_open()) {
+    return false;
+  }
+  return coordinator_->candidate_snapshot().version != candidate_dismissed_version_;
+}
+
+void ProductTextController::MoveCandidateSelection(int delta) {
+  if (!coordinator_) {
+    return;
+  }
+  const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
+  if (!snapshot.valid || snapshot.items.empty()) {
+    return;
+  }
+  const int count = static_cast<int>(snapshot.items.size());
+  if (delta > 0) {
+    candidate_selection_ =
+        candidate_selection_ < 0 ? 0 : (candidate_selection_ + 1) % count;
+  } else if (delta < 0) {
+    candidate_selection_ =
+        candidate_selection_ < 0 ? count - 1 : (candidate_selection_ - 1 + count) % count;
+  }
+  if (candidate_ui_) {
+    candidate_ui_->SetSelection(candidate_selection_);
+  }
+}
+
+bool ProductTextController::FinalizeCandidateSelection(
+    const CandidateUiSelection& selection) {
+  if (!engine_ || !coordinator_ || selection.page_index < 0) {
+    return false;
+  }
+  const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
+  if (!snapshot.valid || snapshot.version != selection.snapshot_version) {
+    ++candidate_stale_selections_;
+    candidate_selection_ = -1;
+    candidate_dismissed_version_ = snapshot.version;
+    if (candidate_ui_) {
+      candidate_ui_->SetSelection(-1);
+      candidate_ui_->End();
+    }
+    return false;
+  }
+  coordinator::CandidateSelectionRequest request;
+  request.snapshot_version = selection.snapshot_version;
+  request.context_id = selection.context_id;
+  request.generation = selection.generation;
+  request.page_index = static_cast<std::size_t>(selection.page_index);
+  coordinator::WorkId work;
+  const coordinator::SubmitStatus status =
+      coordinator_->SubmitCandidateSelection(request, &work);
+  if (status != coordinator::SubmitStatus::kAccepted) {
+    ++candidate_stale_selections_;
+    candidate_selection_ = -1;
+    if (status == coordinator::SubmitStatus::kCandidateStale) {
+      candidate_dismissed_version_ = snapshot.version;
+      if (candidate_ui_) {
+        candidate_ui_->SetSelection(-1);
+        candidate_ui_->End();
+      }
+    } else if (candidate_ui_) {
+      candidate_ui_->SetSelection(-1);
+    }
+    return false;
+  }
+  candidate_selection_ = -1;
+  if (candidate_ui_) {
+    candidate_ui_->SetSelection(-1);
+  }
+  waker_.SetPacing(true);
+  return true;
+}
+
+void ProductTextController::UpdateCandidateUi() {
+  if (!candidate_ui_) {
+    return;
+  }
+  if (!engine_ || !coordinator_) {
+    candidate_ui_->End();
+    candidate_selection_ = -1;
+    return;
+  }
+  const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
+  if (!snapshot.valid || raw_active_ || raw_submitted_) {
+    candidate_ui_->End();
+    candidate_selection_ = -1;
+    candidate_ui_version_ = snapshot.version;
+    return;
+  }
+  if (snapshot.version != candidate_ui_version_) {
+    candidate_ui_version_ = snapshot.version;
+    candidate_selection_ = -1;
+  }
+  if (candidate_dismissed_version_ == snapshot.version) {
+    candidate_ui_->End();
+    return;
+  }
+  const coordinator::CoordinatorSnapshot coordinator = coordinator_->Snapshot();
+  RECT anchor = {};
+  const RECT* anchor_ptr = nullptr;
+  // A real TSF UI element manager is the only reason to start a read-only edit session for
+  // the caret rectangle. Without one (the controlled direct-sink host) the element answers
+  // no UI queries, so no TSF call is made. A host-drawn element needs no rectangle either.
+  const bool wants_window = candidate_ui_->tsf_manager() &&
+                            (!candidate_ui_->begun() || !candidate_ui_->host_drawn());
+  if (wants_window && ui_context_ != nullptr && coordinator.composition_active &&
+      coordinator.composition_start_utf16 >= 0 &&
+      coordinator.composition_length_utf16 > 0) {
+    bool clipped = false;
+    if (ReadCompositionRect(ui_context_, client_id_, coordinator.composition_start_utf16,
+                            coordinator.composition_length_utf16, &anchor, &clipped,
+                            nullptr)) {
+      anchor_ptr = &anchor;
+    }
+  }
+  candidate_ui_->Update(snapshot, ui_context_, anchor_ptr, candidate_selection_);
+}
+
+void ProductTextController::OnUiSelectionChanged(
+    const CandidateUiSelection& selection) {
+  if (!coordinator_) {
+    return;
+  }
+  const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
+  if (!snapshot.valid || snapshot.version != selection.snapshot_version ||
+      snapshot.identity.context_id != selection.context_id ||
+      snapshot.identity.generation != selection.generation ||
+      selection.page_index < 0 ||
+      selection.page_index >= static_cast<int>(snapshot.items.size())) {
+    ++candidate_stale_selections_;
+    return;
+  }
+  candidate_selection_ = selection.page_index;
+  if (candidate_ui_) {
+    candidate_ui_->SetSelection(selection.page_index);
+  }
+}
+
+void ProductTextController::OnUiFinalize(const CandidateUiSelection& selection) {
+  (void)FinalizeCandidateSelection(selection);
+}
+
+void ProductTextController::OnUiAbort(std::uint64_t snapshot_version,
+                                     std::uint64_t context_id,
+                                     std::uint64_t generation) {
+  candidate_selection_ = -1;
+  if (snapshot_version != 0) {
+    candidate_dismissed_version_ = snapshot_version;
+  } else if (coordinator_) {
+    candidate_dismissed_version_ = coordinator_->candidate_snapshot().version;
+  }
+  (void)context_id;
+  (void)generation;
+  if (candidate_ui_) {
+    candidate_ui_->SetSelection(-1);
+    candidate_ui_->End();
+  }
+}
+
 void ProductTextController::OnStaWake(std::uint64_t generation) {
   if (!started_ || stopping_ || generation != generation_) {
     ++stale_wakes_;
@@ -1026,10 +1399,15 @@ void ProductTextController::OnStaWake(std::uint64_t generation) {
   ++wakes_;
   PumpNow();
 }
-
 void ProductTextController::OnTargetLost(ctx::ContextDropReason reason) {
   ++target_losses_;
   FailRawState(KeyFailure::kFocusChanged);
+  if (ui_context_ != nullptr) {
+    ui_context_->Release();
+    ui_context_ = nullptr;
+  }
+  candidate_selection_ = -1;
+  candidate_ui_version_ = 0;
   // A host-owned token survives an external edit caused by the host inserting the very
   // characters we passed through; it ends only when the token itself ends or the target
   // really moves to another document.
@@ -1048,6 +1426,14 @@ void ProductTextController::OnTargetLost(ctx::ContextDropReason reason) {
 void ProductTextController::OnTargetBound(ITfContext* context,
                                           const ctx::ObservedTarget& target) {
   ++target_binds_;
+  if (ui_context_ != nullptr) {
+    ui_context_->Release();
+    ui_context_ = nullptr;
+  }
+  if (context != nullptr) {
+    context->AddRef();
+    ui_context_ = context;
+  }
   // A fresh binding starts with a fresh engine client. The host-owned token is NOT a
   // binding fact: a rebind caused by the host inserting passed-through text must not
   // reopen the token to the engine.
@@ -1062,12 +1448,31 @@ void ProductTextController::OnOwnEditCompleted(
   binding_->OnOwnEditCompleted(context, target, selection);
 }
 
+coordinator::CandidateSnapshot ProductTextController::CandidateSnapshotForTest() const {
+  if (!coordinator_) {
+    return coordinator::CandidateSnapshot{};
+  }
+  return coordinator_->candidate_snapshot();
+}
+
 ControllerDiagnostics ProductTextController::Snapshot() const {
   ControllerDiagnostics diagnostics;
   diagnostics.started = started_;
   diagnostics.stopping = stopping_;
   diagnostics.subscribed = subscribed_;
   diagnostics.observer_closed = observer_ ? observer_->closed() : true;
+  diagnostics.engine_ready = engine_ != nullptr && coordinator_ != nullptr;
+  diagnostics.engine_attaching = attaching_;
+  diagnostics.engine_state =
+      DescribeEngineBootstrapState(ProductEngineBootstrap::Instance().state());
+  const std::wstring bootstrap_failure = ProductEngineBootstrap::Instance().failure();
+  diagnostics.engine_failure =
+      engine_failure_.empty()
+          ? std::string(bootstrap_failure.begin(), bootstrap_failure.end())
+          : engine_failure_;
+  diagnostics.literal_key_downs = literal_key_downs_;
+  diagnostics.engine_attach_attempts = engine_attach_attempts_;
+  diagnostics.engine_attach_failures = engine_attach_failures_;
   diagnostics.generation = generation_;
   diagnostics.pumps = pumps_;
   diagnostics.wakes = wakes_;
@@ -1085,13 +1490,19 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   diagnostics.raw_submitted = raw_submitted_;
   diagnostics.engine_stale = engine_stale_;
   diagnostics.raw_unapplied_units =
-      static_cast<std::uint64_t>(raw_text_.size());
+      static_cast<std::uint64_t>(raw_run_.size());
   diagnostics.raw_keys = raw_keys_;
   diagnostics.raw_commits = raw_commits_;
   diagnostics.raw_entered = raw_entered_;
   diagnostics.raw_exits = raw_exits_;
   diagnostics.raw_ignored_edits = raw_ignored_edits_;
+  diagnostics.raw_cancelled_keys = raw_cancelled_keys_;
+  diagnostics.raw_cancelled_units = raw_cancelled_units_;
   diagnostics.raw_unrecoverable = raw_unrecoverable_;
+  diagnostics.raw_reason_unapplied = raw_reason_unapplied_;
+  diagnostics.raw_reason_not_candidate = raw_reason_not_candidate_;
+  diagnostics.raw_reason_high_water = raw_reason_high_water_;
+  diagnostics.raw_reason_admission = raw_reason_admission_;
   diagnostics.token_host_keys = token_host_keys_;
   if (clients_) {
     diagnostics.engine_client_requests = clients_->requests();
@@ -1101,6 +1512,15 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   if (coordinator_) {
     diagnostics.coordinator_bound = coordinator_->bound();
     diagnostics.coordinator = coordinator_->Snapshot();
+    const coordinator::CandidateSnapshot candidates = coordinator_->candidate_snapshot();
+    diagnostics.candidate_menu_open = candidates.valid;
+    diagnostics.candidate_version = candidates.version;
+    diagnostics.candidate_items = candidates.items.size();
+  }
+  diagnostics.candidate_selected = candidate_selection_;
+  diagnostics.candidate_stale_selections = candidate_stale_selections_;
+  if (candidate_ui_) {
+    diagnostics.candidate_ui = candidate_ui_->Diagnostics();
   }
   if (observer_) {
     diagnostics.observer = observer_->Snapshot();

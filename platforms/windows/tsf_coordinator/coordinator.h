@@ -122,6 +122,7 @@
 #include <optional>
 #include <vector>
 
+#include "candidate_snapshot.h"
 #include "context_registry.h"
 #include "edit_plan.h"
 #include "edit_result.h"
@@ -180,6 +181,7 @@ enum class SubmitStatus : std::uint8_t {
   kThreadFocusLost,
   kTargetUnverified,
   kNotEngineCandidate,     // the local pure evaluation says this is not an engine key
+  kCandidateStale,         // a UI selection no longer matches the engine's current page
   kEngineNotRunning,       // mapped from the executor's kNotRunning
   kQueueFull,              // mapped from the executor's kQueueFull
   kEngineClientUnavailable,// the executor no longer knows/accepts this engine client
@@ -418,6 +420,15 @@ struct CoordinatorSnapshot {
   std::uint64_t raw_commits_failed = 0;
   std::uint64_t raw_units_applied = 0;
   std::uint64_t raw_units_refused = 0;
+  LONG last_raw_composition_start = -1;
+  std::uint64_t last_raw_composition_units = 0;
+  std::uint64_t last_raw_input_units = 0;
+  std::uint64_t last_raw_plan_units = 0;
+  // W2-B candidate snapshot accounting. Text-free.
+  std::uint64_t candidate_version = 0;
+  std::uint64_t candidate_snapshots = 0;
+  std::uint64_t candidate_items = 0;
+  std::uint64_t candidate_stale_refusals = 0;
   std::uint64_t engine_results_taken = 0;
   std::uint64_t plans_submitted = 0;
   std::uint64_t edits_applied = 0;
@@ -538,6 +549,16 @@ class ContextCoordinator {
   SubmitStatus SubmitKey(const input::KeyEventSnapshot& event, const input::KeyText& text,
                          WorkId* id);
   SubmitStatus SubmitCandidate(std::size_t candidate_index, WorkId* id);
+
+  // W2-B UI selection: the same engine command as SubmitCandidate, but only when the
+  // request still names the CURRENT candidate snapshot (version), the CURRENT binding
+  // identity/generation, and an index that exists on that page while the composition is
+  // still active. An expired request is kCandidateStale and is never sent to the engine.
+  SubmitStatus SubmitCandidateSelection(const CandidateSelectionRequest& request,
+                                        WorkId* id);
+  // The current menu copy. The version increments on every engine observation.
+  CandidateSnapshot candidate_snapshot() const { return candidate_snapshot_; }
+  bool candidate_menu_open() const { return candidate_snapshot_.valid; }
 
   // W2-A-R degraded terminal: commit `raw_utf16` (UTF-16 code units) into the bound
   // document without an engine call. When the coordinator's writer owns a composition, the
@@ -691,6 +712,10 @@ class ContextCoordinator {
   void FinishWorkLedger(WorkKind kind);
   SubmitStatus FinishSubmit(engine::RequestId request, WorkKind kind);
   void ResolveEngineResult(const engine::CommandResult& result);
+  // Copies the engine's current page into candidate_snapshot_ (or clears it) and bumps the
+  // version. Text lives only in memory; diagnostics never see it.
+  void UpdateCandidateSnapshot(const engine::EngineState& state);
+  void InvalidateCandidateSnapshot();
   // Decides what the observation means, then (only for an edit-producing plan) resolves
   // the permission again before submitting. NoEdit/InvalidObservation/UnsupportedShape are
   // decided first so a permission answer cannot hide an unreadable engine result.
@@ -775,6 +800,10 @@ class ContextCoordinator {
   std::uint64_t target_refusals_ = 0;
 
   LocalDocumentView view_;
+  CandidateSnapshot candidate_snapshot_;
+  std::uint64_t candidate_version_ = 0;
+  std::uint64_t candidate_snapshots_ = 0;
+  std::uint64_t candidate_stale_refusals_ = 0;
 
   // Fixed-capacity retirement ledger. It holds only already-invalidated bindings, so it can
   // never be used to continue typing into them.
@@ -821,6 +850,10 @@ class ContextCoordinator {
   std::uint64_t raw_units_applied_ = 0;
   std::uint64_t raw_units_refused_ = 0;
   std::uint64_t last_raw_units_ = 0;
+  LONG last_raw_composition_start_ = -1;
+  std::uint64_t last_raw_composition_units_ = 0;
+  std::uint64_t last_raw_input_units_ = 0;
+  std::uint64_t last_raw_plan_units_ = 0;
   bool raw_terminal_noted_ = false;
   std::uint64_t engine_results_taken_ = 0;
   std::uint64_t plans_submitted_ = 0;

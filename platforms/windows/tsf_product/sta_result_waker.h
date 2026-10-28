@@ -27,6 +27,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace epocanva {
@@ -73,6 +74,14 @@ class StaResultWaker {
   // class can wait on. Paced mode wakes every few milliseconds; unpaced mode sleeps until
   // the executor event, a reconfiguration or Stop.
   void SetPacing(bool paced);
+  // The engine result event is not known when a literal-mode controller starts. Setting it
+  // later re-arms the existing watcher thread; the STA window is not recreated.
+  void SetExecutorEvent(HANDLE executor_event);
+
+  // Cross-thread wake: posts the same generation-only message as the watcher. Used by the
+  // asynchronous engine bootstrap. Safe from any thread; a call racing Stop() either posts
+  // before the window is destroyed or observes stopped and does nothing.
+  void Notify();
 
   StaWakerDiagnostics Snapshot() const;
   HWND window_for_test() const { return window_; }
@@ -92,7 +101,7 @@ class StaResultWaker {
   HWND window_ = nullptr;
   HANDLE stop_event_ = nullptr;
   HANDLE reconfigure_event_ = nullptr;
-  HANDLE executor_event_ = nullptr;
+  std::atomic<HANDLE> executor_event_{nullptr};
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> paced_{false};
   std::atomic<std::uint64_t> wakes_posted_{0};
@@ -101,6 +110,9 @@ class StaResultWaker {
   std::atomic<std::uint64_t> stops_{0};
   std::uint64_t generation_ = 0;
   bool started_ = false;
+  // Protects window_/generation_ against a cross-thread Notify racing Stop(). The window
+  // itself is created and destroyed only on the STA.
+  std::mutex window_mutex_;
 };
 
 }  // namespace product

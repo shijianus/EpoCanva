@@ -76,6 +76,47 @@ void HostTokenOwnership::HostKept(const input::KeyText& text, bool shortcut) {
   owned_ = IsTokenText(text);
 }
 
+RawTextRun::AppendStatus RawTextRun::Append(std::u16string_view text,
+                                            std::size_t capacity_utf16) {
+  if (text.empty()) {
+    return AppendStatus::kAppended;
+  }
+  if (text.size() > capacity_utf16) {
+    return AppendStatus::kTooLarge;
+  }
+  if (text_.size() + text.size() > capacity_utf16) {
+    return text_.empty() ? AppendStatus::kTooLarge : AppendStatus::kNeedsFlush;
+  }
+  text_.append(text.begin(), text.end());
+  return AppendStatus::kAppended;
+}
+
+bool RawTextRun::BackspaceOneCodePoint() {
+  if (text_.empty()) {
+    return false;
+  }
+  std::size_t remove = 1;
+  if (text_.size() >= 2) {
+    const char16_t last = text_[text_.size() - 1];
+    const char16_t previous = text_[text_.size() - 2];
+    const bool low = last >= 0xDC00 && last <= 0xDFFF;
+    const bool high = previous >= 0xD800 && previous <= 0xDBFF;
+    if (low && high) {
+      remove = 2;
+    }
+  }
+  text_.resize(text_.size() - remove);
+  return true;
+}
+
+void RawTextRun::Clear() { text_.clear(); }
+
+std::u16string RawTextRun::Take() {
+  std::u16string taken = std::move(text_);
+  text_.clear();
+  return taken;
+}
+
 bool KeyAdmissionQueue::CanAccept(bool composition_active) const {
   const std::size_t limit = composition_active ? kCapacity : kNonComposingLimit;
   return queue_.size() < limit;
@@ -289,6 +330,13 @@ void KeyAdmissionQueue::RecordRawApplied(std::size_t keys, std::size_t units) {
   counters_.raw_applied_units += units;
 }
 
+void KeyAdmissionQueue::RecordRawCancelled(std::size_t keys, std::size_t units) {
+  counters_.raw_cancelled_keys += keys;
+  counters_.raw_cancelled_units += units;
+  counters_.last_terminal_state = KeyState::kEditCompleted;
+  counters_.last_failure = KeyFailure::kNone;
+}
+
 void KeyAdmissionQueue::RecordRawFailed(std::size_t keys, std::size_t units) {
   counters_.raw_failed_keys += keys;
   counters_.raw_failed_units += units;
@@ -304,6 +352,7 @@ void KeyAdmissionQueue::RecordRawFailed(std::size_t keys, std::size_t units) {
 
 void KeyAdmissionQueue::RecordRawDropped(std::size_t keys, std::size_t units) {
   counters_.raw_dropped_keys += keys;
+  counters_.raw_dropped_units += units;
   counters_.raw_failed_units += units;
   for (std::size_t index = 0; index < keys; ++index) {
     CountFailure(KeyFailure::kRawCapacity);

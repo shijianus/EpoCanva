@@ -178,11 +178,10 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
 
   target_ = target;
   module_ = module;
-  executor_event_ = executor_event;
+  executor_event_.store(executor_event);
   generation_ = generation;
   stop_requested_.store(false);
-  paced_.store(false);
-  {
+  paced_.store(false);  {
     std::lock_guard<std::mutex> guard(g_registry_mutex);
     g_registry[window_] = Registration{this, target_, generation_};
   }
@@ -190,16 +189,18 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
   const HWND window = window_;
   const HANDLE stop_event = stop_event_;
   const HANDLE reconfigure_event = reconfigure_event_;
-  const HANDLE result_event = executor_event_;
   const std::uint64_t wake_generation = generation_;
   try {
     impl_->watcher = std::thread([this, window, stop_event, reconfigure_event,
-                                  result_event, wake_generation] {
-      HANDLE handles[3] = {stop_event, reconfigure_event, result_event};
-      const DWORD handle_count = result_event != nullptr ? 3 : 2;
+                                  wake_generation] {
       bool retry = false;
       for (;;) {
         const bool paced = paced_.load();
+        // The result event is installed after Start when the engine is attached
+        // asynchronously; re-read it on every wait so no thread restart is needed.
+        const HANDLE result_event = executor_event_.load();
+        HANDLE handles[3] = {stop_event, reconfigure_event, result_event};
+        const DWORD handle_count = result_event != nullptr ? 3 : 2;
         const DWORD timeout = (paced || retry) ? 10 : INFINITE;
         const DWORD waited =
             ::WaitForMultipleObjects(handle_count, handles, FALSE, timeout);
@@ -207,7 +208,7 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
           break;
         }
         if (waited == WAIT_OBJECT_0 + 1) {
-          // Reconfiguration changes the timeout for the next wait; it is not a result.
+          // Reconfiguration changes the wait set; it is not a result.
           continue;
         }
         if (waited == WAIT_FAILED) {
@@ -236,7 +237,7 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
     stop_event_ = nullptr;
     reconfigure_event_ = nullptr;
     target_ = nullptr;
-    executor_event_ = nullptr;
+    executor_event_.store(nullptr);
     ReleaseWindowClass(module_);
     module_ = nullptr;
     if (why != nullptr) {
@@ -244,11 +245,12 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
     }
     return false;
   }
-  started_ = true;
+  {
+    std::lock_guard<std::mutex> guard(window_mutex_);
+    started_ = true;
+  }
   return true;
-}
-
-void StaResultWaker::HandleWake(std::uint64_t generation) {
+}void StaResultWaker::HandleWake(std::uint64_t generation) {
   if (!started_ || stop_requested_.load() || generation != generation_ ||
       target_ == nullptr) {
     g_stale_wakes.fetch_add(1);
@@ -259,8 +261,12 @@ void StaResultWaker::HandleWake(std::uint64_t generation) {
 }
 
 void StaResultWaker::Stop() {
-  if (!started_) {
-    return;
+  {
+    std::lock_guard<std::mutex> guard(window_mutex_);
+    if (!started_) {
+      return;
+    }
+    started_ = false;
   }
   stop_requested_.store(true);
   if (stop_event_ != nullptr) {
@@ -276,10 +282,15 @@ void StaResultWaker::Stop() {
     std::lock_guard<std::mutex> guard(g_registry_mutex);
     g_registry.erase(window_);
   }
-  ::SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
-  if (window_ != nullptr) {
-    ::DestroyWindow(window_);
-    window_ = nullptr;
+  {
+    // Serialised with Notify(): after started_ is false no new post starts, and a poster
+    // that already observed true has finished before this lock is granted.
+    std::lock_guard<std::mutex> guard(window_mutex_);
+    if (window_ != nullptr) {
+      ::SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
+      ::DestroyWindow(window_);
+      window_ = nullptr;
+    }
   }
   if (stop_event_ != nullptr) {
     ::CloseHandle(stop_event_);
@@ -289,14 +300,25 @@ void StaResultWaker::Stop() {
     ::CloseHandle(reconfigure_event_);
     reconfigure_event_ = nullptr;
   }
-  executor_event_ = nullptr;
+  executor_event_.store(nullptr);
   target_ = nullptr;
   if (module_ != nullptr) {
     ReleaseWindowClass(module_);
     module_ = nullptr;
   }
-  started_ = false;
   stops_.fetch_add(1);
+}
+
+void StaResultWaker::Notify() {
+  std::lock_guard<std::mutex> guard(window_mutex_);
+  if (!started_ || stop_requested_.load() || window_ == nullptr) {
+    return;
+  }
+  if (!::PostMessageW(window_, kWakeMessage, static_cast<WPARAM>(generation_), 0)) {
+    wake_post_failures_.fetch_add(1);
+  } else {
+    wakes_posted_.fetch_add(1);
+  }
 }
 
 void StaResultWaker::SetPacing(bool paced) {
@@ -304,6 +326,11 @@ void StaResultWaker::SetPacing(bool paced) {
   if (started_ && previous != paced) {
     RequestWatcherReconfigure();
   }
+}
+
+void StaResultWaker::SetExecutorEvent(HANDLE executor_event) {
+  executor_event_.store(executor_event);
+  RequestWatcherReconfigure();
 }
 
 void StaResultWaker::RequestWatcherReconfigure() {

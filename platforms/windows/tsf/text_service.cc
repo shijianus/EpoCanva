@@ -14,6 +14,9 @@
 #endif
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
 #include "text_service_controller.h"
+#ifdef EPOCANVA_TSF_DIRECT_SINK_TEST
+#include "product_test_seam.h"
+#endif
 #endif
 
 namespace epocanva {
@@ -186,6 +189,9 @@ HRESULT STDMETHODCALLTYPE EpoCanvaTextService::Deactivate() {
     key_sink_advised = key_sink_advised_;
     key_sink_advised_ = false;
   }
+#ifdef EPOCANVA_TSF_DIRECT_SINK_TEST
+  product::SetTestController(nullptr);
+#endif
   // Unadvise the key sink FIRST: no new callback may enter the controller while it is
   // being stopped, and the sink object is still alive for TSF's matching Release.
   if (key_sink_advised && thread_manager != nullptr && client_id != 0) {
@@ -225,6 +231,100 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
     return E_INVALIDARG;
   }
 
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  // W2-B asynchronous activation. The controller starts in literal mode immediately and
+  // subscribes the background engine start; no deployment lock, engine start or 60-second
+  // wait runs on this STA. The engine is adopted later on this same thread.
+  std::unique_ptr<product::ProductTextController> new_controller;
+  bool same_identity = false;
+  bool advised_new = false;
+  std::unique_ptr<product::ProductTextController> old_controller;
+  TfClientId old_client_id = 0;
+  ITfThreadMgr* old_thread_manager = nullptr;
+  bool old_key_sink_advised = false;
+  try {
+    new_controller.reset(new product::ProductTextController());
+    product::ProductTextController::Options controller_options;
+    controller_options.thread_manager = thread_manager;
+    controller_options.client_id = client_id;
+    std::wstring start_why;
+    if (!new_controller->Start(controller_options, &start_why)) {
+      return HRESULT_FROM_WIN32(ERROR_NOT_READY);
+    }
+    {
+      std::lock_guard<std::mutex> guard(state_mutex_);
+      same_identity = active_ && thread_manager_ == thread_manager &&
+                      client_id_ == client_id && key_sink_advised_;
+    }
+    if (!same_identity) {
+      // Advise before the commit. A reactivation for another thread manager/client keeps
+      // the old advice until this one succeeds, so a failure leaves the old service usable.
+      const HRESULT advised = AdviseKeySink(thread_manager, client_id);
+      if (FAILED(advised)) {
+#ifdef EPOCANVA_TSF_DIRECT_SINK_TEST
+        // Controlled test variant only: an unregistered TIP cannot advise a key sink, so
+        // the test calls the sink directly through its QI. The product DLL never defines
+        // this macro and still fails activation when the advice is refused.
+        advised_new = false;
+#else
+        new_controller->Stop();
+        return HRESULT_FROM_WIN32(ERROR_INVALID_FUNCTION);
+#endif
+      } else {
+        advised_new = true;
+      }
+    }
+  } catch (const std::bad_alloc&) {
+    if (new_controller) {
+      new_controller->Stop();
+    }
+    return E_OUTOFMEMORY;
+  } catch (...) {
+    if (new_controller) {
+      new_controller->Stop();
+    }
+    return E_FAIL;
+  }
+
+  // Retain the new thread manager before releasing the old one. If both arguments name the
+  // same object, the AddRef below happens before the old Release, so no dangling reference
+  // is possible.
+  thread_manager->AddRef();
+  {
+    std::lock_guard<std::mutex> guard(state_mutex_);
+    old_client_id = client_id_;
+    old_thread_manager = thread_manager_;
+    thread_manager_ = thread_manager;
+    client_id_ = client_id;
+    activation_flags_ = flags;
+    active_ = true;
+  }
+  {
+    std::lock_guard<std::mutex> guard(controller_mutex_);
+    old_controller = std::move(controller_);
+    controller_ = std::move(new_controller);
+#ifdef EPOCANVA_TSF_DIRECT_SINK_TEST
+    product::SetTestController(controller_.get());
+#endif
+    old_key_sink_advised = key_sink_advised_;
+#ifdef EPOCANVA_TSF_DIRECT_SINK_TEST
+    key_sink_advised_ = advised_new || same_identity;
+#else
+    key_sink_advised_ = true;
+#endif
+  }
+  if (!same_identity && old_key_sink_advised && old_thread_manager != nullptr &&
+      old_client_id != 0) {
+    UnadviseKeySink(old_thread_manager, old_client_id);
+  }
+  if (old_controller) {
+    old_controller->Stop();
+  }
+  if (old_thread_manager != nullptr) {
+    old_thread_manager->Release();
+  }
+  return S_OK;
+#else
 #ifdef EPOCANVA_TSF_ENGINE_HOST
   // Acquire the engine environment BEFORE touching the current activation. No mutation of
   // this object happens on a failure, so a rejected Activate leaves the old activation
@@ -438,6 +538,7 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
     old_thread_manager->Release();
   }
   return S_OK;
+#endif  // EPOCANVA_TSF_PRODUCT_CONTROLLER
 }
 
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER

@@ -35,6 +35,7 @@
 #include <deque>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "coordinator.h"
 #include "key_decision.h"
@@ -123,15 +124,19 @@ struct KeyAdmissionSnapshot {
   std::uint64_t engine_completed = 0;
   std::uint64_t edit_completed = 0;
   // W2-A-R staging: keys accepted but moved from the engine path into a raw catch-up run
-  // (deferred_raw), raw runs confirmed applied (raw_applied), and reported failures that
-  // name why a captured key could not be applied (raw_failed / raw_dropped).
+  // (deferred_raw), raw runs confirmed applied (raw_applied), explicitly cancelled by
+  // Escape before submission (raw_cancelled), and reported failures that name why a
+  // captured key could not be applied (raw_failed / raw_dropped).
   std::uint64_t deferred_raw_keys = 0;
   std::uint64_t deferred_raw_units = 0;
   std::uint64_t raw_applied_keys = 0;
   std::uint64_t raw_applied_units = 0;
+  std::uint64_t raw_cancelled_keys = 0;
+  std::uint64_t raw_cancelled_units = 0;
   std::uint64_t raw_failed_keys = 0;
   std::uint64_t raw_failed_units = 0;
   std::uint64_t raw_dropped_keys = 0;
+  std::uint64_t raw_dropped_units = 0;
   std::uint64_t failed = 0;
   std::uint64_t failed_raw_commit = 0;
   std::uint64_t failed_raw_capacity = 0;
@@ -152,6 +157,35 @@ struct KeyAdmissionSnapshot {
   KeyFailure last_failure = KeyFailure::kNone;
 };
 
+// W2-B bounded raw text run. One chunk of text the degraded path captured but has not
+// handed to the coordinator yet. A chunk that would exceed its capacity is flushed first,
+// so the capture bound applies to the next chunk rather than dropping the key. Appends are
+// atomic: a text key is never split, and a surrogate pair is never separated by the bound.
+class RawTextRun {
+ public:
+  static constexpr std::size_t kDefaultCapacityUtf16 = 1024;
+
+  enum class AppendStatus : std::uint8_t {
+    kAppended = 0,
+    kNeedsFlush,  // the run is non-empty and this text would exceed the capacity
+    kTooLarge,    // the text alone exceeds the capacity; nothing can hold it
+  };
+
+  AppendStatus Append(std::u16string_view text, std::size_t capacity_utf16);
+  // Removes exactly one code point. A trailing high+low surrogate pair is removed as a
+  // pair, so a backspace can never leave half a code point in the run.
+  bool BackspaceOneCodePoint();
+  void Clear();
+  std::u16string Take();
+
+  bool empty() const { return text_.empty(); }
+  std::size_t size() const { return text_.size(); }
+  const std::u16string& text() const { return text_; }
+
+ private:
+  std::u16string text_;
+};
+
 class KeyAdmissionQueue {
  public:
   static constexpr std::size_t kCapacity = 64;
@@ -160,7 +194,6 @@ class KeyAdmissionQueue {
   // into a raw catch-up run. Chosen below both limits so the hard limits stay unreachable in
   // the normal degraded flow.
   static constexpr std::size_t kHighWater = 24;
-
   bool CanAccept(bool composition_active) const;
   // Appends one accepted key. The caller must have checked CanAccept first.
   std::uint64_t Push(const input::KeyEventSnapshot& event, const input::KeyText& text,
@@ -197,6 +230,7 @@ class KeyAdmissionQueue {
   // keys represented by the run (text keys and the special keys the run folded in).
   void RecordDeferredRaw(std::size_t keys, std::size_t units);
   void RecordRawApplied(std::size_t keys, std::size_t units);
+  void RecordRawCancelled(std::size_t keys, std::size_t units);
   void RecordRawFailed(std::size_t keys, std::size_t units);
   void RecordRawDropped(std::size_t keys, std::size_t units);
 

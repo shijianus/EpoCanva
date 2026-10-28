@@ -29,6 +29,8 @@
 
 #include <string>
 
+#include "engine_host.h"
+
 namespace epocanva {
 namespace product {
 
@@ -74,6 +76,10 @@ class EngineStartTransaction {
   // True when a settings/data change could not be applied because another activation is
   // already running the engine. The marker is kept and the change applies after restart.
   bool deferred_while_running() const { return deferred_while_running_; }
+  // The exact configuration this transaction installed for the broker. Callers on another
+  // thread use this copy instead of re-reading the process-wide value, which a second
+  // activation could replace between Prepare and Acquire.
+  bool config(epocanva::tsf::EngineHostConfig* out) const;
   const std::string& fingerprint() const { return fingerprint_; }
 
  private:
@@ -83,6 +89,7 @@ class EngineStartTransaction {
   bool exclusive_ = false;
   std::string token_;
   std::string fingerprint_;
+  epocanva::tsf::EngineHostConfig config_;
   void* mutex_ = nullptr;      // named start mutex HANDLE
   void* lock_file_ = nullptr;  // engine.lock HANDLE (shared or exclusive)
 };

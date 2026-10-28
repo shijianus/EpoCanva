@@ -156,8 +156,8 @@ struct LoadedProduct {
 using GetClassObjectFn = HRESULT(WINAPI*)(REFCLSID, REFIID, LPVOID*);
 using CanUnloadNowFn = HRESULT(WINAPI*)();
 
-bool ActivateProduct(LoadedProduct* product, ITfThreadMgr* thread_manager,
-                     const std::filesystem::path& stage, std::wstring* why) {
+bool PrepareProduct(LoadedProduct* product, ITfThreadMgr* thread_manager,
+                    const std::filesystem::path& stage, std::wstring* why) {
   const std::filesystem::path dll = stage / L"epocanva_tsf.dll";
   product->module = ::LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
   if (product->module == nullptr) {
@@ -218,6 +218,14 @@ bool ActivateProduct(LoadedProduct* product, ITfThreadMgr* thread_manager,
     }
     return false;
   }
+  return true;
+}
+
+bool ActivateProduct(LoadedProduct* product, ITfThreadMgr* thread_manager,
+                     const std::filesystem::path& stage, std::wstring* why) {
+  if (!PrepareProduct(product, thread_manager, stage, why)) {
+    return false;
+  }
   // Retry activation: a previous case's engine may still be finishing its stop after the
   // last lease was released. A real failure is still reported after the deadline.
   const ULONGLONG deadline = ::GetTickCount64() + 10000;
@@ -244,7 +252,7 @@ bool ActivateProduct(LoadedProduct* product, ITfThreadMgr* thread_manager,
   return true;
 }
 
-void ReleaseProduct(LoadedProduct* product, bool deactivate) {
+void ReleaseProduct(LoadedProduct* product, bool deactivate, bool free_module = true) {
   if (product->tip != nullptr) {
     if (deactivate) {
       (void)product->tip->Deactivate();
@@ -260,13 +268,166 @@ void ReleaseProduct(LoadedProduct* product, bool deactivate) {
     product->factory->Release();
     product->factory = nullptr;
   }
-  if (product->module != nullptr) {
+  if (free_module && product->module != nullptr) {
     ::FreeLibrary(product->module);
     product->module = nullptr;
   }
 }
 
 HANDLE g_pump_event = nullptr;
+
+void PumpSlice(TestHost& host, DWORD milliseconds);
+
+// The direct-sink test DLL's controlled seam (product_test_seam.h). The struct layout is
+// duplicated here because the test executable is not compiled with the DLL's private
+// header; both sides use plain C types.
+struct SeamCounters {
+  unsigned long long key_downs;
+  unsigned long long eaten;
+  unsigned long long literal_key_downs;
+  unsigned long long raw_dropped_keys;
+  unsigned long long raw_unrecoverable;
+  unsigned long long raw_applied_units;
+  unsigned long long raw_cancelled_units;
+  unsigned long long raw_commits;
+  unsigned long long raw_ignored_edits;
+  unsigned long long candidate_version;
+  unsigned long long candidate_items;
+  unsigned long long candidate_stale;
+  int candidate_menu_open;
+  int candidate_selected;
+  int page_no;
+  int page_size;
+  int is_last_page;
+  int engine_ready;
+  int engine_state;
+  unsigned long long engine_attach_failures;
+  unsigned long long queue_pending;
+  unsigned long long queue_in_flight;
+  unsigned long long coordinator_phase;
+  unsigned long long engine_requests;
+  unsigned long long engine_results;
+  int raw_active;
+  int raw_submitted;
+  unsigned long long works_accepted;
+  unsigned long long target_binds;
+  unsigned long long rebind_requests;
+  unsigned long long raw_entered;
+  unsigned long long last_submit_status;
+  unsigned long long gate;
+  unsigned long long permission;
+  unsigned long long composition_length;
+  int composition_active;
+  unsigned long long raw_reason_unapplied;
+  unsigned long long raw_reason_not_candidate;
+  unsigned long long raw_reason_high_water;
+  unsigned long long raw_reason_admission;
+  unsigned long long last_raw_composition_start;
+  unsigned long long last_raw_composition_units;
+  unsigned long long last_raw_input_units;
+  unsigned long long last_raw_plan_units;
+  unsigned long long raw_unapplied_units;
+  unsigned long long raw_exits;
+};
+
+using SeamQueryFn = int (*)(SeamCounters*);
+using SeamTextFn = int (*)(unsigned, wchar_t*, unsigned);
+using SeamKindFn = int (*)(unsigned);
+using SeamSelectFn = int (*)(unsigned long long, int);
+using SeamBeginStartFn = int (*)(void*, void*);
+using SeamResetFn = int (*)();
+using SeamStateFn = int (*)();
+
+struct ProductSeam {
+  SeamQueryFn query = nullptr;
+  SeamTextFn text = nullptr;
+  SeamKindFn kind = nullptr;
+  SeamSelectFn select = nullptr;
+  SeamBeginStartFn begin_start = nullptr;
+  SeamResetFn reset = nullptr;
+  SeamStateFn state = nullptr;
+
+  bool usable() const {
+    return query != nullptr && text != nullptr && kind != nullptr &&
+           select != nullptr;
+  }
+  bool startup_usable() const {
+    return begin_start != nullptr && reset != nullptr && state != nullptr;
+  }
+};
+
+ProductSeam LoadSeam(LoadedProduct& product) {
+  ProductSeam seam;
+  seam.query = reinterpret_cast<SeamQueryFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestQueryCounters"));
+  seam.text = reinterpret_cast<SeamTextFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestCandidateText"));
+  seam.kind = reinterpret_cast<SeamKindFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestCandidateKind"));
+  seam.select = reinterpret_cast<SeamSelectFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestSelectCandidate"));
+  seam.begin_start = reinterpret_cast<SeamBeginStartFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestBeginBlockingStart"));
+  seam.reset = reinterpret_cast<SeamResetFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestResetBootstrap"));
+  seam.state = reinterpret_cast<SeamStateFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestBootstrapState"));
+  return seam;
+}
+
+bool WaitForCandidateMenu(TestHost& host, const ProductSeam& seam,
+                          SeamCounters* counters, std::size_t minimum_items,
+                          DWORD timeout_ms) {
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  for (;;) {
+    if (seam.query != nullptr && seam.query(counters) == 0 &&
+        counters->candidate_menu_open != 0 &&
+        counters->candidate_items >= minimum_items &&
+        counters->composition_active != 0 && counters->coordinator_phase == 0 &&
+        counters->queue_pending == 0 && counters->queue_in_flight == 0) {
+      return true;
+    }
+    if (::GetTickCount64() >= deadline) {
+      std::cout << "  menu wait timeout: open="
+                << (counters != nullptr ? counters->candidate_menu_open : -1)
+                << " items=" << (counters != nullptr ? counters->candidate_items : 0)
+                << " version=" << (counters != nullptr ? counters->candidate_version : 0)
+                << " selected=" << (counters != nullptr ? counters->candidate_selected : -1)
+                << " engine=" << (counters != nullptr ? counters->engine_ready : -1)
+                << " key_downs=" << (counters != nullptr ? counters->key_downs : 0)
+                << " eaten=" << (counters != nullptr ? counters->eaten : 0)
+                << " queued=" << (counters != nullptr ? counters->queue_pending : 0)
+                << " in_flight=" << (counters != nullptr ? counters->queue_in_flight : 0)
+                << " phase=" << (counters != nullptr ? counters->coordinator_phase : 0)
+                << " req=" << (counters != nullptr ? counters->engine_requests : 0)
+                << " res=" << (counters != nullptr ? counters->engine_results : 0)
+                << " raw=" << (counters != nullptr ? counters->raw_active : 0)
+                << "/" << (counters != nullptr ? counters->raw_submitted : 0)
+                << " works=" << (counters != nullptr ? counters->works_accepted : 0)
+                << " binds=" << (counters != nullptr ? counters->target_binds : 0)
+                << " rebinds=" << (counters != nullptr ? counters->rebind_requests : 0)
+                << " raw_entered=" << (counters != nullptr ? counters->raw_entered : 0)
+                << " submit=" << (counters != nullptr ? counters->last_submit_status : 0)
+                << " gate=" << (counters != nullptr ? counters->gate : 0)
+                << " perm=" << (counters != nullptr ? counters->permission : 0)
+                << " comp=" << (counters != nullptr ? counters->composition_active : 0)
+                << "/" << (counters != nullptr ? counters->composition_length : 0)
+                << " rawwhy=" << (counters != nullptr ? counters->raw_reason_unapplied : 0)
+                << "," << (counters != nullptr ? counters->raw_reason_not_candidate : 0)
+                << "," << (counters != nullptr ? counters->raw_reason_high_water : 0)
+                << "," << (counters != nullptr ? counters->raw_reason_admission : 0)
+                << std::endl;
+      return false;
+    }
+    PumpSlice(host, 10);
+  }
+}
+
+std::wstring ReadCandidateText(const ProductSeam& seam, unsigned index) {
+  wchar_t buffer[128] = {};
+  const int len = seam.text != nullptr ? seam.text(index, buffer, 128) : -1;
+  return len >= 0 ? std::wstring(buffer) : std::wstring();
+}
 
 void PumpSlice(TestHost& host, DWORD milliseconds) {
   if (g_pump_event == nullptr) {
@@ -1155,6 +1316,22 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
   waiter.join();
   ::CloseHandle(release_event);
   ::CloseHandle(ready_event);
+  // The engine lease release is deliberately off the STA. Wait (bounded) until the engine
+  // host is really idle before activating again, so this case tests a restart rather than
+  // an asynchronous stop followed by a joined old engine.
+  {
+    using HostStateFn = int (*)();
+    const auto host_state = reinterpret_cast<HostStateFn>(
+        ::GetProcAddress(held.product.module, "EpoCanvaTestEngineHostState"));
+    (void)held.product.tip->Deactivate();
+    const ULONGLONG idle_deadline = ::GetTickCount64() + 10000;
+    while (host_state != nullptr && host_state() != 0 &&
+           ::GetTickCount64() < idle_deadline) {
+      ::Sleep(20);
+    }
+    LocalCheck(host_state != nullptr && host_state() == 0,
+               "timing: the previous engine host is idle before the restart");
+  }
   EndCase(&held);
 
   Case renewed;
@@ -1182,6 +1359,15 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
   return true;
 }
 
+// Independent reference edit model. It is written from the documented default English
+// behaviour (raw characters preserved, Space commits and inserts one space) and never calls
+// product code. The final controlled-store text must equal its text.
+struct ReferenceDoc {
+  std::wstring text;
+  void HostInsert(const std::wstring& units) { text += units; }
+  void RawAppend(const std::wstring& units) { text += units; }
+};
+
 bool RunEngineMissingCase(const std::filesystem::path& stage,
                           const std::filesystem::path& user_root,
                           const std::filesystem::path& marker,
@@ -1204,16 +1390,509 @@ bool RunEngineMissingCase(const std::filesystem::path& stage,
   SetThreadFocus(*host, document, &focus, &error);
 
   LoadedProduct product;
-  const std::wstring missing_reason;
+  std::wstring why;
   const bool activated =
-      ActivateProduct(&product, host->thread_manager_for_test(), stage, nullptr);
-  LocalCheck(!activated, "missing rime.dll: activation fails");
-  ReleaseProduct(&product, false);
+      ActivateProduct(&product, host->thread_manager_for_test(), stage, &why);
+  LocalCheck(activated,
+             "missing rime.dll: activation succeeds immediately in literal mode");
+  ProductSeam seam = LoadSeam(product);
+  LocalCheck(seam.startup_usable(), "missing rime.dll: startup seam available");
+  int state = -1;
+  const ULONGLONG deadline = ::GetTickCount64() + 15000;
+  for (;;) {
+    state = seam.state != nullptr ? seam.state() : -1;
+    if (state == 3) {  // EngineBootstrapState::kFailed
+      break;
+    }
+    if (::GetTickCount64() >= deadline) {
+      break;
+    }
+    PumpSlice(*host, 20);
+  }
+  LocalCheck(state == 3,
+             "missing rime.dll: the asynchronous start reports failure, not success");
+  InputRoute route{host.get(), document, product.sink, document->context()};
+  SeamCounters counters;
+  (void)seam.query(&counters);
+  LocalCheck(counters.engine_ready == 0,
+             "missing rime.dll: no engine pipeline is claimed");
+  LocalCheck(SendText(&route, L"abc", false, &error),
+             "missing rime.dll: every key stays with the host: " + error);
+  LocalCheck(document->text_utf16() == L"abc",
+             "missing rime.dll: the literal path delivers the host's own text exactly");
+  (void)seam.query(&counters);
+  LocalCheck(counters.literal_key_downs >= 3,
+             "missing rime.dll: the literal path is counted");
   LocalCheck(std::filesystem::is_regular_file(marker),
              "missing rime.dll: the marker is kept for a retry");
   LocalCheck(!std::filesystem::is_regular_file(compiled),
              "missing rime.dll: no compiled schema is claimed");
-  (void)missing_reason;
+  const ULONGLONG stop_start = ::GetTickCount64();
+  (void)product.tip->Deactivate();
+  LocalCheck(::GetTickCount64() - stop_start < 1000,
+             "missing rime.dll: deactivation does not wait for the failed start");
+  ReleaseProduct(&product, false);
+  return true;
+}
+
+bool RunCandidateCase(const std::filesystem::path& stage,
+                      const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.initial_text_utf16 = L"";
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "candidate: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ProductSeam seam = LoadSeam(test_case.product);
+  LocalCheck(seam.usable(), "candidate: controlled seam available");
+  if (!seam.usable()) {
+    EndCase(&test_case);
+    return false;
+  }
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  ReferenceDoc reference;
+  std::string error;
+  SeamCounters counters;
+
+  // 1. Real engine page and explicit kinds; Enter with no user selection commits the
+  // literal, never an automatically suggested completion.
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "candidate: the engine path is ready");
+  LocalCheck(SendText(&route, L"hel", true, &error),
+             "candidate: the first token is eaten: " + error);
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
+             "candidate: the real menu opened");
+  LocalCheck(counters.page_size == 8 && counters.is_last_page == 1 &&
+                 counters.candidate_items <= 8,
+             "candidate: the engine's real page size is 8 and this is its last page");
+  LocalCheck(seam.kind(0) == 0, "candidate: index 0 is the original text");
+  LocalCheck(seam.kind(1) == 1, "candidate: index 1 is a completion");
+  const bool no_selection_enter_eaten =
+      SendVirtualKey(&route, VK_RETURN, true, &error);
+  LocalCheck(no_selection_enter_eaten,
+             "candidate: Enter with no selection is eaten");
+  reference.RawAppend(L"hel");
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
+             "candidate: Enter with no selection committed the literal, not a suggestion");
+
+  // 2. Arrow navigation selects an explicit row; Enter accepts that row through the
+  // validated selection path (not an engine Return).
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "candidate: ready for arrow navigation");
+  LocalCheck(SendText(&route, L"hel", true, &error),
+             "candidate: the second token is eaten: " + error);
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
+             "candidate: the second menu opened");
+  const std::wstring completion = ReadCandidateText(seam, 1);
+  LocalCheck(!completion.empty(), "candidate: the completion text is available");
+  bool down1 = false;
+  bool down2 = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down1, &error) &&
+                 down1,
+             "candidate: the first Down is eaten by the menu");
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down2, &error) &&
+                 down2,
+             "candidate: the second Down is eaten by the menu");
+  (void)seam.query(&counters);
+  LocalCheck(counters.candidate_selected == 1,
+             "candidate: the explicit selection is the completion row");
+  LocalCheck(SendVirtualKey(&route, VK_RETURN, true, &error),
+             "candidate: Enter accepts the explicit selection");
+  reference.RawAppend(completion);
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
+             "candidate: the selected completion was committed once");
+
+  // 3. Space keeps the literal commit contract even while a completion is selected.
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "candidate: ready for the Space contract");
+  LocalCheck(SendText(&route, L"hel", true, &error),
+             "candidate: the third token is eaten: " + error);
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
+             "candidate: the third menu opened");
+  bool down3 = false;
+  bool down4 = false;
+  (void)SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down3, &error);
+  (void)SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down4, &error);
+  bool space_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
+                 space_eaten,
+             "candidate: Space is eaten while the menu is open");
+  reference.RawAppend(L"hel ");
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
+             "candidate: Space committed the original text, not the selected completion");
+
+  // 4. Escape closes the menu and cancels the composition; nothing is written late.
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "candidate: ready for Escape");
+  LocalCheck(SendText(&route, L"wor", true, &error),
+             "candidate: the cancelled token is eaten: " + error);
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
+             "candidate: the cancelled menu opened");
+  LocalCheck(SendVirtualKey(&route, VK_ESCAPE, true, &error),
+             "candidate: Escape is eaten");
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
+             "candidate: Escape cancelled the composition without adding text");
+  PumpSlice(*test_case.host, 300);
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "candidate: no late write followed the cancel");
+
+  // 5. Stale selection: a click drawn from an older menu must not commit into the newer one.
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "candidate: ready for the stale-selection case");
+  LocalCheck(SendText(&route, L"hel", true, &error),
+             "candidate: the stale-selection token is eaten: " + error);
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
+             "candidate: the stale-selection menu opened");
+  const unsigned long long old_version = counters.candidate_version;
+  bool extra_eaten = false;
+  LocalCheck(SendCharAdaptive(&route, L'l', &extra_eaten, &error) && extra_eaten,
+             "candidate: another character extends the composition");
+  unsigned long long newer_version = old_version;
+  const ULONGLONG version_deadline = ::GetTickCount64() + 8000;
+  for (;;) {
+    (void)seam.query(&counters);
+    if (counters.candidate_menu_open != 0 &&
+        counters.candidate_version > old_version) {
+      newer_version = counters.candidate_version;
+      break;
+    }
+    if (::GetTickCount64() >= version_deadline) {
+      break;
+    }
+    PumpSlice(*test_case.host, 10);
+  }
+  LocalCheck(newer_version > old_version,
+             "candidate: a newer menu version exists before the stale click");
+  const std::wstring before_stale = test_case.doc->text_utf16();
+  (void)seam.select(old_version, 1);
+  PumpSlice(*test_case.host, 300);
+  SeamCounters after_stale;
+  (void)seam.query(&after_stale);
+  LocalCheck(test_case.doc->text_utf16() == before_stale,
+             "candidate: a stale selection changed nothing in the document");
+  LocalCheck(after_stale.candidate_stale >= 1,
+             "candidate: the stale selection is reported");
+  const std::wstring newer_completion = ReadCandidateText(seam, 1);
+  (void)seam.select(newer_version, 1);
+  reference.RawAppend(newer_completion);
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
+             "candidate: the current selection committed exactly once");
+
+  // 6. External edit invalidates the snapshot; the old click cannot reach the rebuilt
+  // binding.
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "candidate: ready for the external-edit case");
+  LocalCheck(SendText(&route, L"hel", true, &error),
+             "candidate: the external-edit token is eaten: " + error);
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
+             "candidate: the external-edit menu opened");
+  const unsigned long long pre_edit_version = counters.candidate_version;
+  SeamCounters before_external;
+  (void)seam.query(&before_external);
+  std::string client_error;
+  const TfClientId external_client =
+      epocanva::tsf::context::test::ExternalClientId(
+          test_case.host->thread_manager_for_test(), &client_error);
+  const LONG caret = test_case.doc->selection_start_utf16();
+  ExternalEditResult external;
+  LocalCheck(external_client != 0 &&
+                 RunExternalEdit(*test_case.host, test_case.doc, external_client,
+                                 ExternalEditMode::kInsertText, caret, caret, L"X",
+                                 &external, &error),
+             "candidate: the external edit ran: " + error);
+  PumpSlice(*test_case.host, 600);
+  const std::wstring after_external = test_case.doc->text_utf16();
+  (void)seam.select(pre_edit_version, 0);
+  PumpSlice(*test_case.host, 300);
+  SeamCounters after_external_counters;
+  (void)seam.query(&after_external_counters);
+  LocalCheck(test_case.doc->text_utf16() == after_external,
+             "candidate: a selection from before the external edit wrote nothing");
+  LocalCheck(after_external_counters.candidate_stale >= 2,
+             "candidate: the pre-edit selection is reported stale");
+  (void)before_external;
+
+  // 7. Spelling suggestions are labelled distinctly, and the literal row stays index 0.
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "candidate: ready for the spelling classification");
+  LocalCheck(SendText(&route, L"heloo", true, &error),
+             "candidate: the misspelling token is eaten: " + error);
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
+             "candidate: the spelling menu opened");
+  bool spelling_seen = false;
+  for (int index = 0; index < counters.candidate_items; ++index) {
+    if (seam.kind(index) == 2) {
+      spelling_seen = true;
+    }
+  }
+  LocalCheck(seam.kind(0) == 0, "candidate: the literal row is still index 0");
+  LocalCheck(spelling_seen,
+             "candidate: the engine's spelling suggestion is labelled as such");
+  LocalCheck(SendVirtualKey(&route, VK_ESCAPE, true, &error),
+             "candidate: Escape closes the spelling menu");
+
+  EndCase(&test_case);
+  return true;
+}
+
+bool RunContinuousCase(const std::filesystem::path& stage,
+                        const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.initial_text_utf16 = L"";
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "continuous: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ProductSeam seam = LoadSeam(test_case.product);
+  LocalCheck(seam.usable(), "continuous: controlled seam available");
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  std::string error;
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "continuous: ready exactly once before the whole burst");
+
+  // One readiness check above covers the whole run. Words are never checked for readiness
+  // again; the only pump between words lets TSF deliver its normal notifications. The first
+  // segment is sent with every grant held, which forces a real raw catch-up and a binding
+  // rebuild; the rest follows immediately.
+  const std::wstring first = L"Hello world email user@example.com ";
+  ReferenceDoc reference;
+
+  test_case.host->SetHoldGrantMessages(true);
+  LocalCheck(SendTextAdaptive(&route, first, nullptr, &error),
+             "continuous: the blocked segment was accepted: " + error);
+  reference.HostInsert(first);
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+  PumpSlice(*test_case.host, 200);
+
+  const wchar_t* words[] = {L"path ", L"C:\\temp\\file_1.txt ", L"URL ",
+                            L"https://example.com/a?b=1 ", L"mixedCase ",
+                            L"9x_Z-7 ", L"sustained ", L"qwerty ",
+                            L"asdfgh ", L"zxcvbn ", L"technical ",
+                            L"a.b_c@d/e ", L"tail ", L"token ", L"final "};
+  bool words_ok = true;
+  for (const wchar_t* word : words) {
+    if (!SendTextAdaptive(&route, word, nullptr, &error)) {
+      words_ok = false;
+      break;
+    }
+    reference.HostInsert(word);
+    // Not a readiness check: just let TSF dispatch its own notifications between words.
+    PumpSlice(*test_case.host, 2);
+  }
+  LocalCheck(words_ok, "continuous: every following word was accepted: " + error);
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 25000),
+             "continuous: the whole run is in the document exactly once, in order");
+  const std::wstring after_burst = test_case.doc->text_utf16();
+  PumpSlice(*test_case.host, 300);
+  LocalCheck(test_case.doc->text_utf16() == after_burst,
+             "continuous: no late write changed the document after the run");
+  EndCase(&test_case);
+  return true;
+}
+
+bool RunCapacityCase(const std::filesystem::path& stage,
+                     const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.initial_text_utf16 = L"";
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "capacity: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ProductSeam seam = LoadSeam(test_case.product);
+  LocalCheck(seam.usable(), "capacity: controlled seam available");
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  std::string error;
+  SeamCounters counters;
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "capacity: the engine path is ready");
+
+  // The document lock is held for the whole burst. The first key goes to the engine and its
+  // edit cannot complete; the queue crosses the high-water mark, the raw run takes over, and
+  // the run's own 1024 UTF-16 bound is reached while the chunk cannot be flushed.
+  test_case.host->SetHoldGrantMessages(true);
+  std::wstring burst;
+  burst.reserve(1250);
+  burst += L"ab";
+  for (std::size_t index = 0; index < 1200; ++index) {
+    burst.push_back(L'x');
+  }
+  LocalCheck(SendTextAdaptive(&route, burst, nullptr, &error),
+             "capacity: the whole burst was eaten: " + error);
+  (void)seam.query(&counters);
+  LocalCheck(counters.raw_unrecoverable > 0,
+             "capacity: the bound was really reached while the chunk could not flush");
+  LocalCheck(counters.raw_dropped_keys > 0,
+             "capacity: the overflow is reported as an explicit loss");
+  LocalCheck(counters.raw_applied_units == 0,
+             "capacity: nothing was claimed applied while the document was locked");
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+
+  const ULONGLONG settle_deadline = ::GetTickCount64() + 25000;
+  for (;;) {
+    (void)seam.query(&counters);
+    if (counters.raw_applied_units >= 1024 || ::GetTickCount64() >= settle_deadline) {
+      break;
+    }
+    PumpSlice(*test_case.host, 20);
+  }
+  LocalCheck(counters.raw_applied_units == 1024,
+             "capacity: exactly one full 1024-unit chunk was applied");
+  const std::wstring retained = test_case.doc->text_utf16();
+  bool prefix_ok = true;
+  for (std::size_t index = 0; index < retained.size(); ++index) {
+    const wchar_t expected = index < 2 ? L"ab"[index] : L'x';
+    if (retained[index] != expected) {
+      prefix_ok = false;
+      break;
+    }
+  }
+  LocalCheck(prefix_ok, "capacity: the retained prefix is the typed prefix, unchanged");
+  LocalCheck(retained.size() == 1024 || retained.size() == 1025,
+             "capacity: the document holds the bounded chunk (plus at most one engine key)");
+  PumpSlice(*test_case.host, 300);
+  LocalCheck(test_case.doc->text_utf16() == retained,
+             "capacity: no duplicate write followed the chunk");
+  EndCase(&test_case);
+
+  // Recovery in a fresh activation: the boundary loss is confined to the stalled session;
+  // a new host session starts with a live engine and accepts a new token normally.
+  Case recovery_case;
+  TestDocumentOptions recovery_options;
+  recovery_options.initial_text_utf16 = L"";
+  if (BeginCase(&recovery_case, stage, user_root, recovery_options, nullptr)) {
+    InputRoute recovery_route{recovery_case.host, recovery_case.doc,
+                              recovery_case.product.sink,
+                              recovery_case.doc->context()};
+    LocalCheck(ReadyToType(*recovery_case.host, recovery_case.product.sink,
+                           recovery_case.doc->context(), 15000),
+               "capacity: a fresh activation becomes ready after the boundary loss");
+    LocalCheck(SendText(&recovery_route, L"after", true, &error) &&
+                   SendVirtualKey(&recovery_route, VK_SPACE, true, &error),
+               "capacity: the fresh session accepts a new token: " + error);
+    LocalCheck(WaitForText(*recovery_case.host, recovery_case.doc, L"after ",
+                           10000),
+               "capacity: the fresh session's document is exact");
+    EndCase(&recovery_case);
+  } else {
+    LocalCheck(false, "capacity: a fresh activation after the boundary");
+  }
+  return true;
+}
+
+bool RunStartupCase(const std::filesystem::path& stage,
+                    const std::filesystem::path& user_root) {
+  ::SetEnvironmentVariableW(L"EPOCANVA_USER_DATA_ROOT", user_root.c_str());
+  std::string error;
+  std::unique_ptr<TestHost> host = TestHost::Create(&error);
+  if (!host) {
+    LocalCheck(false, "startup: host created");
+    return false;
+  }
+  TestDocumentOptions options;
+  TestDocument* document = host->CreateDocument(options, &error);
+  if (document == nullptr) {
+    LocalCheck(false, "startup: document created");
+    return false;
+  }
+  epocanva::tsf::context::test::EnsureTestThreadFocus(&error);
+  epocanva::tsf::context::test::FocusCallResult focus;
+  SetThreadFocus(*host, document, &focus, &error);
+
+  LoadedProduct product;
+  std::wstring why;
+  if (!PrepareProduct(&product, host->thread_manager_for_test(), stage, &why)) {
+    LocalCheck(false, "startup: product prepared");
+    return false;
+  }
+  ProductSeam seam = LoadSeam(product);
+  LocalCheck(seam.startup_usable(), "startup: controlled seam available");
+  if (!seam.startup_usable()) {
+    ReleaseProduct(&product, false);
+    return false;
+  }
+  LocalCheck(seam.reset() == 0, "startup: the bootstrap state was reset");
+  HANDLE entered = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  HANDLE released = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  LocalCheck(entered != nullptr && released != nullptr,
+             "startup: test events created");
+  LocalCheck(seam.begin_start(entered, released) == 0,
+             "startup: the blocking start was installed");
+  const ULONGLONG activate_start = ::GetTickCount64();
+  const HRESULT activated =
+      product.tip->Activate(host->thread_manager_for_test(), product.client_id);
+  const ULONGLONG activate_elapsed = ::GetTickCount64() - activate_start;
+  LocalCheck(SUCCEEDED(activated), "startup: activation succeeded");
+  LocalCheck(activate_elapsed < 1500,
+             "startup: Activate returned without waiting for the engine");
+  LocalCheck(::WaitForSingleObject(entered, 5000) == WAIT_OBJECT_0,
+             "startup: the background start really is in progress");
+  InputRoute route{host.get(), document, product.sink, document->context()};
+  SeamCounters counters;
+  LocalCheck(SendText(&route, L"abc", false, &error),
+             "startup: every key stays literal while the start is blocked: " + error);
+  LocalCheck(document->text_utf16() == L"abc",
+             "startup: the literal path is exact");
+  (void)seam.query(&counters);
+  LocalCheck(counters.engine_ready == 0 && counters.literal_key_downs >= 3,
+             "startup: the controller reports literal mode, not a working engine");
+  LocalCheck(counters.engine_state == 1,
+             "startup: the bootstrap state is starting");
+  const ULONGLONG deactivate_start = ::GetTickCount64();
+  (void)product.tip->Deactivate();
+  const ULONGLONG deactivate_elapsed = ::GetTickCount64() - deactivate_start;
+  LocalCheck(deactivate_elapsed < 1500,
+             "startup: deactivation does not wait for the blocked start");
+
+  using CanUnloadNowFn = HRESULT(WINAPI*)();
+  const auto can_unload = reinterpret_cast<CanUnloadNowFn>(
+      ::GetProcAddress(product.module, "DllCanUnloadNow"));
+  LocalCheck(can_unload != nullptr, "startup: DllCanUnloadNow is exported");
+  ReleaseProduct(&product, false, false);
+  LocalCheck(can_unload != nullptr && can_unload() == S_FALSE,
+             "startup: the blocked start keeps the module from unloading");
+  ::SetEvent(released);
+  const ULONGLONG unload_deadline = ::GetTickCount64() + 8000;
+  bool unloadable = false;
+  int state = -1;
+  for (;;) {
+    state = seam.state();
+    unloadable = can_unload != nullptr && can_unload() == S_OK;
+    if (state == 3 && unloadable) {
+      break;
+    }
+    if (::GetTickCount64() >= unload_deadline) {
+      break;
+    }
+    ::Sleep(20);
+  }
+  LocalCheck(state == 3,
+             "startup: the abandoned start ends in a named failure");
+  LocalCheck(unloadable,
+             "startup: the module becomes unloadable after the start thread exits");
+  if (entered != nullptr) {
+    ::CloseHandle(entered);
+  }
+  if (released != nullptr) {
+    ::CloseHandle(released);
+  }
+  if (product.module != nullptr) {
+    ::FreeLibrary(product.module);
+    product.module = nullptr;
+  }
   return true;
 }
 
@@ -1345,11 +2024,6 @@ bool RunLeaseLockCase(const std::filesystem::path& stage,
 // Independent reference edit model. It is written from the documented default English
 // behaviour (raw characters preserved, Space commits and inserts one space) and never calls
 // product code. The final controlled-store text must equal its text.
-struct ReferenceDoc {
-  std::wstring text;
-  void HostInsert(const std::wstring& units) { text += units; }
-  void RawAppend(const std::wstring& units) { text += units; }
-};
 
 bool RunColdTokenCase(const std::filesystem::path& stage,
                       const std::filesystem::path& user_root) {
@@ -1538,7 +2212,7 @@ int main(int argc, char** argv) {
       lexicon.empty() || run_root.empty() || !run_root.is_absolute()) {
     std::cout
         << "usage error: --product-dll --rime-dll --data-dir --lexicon "
-           "--run-root <absolute> [--mode input|engine-missing]\n";
+           "--run-root <absolute> [--mode input|engine-missing|candidate|continuous|capacity|startup]\n";
     return 2;
   }
 
@@ -1618,6 +2292,38 @@ int main(int argc, char** argv) {
     LocalCheck(PrepareUserRoot(user_root, settings, &why),
                "strict: settings and marker written");
     RunStrictUnregisteredCase(stage, user_root);
+  } else if (mode == "candidate") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "candidate: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "candidate: settings and marker written");
+    RunCandidateCase(stage, user_root);
+  } else if (mode == "continuous") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "continuous: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "continuous: settings and marker written");
+    RunContinuousCase(stage, user_root);
+  } else if (mode == "capacity") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "capacity: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "capacity: settings and marker written");
+    RunCapacityCase(stage, user_root);
+  } else if (mode == "startup") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "startup: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "startup: settings and marker written");
+    RunStartupCase(stage, user_root);
   } else if (mode == "engine-missing") {
     std::wstring why;
     const bool staged = StageProduct(stage, product_dll, rime_dll, data_dir, lexicon,

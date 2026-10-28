@@ -33,9 +33,10 @@ constexpr std::array<RequiredFile, 8> kRequiredFiles = {{
 }};
 
 constexpr const char* kCapabilities =
-    "English natural keyboard input through a TSF key sink, prefix completion and "
-    "one-edit spelling suggestions. No candidate window, registration, installer, "
-    "learning, other languages or system-wide input in this build.";
+    "English natural keyboard input through a TSF key sink, prefix completion, "
+    "one-edit spelling suggestions and a native candidate window (8 per page, arrow "
+    "selection, validated acceptance). No registration, installer, learning, other "
+    "languages or system-wide input in this build.";
 
 struct WindowsVersion {
   DWORD major = 0;
