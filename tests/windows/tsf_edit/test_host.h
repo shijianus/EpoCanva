@@ -236,6 +236,10 @@ class TestHost {
   // than a race. P3.7/P3.8/P3.9 tests leave it disabled.
   void SetHoldGrantMessages(bool hold);
   std::size_t ReleaseHeldGrantMessages();
+  // Releases the held store references without granting the lock. The application never
+  // answered, so TSF's request stays pending until the context is torn down. Used to model
+  // "the user switched away while the application was still holding the lock".
+  std::size_t DropHeldGrantMessages();
   std::size_t held_grant_messages() const { return held_grant_messages_.size(); }
 
   void Shutdown();

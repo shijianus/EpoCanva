@@ -49,4 +49,8 @@ target_compile_options(epocanva_tsf_context PRIVATE
   /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
 target_include_directories(epocanva_tsf_context PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}")
+# module_lifetime.h (header-only) is shared with the edit layer: both keep the module
+# loaded while TSF owns a COM object they implemented.
+target_include_directories(epocanva_tsf_context PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../tsf_edit")
 target_link_libraries(epocanva_tsf_context PUBLIC ole32 uuid user32)

@@ -25,15 +25,18 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "identifiers.h"
+#include "crash_capture.h"
 #include "observer_test_support.h"
 #include "product_paths.h"
 #include "product_settings.h"
@@ -252,7 +255,7 @@ bool ActivateProduct(LoadedProduct* product, ITfThreadMgr* thread_manager,
   return true;
 }
 
-void ReleaseProduct(LoadedProduct* product, bool deactivate, bool free_module = true) {
+void ReleaseProduct(LoadedProduct* product, bool deactivate) {
   if (product->tip != nullptr) {
     if (deactivate) {
       (void)product->tip->Deactivate();
@@ -268,10 +271,109 @@ void ReleaseProduct(LoadedProduct* product, bool deactivate, bool free_module = 
     product->factory->Release();
     product->factory = nullptr;
   }
-  if (free_module && product->module != nullptr) {
-    ::FreeLibrary(product->module);
-    product->module = nullptr;
+}
+
+// Two concurrent sessions in one process share one loaded module. A session that finishes
+// first cannot free its LoadLibrary reference while the other is still running, so it parks
+// the handle here and the case frees every parked reference once all sessions are gone.
+std::mutex g_deferred_modules_mutex;
+std::vector<HMODULE> g_deferred_modules;
+
+void DeferProductModule(LoadedProduct* product) {
+  if (product->module == nullptr) {
+    return;
   }
+  std::lock_guard<std::mutex> guard(g_deferred_modules_mutex);
+  g_deferred_modules.push_back(product->module);
+  product->module = nullptr;
+}
+
+bool FreeDeferredProductModules(DWORD timeout_ms, const char* label) {
+  std::vector<HMODULE> modules;
+  {
+    std::lock_guard<std::mutex> guard(g_deferred_modules_mutex);
+    modules.swap(g_deferred_modules);
+  }
+  if (modules.empty()) {
+    return true;
+  }
+  const auto can_unload = reinterpret_cast<CanUnloadNowFn>(
+      ::GetProcAddress(modules.front(), "DllCanUnloadNow"));
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  HRESULT status = can_unload != nullptr ? can_unload() : E_FAIL;
+  while (status != S_OK && ::GetTickCount64() < deadline) {
+    ::Sleep(20);
+    status = can_unload != nullptr ? can_unload() : E_FAIL;
+  }
+  if (status != S_OK) {
+    std::cout << "  [unload] " << label
+              << ": DllCanUnloadNow stayed S_FALSE; deferred references are left loaded"
+              << std::endl;
+    std::lock_guard<std::mutex> guard(g_deferred_modules_mutex);
+    g_deferred_modules.insert(g_deferred_modules.end(), modules.begin(), modules.end());
+    return false;
+  }
+  for (HMODULE module : modules) {
+    (void)::FreeLibrary(module);
+  }
+  HMODULE still = nullptr;
+  if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(modules.front()), &still) != FALSE) {
+    std::cout << "  [unload] " << label
+              << ": the image is still mapped after freeing deferred references"
+              << std::endl;
+    return false;
+  }
+  return true;
+}
+
+HRESULT ProductUnloadStatus(LoadedProduct* product) {
+  if (product->module == nullptr) {
+    return S_OK;
+  }
+  const auto can_unload = reinterpret_cast<CanUnloadNowFn>(
+      ::GetProcAddress(product->module, "DllCanUnloadNow"));
+  return can_unload != nullptr ? can_unload() : E_FAIL;
+}
+
+// The COM unload contract, applied by the client that loaded the DLL: free the module only
+// after the server says it can unload, and only after every TSF-owned object the DLL handed
+// out has been released (which requires tearing the TSF host down first). A forced
+// FreeLibrary here would leave TSF holding vtables in an unmapped image.
+bool FreeProductModule(LoadedProduct* product, DWORD timeout_ms,
+                       const char* label) {
+  if (product->module == nullptr) {
+    return true;
+  }
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  HRESULT status = ProductUnloadStatus(product);
+  while (status != S_OK && ::GetTickCount64() < deadline) {
+    ::Sleep(20);
+    status = ProductUnloadStatus(product);
+  }
+  if (status != S_OK) {
+    std::cout << "  [unload] " << label
+              << ": DllCanUnloadNow stayed S_FALSE; the module is left loaded (not forced)"
+              << std::endl;
+    return false;
+  }
+  HMODULE module = product->module;
+  product->module = nullptr;
+  if (!::FreeLibrary(module)) {
+    std::cout << "  [unload] " << label << ": FreeLibrary failed err="
+              << ::GetLastError() << std::endl;
+    return false;
+  }
+  HMODULE still = nullptr;
+  if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(module), &still) != FALSE) {
+    std::cout << "  [unload] " << label
+              << ": the image is still mapped after FreeLibrary" << std::endl;
+    return false;
+  }
+  return true;
 }
 
 HANDLE g_pump_event = nullptr;
@@ -328,6 +430,8 @@ struct SeamCounters {
   unsigned long long last_raw_plan_units;
   unsigned long long raw_unapplied_units;
   unsigned long long raw_exits;
+  unsigned long long raw_failed_keys;
+  unsigned long long raw_failed_units;
 };
 
 using SeamQueryFn = int (*)(SeamCounters*);
@@ -337,6 +441,9 @@ using SeamSelectFn = int (*)(unsigned long long, int);
 using SeamBeginStartFn = int (*)(void*, void*);
 using SeamResetFn = int (*)();
 using SeamStateFn = int (*)();
+using SeamModuleStateFn = int (*)(long long*, long long*, long long*, long long*,
+                                  long long*);
+using SeamGuardedObjectsFn = int (*)(long long*, int);
 
 struct ProductSeam {
   SeamQueryFn query = nullptr;
@@ -346,6 +453,8 @@ struct ProductSeam {
   SeamBeginStartFn begin_start = nullptr;
   SeamResetFn reset = nullptr;
   SeamStateFn state = nullptr;
+  SeamModuleStateFn module_state = nullptr;
+  SeamGuardedObjectsFn guarded_objects = nullptr;
 
   bool usable() const {
     return query != nullptr && text != nullptr && kind != nullptr &&
@@ -355,6 +464,10 @@ struct ProductSeam {
     return begin_start != nullptr && reset != nullptr && state != nullptr;
   }
 };
+
+// Test-only crash evidence: the handler prints these text-free counters into the crash
+// report. The buffer is static because the handler cannot rely on allocation.
+ProductSeam g_crash_seam;
 
 ProductSeam LoadSeam(LoadedProduct& product) {
   ProductSeam seam;
@@ -372,7 +485,48 @@ ProductSeam LoadSeam(LoadedProduct& product) {
       ::GetProcAddress(product.module, "EpoCanvaTestResetBootstrap"));
   seam.state = reinterpret_cast<SeamStateFn>(
       ::GetProcAddress(product.module, "EpoCanvaTestBootstrapState"));
+  seam.module_state = reinterpret_cast<SeamModuleStateFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestModuleState"));
+  seam.guarded_objects = reinterpret_cast<SeamGuardedObjectsFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestGuardedObjects"));
+  g_crash_seam = seam;
   return seam;
+}
+
+const char* CrashCountersForReport() {
+  static char buffer[2048] = "seam unavailable";
+  if (g_crash_seam.query == nullptr) {
+    return buffer;
+  }
+  SeamCounters counters = {};
+  if (g_crash_seam.query(&counters) != 0) {
+    std::snprintf(buffer, sizeof(buffer), "controller unavailable");
+    return buffer;
+  }
+  std::snprintf(
+      buffer, sizeof(buffer),
+      "keys=%llu eaten=%llu raw_dropped=%llu raw_unrecoverable=%llu raw_applied=%llu "
+      "raw_cancelled=%llu raw_commits=%llu raw_active=%d raw_submitted=%d raw_entered=%llu "
+      "raw_exits=%llu queue=%llu in_flight=%llu phase=%llu comp=%d/%llu binds=%llu "
+      "rebinds=%llu menu=%d version=%llu selected=%d engine_ready=%d work=%llu req=%llu "
+      "res=%llu last_raw_start=%llu last_raw_comp=%llu last_raw_input=%llu last_raw_plan=%llu",
+      counters.key_downs, counters.eaten, counters.raw_dropped_keys,
+      counters.raw_unrecoverable, counters.raw_applied_units,
+      counters.raw_cancelled_units, counters.raw_commits, counters.raw_active,
+      counters.raw_submitted, counters.raw_entered, counters.raw_exits,
+      counters.queue_pending, counters.queue_in_flight, counters.coordinator_phase,
+      counters.composition_active, counters.composition_length, counters.target_binds,
+      counters.rebind_requests, counters.candidate_menu_open, counters.candidate_version,
+      counters.candidate_selected, counters.engine_ready, counters.works_accepted,
+      counters.engine_requests, counters.engine_results,
+      counters.last_raw_composition_start, counters.last_raw_composition_units,
+      counters.last_raw_input_units, counters.last_raw_plan_units);
+  return buffer;
+}
+
+void CrashPhase(const std::string& phase) {
+  epocanva::tsf::product::test::SetCrashPhase(phase);
+  std::cout << "[phase] " << phase << std::endl;
 }
 
 bool WaitForCandidateMenu(TestHost& host, const ProductSeam& seam,
@@ -733,6 +887,87 @@ bool ReadyToType(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
   }
 }
 
+void PrintSeamCounters(const SeamCounters& counters, const char* label) {
+  std::cout << "  [" << label << "]"
+            << " keys=" << counters.key_downs
+            << " eaten=" << counters.eaten
+            << " literal=" << counters.literal_key_downs
+            << " raw_active=" << counters.raw_active
+            << " raw_submitted=" << counters.raw_submitted
+            << " raw_unapplied=" << counters.raw_unapplied_units
+            << " commits=" << counters.raw_commits
+            << " applied=" << counters.raw_applied_units
+            << " cancelled=" << counters.raw_cancelled_units
+            << " dropped=" << counters.raw_dropped_keys
+            << " unrecoverable=" << counters.raw_unrecoverable
+            << " entered=" << counters.raw_entered
+            << " exits=" << counters.raw_exits
+            << " ignored=" << counters.raw_ignored_edits
+            << " queue=" << counters.queue_pending
+            << "/" << counters.queue_in_flight
+            << " phase=" << counters.coordinator_phase
+            << " works=" << counters.works_accepted
+            << " engine=" << counters.engine_ready
+            << " comp=" << counters.composition_active
+            << "/" << counters.composition_length
+            << " binds=" << counters.target_binds
+            << " rebinds=" << counters.rebind_requests
+            << " menu=" << counters.candidate_menu_open
+            << " v=" << counters.candidate_version
+            << " items=" << counters.candidate_items
+            << " sel=" << counters.candidate_selected
+            << " req=" << counters.engine_requests
+            << " res=" << counters.engine_results
+            << " last_submit=" << counters.last_submit_status
+            << " gate=" << counters.gate
+            << " perm=" << counters.permission
+            << " rawwhy=" << counters.raw_reason_unapplied << ","
+            << counters.raw_reason_not_candidate << ","
+            << counters.raw_reason_high_water << ","
+            << counters.raw_reason_admission
+            << std::endl;
+}
+
+void PrintModuleState(const ProductSeam& seam, const char* label) {
+  long long live = -1;
+  long long locks = -1;
+  long long host_active = -1;
+  long long host_failed = -1;
+  long long guarded = -1;
+  if (seam.module_state != nullptr) {
+    (void)seam.module_state(&live, &locks, &host_active, &host_failed, &guarded);
+  }
+  std::cout << "  [module] " << label << " live=" << live << " locks=" << locks
+            << " host_active=" << host_active << " host_failed=" << host_failed
+            << " guarded=" << guarded << std::endl;
+}
+
+// ReadyToType answers "would the product eat a plain letter now"; while the degraded run is// still active that is true for a raw capture, not for an engine key. This helper waits for
+// the run to be closed, the coordinator to be idle and a bounded engine prediction to be
+// positive. It is used only by cases that must exercise the recovered engine path.
+bool WaitForEnginePath(TestHost& host, const ProductSeam& seam, ITfKeyEventSink* sink,
+                       ITfContext* context, SeamCounters* counters,
+                       DWORD timeout_ms) {
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  for (;;) {
+    if (seam.query != nullptr && seam.query(counters) == 0 &&
+        counters->engine_ready != 0 && counters->raw_active == 0 &&
+        counters->raw_submitted == 0 && counters->raw_unapplied_units == 0 &&
+        counters->queue_pending == 0 && counters->queue_in_flight == 0 &&
+        counters->coordinator_phase == 0 &&
+        ReadyToType(host, sink, context, 200)) {
+      return true;
+    }
+    if (::GetTickCount64() >= deadline) {
+      if (counters != nullptr) {
+        PrintSeamCounters(*counters, "engine path wait timeout");
+      }
+      return false;
+    }
+    PumpSlice(host, 20);
+  }
+}
+
 struct Case {
   TestHost* host = nullptr;
   TestDocument* doc = nullptr;
@@ -743,6 +978,7 @@ struct Case {
 bool BeginCase(Case* test_case, const std::filesystem::path& stage,
                const std::filesystem::path& user_root,
                const TestDocumentOptions& options, std::wstring* why) {
+  CrashPhase("begin-case: creating the controlled host");
   ::SetEnvironmentVariableW(L"EPOCANVA_USER_DATA_ROOT", user_root.c_str());
   test_case->host = TestHost::Create(&test_case->error).release();
   if (test_case->host == nullptr) {
@@ -764,6 +1000,7 @@ bool BeginCase(Case* test_case, const std::filesystem::path& stage,
     return false;
   }
   std::wstring activate_why;
+  CrashPhase("begin-case: activating the product");
   if (!ActivateProduct(&test_case->product, test_case->host->thread_manager_for_test(),
                        stage, &activate_why)) {
     std::cout << "  activate: "
@@ -778,10 +1015,43 @@ bool BeginCase(Case* test_case, const std::filesystem::path& stage,
 
 void EndCase(Case* test_case) {
   if (test_case->host != nullptr) {
+    CrashPhase("end-case: deactivating and releasing the product interfaces");
     ReleaseProduct(&test_case->product, true);
+    // TSF-owned objects implemented by the DLL (queued edit sessions, composition sinks,
+    // candidate elements) are released when the documents are popped, so the host must go
+    // first. Only then may the module be freed, and only when it agrees.
+    CrashPhase("end-case: tearing down the controlled host");
     delete test_case->host;
     test_case->host = nullptr;
     test_case->doc = nullptr;
+    CrashPhase("end-case: waiting for the module to become unloadable");
+    if (!FreeProductModule(&test_case->product, 10000, "end-case") &&
+        test_case->product.module != nullptr) {
+      const auto module_state = reinterpret_cast<SeamModuleStateFn>(
+          ::GetProcAddress(test_case->product.module, "EpoCanvaTestModuleState"));
+      long long live = -1;
+      long long locks = -1;
+      long long host_active = -1;
+      long long host_failed = -1;
+      long long guarded = -1;
+      if (module_state != nullptr) {
+        (void)module_state(&live, &locks, &host_active, &host_failed, &guarded);
+      }
+      std::cout << "  [unload] end-case retained: live=" << live
+                << " locks=" << locks << " host_active=" << host_active
+                << " host_failed=" << host_failed << " guarded=" << guarded
+                << std::endl;
+      const auto guarded_objects = reinterpret_cast<SeamGuardedObjectsFn>(
+          ::GetProcAddress(test_case->product.module, "EpoCanvaTestGuardedObjects"));
+      long long kinds[6] = {-1, -1, -1, -1, -1, -1};
+      if (guarded_objects != nullptr) {
+        (void)guarded_objects(kinds, 6);
+      }
+      std::cout << "  [unload] kinds edit_session=" << kinds[0]
+                << " selection_read=" << kinds[1] << " composition_sink=" << kinds[2]
+                << " rect_read=" << kinds[3] << " candidate_element=" << kinds[4]
+                << " candidate_sink=" << kinds[5] << std::endl;
+    }
   }
 }
 
@@ -1107,6 +1377,7 @@ void RunSessionWorker(const std::filesystem::path& stage, const std::wstring& wo
   ReleaseProduct(&product, true);
   ::DestroyWindow(window);
   delete host;
+  DeferProductModule(&product);
 }
 
 bool RunMultiSessionCase(const std::filesystem::path& stage,
@@ -1131,6 +1402,8 @@ bool RunMultiSessionCase(const std::filesystem::path& stage,
              "session A committed its own text");
   LocalCheck(second.ok && second.text == L"beta ",
              "session B committed its own text");
+  const bool unloaded = FreeDeferredProductModules(15000, "multi-session");
+  LocalCheck(unloaded, "multi-session: both load references were released");
   return first.ok && second.ok;
 }
 
@@ -1165,6 +1438,28 @@ bool RunStrictUnregisteredCase(const std::filesystem::path& stage,
   }
   ReleaseProduct(&product, false);
   LocalCheck(document->text_utf16().empty(), "strict: the document is unchanged");
+  {
+    ProductSeam strict_seam = LoadSeam(product);
+    PrintModuleState(strict_seam, "strict after releasing the interfaces");
+  }
+  host.reset();
+  // The activation failed after the asynchronous engine start was requested. That start is
+  // bounded (60 s) and keeps the module loaded until it exits; the host must wait for the
+  // gate instead of exiting with the background thread still inside the DLL.
+  const ULONGLONG strict_gate_deadline = ::GetTickCount64() + 75000;
+  HRESULT strict_gate = ProductUnloadStatus(&product);
+  while (strict_gate != S_OK && ::GetTickCount64() < strict_gate_deadline) {
+    ::Sleep(100);
+    strict_gate = ProductUnloadStatus(&product);
+  }
+  LocalCheck(strict_gate == S_OK,
+             "strict: the failed activation's background start ended and the gate opened");
+  {
+    ProductSeam strict_seam = LoadSeam(product);
+    PrintModuleState(strict_seam, "strict after the host teardown");
+  }
+  const bool strict_freed = FreeProductModule(&product, 5000, "strict");
+  LocalCheck(strict_freed, "strict: the module is freed after the background start ended");
   return true;
 }
 
@@ -1213,6 +1508,7 @@ void HoldSessionWorker(const std::filesystem::path& stage, HANDLE ready_event,
   ReleaseProduct(&product, true);
   ::DestroyWindow(window);
   delete host;
+  DeferProductModule(&product);
 }
 
 
@@ -1298,8 +1594,11 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
   LocalCheck(before.find("max_completions: 4") != std::string::npos,
              "timing: the first engine compiled the first settings");
 
-  LocalCheck(WriteSettingsOnly(user_root, second, why),
-             "timing: new settings are saved while the engine runs");
+  {
+    const bool saved = WriteSettingsOnly(user_root, second, why);
+    LocalCheck(saved, "timing: new settings are saved while the engine runs: " +
+                          std::string(why->begin(), why->end()));
+  }
   HANDLE ready_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
   HANDLE release_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
   HoldSessionResult deferred;
@@ -1333,6 +1632,10 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
                "timing: the previous engine host is idle before the restart");
   }
   EndCase(&held);
+  // The worker session's load reference was parked. Free it now so the restarted case gets a
+  // fresh module and a fresh bootstrap singleton, exactly as the settings contract assumes.
+  LocalCheck(FreeDeferredProductModules(15000, "settings-timing"),
+             "timing: the parked load references were released before the restart");
 
   Case renewed;
   if (!BeginCase(&renewed, stage, user_root, options, nullptr)) {
@@ -1432,6 +1735,8 @@ bool RunEngineMissingCase(const std::filesystem::path& stage,
   LocalCheck(::GetTickCount64() - stop_start < 1000,
              "missing rime.dll: deactivation does not wait for the failed start");
   ReleaseProduct(&product, false);
+  host.reset();
+  (void)FreeProductModule(&product, 10000, "engine-missing");
   return true;
 }
 
@@ -1793,6 +2098,656 @@ bool RunCapacityCase(const std::filesystem::path& stage,
   return true;
 }
 
+// W2-B-R: the original failure shape. The same activation and the same context cross the
+// bounded raw capacity while the document lock is held, the retained chunk applies, and the
+// session keeps typing instead of reactivating. Every step is labelled for the crash report.
+bool RunCapacityContinueCase(const std::filesystem::path& stage,
+                             const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.initial_text_utf16 = L"";
+  // A real deferred lock: RequestLock answers TS_S_ASYNC and the grant arrives as a message
+  // that the host can hold. Without this the burst only "holds" because nothing pumps, which
+  // is not the same as an application that is busy inside a lock.
+  options.async_locks = true;
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "capacity-continue: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ProductSeam seam = LoadSeam(test_case.product);
+  LocalCheck(seam.usable(), "capacity-continue: controlled seam available");
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  std::string error;
+  SeamCounters counters = {};
+  CrashPhase("capacity-continue: waiting for the engine path");
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "capacity-continue: the engine path is ready");
+
+  // 1. Backlog and boundary: the first engine key is in flight and cannot be granted, then
+  // the burst crosses the high water mark and fills the bounded raw run.
+  CrashPhase("capacity-continue: sending the 1202-unit burst under a held lock");
+  test_case.host->SetHoldGrantMessages(true);
+  std::wstring burst = L"ab";
+  burst.append(1200, L'x');
+  std::vector<bool> burst_eaten;
+  LocalCheck(SendTextAdaptive(&route, burst, &burst_eaten, &error),
+             "capacity-continue: the burst was delivered to the sink: " + error);
+  std::size_t eaten_keys = 0;
+  for (const bool key_eaten : burst_eaten) {
+    eaten_keys += key_eaten ? 1u : 0u;
+  }
+  LocalCheck(burst_eaten.size() == burst.size() && eaten_keys == burst.size(),
+             "capacity-continue: every burst key was eaten (host kept none)");
+  (void)seam.query(&counters);
+  LocalCheck(counters.raw_unrecoverable > 0,
+             "capacity-continue: the bound was reached while the chunk could not flush");
+  LocalCheck(counters.raw_dropped_keys > 0,
+             "capacity-continue: the overflow is an explicit, counted loss");
+  LocalCheck(counters.raw_applied_units == 0,
+             "capacity-continue: nothing was applied while the document stayed locked");
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+
+  CrashPhase("capacity-continue: waiting for the retained 1024-unit chunk");
+  const ULONGLONG settle_deadline = ::GetTickCount64() + 25000;
+  for (;;) {
+    (void)seam.query(&counters);
+    if (counters.raw_applied_units >= 1024 || ::GetTickCount64() >= settle_deadline) {
+      break;
+    }
+    PumpSlice(*test_case.host, 20);
+  }
+  LocalCheck(counters.raw_applied_units == 1024,
+             "capacity-continue: exactly one 1024-unit chunk was applied");
+  const std::wstring retained = test_case.doc->text_utf16();
+  LocalCheck(retained == burst.substr(0, retained.size()),
+             "capacity-continue: the document is the typed prefix, unit for unit");
+  LocalCheck(retained.size() == 1024 || retained.size() == 1025,
+             "capacity-continue: the document holds the bounded chunk (plus at most one "
+             "engine key)");
+  const std::size_t typed_units = burst.size();
+  const std::size_t dropped_keys = static_cast<std::size_t>(counters.raw_dropped_keys);
+  // This fixed burst uses one UTF-16 unit per key, so key counts and unit counts are equal.
+  // Every typed key is either inside the retained text or explicitly dropped; nothing is
+  // allowed to vanish between those two accounts.
+  LocalCheck(retained.size() + dropped_keys == typed_units,
+             "capacity-continue: retained + dropped accounts for every typed unit");
+  LocalCheck(counters.queue_pending == 0 && counters.queue_in_flight == 0,
+             "capacity-continue: no accepted key is still waiting after the chunk applied");
+
+  // 2. Continue typing in the SAME activation and context as soon as the chunk applied, with
+  // no artificial settle window. The controller is still in the degraded run, so these keys
+  // are captured raw, committed, and only then does the run end.
+  SeamCounters before_continue = {};
+  (void)seam.query(&before_continue);
+  CrashPhase("capacity-continue: typing a new token after the applied chunk");
+  std::vector<bool> continued_eaten;
+  LocalCheck(SendTextAdaptive(&route, L"after", &continued_eaten, &error),
+             "capacity-continue: the continued token was delivered: " + error);
+  std::size_t continued_keys = 0;
+  for (const bool key_eaten : continued_eaten) {
+    continued_keys += key_eaten ? 1u : 0u;
+  }
+  LocalCheck(continued_eaten.size() == 5 && continued_keys == 5,
+             "capacity-continue: every continued key stayed in the product path");
+  CrashPhase("capacity-continue: committing the continued token with Space");
+  bool space_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
+                 space_eaten,
+             "capacity-continue: Space was eaten and ends the degraded run: " + error);
+  const std::wstring continued = retained + L"after ";
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, continued, 25000),
+             "capacity-continue: the continued token is in the document exactly once");
+  (void)seam.query(&counters);
+  LocalCheck(counters.raw_commits > before_continue.raw_commits,
+             "capacity-continue: the continuation went through a real raw commit");
+  const std::wstring after_continuation = test_case.doc->text_utf16();
+  PumpSlice(*test_case.host, 300);
+  LocalCheck(test_case.doc->text_utf16() == after_continuation,
+             "capacity-continue: no late write changed the document after the continuation");
+
+  // 3. The raw run ended; the binding rebuilds and the engine path comes back in this same
+  // session. Then a fresh token must produce a real menu and a validated selection.
+  CrashPhase("capacity-continue: waiting for the engine path to recover in this session");
+  LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, context, &counters, 30000),
+             "capacity-continue: the same session recovered the engine path");
+  PrintSeamCounters(counters, "after recovery");
+  LocalCheck(counters.raw_active == 0 && counters.raw_submitted == 0,
+             "capacity-continue: the degraded run is closed before engine input resumes");
+  CrashPhase("capacity-continue: typing a fresh token through the recovered engine");
+  LocalCheck(SendText(&route, L"hel", true, &error),
+             "capacity-continue: the fresh token is eaten by the engine path: " + error);
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 15000),
+             "capacity-continue: the recovered engine opened a real menu");
+  const std::wstring completion = ReadCandidateText(seam, 1);
+  LocalCheck(!completion.empty(),
+             "capacity-continue: the completion text is available");
+  CrashPhase("capacity-continue: selecting the completion and committing");
+  bool down1 = false;
+  bool down2 = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down1, &error) && down1 &&
+                 SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down2, &error) && down2,
+             "capacity-continue: the menu owns both Down keys");
+  LocalCheck(SendVirtualKey(&route, VK_RETURN, true, &error),
+             "capacity-continue: Enter accepts the explicit selection");
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, continued + completion, 20000),
+             "capacity-continue: the selected completion was committed exactly once");
+  const std::wstring final_text = test_case.doc->text_utf16();
+  PumpSlice(*test_case.host, 300);
+  LocalCheck(test_case.doc->text_utf16() == final_text,
+             "capacity-continue: no late write followed the recovered commit");
+
+  // 4. Deactivate and clean up the same activation. The module may only be freed after the
+  // host released every product-implemented COM object; EndCase enforces that order.
+  CrashPhase("capacity-continue: deactivating");
+  EndCase(&test_case);
+  LocalCheck(test_case.product.module == nullptr,
+             "capacity-continue: the product module was unloaded after the host teardown");
+  return true;
+}
+
+// W2-B-R asynchronous startup lifecycle: deactivate while the background start is blocked,
+// activate a second TIP while the old start is still in flight, then release the old start.
+// The old completion must not be adopted by the new activation, and the module must stay
+// unloadable=false until the background thread really exits.
+bool RunStartupLifecycleCase(const std::filesystem::path& stage,
+                             const std::filesystem::path& user_root) {
+  ::SetEnvironmentVariableW(L"EPOCANVA_USER_DATA_ROOT", user_root.c_str());
+  std::string error;
+  std::unique_ptr<TestHost> host_a = TestHost::Create(&error);
+  if (!host_a) {
+    LocalCheck(false, "startup-lifecycle: first host created: " + error);
+    return false;
+  }
+  TestDocument* document_a = host_a->CreateDocument(TestDocumentOptions{}, &error);
+  if (document_a == nullptr ||
+      !epocanva::tsf::context::test::EnsureTestThreadFocus(&error)) {
+    LocalCheck(false, "startup-lifecycle: first document and focus: " + error);
+    return false;
+  }
+  epocanva::tsf::context::test::FocusCallResult focus;
+  SetThreadFocus(*host_a, document_a, &focus, &error);
+
+  LoadedProduct product_a;
+  std::wstring why;
+  if (!PrepareProduct(&product_a, host_a->thread_manager_for_test(), stage, &why)) {
+    LocalCheck(false, "startup-lifecycle: first product prepared: " +
+                          std::string(why.begin(), why.end()));
+    return false;
+  }
+  ProductSeam seam_a = LoadSeam(product_a);
+  LocalCheck(seam_a.startup_usable(), "startup-lifecycle: startup seam available");
+  HANDLE entered = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  HANDLE released = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  LocalCheck(entered != nullptr && released != nullptr,
+             "startup-lifecycle: events created");
+  LocalCheck(seam_a.begin_start(entered, released) == 0,
+             "startup-lifecycle: the blocking start was installed");
+
+  CrashPhase("startup-lifecycle: activating the first TIP");
+  const ULONGLONG activate_a_start = ::GetTickCount64();
+  const HRESULT activated_a =
+      product_a.tip->Activate(host_a->thread_manager_for_test(), product_a.client_id);
+  const ULONGLONG activate_a_ms = ::GetTickCount64() - activate_a_start;
+  LocalCheck(SUCCEEDED(activated_a),
+             "startup-lifecycle: the first activation returns immediately");
+  LocalCheck(activate_a_ms < 1500, "startup-lifecycle: the first Activate did not wait");
+  LocalCheck(::WaitForSingleObject(entered, 5000) == WAIT_OBJECT_0,
+             "startup-lifecycle: the background start is really in progress");
+
+  CrashPhase("startup-lifecycle: deactivating while the start is blocked");
+  const ULONGLONG deactivate_a_start = ::GetTickCount64();
+  (void)product_a.tip->Deactivate();
+  const ULONGLONG deactivate_a_ms = ::GetTickCount64() - deactivate_a_start;
+  LocalCheck(deactivate_a_ms < 1500,
+             "startup-lifecycle: Deactivate does not wait for the blocked start");
+  product_a.tip->Release();
+  product_a.tip = nullptr;
+  product_a.sink->Release();
+  product_a.sink = nullptr;
+  product_a.factory->Release();
+  product_a.factory = nullptr;
+  const auto can_unload = reinterpret_cast<CanUnloadNowFn>(
+      ::GetProcAddress(product_a.module, "DllCanUnloadNow"));
+  LocalCheck(can_unload != nullptr && can_unload() == S_FALSE,
+             "startup-lifecycle: the blocked start keeps the module from unloading");
+
+  // A second activation while the first start is still blocked. It must stay literal and
+  // must not wait on the old start.
+  CrashPhase("startup-lifecycle: activating a second TIP while the old start is blocked");
+  std::unique_ptr<TestHost> host_b = TestHost::Create(&error);
+  if (!host_b) {
+    LocalCheck(false, "startup-lifecycle: second host created: " + error);
+    ::SetEvent(released);
+    return false;
+  }
+  TestDocument* document_b = host_b->CreateDocument(TestDocumentOptions{}, &error);
+  if (document_b == nullptr) {
+    LocalCheck(false, "startup-lifecycle: second document: " + error);
+    ::SetEvent(released);
+    return false;
+  }
+  SetThreadFocus(*host_b, document_b, &focus, &error);
+  LoadedProduct product_b;
+  if (!PrepareProduct(&product_b, host_b->thread_manager_for_test(), stage, &why)) {
+    LocalCheck(false, "startup-lifecycle: second product prepared: " +
+                          std::string(why.begin(), why.end()));
+    ::SetEvent(released);
+    return false;
+  }
+  ProductSeam seam_b = LoadSeam(product_b);
+  const ULONGLONG activate_b_start = ::GetTickCount64();
+  const HRESULT activated_b =
+      product_b.tip->Activate(host_b->thread_manager_for_test(), product_b.client_id);
+  const ULONGLONG activate_b_ms = ::GetTickCount64() - activate_b_start;
+  LocalCheck(SUCCEEDED(activated_b) && activate_b_ms < 1500,
+             "startup-lifecycle: the second Activate returns without joining the old start");
+  InputRoute route_b{host_b.get(), document_b, product_b.sink, document_b->context()};
+  std::string input_error;
+  LocalCheck(SendText(&route_b, L"abc", false, &input_error) &&
+                 document_b->text_utf16() == L"abc",
+             "startup-lifecycle: the second session stays literal: " + input_error);
+  SeamCounters counters_b = {};
+  (void)seam_b.query(&counters_b);
+  LocalCheck(counters_b.engine_ready == 0 && counters_b.literal_key_downs >= 3,
+             "startup-lifecycle: no engine pipeline is claimed while the old start runs");
+
+  CrashPhase("startup-lifecycle: releasing the old start");
+  ::SetEvent(released);
+  const ULONGLONG state_deadline = ::GetTickCount64() + 10000;
+  int state = -1;
+  for (;;) {
+    state = seam_b.state();
+    if (state == 3 || ::GetTickCount64() >= state_deadline) {
+      break;
+    }
+    if (host_b != nullptr) {
+      PumpSlice(*host_b, 20);
+    } else {
+      ::Sleep(20);
+    }
+  }
+  LocalCheck(state == 3,
+             "startup-lifecycle: the old, late completion is reported as failed");
+  LocalCheck(SendText(&route_b, L"def", false, &input_error) &&
+                 document_b->text_utf16() == L"abcdef",
+             "startup-lifecycle: the second session remains literal after the old completion");
+  (void)seam_b.query(&counters_b);
+  LocalCheck(counters_b.engine_ready == 0,
+             "startup-lifecycle: the stale completion was not adopted");
+
+  // Tear the second session down too. The gate can only open once the background start
+  // exited AND both TIPs/factories are released; checking before this would blame the
+  // background thread for a live activation.
+  CrashPhase("startup-lifecycle: tearing both sessions down");
+  (void)product_b.tip->Deactivate();
+  product_b.tip->Release();
+  product_b.tip = nullptr;
+  product_b.sink->Release();
+  product_b.sink = nullptr;
+  product_b.factory->Release();
+  product_b.factory = nullptr;
+  host_b.reset();
+  host_a.reset();
+  const ULONGLONG gate_deadline = ::GetTickCount64() + 10000;
+  HRESULT gate = S_FALSE;
+  for (;;) {
+    gate = can_unload != nullptr ? can_unload() : E_FAIL;
+    if (gate == S_OK || ::GetTickCount64() >= gate_deadline) {
+      break;
+    }
+    ::Sleep(20);
+  }
+  LocalCheck(gate == S_OK,
+             "startup-lifecycle: the gate opens after the background start exits");
+  HMODULE module_b = product_b.module;
+  HMODULE module_a = product_a.module;
+  product_a.module = nullptr;
+  product_b.module = nullptr;
+  if (module_b != nullptr) {
+    (void)::FreeLibrary(module_b);
+  }
+  if (module_a != nullptr) {
+    (void)::FreeLibrary(module_a);
+  }
+  HMODULE still = nullptr;
+  const bool image_loaded =
+      module_a != nullptr &&
+      ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(module_a), &still) != FALSE;
+  LocalCheck(!image_loaded,
+             "startup-lifecycle: both load references were released and the image is gone");
+  ::CloseHandle(released);
+  ::CloseHandle(entered);
+  return true;
+}
+
+// W2-B-R degraded control keys: Enter, Escape and BackSpace through the real controller,
+// coordinator and TSF edit sessions while the bounded raw run owns the caret order. Every
+// expectation is derived from the documented contract, not from the product's current text.
+bool RunDegradedKeysCase(const std::filesystem::path& stage,
+                         const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.initial_text_utf16 = L"";
+  options.async_locks = true;
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "degraded-keys: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ProductSeam seam = LoadSeam(test_case.product);
+  LocalCheck(seam.usable(), "degraded-keys: controlled seam available");
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  std::string error;
+  SeamCounters counters = {};
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "degraded-keys: the engine path is ready");
+
+  // Phase A: BackSpace edits only the unsubmitted suffix while a real backlog exists. The
+  // burst is sent without pumping, so the first key is in flight, the queue crosses the high
+  // water mark, and every following key is withdrawn into the raw run.
+  CrashPhase("degraded-keys: building a backlog");
+  std::wstring burst = L"q";
+  burst.append(29, L'w');
+  std::vector<bool> burst_eaten;
+  LocalCheck(SendTextAdaptive(&route, burst, &burst_eaten, &error),
+             "degraded-keys: the backlog was delivered: " + error);
+  (void)seam.query(&counters);
+  LocalCheck(counters.raw_active != 0,
+             "degraded-keys: the raw run really took over the backlog");
+  std::wstring typed_suffix = L"abc";
+  std::vector<bool> suffix_eaten;
+  LocalCheck(SendTextAdaptive(&route, typed_suffix, &suffix_eaten, &error),
+             "degraded-keys: the suffix was captured: " + error);
+  CrashPhase("degraded-keys: BackSpace removes one code point from the suffix");
+  bool backspace_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_BACK, L"", &backspace_eaten, &error) &&
+                 backspace_eaten,
+             "degraded-keys: BackSpace is eaten by the degraded run: " + error);
+  bool space_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
+                 space_eaten,
+             "degraded-keys: Space ends the run and commits it: " + error);
+  // The engine key 'q' plus the withdrawn run "w"*29 plus "ab" plus the committed space.
+  std::wstring expected = L"q";
+  expected.append(29, L'w');
+  expected += L"ab ";
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 25000),
+             "degraded-keys: BackSpace removed exactly the last captured code point");
+  (void)seam.query(&counters);
+  LocalCheck(counters.raw_ignored_edits == 0,
+             "degraded-keys: the BackSpace was a real edit, not an ignored one");
+  LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, context, &counters, 30000),
+             "degraded-keys: the engine path recovered after the BackSpace run");
+
+  // Phase B: Enter ends the degraded segment and commits the captured suffix without adding
+  // a line break; a previously committed block is preserved.
+  CrashPhase("degraded-keys: Enter commits the suffix without a newline");
+  test_case.host->SetHoldGrantMessages(true);
+  std::vector<bool> enter_prefix;
+  LocalCheck(SendTextAdaptive(&route, L"cd", &enter_prefix, &error),
+             "degraded-keys: the Enter prefix was captured: " + error);
+  bool enter_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_RETURN, L"", &enter_eaten, &error) &&
+                 enter_eaten,
+             "degraded-keys: Enter is eaten by the degraded run: " + error);
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+  expected += L"cd";
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 25000),
+             "degraded-keys: Enter committed the suffix exactly once");
+  LocalCheck(expected.find(L'\n') == std::wstring::npos &&
+                 test_case.doc->text_utf16().find(L'\n') == std::wstring::npos,
+             "degraded-keys: Enter inserted no line break");
+  LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, context, &counters, 30000),
+             "degraded-keys: the engine path recovered after Enter");
+
+  // Phase C: Escape cancels only the suffix that was not yet submitted. The first captured
+  // key of this segment was already handed to the coordinator and still applies once.
+  CrashPhase("degraded-keys: Escape cancels only the unsubmitted suffix");
+  test_case.host->SetHoldGrantMessages(true);
+  std::vector<bool> escape_prefix;
+  LocalCheck(SendTextAdaptive(&route, L"efg", &escape_prefix, &error),
+             "degraded-keys: the Escape segment was captured: " + error);
+  bool escape_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_ESCAPE, L"", &escape_eaten, &error) &&
+                 escape_eaten,
+             "degraded-keys: Escape is eaten by the degraded run: " + error);
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+  expected += L"e";  // 'f' and 'g' were cancelled; 'e' was already submitted.
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 25000),
+             "degraded-keys: Escape cancelled the suffix and kept the submitted chunk");
+  (void)seam.query(&counters);
+  LocalCheck(counters.raw_cancelled_units >= 2,
+             "degraded-keys: the cancelled suffix is counted");
+  const std::wstring after_escape = test_case.doc->text_utf16();
+  PumpSlice(*test_case.host, 300);
+  LocalCheck(test_case.doc->text_utf16() == after_escape,
+             "degraded-keys: no cancelled text was written late");
+  LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, context, &counters, 30000),
+             "degraded-keys: the engine path recovered after Escape");
+
+  // Phase D: BackSpace with an empty suffix is eaten and ignored; it never deletes text that
+  // was already committed or is already owned by the coordinator. To reach that state the
+  // session must already be in the degraded run with an empty, unsubmitted suffix.
+  CrashPhase("degraded-keys: re-entering the degraded run for the empty-suffix BackSpace");
+  std::wstring second_burst = L"r";
+  second_burst.append(29, L'v');
+  std::vector<bool> second_eaten;
+  LocalCheck(SendTextAdaptive(&route, second_burst, &second_eaten, &error),
+             "degraded-keys: the second backlog was delivered: " + error);
+  (void)seam.query(&counters);
+  LocalCheck(counters.raw_active != 0,
+             "degraded-keys: the second backlog re-entered the raw run");
+  const std::size_t applied_before = static_cast<std::size_t>(counters.raw_applied_units);
+  const ULONGLONG second_deadline = ::GetTickCount64() + 25000;
+  for (;;) {
+    (void)seam.query(&counters);
+    if ((counters.raw_applied_units > applied_before &&
+         counters.raw_unapplied_units == 0 && counters.raw_submitted == 0) ||
+        ::GetTickCount64() >= second_deadline) {
+      break;
+    }
+    PumpSlice(*test_case.host, 20);
+  }
+  LocalCheck(counters.raw_applied_units > applied_before &&
+                 counters.raw_active != 0 && counters.raw_unapplied_units == 0 &&
+                 counters.raw_submitted == 0,
+             "degraded-keys: the second chunk applied and the run is empty but still active");
+  expected += second_burst;
+
+  CrashPhase("degraded-keys: BackSpace with an empty suffix deletes nothing");
+  test_case.host->SetHoldGrantMessages(true);
+  std::vector<bool> host_prefix;
+  LocalCheck(SendTextAdaptive(&route, L"h", &host_prefix, &error),
+             "degraded-keys: the preserved prefix was captured: " + error);
+  (void)seam.query(&counters);
+  LocalCheck(counters.raw_active != 0 && counters.raw_unapplied_units == 0,
+             "degraded-keys: the preserved prefix was submitted, leaving an empty suffix");
+  SeamCounters before_empty_backspace = counters;
+  bool empty_backspace_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_BACK, L"", &empty_backspace_eaten,
+                                    &error) &&
+                 empty_backspace_eaten,
+             "degraded-keys: the empty-suffix BackSpace is eaten: " + error);
+  (void)seam.query(&counters);
+  LocalCheck(counters.raw_ignored_edits > before_empty_backspace.raw_ignored_edits,
+             "degraded-keys: the empty-suffix BackSpace is reported as ignored");
+  std::vector<bool> tail_eaten;
+  LocalCheck(SendTextAdaptive(&route, L"i", &tail_eaten, &error),
+             "degraded-keys: the following text was captured: " + error);
+  bool tail_space = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &tail_space, &error) &&
+                 tail_space,
+             "degraded-keys: Space ends the run: " + error);
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+  expected += L"hi ";
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 25000),
+             "degraded-keys: the ignored BackSpace deleted no committed or pending text");
+
+  // Phase E: a focus change while a raw run is pending. The already-submitted chunk still
+  // applies to the document it was typed into; the unsubmitted suffix is failed and must
+  // never be replayed into either document. The new context accepts its own input.
+  CrashPhase("degraded-keys: focus change during a pending raw run");
+  SeamCounters before_focus_switch = {};
+  (void)seam.query(&before_focus_switch);
+  test_case.host->SetHoldGrantMessages(true);
+  std::vector<bool> focus_prefix;
+  LocalCheck(SendTextAdaptive(&route, L"mn", &focus_prefix, &error),
+             "degraded-keys: the pending focus token was captured: " + error);
+  TestDocumentOptions child_options;
+  child_options.initial_text_utf16 = L"";
+  const std::wstring parent_before_switch = test_case.doc->text_utf16();
+  // The application never grants the held lock: switch focus while both the submitted
+  // chunk and its suffix are still unresolved. Dropping (not granting) the grant also keeps
+  // the child's own TSF sessions from inheriting the held message.
+  test_case.host->SetHoldGrantMessages(false);
+  const std::size_t dropped_grants = test_case.host->DropHeldGrantMessages();
+  std::cout << "  [degraded-keys] dropped held grants before the switch="
+            << dropped_grants << std::endl;
+  TestDocument* child =
+      test_case.host->CreateChildContext(test_case.doc, child_options, &error);
+  LocalCheck(child != nullptr, "degraded-keys: a child context is pushed: " + error);
+  if (child != nullptr) {
+    PumpSlice(*test_case.host, 500);
+    ITfContext* child_context = child->context();
+    LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, child_context, &counters,
+                                 30000),
+               "degraded-keys: the child context became the bound target");
+    InputRoute child_route{test_case.host, child, sink, child_context};
+    LocalCheck(WaitForText(*test_case.host, child, L"", 100),
+               "degraded-keys: the new context starts empty");
+    std::vector<bool> child_eaten;
+    LocalCheck(SendTextAdaptive(&child_route, L"z", &child_eaten, &error),
+               "degraded-keys: the child token was accepted: " + error);
+    bool child_space = false;
+    LocalCheck(SendVirtualKeyAdaptive(&child_route, VK_SPACE, L" ", &child_space,
+                                      &error) &&
+                   child_space,
+               "degraded-keys: the child Space committed: " + error);
+    LocalCheck(WaitForText(*test_case.host, child, L"z ", 15000),
+               "degraded-keys: the child document holds only its own token");
+    // The lock was never granted, so neither the submitted chunk nor its suffix may be
+    // written; the focus change reports the whole pending run as an explicit failure.
+    const std::wstring parent_after = test_case.doc->text_utf16();
+    LocalCheck(parent_after == parent_before_switch,
+               "degraded-keys: no captured text was replayed into the old document");
+    (void)seam.query(&counters);
+    LocalCheck(counters.raw_failed_units >= before_focus_switch.raw_failed_units + 2,
+               "degraded-keys: the whole pending run is reported as an explicit failure");
+    LocalCheck(counters.raw_unapplied_units == 0 && counters.raw_submitted == 0,
+               "degraded-keys: no captured unit is left in an unspecified state");
+    PumpSlice(*test_case.host, 300);
+    LocalCheck(test_case.doc->text_utf16() == parent_after,
+               "degraded-keys: the failed suffix was not replayed into the parent late");
+  }
+
+  CrashPhase("degraded-keys: deactivating");
+  EndCase(&test_case);
+  LocalCheck(test_case.product.module == nullptr,
+             "degraded-keys: the product module was unloaded after the host teardown");
+  return true;
+}
+
+// W2-B-R unload contract: TSF owns an ITfEditSession callback the DLL implemented, so the
+// DLL must refuse to unload. Granting the deferred lock lets TSF run and release that
+// callback; only then may the module go away. No step forces FreeLibrary.
+bool RunUnloadContractCase(const std::filesystem::path& stage,
+                           const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.initial_text_utf16 = L"";
+  options.async_locks = true;
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "unload-contract: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ProductSeam seam = LoadSeam(test_case.product);
+  LocalCheck(seam.usable(), "unload-contract: controlled seam available");
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  std::string error;
+  SeamCounters counters = {};
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+             "unload-contract: the engine path is ready");
+
+  const auto can_unload = reinterpret_cast<CanUnloadNowFn>(
+      ::GetProcAddress(test_case.product.module, "DllCanUnloadNow"));
+  LocalCheck(can_unload != nullptr, "unload-contract: DllCanUnloadNow is exported");
+
+  // Queue a real edit session and hold its grant.
+  CrashPhase("unload-contract: queueing an edit session behind a held grant");
+  test_case.host->SetHoldGrantMessages(true);
+  std::vector<bool> eaten;
+  LocalCheck(SendTextAdaptive(&route, L"hel", &eaten, &error),
+             "unload-contract: the token was delivered: " + error);
+  // Wait, bounded, for the engine result to be harvested and the edit session to be
+  // requested. A fixed 500 ms slice is not a fact: on a slow engine start the result can
+  // arrive later, and this test must observe a queued session, not a still-empty pipeline.
+  const ULONGLONG queue_deadline = ::GetTickCount64() + 20000;
+  for (;;) {
+    (void)seam.query(&counters);
+    if ((counters.queue_in_flight >= 1 && counters.coordinator_phase != 0) ||
+        ::GetTickCount64() >= queue_deadline) {
+      break;
+    }
+    PumpSlice(*test_case.host, 50);
+  }
+  LocalCheck(counters.queue_in_flight >= 1 && counters.coordinator_phase != 0,
+             "unload-contract: an edit session really is queued inside TSF");
+  PrintModuleState(seam, "with a queued session");
+
+  CrashPhase("unload-contract: deactivating while TSF owns the callback");
+  ReleaseProduct(&test_case.product, true);
+  const HRESULT while_queued = can_unload != nullptr ? can_unload() : E_FAIL;
+  LocalCheck(while_queued == S_FALSE,
+             "unload-contract: the DLL refuses to unload while TSF owns its callback");
+  PrintModuleState(seam, "after deactivate");
+
+  // The application grants the deferred lock. TSF runs the now-stale session and releases
+  // it; the observer must publish nothing and the document must not change.
+  const std::wstring before_grant = test_case.doc->text_utf16();
+  test_case.host->SetHoldGrantMessages(false);
+  const std::size_t granted = test_case.host->ReleaseHeldGrantMessages();
+  std::cout << "  [unload-contract] granted held locks=" << granted << std::endl;
+  PumpSlice(*test_case.host, 1000);
+  const ULONGLONG gate_deadline = ::GetTickCount64() + 10000;
+  HRESULT settled = while_queued;
+  for (;;) {
+    settled = can_unload != nullptr ? can_unload() : E_FAIL;
+    if (settled == S_OK || ::GetTickCount64() >= gate_deadline) {
+      break;
+    }
+    PumpSlice(*test_case.host, 50);
+  }
+  LocalCheck(settled == S_OK,
+             "unload-contract: the gate opens once TSF released the callback");
+  LocalCheck(test_case.doc->text_utf16() == before_grant,
+             "unload-contract: the stale session wrote nothing after deactivation");
+  PrintModuleState(seam, "after the grant");
+
+  CrashPhase("unload-contract: tearing the host down and freeing the module");
+  delete test_case.host;
+  test_case.host = nullptr;
+  test_case.doc = nullptr;
+  const bool freed = FreeProductModule(&test_case.product, 10000, "unload-contract");
+  LocalCheck(freed && test_case.product.module == nullptr,
+             "unload-contract: the module is freed after the host released its objects");
+  return true;
+}
+
+
 bool RunStartupCase(const std::filesystem::path& stage,
                     const std::filesystem::path& user_root) {
   ::SetEnvironmentVariableW(L"EPOCANVA_USER_DATA_ROOT", user_root.c_str());
@@ -1861,7 +2816,7 @@ bool RunStartupCase(const std::filesystem::path& stage,
   const auto can_unload = reinterpret_cast<CanUnloadNowFn>(
       ::GetProcAddress(product.module, "DllCanUnloadNow"));
   LocalCheck(can_unload != nullptr, "startup: DllCanUnloadNow is exported");
-  ReleaseProduct(&product, false, false);
+  ReleaseProduct(&product, false);
   LocalCheck(can_unload != nullptr && can_unload() == S_FALSE,
              "startup: the blocked start keeps the module from unloading");
   ::SetEvent(released);
@@ -2190,6 +3145,7 @@ int main(int argc, char** argv) {
   std::filesystem::path run_root;
   std::filesystem::path deployment_exe;
   std::string mode = "input";
+  int watchdog_ms = 0;
   for (int index = 1; index < argc; ++index) {
     const std::string arg = argv[index];
     if (arg == "--product-dll" && index + 1 < argc) {
@@ -2206,13 +3162,18 @@ int main(int argc, char** argv) {
       mode = argv[++index];
     } else if (arg == "--deployment-exe" && index + 1 < argc) {
       deployment_exe = std::filesystem::path(argv[++index]);
+    } else if (arg == "--watchdog-ms" && index + 1 < argc) {
+      watchdog_ms = std::atoi(argv[++index]);
     }
   }
   if (product_dll.empty() || rime_dll.empty() || data_dir.empty() ||
       lexicon.empty() || run_root.empty() || !run_root.is_absolute()) {
     std::cout
         << "usage error: --product-dll --rime-dll --data-dir --lexicon "
-           "--run-root <absolute> [--mode input|engine-missing|candidate|continuous|capacity|startup]\n";
+           "--run-root <absolute> [--mode input|engine-missing|candidate|continuous|"
+           "capacity|capacity-continue|unload-contract|degraded-keys|startup|"
+           "startup-lifecycle] "
+           "[--watchdog-ms N]\n";
     return 2;
   }
 
@@ -2221,6 +3182,24 @@ int main(int argc, char** argv) {
   std::error_code ec;
   std::filesystem::create_directories(run_root, ec);
   const std::filesystem::path stage = run_root / L"stage";
+  {
+    wchar_t exe_path[32768] = {};
+    ::GetModuleFileNameW(nullptr, exe_path, 32768);
+    const std::wstring symbol_path =
+        std::filesystem::path(exe_path).parent_path().wstring() + L";" +
+        stage.wstring() + L";" + product_dll.parent_path().wstring();
+    epocanva::tsf::product::test::InstallCrashCapture(run_root / L"diagnostics",
+                                                      symbol_path);
+    epocanva::tsf::product::test::SetCrashCounterCallback(&CrashCountersForReport);
+  }
+  if (watchdog_ms > 0) {
+    std::thread([watchdog_ms]() {
+      ::Sleep(static_cast<DWORD>(watchdog_ms));
+      (void)epocanva::tsf::product::test::WriteHangDump(
+          "watchdog", "the test exceeded --watchdog-ms; the dump describes the live hang");
+      ::TerminateProcess(::GetCurrentProcess(), 3);
+    }).detach();
+  }
   const std::filesystem::path user_root = run_root / L"鐢ㄦ埛 鏁版嵁";
   const std::filesystem::path marker = user_root / L"engine" / L"deploy-required";
   const std::filesystem::path state = user_root / L"engine" / L"deployed-state";
@@ -2316,6 +3295,30 @@ int main(int argc, char** argv) {
     LocalCheck(PrepareUserRoot(user_root, settings, &why),
                "capacity: settings and marker written");
     RunCapacityCase(stage, user_root);
+  } else if (mode == "capacity-continue") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "capacity-continue: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "capacity-continue: settings and marker written");
+    RunCapacityContinueCase(stage, user_root);
+  } else if (mode == "unload-contract") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "unload-contract: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "unload-contract: settings and marker written");
+    RunUnloadContractCase(stage, user_root);
+  } else if (mode == "degraded-keys") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "degraded-keys: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "degraded-keys: settings and marker written");
+    RunDegradedKeysCase(stage, user_root);
   } else if (mode == "startup") {
     std::wstring why;
     LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
@@ -2324,6 +3327,14 @@ int main(int argc, char** argv) {
     LocalCheck(PrepareUserRoot(user_root, settings, &why),
                "startup: settings and marker written");
     RunStartupCase(stage, user_root);
+  } else if (mode == "startup-lifecycle") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "startup-lifecycle: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "startup-lifecycle: settings and marker written");
+    RunStartupLifecycleCase(stage, user_root);
   } else if (mode == "engine-missing") {
     std::wstring why;
     const bool staged = StageProduct(stage, product_dll, rime_dll, data_dir, lexicon,

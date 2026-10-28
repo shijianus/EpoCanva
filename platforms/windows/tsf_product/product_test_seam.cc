@@ -3,9 +3,12 @@
 
 #ifdef EPOCANVA_TSF_DIRECT_SINK_TEST
 
+#include <algorithm>
 #include <mutex>
 
 #include "candidate_snapshot.h"
+#include "module_lifetime.h"
+#include "module_state.h"
 #include "product_engine_bootstrap.h"
 #include "text_service_controller.h"
 
@@ -90,6 +93,8 @@ extern "C" int EpoCanvaTestQueryCounters(EpoCanvaTestCounters* out) {
   out->last_raw_plan_units = diagnostics.coordinator.last_raw_plan_units;
   out->raw_unapplied_units = diagnostics.raw_unapplied_units;
   out->raw_exits = diagnostics.raw_exits;
+  out->raw_failed_keys = diagnostics.keys.raw_failed_keys;
+  out->raw_failed_units = diagnostics.keys.raw_failed_units;
   out->raw_commits = diagnostics.raw_commits;
   return 0;
 }
@@ -187,6 +192,46 @@ extern "C" int EpoCanvaTestEngineHostState() {
   epocanva::tsf::EngineHostDiagnostics diagnostics;
   epocanva::tsf::EngineHostBroker::Instance().Snapshot(&diagnostics);
   return static_cast<int>(diagnostics.state);
+}
+
+extern "C" int EpoCanvaTestModuleState(long long* live_objects, long long* server_locks,
+                                       long long* host_active, long long* host_failed,
+                                       long long* guarded_objects) {
+  if (live_objects != nullptr) {
+    *live_objects = epocanva::tsf::ModuleLiveObjectCount();
+  }
+  if (server_locks != nullptr) {
+    *server_locks = epocanva::tsf::ModuleServerLockCount();
+  }
+  if (host_active != nullptr) {
+    *host_active = epocanva::tsf::ModuleHostActiveFlag();
+  }
+  if (host_failed != nullptr) {
+    *host_failed = epocanva::tsf::ModuleHostFailedFlag();
+  }
+  if (guarded_objects != nullptr) {
+    *guarded_objects = epocanva::tsf::edit::LiveGuardedObjects();
+  }
+  return 0;
+}
+
+extern "C" int EpoCanvaTestGuardedObjects(long long* out, int capacity) {
+  if (out == nullptr || capacity <= 0) {
+    return 0;
+  }
+  using epocanva::tsf::edit::LiveGuardedObjects;
+  using epocanva::tsf::edit::ModuleObjectKind;
+  const int count =
+      std::min<int>(capacity, static_cast<int>(ModuleObjectKind::kKindCount));
+  const ModuleObjectKind kinds[] = {
+      ModuleObjectKind::kEditSession,      ModuleObjectKind::kSelectionRead,
+      ModuleObjectKind::kCompositionSink,  ModuleObjectKind::kRectRead,
+      ModuleObjectKind::kCandidateElement, ModuleObjectKind::kCandidateSink,
+  };
+  for (int index = 0; index < count; ++index) {
+    out[index] = LiveGuardedObjects(kinds[index]);
+  }
+  return count;
 }
 
 #endif  // EPOCANVA_TSF_DIRECT_SINK_TEST

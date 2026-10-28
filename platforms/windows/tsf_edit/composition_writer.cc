@@ -4,6 +4,8 @@
 #include <atomic>
 #include <utility>
 
+#include "module_lifetime.h"
+
 namespace epocanva {
 namespace tsf {
 namespace edit {
@@ -56,6 +58,9 @@ class CompositionSink final : public ITfCompositionSink {
   std::atomic<LONG> reference_count_{1};
   std::atomic<bool> terminated_{false};
   std::atomic<std::uint64_t> terminations_{0};
+  // TSF may keep the sink after EndComposition; the module must stay loaded until its last
+  // Release reaches this object.
+  ModuleObjectGuard module_guard_{ModuleObjectKind::kCompositionSink};
 };
 
 namespace {

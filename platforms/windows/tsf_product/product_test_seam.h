@@ -61,6 +61,8 @@ struct EpoCanvaTestCounters {
   unsigned long long last_raw_plan_units;
   unsigned long long raw_unapplied_units;
   unsigned long long raw_exits;
+  unsigned long long raw_failed_keys;
+  unsigned long long raw_failed_units;
 };
 
 __declspec(dllexport) int EpoCanvaTestQueryCounters(EpoCanvaTestCounters* out);
@@ -82,6 +84,16 @@ __declspec(dllexport) int EpoCanvaTestResetBootstrap();
 __declspec(dllexport) int EpoCanvaTestBootstrapState();
 // EngineHostState value: 0 idle, 1 starting, 2 running, 3 stopping, 4 failed.
 __declspec(dllexport) int EpoCanvaTestEngineHostState();
+// Module lifetime facts behind DllCanUnloadNow, plus the number of live edit-layer COM
+// objects counted through module_lifetime.h. Any of the pointers may be null.
+__declspec(dllexport) int EpoCanvaTestModuleState(long long* live_objects,
+                                                  long long* server_locks,
+                                                  long long* host_active,
+                                                  long long* host_failed,
+                                                  long long* guarded_objects);
+// Per-kind live guard counts (edit session, selection read, composition sink, rect read,
+// candidate element, candidate sink). Returns the number written.
+__declspec(dllexport) int EpoCanvaTestGuardedObjects(long long* out, int capacity);
 
 }  // extern "C"
 

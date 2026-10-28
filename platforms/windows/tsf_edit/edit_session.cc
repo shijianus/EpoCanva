@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "composition_writer.h"
+#include "module_lifetime.h"
 
 namespace epocanva {
 namespace tsf {
@@ -361,6 +362,9 @@ class EditSessionCallback final : public ITfEditSession {
   std::uint64_t session_id_ = 0;
   EditResult result_;
   bool done_ = false;
+  // TSF owns a reference until the session is granted or cancelled; a deactivated text
+  // service still cannot unload while this object can still be called.
+  ModuleObjectGuard module_guard_{ModuleObjectKind::kEditSession};
 };
 
 const char* DescribeInputPermission(InputPermission permission) {
@@ -711,11 +715,14 @@ EditResult CompositionEditSession::Submit(const EditPlan& plan, bool asynchronou
   }
 
   if (phr_session == TF_S_ASYNC) {
-    // Waiting. The callback, not this return, establishes whether text was applied.
+    // Waiting. The callback, not this return, establishes whether text was applied. The
+    // construction reference is transferred to `pending_callback`; it is released by
+    // PendingResult/Close. TSF's own reference (if any) is released when the session is
+    // granted or cancelled. Adding a second reference here leaked one callback per async
+    // edit and kept the DLL permanently unloadable.
     {
       std::lock_guard<std::mutex> lock(state->mutex);
       state->pending_callback = callback;
-      callback->AddRef();
       state->pending_result = MakeBaseResult(plan, session_id);
       state->pending_result.status = EditStatus::kPending;
       state->pending_result.request_hr = request_hr;

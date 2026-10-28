@@ -6,6 +6,8 @@
 #include <atomic>
 #include <utility>
 
+#include "module_lifetime.h"
+
 namespace epocanva {
 namespace tsf {
 namespace context {
@@ -230,6 +232,10 @@ class SelectionReadCallback final : public ITfEditSession {
   std::atomic<LONG> reference_count_{1};
   std::shared_ptr<SelectionReader::ReadState> state_;
   bool done_ = false;
+  // A read requested but not yet granted is still owned by TSF; the module cannot unload
+  // until that reference is released.
+  ::epocanva::tsf::edit::ModuleObjectGuard module_guard_{
+      ::epocanva::tsf::edit::ModuleObjectKind::kSelectionRead};
 };
 
 SelectionReader::SelectionReader(TfClientId client_id)

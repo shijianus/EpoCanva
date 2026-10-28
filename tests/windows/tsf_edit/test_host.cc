@@ -463,16 +463,31 @@ bool TestHost::PumpUntil(HANDLE event, DWORD timeout_ms) {
   if (event == nullptr) {
     return false;
   }
+  // One overall deadline. The product's watcher posts a wake message every 10 ms while it
+  // is paced (for example while an edit waits for the application's write grant), so a
+  // per-wait timeout that restarts on every message would never expire.
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
   for (;;) {
-    const DWORD wait = ::MsgWaitForMultipleObjects(1, &event, FALSE, timeout_ms, QS_ALLINPUT);
+    const ULONGLONG now = ::GetTickCount64();
+    if (now >= deadline) {
+      return false;
+    }
+    const DWORD remaining = static_cast<DWORD>(deadline - now);
+    const DWORD wait =
+        ::MsgWaitForMultipleObjects(1, &event, FALSE, remaining, QS_ALLINPUT);
     if (wait == WAIT_OBJECT_0) {
       return true;
     }
     if (wait == WAIT_OBJECT_0 + 1) {
+      // Each slice dispatches a bounded number of messages and then waits again. Repeated
+      // wakes stay harmless because Pump is idempotent.
       MSG message = {};
-      while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != 0) {
+      int dispatched = 0;
+      while (dispatched < 64 &&
+             ::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != 0) {
         ::TranslateMessage(&message);
         ::DispatchMessageW(&message);
+        ++dispatched;
       }
       continue;
     }
@@ -522,6 +537,18 @@ std::size_t TestHost::ReleaseHeldGrantMessages() {
   }
   held_grant_messages_.clear();
   return granted;
+}
+
+std::size_t TestHost::DropHeldGrantMessages() {
+  std::size_t dropped = 0;
+  for (TestTextStore* store : held_grant_messages_) {
+    if (store != nullptr) {
+      store->Release();
+      ++dropped;
+    }
+  }
+  held_grant_messages_.clear();
+  return dropped;
 }
 
 void TestHost::Shutdown() {

@@ -7,6 +7,7 @@
 
 #include "key_text_translation.h"
 #include "keyboard_state.h"
+#include "module_lifetime.h"
 #include "module_state.h"
 
 namespace epocanva {
@@ -153,6 +154,10 @@ bool ProductTextController::Start(const Options& options, std::wstring* why) {
   }
   thread_manager_ = options.thread_manager;
   client_id_ = options.client_id;
+  // Every COM object this layer hands to TSF (edit-session callbacks, composition sinks,
+  // candidate elements) counts against DllCanUnloadNow. TSF may still own one after
+  // Deactivate, and unloading then would leave it a vtable in an unmapped image.
+  edit::SetModuleCounters(&ModuleAddObject, &ModuleReleaseObject);
 
   // The wake channel exists before the engine does: the asynchronous bootstrap posts the
   // same generation-only message, and the first pump that observes readiness builds the
@@ -179,10 +184,16 @@ bool ProductTextController::Start(const Options& options, std::wstring* why) {
   if (!candidate_ui_->Start(thread_manager_, &candidate_why)) {
     candidate_ui_.reset();
   }
-  ProductEngineBootstrap::Instance().RequestStart();
   TryAttachEngine();
   PumpNow();
   return true;
+}
+
+void ProductTextController::RequestEngineStart() {
+  if (!started_ || stopping_) {
+    return;
+  }
+  ProductEngineBootstrap::Instance().RequestStart();
 }
 
 void ProductTextController::ResetObjects() {

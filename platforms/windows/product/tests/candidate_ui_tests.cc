@@ -407,6 +407,26 @@ void TestUiLifecycle() {
   Check(manager->updates >= 1, "ui: an existing element is updated, not begun again");
   Check(manager->begins == 1, "ui: no duplicate BeginUIElement");
 
+  // With no explicit user selection the element answers row 0 (the literal). That is the
+  // same row an Enter without a selection commits, so the host never draws a suggestion as
+  // preselected.
+  ui.Update(snapshot, nullptr, &anchor, -1);
+  if (manager->element != nullptr) {
+    ITfCandidateListUIElement* list = nullptr;
+    if (SUCCEEDED(manager->element->QueryInterface(
+            IID_ITfCandidateListUIElement, reinterpret_cast<void**>(&list))) &&
+        list != nullptr) {
+      UINT selection = 99;
+      DWORD flags = 0;
+      Check(SUCCEEDED(list->GetSelection(&selection)) && selection == 0,
+            "ui: with no explicit selection GetSelection answers the literal row");
+      Check(SUCCEEDED(list->GetUpdatedFlags(&flags)) &&
+                (flags & TF_CLUIE_COUNT) != 0 && (flags & TF_CLUIE_STRING) != 0,
+            "ui: an update advertises the data the host must re-read");
+      list->Release();
+    }
+  }
+
   if (manager->element != nullptr) {
     ITfCandidateListUIElementBehavior* behavior = nullptr;
     if (SUCCEEDED(manager->element->QueryInterface(
@@ -433,6 +453,20 @@ void TestUiLifecycle() {
   Check(manager->ends == 1, "ui: EndUIElement issued exactly once");
   Check(!ui.begun() && !ui.window_visible(), "ui: End hides the window");
 
+  // The manager may legally hold the element after EndUIElement. Pure queries must stay
+  // valid; a selection arriving only after Stop must not reach the controller.
+  if (manager->element != nullptr) {
+    ITfCandidateListUIElement* list = nullptr;
+    if (SUCCEEDED(manager->element->QueryInterface(
+            IID_ITfCandidateListUIElement, reinterpret_cast<void**>(&list))) &&
+        list != nullptr) {
+      UINT count = 0;
+      Check(SUCCEEDED(list->GetCount(&count)) && count == 8,
+            "ui: an element held after End still answers GetCount");
+      list->Release();
+    }
+  }
+
   // Host-drawn: BeginUIElement answers FALSE; no floating window may appear.
   manager->show = false;
   ui.Update(snapshot, nullptr, &anchor, 0);
@@ -456,6 +490,20 @@ void TestUiLifecycle() {
   }
   ui.End();
   ui.Stop();
+  if (manager->element != nullptr) {
+    ITfCandidateListUIElementBehavior* behavior = nullptr;
+    if (SUCCEEDED(manager->element->QueryInterface(
+            IID_ITfCandidateListUIElementBehavior,
+            reinterpret_cast<void**>(&behavior))) &&
+        behavior != nullptr) {
+      const int before = host.selections + host.finals;
+      Check(SUCCEEDED(behavior->SetSelection(1)),
+            "ui: a late element callback is accepted without a product behind it");
+      Check(host.selections + host.finals == before,
+            "ui: a callback after Stop cannot reach the controller");
+      behavior->Release();
+    }
+  }
   manager->Release();
   Check(true, "ui: teardown completed without a crash");
 }

@@ -177,11 +177,28 @@ bool WriteFileAtomically(const std::filesystem::path& path, const void* data,
     ::DeleteFileW(temp_path.c_str());
     return false;
   }
-  if (!::MoveFileExW(temp_path.c_str(), path.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+  // The engine can still be closing the previous deployment/settings file when the user
+  // saves; Windows then rejects the replace with ERROR_ACCESS_DENIED or
+  // ERROR_SHARING_VIOLATION. A short bounded retry covers that window without changing the
+  // write itself. Persistent locks still fail with the real error below.
+  bool moved = false;
+  DWORD move_error = ERROR_SUCCESS;
+  for (int attempt = 0; attempt < 20; ++attempt) {
+    if (::MoveFileExW(temp_path.c_str(), path.c_str(),
+                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+      moved = true;
+      break;
+    }
+    move_error = ::GetLastError();
+    if (move_error != ERROR_ACCESS_DENIED && move_error != ERROR_SHARING_VIOLATION) {
+      break;
+    }
+    ::Sleep(50);
+  }
+  if (!moved) {
     if (why != nullptr) {
       *why = L"replacing " + path.wstring() + L" failed (error " +
-             std::to_wstring(::GetLastError()) + L")";
+             std::to_wstring(move_error) + L")";
     }
     ::DeleteFileW(temp_path.c_str());
     return false;

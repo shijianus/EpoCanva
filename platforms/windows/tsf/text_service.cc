@@ -267,6 +267,8 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
         // this macro and still fails activation when the advice is refused.
         advised_new = false;
 #else
+        // No engine start was requested yet, so stopping the literal controller leaves no
+        // background deployment behind.
         new_controller->Stop();
         return HRESULT_FROM_WIN32(ERROR_INVALID_FUNCTION);
 #endif
@@ -274,6 +276,8 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
         advised_new = true;
       }
     }
+    // The engine start begins only after the key sink is really advised.
+    new_controller->RequestEngineStart();
   } catch (const std::bad_alloc&) {
     if (new_controller) {
       new_controller->Stop();

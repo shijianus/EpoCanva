@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "product_io.h"
@@ -177,6 +178,24 @@ void TestAtomicWrite(const std::filesystem::path& root) {
     }
   }
   Check(temporaries == 0, "no temporary file is left behind");
+
+  // A reader that denies delete/write (no FILE_SHARE_DELETE) blocks MoveFileEx with
+  // ERROR_ACCESS_DENIED. The save must survive that short window instead of failing the
+  // user's settings change while the engine is closing the previous file.
+  const HANDLE holder =
+      ::CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL, nullptr);
+  Check(holder != INVALID_HANDLE_VALUE, "a transient reader opened the destination");
+  if (holder != INVALID_HANDLE_VALUE) {
+    std::thread closer([holder]() {
+      ::Sleep(250);
+      ::CloseHandle(holder);
+    });
+    const bool replaced = epocanva::product::WriteTextAtomically(file, "after-lock\n", &why);
+    closer.join();
+    Check(replaced, "atomic write retries through a transient sharing lock");
+    Check(ReadText(file) == "after-lock\n", "the retried write is the final content");
+  }
 }
 
 void TestManifest(const std::filesystem::path& root) {

@@ -7,6 +7,8 @@
 #include <mutex>
 #include <utility>
 
+#include "module_lifetime.h"
+
 namespace epocanva {
 namespace tsf {
 namespace product {
@@ -288,6 +290,10 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
   DWORD flags_ = 0;
   int selected_ = -1;
   bool shown_ = true;
+  // The UI element manager may keep the element after EndUIElement; the module stays
+  // loaded until its last Release reaches this object.
+  epocanva::tsf::edit::ModuleObjectGuard module_guard_{
+      epocanva::tsf::edit::ModuleObjectKind::kCandidateElement};
 };
 
 namespace {
@@ -357,6 +363,8 @@ class UiElementSink final : public ITfUIElementSink {
   ~UiElementSink() = default;
   std::atomic<LONG> reference_count_{1};
   std::shared_ptr<CandidateUiBridge> bridge_;
+  epocanva::tsf::edit::ModuleObjectGuard module_guard_{
+      epocanva::tsf::edit::ModuleObjectKind::kCandidateSink};
 };
 
 class RectReadCallback final : public ITfEditSession {
@@ -452,6 +460,8 @@ class RectReadCallback final : public ITfEditSession {
   bool ok_ = false;
   bool clipped_ = false;
   RECT rect_{};
+  epocanva::tsf::edit::ModuleObjectGuard module_guard_{
+      epocanva::tsf::edit::ModuleObjectKind::kRectRead};
 };
 
 }  // namespace

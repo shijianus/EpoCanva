@@ -146,6 +146,9 @@ class ProductTextController final : public StaWakeTarget,
   // engine pipeline is built on this STA by the first pump after the bootstrap reports
   // ready; until then every key keeps the host's own default effect.
   bool Start(const Options& options, std::wstring* why);
+  // Requests the asynchronous engine start. Called only after the key sink was advised: a
+  // failed Activate must not leave a background engine starting with no owner.
+  void RequestEngineStart();
   void Stop();
 
   // OnTestKeyDown: prediction only, no engine/query/edit.
