@@ -86,3 +86,21 @@ UI 只发起请求，不调用引擎、不 `SetText`。请求携带：
   多显示器/小工作区的纯布局；方向键/Enter/Space/Escape 的文档结果、过期版本与外部编辑拒绝。
 - **未验证（C 层）**：正式注册的 TIP 在真实应用/StrictTsf 前台下的候选窗口显示与点击。
   本机没有已授权的隔离环境；直接 sink 变体不创建 TSF UI 管理器。该门留给 W3。
+
+## 8. W2-B-R 审查结论（实现未改变，补充验证）
+
+- **无显式选择时的 `GetSelection`**：返回 0（原文行）。这与“无选择时 Enter 提交原文”的
+  契约一致，宿主不会把补全/拼写建议画成预选项。
+- **更新标志**：每次 `UpdateUIElement` 都携带完整集合
+  （`TF_CLUIE_DOCUMENTMGR | COUNT | SELECTION | STRING | PAGEINDEX | CURRENTPAGE`）。
+  这是保守做法：宿主会重读全部数据；首次 Begin 之后不会出现“缺标志导致旧数据”的状态。
+- **`pbShow=FALSE`**：仍然更新元素数据并回答所有查询，只是不创建自绘窗口；不重复弹窗。
+- **End 之后元素仍被合法持有**：`EndUIElement` 返回后管理器仍可查询元素；只读查询继续
+  返回最后一页数据。元素引用由 `End()`/`Stop()` 在管理器调用返回后释放。
+- **Stop 之后的迟到回调**：桥接对象被置空/inactive；迟到 `SetSelection`/`Finalize` 不
+  会到达控制器。`product.ui.candidate_window` 覆盖该路径。
+- **模块记账**：候选元素与 UIElement sink 计入 `DllCanUnloadNow`（见引擎生命周期契约
+  §11.3），避免 TSF 在 DLL 卸载后释放它们。
+- **仍未验证（C 层）**：正式注册 TIP 的真实 `ITfUIElementMgr`、真实前台应用中的窗口
+  显示/点击不抢焦点、真实 `GetTextExt`/`ReadCompositionRect`、150/200% DPI 与多显示器。
+  受控直接 sink 变体不创建 TSF UI 管理器，不能用它替代这些结论。

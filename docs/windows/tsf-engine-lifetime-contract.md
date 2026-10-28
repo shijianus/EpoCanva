@@ -363,3 +363,73 @@ ctest --test-dir build/vs2022-x64-debug -C Release --no-tests=error -V ^
 - 第二个提交：引入本文、事务式激活和卸载护栏；
   `feat(windows): bind engine lifetime to TSF activation`。提交自身不能包含自己的 SHA，
   完整 SHA 由本轮交付报告给出。
+
+## 11. W2-B-R 增补：启动顺序、TSF 持有的回调与模块卸载（已实现）
+
+本节记录 W2-B-R 实际修改并验证的行为；前文 P3.6 的 broker/租约规则不变。
+
+### 11.1 引擎启动只在键接收器注册成功之后发起
+
+`ProductTextController::Start` 只建立 STA 控制器、唤醒通道和异步启动等待者；它不再在
+`ActivateInternal` 内直接调用 `ProductEngineBootstrap::RequestStart()`。新的
+`RequestEngineStart()` 由 `text_service.cc` 在 `AdviseKeyEventSink` 成功之后调用。
+
+原因是一个真实缺陷：严格产品 DLL 在未注册时 `AdviseKeyEventSink` 被拒绝，旧顺序已经
+把后台引擎启动发出；失败的 `Activate` 回滚了控制器，却没有、也不能在 STA 上等待/取消
+那次启动。启动完成后引擎运行而没有所有者，`host_active` 保持 1，`DllCanUnloadNow`
+永久 `S_FALSE`；宿主退出时后台执行器线程仍在 DLL 内，进程以访问冲突结束。
+
+启动仍然异步：`Activate` 在字面模式立即返回，`RequestEngineStart` 只投递请求。失败的
+引擎启动由 `engine_state/failure` 报告，`DllCanUnloadNow` 在后台线程退出前保持
+`S_FALSE`，之后回到 `S_OK`。
+
+### 11.2 异步编辑会话的引用只转移一次
+
+`CompositionEditSession::Submit` 在 `phr_session == TF_S_ASYNC` 时把**构造引用转移**到
+`State::pending_callback`，不再额外 `AddRef`。旧代码保留了构造引用又加了一个，完成的
+每个异步编辑泄漏一个 `ITfEditSession` 回调；这些回调由 TSF 持有，导致模块永远不可
+卸载，并可能在 DLL 卸载后才被 TSF 释放（调用已解除映射的 vtable）。
+
+`PendingResult`/`Close`/`State` 析构各释放一次；同步路径仍按原样释放。
+
+### 11.3 交给 TSF 的 COM 对象计入模块存活
+
+`platforms/windows/tsf_edit/module_lifetime.h`（header-only，按镜像各自计数）由产品 DLL
+在 `ProductTextController::Start` 安装 `ModuleAddObject/ModuleReleaseObject`。以下对象
+在存在期间计入 `DllCanUnloadNow`：
+
+| 对象 | 位置 |
+| --- | --- |
+| `ITfEditSession`（组合编辑） | `EditSessionCallback` |
+| `ITfEditSession`（选择读取） | `SelectionReadCallback` |
+| `ITfCompositionSink` | `CompositionSink` |
+| `ITfEditSession`（候选位置读取） | `RectReadCallback` |
+| `ITfCandidateListUIElementBehavior` | `CandidateUiElement` |
+| `ITfUIElementSink` | `UiElementSink` |
+
+`DllCanUnloadNow` 的回答仍是四个计数器的只读判断，不 join、不加锁、不触碰 TSF。
+
+### 11.4 宿主的卸载契约（受控测试宿主）
+
+`tests/windows/tsf_product` 的顺序改为：
+
+1. `Deactivate`，再释放 TIP / sink / class factory；
+2. 拆除 TSF 宿主（Pop 文档、`CoUninitialize`），让 TSF 释放它仍持有的回调/sink；
+3. 以 10 s 为上限等待 `DllCanUnloadNow == S_OK`；
+4. 只有 `S_OK` 才 `FreeLibrary`；`S_FALSE` 时保留模块并打印
+   `[unload] ... stayed S_FALSE ... (not forced)`，绝不强制卸载；
+5. 释放后按地址确认镜像确实消失。
+
+同时修复了 `TestHost::PumpUntil` 的一个活性缺陷：它以“消息队列为空”为结束条件，而产品
+在等待写授权时每 10 ms 发一次唤醒消息，导致 500 ms 切片永不返回。现在使用**整体截止
+时间**并在每个切片最多派发 64 条消息。
+
+验证：
+- `product.integration.sink_unload_contract`：队列中的编辑会话使 `DllCanUnloadNow`
+  为 `S_FALSE`；授予锁后 TSF 释放回调，门变为 `S_OK`，陈旧会话不写文档，随后安全卸载。
+- `product.integration.sink_startup_lifecycle`：启动阻塞期间停用、旧启动晚于下一次激活、
+  旧启动失败不被新激活采纳、后台线程退出后门打开。
+- `product.integration.sink_strict_unregistered`：Advise 失败不再留下引擎启动，门在
+  宿主拆除后打开，进程正常退出。
+- `product.integration.sink_capacity_continue` 与 `sink_degraded_keys` 结束时都断言模块
+  已卸载。

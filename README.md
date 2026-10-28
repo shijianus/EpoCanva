@@ -55,7 +55,9 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
   W1 只交付未注册的产品 TSF DLL 与设置壳；W2-A 已把产品 TSF DLL 接到真实
   `ITfKeyEventSink`、上下文观察、真实许可、协调器、固定 STA 唤醒与有界输入队列；
   W2-A-R 又补上高水位原样降级（文本不丢/不重/不乱序）、首 token 宿主归属与运行期共享锁，
-  但**仍未注册**、未改系统输入法、未做安装器（W3）；候选窗口已由 W2-B 实现。
+  但**仍未注册**、未改系统输入法、未做安装器（W3）；候选窗口已由 W2-B 实现；
+  W2-B-R 修复了容量边界后的同会话恢复与 COM 回调/卸载生命周期，并补齐降级控制键与
+  启动/停用端到端回归。
 - 因此此刻仓库能演示的输入仍极其有限：默认集成测试补全的是那 54 个词，
   但可以连续打多个词并用空格逐个提交（`Hello world `）；
   pilot 模式补全的是那 42,356 个词，但它是**验证装置**，没有前端、不在分发包里。
@@ -86,6 +88,7 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 | W1 | Windows 英文 Alpha 产品壳：设置/状态 EXE、产品 TSF DLL 配置与部署标记、离线数据与白名单暂存 | 已交付（内部 Alpha；未注册系统输入） | `docs/reports/W1-windows-alpha-product.md` |
 | W2-A | 产品 TSF 生命周期接线：真实 key sink、上下文/许可/协调器、固定 STA 唤醒、有界输入准入、部署指纹与跨进程一致性 | 已交付（内部 W2 运行包；未注册） | `docs/reports/W2-A-product-input.md` |
 | W2-B | 候选快照/选择校验、真实 TSF CandidateListUIElement 与自绘窗口、降级控制键、连续输入、异步引擎启动 | 已交付（内部 W2 运行包；未注册；C 层未验证） | `docs/reports/W2-B-candidates.md` |
+| W2-B-R | 同会话容量恢复回归、降级 Enter/Escape/BackSpace 端到端、异步启动/停用/卸载生命周期、候选 UIElement 审查、隔离验证材料 | 已交付（内部运行包 `0.2.3-w2br`；未注册；C 层未验证） | `docs/reports/W2-B-R-crash-and-lifecycle.md` |
 | W2-A-R | 输入可靠性收敛：高水位原样降级（原文优先于补全/拼写建议）、首 token 宿主归属、宿主默认输入与参考文档模型、运行期共享锁取证 | 已交付（内部运行包 `0.2.1-w2r`；未注册） | `docs/reports/W2-A-R-input-reliability.md` |
 | 之后 | 注册/卸载/安装器（W3）、其余英文能力、Android | 未开始 | — |
 
