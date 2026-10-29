@@ -133,6 +133,10 @@ struct EditResult {
   // unknown (never asserted after an unconfirmed write failure).
   LONG composition_start_utf16 = -1;
   LONG composition_length_utf16 = -1;
+  // The live default-selection caret/length the writer read (ACP, UTF-16 code units), or
+  // -1 when no selection was read. Diagnostics only.
+  LONG observed_selection_start_utf16 = -1;
+  LONG observed_selection_length_utf16 = -1;
   // True when this plan's calls may have changed the backing text. For kApplied and
   // kRejected this stays false because the flags describe failure uncertainty.
   bool text_may_have_changed = false;

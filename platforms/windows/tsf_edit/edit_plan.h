@@ -116,19 +116,23 @@ class EditPlan {
   // against its last-written text and ends only that composition.
   static EditPlanBuildResult BuildEndOwnedComposition(ContextIdentity context);
 
-  // Host-owned text: `expected_utf8` is the token the menu was drawn for and
-  // `replacement_utf8` is the candidate text. The writer replaces the expected token that
-  // immediately precedes the collapsed caret, and refuses when the document range differs.
+  // Host-owned text: `expected_utf8` is the token the menu was drawn for,
+  // `replacement_utf8` is the candidate text and `selection_start_utf16` is the collapsed
+  // caret ACP the menu was drawn at. The writer replaces the expected token that ends at
+  // exactly that caret and refuses when the caret moved -- even if the same string still
+  // sits before the new caret -- or when the document range differs.
   static EditPlanBuildResult BuildReplaceToken(ContextIdentity context,
                                                std::string_view expected_utf8,
-                                               std::string_view replacement_utf8);
+                                               std::string_view replacement_utf8,
+                                               std::int32_t selection_start_utf16);
 
   EditOperation operation() const { return operation_; }
   ContextIdentity context() const { return context_; }
   const std::wstring& text_utf16() const { return text_utf16_; }
   // Only for kReplaceToken; empty for every other operation.
   const std::wstring& expected_text_utf16() const { return expected_text_utf16_; }
-  // -1 when the operation does not carry a caret (Update, Cancel).
+  // -1 when the operation does not carry a caret (Update, Cancel). For kReplaceToken this
+  // is the exact caret ACP the menu was drawn at, and the writer refuses any other caret.
   std::int32_t selection_start_utf16() const { return selection_start_utf16_; }
   std::int32_t selection_end_utf16() const { return selection_end_utf16_; }
   std::uint64_t sequence() const { return sequence_; }

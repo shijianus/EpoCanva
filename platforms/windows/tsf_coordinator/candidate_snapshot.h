@@ -85,6 +85,10 @@ struct CandidateSnapshot {
   // The engine's own raw input for this composition (UTF-16 code units). Kept for the
   // literal row/status; never logged.
   std::u16string input_utf16_code_units;
+  // The host caret ACP (UTF-16 code-unit offset) when this observation was adopted. The
+  // menu describes the host token that ends here; a selection submitted from another caret
+  // is refused even when the same string sits before that other caret.
+  std::int32_t caret_utf16 = 0;
 
   std::size_t size() const { return items.size(); }
   bool has_page() const { return page_size > 0; }
@@ -98,6 +102,9 @@ struct CandidateSelectionRequest {
   std::uint64_t context_id = 0;
   std::uint64_t generation = 0;
   std::size_t page_index = 0;
+  // The exact collapsed caret ACP the menu was drawn at (UTF-16 code units). A different
+  // caret means a different token position even if the text matches.
+  std::int32_t caret_utf16 = 0;
 };
 
 }  // namespace coordinator

@@ -566,6 +566,36 @@ set_tests_properties(product.integration.sink_candidate
              LABELS "windows;product;sink;candidate;selection;stale;no-registration")
 
 add_test(
+  NAME product.integration.sink_replacement_faults
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-replacement-faults
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-replacement-faults;--mode;replacement-faults"
+    -DTIMEOUT_SECONDS=420
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_replacement_faults
+  PROPERTIES TIMEOUT 480
+             LABELS "windows;product;sink;candidate;replacement;fault-injection;no-registration")
+
+add_test(
+  NAME product.integration.sink_suggestion_resync
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-suggestion-resync
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-suggestion-resync;--mode;suggestion-resync"
+    -DTIMEOUT_SECONDS=240
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_suggestion_resync
+  PROPERTIES TIMEOUT 300
+             LABELS "windows;product;sink;candidate;suggestion;drop;resync;no-registration")
+
+add_test(
   NAME product.integration.sink_continuous
   COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>

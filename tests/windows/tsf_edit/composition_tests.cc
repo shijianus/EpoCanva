@@ -1,4 +1,4 @@
-// EpoCanva P3.7 -- the composition-layer verification cases.
+﻿// EpoCanva P3.7 -- the composition-layer verification cases.
 //
 // Every edit below travels the real TSF path: RequestEditSession -> ITextStoreACP RequestLock
 // -> ITextStoreACPSink OnLockGranted -> ITfEditSession::DoEditSession -> ITfRange /
@@ -1120,7 +1120,7 @@ int RunReplaceToken() {
       return Finish();
     }
     const auto plan =
-        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello"),
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello", 7),
                    "ReplaceToken plan built");
     if (!plan.has_value()) {
       return Finish();
@@ -1143,7 +1143,7 @@ int RunReplaceToken() {
       return Finish();
     }
     const auto plan =
-        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello"),
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello", 7),
                    "ReplaceToken plan built for a mismatched range");
     if (!plan.has_value()) {
       return Finish();
@@ -1163,7 +1163,7 @@ int RunReplaceToken() {
       return Finish();
     }
     const auto plan =
-        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello"),
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello", 6),
                    "ReplaceToken plan built for a token suffix");
     if (!plan.has_value()) {
       return Finish();
@@ -1183,7 +1183,7 @@ int RunReplaceToken() {
       return Finish();
     }
     const EditPlanBuildResult empty =
-        EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "");
+        EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "", 7);
     Check(empty.status == EditPlanStatus::kInvalidSelection,
           "an empty replacement is refused when the plan is built",
           DescribeEditPlanStatus(empty.status));
@@ -1202,7 +1202,7 @@ int RunReplaceToken() {
       return Finish();
     }
     const auto plan =
-        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello"),
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello", 7),
                    "ReplaceToken plan built for a selection");
     if (!plan.has_value()) {
       return Finish();
@@ -1212,6 +1212,57 @@ int RunReplaceToken() {
                    "a non-collapsed selection is refused");
     CheckText(fixture.document->text_utf16(), L"abc hel",
               "the refused selection replacement changed nothing");
+  }
+  {
+    // The same token text appears twice. A plan drawn for the second occurrence must not
+    // replace the first one after the caret moved there.
+    Fixture fixture;
+    if (!fixture.Init(Document(L"hel x hel", 9))) {
+      return Finish();
+    }
+    const auto plan =
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello", 9),
+                   "ReplaceToken plan built for the second occurrence");
+    if (!plan.has_value()) {
+      return Finish();
+    }
+    const TestStoreDiagnostics before = StoreDiag(fixture);
+    const HRESULT moved =
+        fixture.document->SetSelectionForTest(fixture.host->client_id(), 3);
+    Check(SUCCEEDED(moved), "the host moved the caret to the other occurrence",
+          HrText(moved));
+    Check(fixture.document->selection_start_utf16() == 3,
+          "the caret really is after the first occurrence", "");
+    const EditResult result = fixture.session->ApplySync(*plan);
+    ExpectRejected(result, EditRejectReason::kSelectionMoved,
+                   "a same-text token at another caret is not treated as the same token");
+    CheckText(fixture.document->text_utf16(), L"hel x hel",
+              "neither occurrence was replaced");
+    Check(StoreDiag(fixture).set_text_calls == before.set_text_calls,
+          "the moved-caret replacement issued no SetText", "");
+  }
+  {
+    // A failed selection read is refused before any mutation, not guessed around.
+    Fixture fixture;
+    if (!fixture.Init(Document(L"abc hel", 7))) {
+      return Finish();
+    }
+    const auto plan =
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello", 7),
+                   "ReplaceToken plan built for an unreadable selection");
+    if (!plan.has_value()) {
+      return Finish();
+    }
+    const TestStoreDiagnostics before = StoreDiag(fixture);
+    fixture.document->SetRefuseSelectionReads(true);
+    const EditResult result = fixture.session->ApplySync(*plan);
+    fixture.document->SetRefuseSelectionReads(false);
+    ExpectRejected(result, EditRejectReason::kNoSelection,
+                   "an unreadable selection is refused");
+    CheckText(fixture.document->text_utf16(), L"abc hel",
+              "the unreadable-selection replacement changed nothing");
+    Check(StoreDiag(fixture).set_text_calls == before.set_text_calls,
+          "the unreadable-selection replacement issued no SetText", "");
   }
   return Finish();
 }

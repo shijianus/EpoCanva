@@ -220,7 +220,8 @@ EditPlanBuildResult EditPlan::BuildEndOwnedComposition(ContextIdentity context) 
 
 EditPlanBuildResult EditPlan::BuildReplaceToken(ContextIdentity context,
                                                 std::string_view expected_utf8,
-                                                std::string_view replacement_utf8) {
+                                                std::string_view replacement_utf8,
+                                                std::int32_t selection_start_utf16) {
   if (!ValidIdentity(context)) {
     return Failure(EditPlanStatus::kInvalidContextIdentity,
                    "context id and generation must be non-zero");
@@ -234,6 +235,10 @@ EditPlanBuildResult EditPlan::BuildReplaceToken(ContextIdentity context,
     return Failure(EditPlanStatus::kInvalidSelection,
                    "a token replacement needs non-empty replacement text");
   }
+  if (selection_start_utf16 < 0) {
+    return Failure(EditPlanStatus::kInvalidSelection,
+                   "the replacement caret is a non-negative UTF-16 code-unit offset");
+  }
   std::wstring expected;
   std::wstring replacement;
   EditPlanBuildResult failure;
@@ -243,7 +248,12 @@ EditPlanBuildResult EditPlan::BuildReplaceToken(ContextIdentity context,
   if (!ConvertPlanText(replacement_utf8, &replacement, &failure)) {
     return failure;
   }
-  EditPlan plan(EditOperation::kReplaceToken, context, std::move(replacement), -1, -1,
+  if (static_cast<std::size_t>(selection_start_utf16) < expected.size()) {
+    return Failure(EditPlanStatus::kInvalidSelection,
+                   "the expected token cannot start before the document");
+  }
+  EditPlan plan(EditOperation::kReplaceToken, context, std::move(replacement),
+                selection_start_utf16, selection_start_utf16,
                 g_next_sequence.fetch_add(1) + 1, std::move(expected));
   EditPlanBuildResult result;
   result.status = EditPlanStatus::kOk;

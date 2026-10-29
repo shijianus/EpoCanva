@@ -1289,6 +1289,7 @@ void ContextCoordinator::FinishWorkLedger(WorkKind kind) {
   last_edit_request_hr_ = S_OK;
   last_edit_session_hr_ = S_OK;
   last_edit_operation_hr_ = S_OK;
+  last_edit_observed_caret_utf16_ = -1;
   ++works_accepted_;
 }
 
@@ -1612,7 +1613,8 @@ void ContextCoordinator::AdvancePermissionStage() {
   if (work.kind == WorkKind::kSuggestionReplace) {
     // The explicit candidate selection's permission read finished Allowed; no engine call
     // exists for it. The plan re-verifies the token range before writing.
-    SubmitSuggestionPlan(std::move(work.replace_expected), std::move(work.replace_text));
+    SubmitSuggestionPlan(std::move(work.replace_expected), std::move(work.replace_text),
+                         work.replace_caret_utf16);
     return;
   }
   if (work.kind == WorkKind::kKey &&
@@ -1712,6 +1714,9 @@ void ContextCoordinator::UpdateCandidateSnapshot(const engine::EngineState& stat
   snapshot.identity = identity_;
   snapshot.generation = work_generation_;
   snapshot.work_id = work_id_;
+  // The menu describes the host token that ends here. The controller refreshes this from a
+  // real selection read before it presents the window; the writer rechecks the live caret.
+  snapshot.caret_utf16 = view_.caret_utf16;
   if (state.valid && state.is_composing && state.has_menu &&
       !state.candidates.empty() && state.page_size > 0 && state.page_no >= 0) {
     snapshot.valid = true;
@@ -1784,11 +1789,18 @@ SubmitStatus ContextCoordinator::SubmitSuggestionReplacement(
       identity_.context_id != request.context_id ||
       identity_.generation != request.generation ||
       request.page_index >= candidate_snapshot_.items.size() ||
-      candidate_snapshot_.input_utf16_code_units.empty()) {
+      candidate_snapshot_.input_utf16_code_units.empty() ||
+      request.caret_utf16 <
+          static_cast<LONG>(candidate_snapshot_.input_utf16_code_units.size())) {
+    // The request must carry a plausible token position. The controller supplies the live
+    // caret it verified when the menu was presented; the writer repeats the live-caret
+    // equality check inside its edit session, so a caret that moved after that is refused
+    // before SetText. The snapshot version and identity still bind the request to the menu.
     ++candidate_stale_refusals_;
     return RecordSubmit(SubmitStatus::kCandidateStale);
   }
   std::u16string expected = candidate_snapshot_.input_utf16_code_units;
+  const LONG expected_caret_utf16 = request.caret_utf16;
   std::u16string replacement =
       candidate_snapshot_.items[request.page_index].text_utf16_code_units;
   // The real permission read still precedes every write. A query that cannot answer now
@@ -1804,6 +1816,7 @@ SubmitStatus ContextCoordinator::SubmitSuggestionReplacement(
     pending_permission_.kind = WorkKind::kSuggestionReplace;
     pending_permission_.replace_expected = std::move(expected);
     pending_permission_.replace_text = std::move(replacement);
+    pending_permission_.replace_caret_utf16 = expected_caret_utf16;
     *id = WorkId{work_id_};
     last_submit_status_ = SubmitStatus::kAccepted;
     return SubmitStatus::kAccepted;
@@ -1818,7 +1831,7 @@ SubmitStatus ContextCoordinator::SubmitSuggestionReplacement(
                             : SubmitStatus::kPermissionUnknown);
   }
   FinishWorkLedger(WorkKind::kSuggestionReplace);
-  SubmitSuggestionPlan(std::move(expected), std::move(replacement));
+  SubmitSuggestionPlan(std::move(expected), std::move(replacement), expected_caret_utf16);
   *id = WorkId{work_id_};
   last_submit_status_ = SubmitStatus::kAccepted;
   return SubmitStatus::kAccepted;
@@ -1990,8 +2003,10 @@ void ContextCoordinator::SubmitRawPlan(std::u16string raw_utf16) {
 }
 
 void ContextCoordinator::SubmitSuggestionPlan(std::u16string expected_text,
-                                              std::u16string replacement_text) {
+                                              std::u16string replacement_text,
+                                              LONG expected_caret_utf16) {
   last_suggestion_expected_units_ = expected_text.size();
+  last_suggestion_expected_caret_utf16_ = expected_caret_utf16;
   last_suggestion_replacement_units_ = replacement_text.size();
   const auto expected_utf8 = epocanva::windows::text::ConvertUtf16CodeUnitsToUtf8Bytes(
       Widen(expected_text));
@@ -2002,7 +2017,8 @@ void ContextCoordinator::SubmitSuggestionPlan(std::u16string expected_text,
     return;
   }
   EditPlanBuildResult built = EditPlan::BuildReplaceToken(
-      identity_, expected_utf8.utf8_bytes, replacement_utf8.utf8_bytes);
+      identity_, expected_utf8.utf8_bytes, replacement_utf8.utf8_bytes,
+      expected_caret_utf16);
   if (!built.ok()) {
     EndWork(WorkOutcome::kRejected, RejectCause::kEditRefused);
     return;
@@ -2100,6 +2116,7 @@ void ContextCoordinator::ResolveEditResult(const EditResult& result) {
   last_edit_request_hr_ = result.request_hr;
   last_edit_session_hr_ = result.edit_session_hr;
   last_edit_operation_hr_ = result.operation_hr;
+  last_edit_observed_caret_utf16_ = result.observed_selection_start_utf16;
 
   if (result.pending()) {
     // Defensive only: callers hand over final results. Pending stays pending.
@@ -2484,6 +2501,7 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.last_edit_request_hr = last_edit_request_hr_;
   snapshot.last_edit_session_hr = last_edit_session_hr_;
   snapshot.last_edit_operation_hr = last_edit_operation_hr_;
+  snapshot.last_edit_observed_caret_utf16 = last_edit_observed_caret_utf16_;
   snapshot.tracked_caret_utf16 = view_.caret_utf16;
   snapshot.composition_active = view_.composition_active;
   snapshot.edit_pump_checks = edit_pump_checks_;
@@ -2509,6 +2527,7 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.last_raw_input_units = last_raw_input_units_;
   snapshot.last_raw_plan_units = last_raw_plan_units_;
   snapshot.last_suggestion_expected_units = last_suggestion_expected_units_;
+  snapshot.last_suggestion_expected_caret_utf16 = last_suggestion_expected_caret_utf16_;
   snapshot.candidate_version = candidate_version_;
   snapshot.candidate_snapshots = candidate_snapshots_;
   snapshot.candidate_items = candidate_snapshot_.items.size();

@@ -447,6 +447,7 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
     selection.context_id = menu.identity.context_id;
     selection.generation = menu.identity.generation;
     selection.page_index = candidate_selection_;
+    selection.caret_utf16 = menu.caret_utf16;
     // This is the one explicit enhancement that suppresses a host key. The product still
     // owns no original text: a refused replacement leaves the typed token in the document.
     (void)FinalizeCandidateSelection(selection);
@@ -455,6 +456,8 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
   }
   if (CandidatesOpen() && vk == VK_ESCAPE) {
     // Escape dismisses the cancelable enhancement. It never removes text the user typed.
+    // The engine stream is reset below; if the user keeps typing, the continuation starts a
+    // new suggestion token at the current caret (host_token_units_ restarts at zero).
     candidate_dismissed_version_ = coordinator_->candidate_snapshot().version;
     DismissCandidateMenu();
     suggestion_queue_.clear();
@@ -516,7 +519,9 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
   if (ends_token) {
     // Space and Return terminate the token even though ToUnicodeEx also reports a
     // character for them. Their own character is host text, not part of the next token.
+    // The boundary also ends any abandoned suffix: a new token may be suggested normally.
     host_token_units_ = 0;
+    token_abandoned_ = false;
     if (vk == input::kVirtualKeySpace) {
       ++host_text_keys_;
     }
@@ -543,7 +548,9 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
 bool ProductTextController::FeedSuggestionKey(
     const BuiltKey& key, const coordinator::CoordinatorSnapshot& snapshot,
     bool ends_token) {
-  if (suggestion_stale_) {
+  if (suggestion_stale_ || token_abandoned_) {
+    // The engine never saw the earlier part of this token. Feeding the remainder would
+    // present a suffix as if it were the whole prefix, so the token waits for its boundary.
     ++suggestion_dropped_;
     return false;
   }
@@ -696,6 +703,7 @@ void ProductTextController::EndSuggestionToken() {
   suggestion_queue_.clear();
   suggestion_engaged_ = false;
   host_token_units_ = 0;
+  token_abandoned_ = false;
   if (had_stream || suggestion_stale_) {
     // Cancel the engine's stale composition with Escape; the binding and the document stay.
     if (!suggestion_in_flight_ && !replacement_pending_) {
@@ -713,6 +721,7 @@ void ProductTextController::ResetSuggestionStream(bool invalidate_binding) {
   suggestion_queue_.clear();
   suggestion_stale_ = false;
   suggestion_engaged_ = false;
+  token_abandoned_ = false;
   DismissCandidateMenu();
   host_token_units_ = 0;
   (void)invalidate_binding;  // suggestion resets never tear down a binding
@@ -723,6 +732,9 @@ void ProductTextController::MarkSuggestionStale() {
     suggestion_stale_ = true;
     ++suggestion_stale_events_;
   }
+  // Whatever caused the drop, the engine's next prefix is incomplete. No suggestion from
+  // this token is restarted; only a boundary or a new host target clears the abandonment.
+  token_abandoned_ = true;
   suggestion_dropped_ += suggestion_queue_.size();
   suggestion_queue_.clear();
   DismissCandidateMenu();
@@ -744,11 +756,9 @@ bool ProductTextController::SubmitReplacement(const CandidateUiSelection& select
   coordinator::WorkId work;
   const coordinator::SubmitStatus status =
       coordinator_->SubmitSuggestionReplacement(
-          coordinator::CandidateSelectionRequest{selection.snapshot_version,
-                                                 selection.context_id,
-                                                 selection.generation,
-                                                 static_cast<std::size_t>(
-                                                     selection.page_index)},
+          coordinator::CandidateSelectionRequest{
+              selection.snapshot_version, selection.context_id, selection.generation,
+              static_cast<std::size_t>(selection.page_index), selection.caret_utf16},
           &work);
   if (status != coordinator::SubmitStatus::kAccepted) {
     ++replacement_refused_;
@@ -773,6 +783,10 @@ void ProductTextController::ResolveReplacement() {
   replacement_pending_ = false;
   replacement_work_id_ = 0;
   suggestion_engaged_ = false;
+  last_replacement_outcome_ = static_cast<int>(snapshot.outcome);
+  last_replacement_edit_status_ = static_cast<int>(snapshot.last_edit_status);
+  last_replacement_edit_reason_ = static_cast<int>(snapshot.last_edit_reason);
+  last_replacement_expected_units_ = snapshot.last_suggestion_expected_units;
   if (snapshot.outcome == coordinator::WorkOutcome::kApplied) {
     ++replacement_applied_;
   } else {
@@ -789,6 +803,7 @@ void ProductTextController::ResolveReplacement() {
   // stay as they are.
   suggestion_queue_.clear();
   suggestion_stale_ = true;
+  token_abandoned_ = false;
   stream_reset_owed_ = false;
   host_token_units_ = 0;
   ++reset_replacement_;
@@ -871,7 +886,8 @@ void ProductTextController::UpdatePacing() {
 }
 
 bool ProductTextController::CandidatesOpen() const {
-  if (!engine_ || !coordinator_ || suggestion_stale_ || replacement_pending_) {
+  if (!engine_ || !coordinator_ || suggestion_stale_ || token_abandoned_ ||
+      replacement_pending_) {
     return false;
   }
   if (suggestion_in_flight_ || !suggestion_queue_.empty()) {
@@ -918,14 +934,32 @@ bool ProductTextController::FinalizeCandidateSelection(
   }
   const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
   if (!snapshot.valid || snapshot.version != selection.snapshot_version ||
-      suggestion_in_flight_ || !suggestion_queue_.empty() ||
+      selection.caret_utf16 != snapshot.caret_utf16 ||
+      suggestion_in_flight_ || replacement_pending_ || !suggestion_queue_.empty() ||
+      token_abandoned_ ||
       snapshot.input_utf16_code_units.size() != host_token_units_) {
     ++candidate_stale_selections_;
     candidate_dismissed_version_ = snapshot.version;
     DismissCandidateMenu();
     return false;
   }
-  if (!SubmitReplacement(selection)) {
+  // The menu's authoritative position is the live caret verified when that version was
+  // presented. The snapshot caret is only the coordinator's (possibly one notification
+  // behind) mirror. The writer compares this value with the live caret and the token text
+  // inside its edit session, so neither a moved caret nor a same-length token elsewhere can
+  // be replaced.
+  CandidateUiSelection anchored = selection;
+  if (candidate_anchor_version_ == snapshot.version && candidate_anchor_caret_utf16_ >= 0) {
+    anchored.caret_utf16 = candidate_anchor_caret_utf16_;
+  }
+  if (anchored.caret_utf16 <
+      static_cast<LONG>(snapshot.input_utf16_code_units.size())) {
+    ++candidate_stale_selections_;
+    candidate_dismissed_version_ = snapshot.version;
+    DismissCandidateMenu();
+    return false;
+  }
+  if (!SubmitReplacement(anchored)) {
     ++candidate_stale_selections_;
     candidate_dismissed_version_ = snapshot.version;
     return false;
@@ -943,37 +977,67 @@ void ProductTextController::UpdateCandidateUi() {
     return;
   }
   const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
-  if (!snapshot.valid || suggestion_stale_ || replacement_pending_ ||
+  if (!snapshot.valid || suggestion_stale_ || token_abandoned_ || replacement_pending_ ||
       suggestion_in_flight_ || !suggestion_queue_.empty()) {
     candidate_ui_->End();
     candidate_selection_ = -1;
     candidate_ui_version_ = snapshot.version;
+    candidate_anchor_version_ = 0;
+    candidate_anchor_caret_utf16_ = -1;
     return;
   }
   if (snapshot.version != candidate_ui_version_) {
     candidate_ui_version_ = snapshot.version;
     candidate_selection_ = -1;
+    candidate_anchor_version_ = 0;
+    candidate_anchor_caret_utf16_ = -1;
   }
   if (candidate_dismissed_version_ == snapshot.version) {
     candidate_ui_->End();
     return;
   }
-  const coordinator::CoordinatorSnapshot coordinator = coordinator_->Snapshot();
-  RECT anchor = {};
-  const RECT* anchor_ptr = nullptr;
-  // A real TSF UI element manager is the only reason to start a read-only edit session for
-  // the caret rectangle. Without one (the controlled direct-sink host) the element answers
-  // no UI queries, so no TSF call is made. A host-drawn element needs no rectangle either.
+  // On every new menu version, resynchronise the token position from the real TSF
+  // selection. The engine's observation can arrive before the host's last edit notification,
+  // so the snapshot caret may be one notification behind; the live read is the latest
+  // allowed host state (a caret ACP only -- no text). The writer rechecks this exact caret.
+  if (ui_context_ != nullptr && candidate_anchor_version_ != snapshot.version) {
+    candidate_anchor_version_ = snapshot.version;
+    candidate_anchor_caret_utf16_ = -1;
+    LONG live_caret = -1;
+    if (ReadCaretPosition(ui_context_, client_id_, &live_caret, nullptr)) {
+      candidate_anchor_caret_utf16_ = live_caret;
+      if (live_caret != snapshot.caret_utf16) {
+        coordinator_->ObserveRealCaret(live_caret);
+      }
+      if (live_caret <
+          static_cast<LONG>(snapshot.input_utf16_code_units.size())) {
+        // The token the menu describes cannot end at this caret. Refuse to present or
+        // select it rather than guessing a position.
+        candidate_anchor_caret_utf16_ = -1;
+        candidate_dismissed_version_ = snapshot.version;
+        candidate_ui_->End();
+        candidate_selection_ = -1;
+        return;
+      }
+    }
+  }
+  // A real TSF UI element manager is the only reason to create a window. Its rectangle is
+  // the live token range [caret - input, caret), not a composition (the document has none
+  // in host-owned mode). A host-drawn element needs no rectangle. Without a verified anchor
+  // the window stays hidden.
   const bool wants_window = candidate_ui_->tsf_manager() &&
                             (!candidate_ui_->begun() || !candidate_ui_->host_drawn());
-  if (wants_window && ui_context_ != nullptr && coordinator.composition_active &&
-      coordinator.composition_start_utf16 >= 0 &&
-      coordinator.composition_length_utf16 > 0) {
+  const RECT* anchor_ptr = nullptr;
+  if (wants_window && ui_context_ != nullptr && candidate_anchor_version_ == snapshot.version &&
+      candidate_anchor_caret_utf16_ >= 0 && !snapshot.input_utf16_code_units.empty()) {
     bool clipped = false;
-    if (ReadCompositionRect(ui_context_, client_id_, coordinator.composition_start_utf16,
-                            coordinator.composition_length_utf16, &anchor, &clipped,
-                            nullptr)) {
-      anchor_ptr = &anchor;
+    RECT rect = {};
+    const LONG token_units =
+        static_cast<LONG>(snapshot.input_utf16_code_units.size());
+    if (ReadTokenRect(ui_context_, client_id_, candidate_anchor_caret_utf16_, token_units,
+                      &rect, &clipped, nullptr, nullptr)) {
+      candidate_anchor_rect_ = rect;
+      anchor_ptr = &candidate_anchor_rect_;
     }
   }
   candidate_ui_->Update(snapshot, ui_context_, anchor_ptr, candidate_selection_);
@@ -1045,12 +1109,15 @@ void ProductTextController::OnTargetLost(ctx::ContextDropReason reason) {
     replacement_work_id_ = 0;
   }
   host_token_units_ = 0;
+  token_abandoned_ = false;
   if (ui_context_ != nullptr) {
     ui_context_->Release();
     ui_context_ = nullptr;
   }
   candidate_selection_ = -1;
   candidate_ui_version_ = 0;
+  candidate_anchor_version_ = 0;
+  candidate_anchor_caret_utf16_ = -1;
   DismissCandidateMenu();
   binding_->OnTargetLost(reason);
   waker_.SetPacing(true);
@@ -1078,6 +1145,9 @@ void ProductTextController::OnTargetBound(ITfContext* context,
   replacement_pending_ = false;
   replacement_work_id_ = 0;
   host_token_units_ = 0;
+  token_abandoned_ = false;
+  candidate_anchor_version_ = 0;
+  candidate_anchor_caret_utf16_ = -1;
   DismissCandidateMenu();
   binding_->OnTargetBound(context, target);
   waker_.SetPacing(true);
@@ -1099,8 +1169,11 @@ void ProductTextController::OnHostEditCompleted(
   ++host_edits_unexpected_;
   // A document change that none of our passed-through keys explains (paste, autocorrect,
   // another client). The engine's token no longer matches the document: stop suggesting and
-  // rebuild at the next token. No text is touched.
+  // rebuild at the next token. No text is touched. host_token_units_ is reset because the
+  // caret mirror now marks a new, unknown token start; the next typed token is complete and
+  // may be suggested normally.
   MarkSuggestionStale();
+  token_abandoned_ = false;
   host_token_units_ = 0;
   QueueEngineReset();
 }
@@ -1159,6 +1232,10 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   diagnostics.replacement_attempts = replacement_attempts_;
   diagnostics.replacement_applied = replacement_applied_;
   diagnostics.replacement_refused = replacement_refused_;
+  diagnostics.last_replacement_outcome = last_replacement_outcome_;
+  diagnostics.last_replacement_edit_status = last_replacement_edit_status_;
+  diagnostics.last_replacement_edit_reason = last_replacement_edit_reason_;
+  diagnostics.last_replacement_expected_units = last_replacement_expected_units_;
   diagnostics.internal_text_losses = internal_text_losses_;
   diagnostics.host_edits_matched = host_edits_matched_;
   diagnostics.host_edits_unexpected = host_edits_unexpected_;
@@ -1171,6 +1248,8 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   diagnostics.suggestion_active =
       suggestion_in_flight_ || !suggestion_queue_.empty() || replacement_pending_;
   diagnostics.suggestion_in_flight = suggestion_in_flight_;
+  diagnostics.token_abandoned = token_abandoned_;
+  diagnostics.suggestion_stale_now = suggestion_stale_;
   diagnostics.replacement_pending = replacement_pending_;
   if (clients_) {
     diagnostics.engine_client_requests = clients_->requests();
@@ -1183,6 +1262,8 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
     const coordinator::CandidateSnapshot candidates = coordinator_->candidate_snapshot();
     diagnostics.candidate_menu_open = candidates.valid;
     diagnostics.candidate_version = candidates.version;
+    diagnostics.candidate_caret_utf16 = candidates.caret_utf16;
+    diagnostics.candidate_input_units = candidates.input_utf16_code_units.size();
     diagnostics.candidate_items = candidates.items.size();
   }
   diagnostics.candidate_selected = candidate_selection_;

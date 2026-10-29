@@ -42,6 +42,7 @@ struct CandidateUiBridge {
   std::uint64_t version = 0;
   std::uint64_t context_id = 0;
   std::uint64_t generation = 0;
+  LONG caret_utf16 = 0;
   int last_selected = -1;
   bool active = true;
 };
@@ -54,11 +55,12 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
 
   void SetData(const std::vector<std::wstring>& strings, int selected,
                ITfDocumentMgr* document, DWORD flags, std::uint64_t context_id,
-               std::uint64_t generation) {
+               std::uint64_t generation, LONG caret_utf16) {
     strings_ = strings;
     selected_ = selected;
     context_id_ = context_id;
     generation_ = generation;
+    caret_utf16_ = caret_utf16;
     if (document_ != nullptr) {
       document_->Release();
       document_ = nullptr;
@@ -236,6 +238,7 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
       selection.context_id = context_id_;
       selection.generation = generation_;
       selection.page_index = static_cast<int>(index);
+      selection.caret_utf16 = caret_utf16_;
       ui->SelectionFromElement(selection);
     }
     return S_OK;
@@ -257,6 +260,7 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
       selection.context_id = context_id_;
       selection.generation = generation_;
       selection.page_index = selected;
+      selection.caret_utf16 = caret_utf16_;
       ui->FinalizeFromElement(selection);
     }
     return S_OK;
@@ -285,6 +289,7 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
   std::uint64_t version_ = 0;
   std::uint64_t context_id_ = 0;
   std::uint64_t generation_ = 0;
+  LONG caret_utf16_ = 0;
   std::vector<std::wstring> strings_;
   ITfDocumentMgr* document_ = nullptr;
   DWORD flags_ = 0;
@@ -367,10 +372,14 @@ class UiElementSink final : public ITfUIElementSink {
       epocanva::tsf::edit::ModuleObjectKind::kCandidateSink};
 };
 
-class RectReadCallback final : public ITfEditSession {
+class CaretReadCallback final : public ITfEditSession {
  public:
-  RectReadCallback(ITfContext* context, LONG start, LONG length)
-      : context_(context), start_(start), length_(length) {
+  CaretReadCallback(ITfContext* context, LONG expected_caret, LONG token_units,
+                    bool want_rect)
+      : context_(context),
+        expected_caret_(expected_caret),
+        token_units_(token_units),
+        want_rect_(want_rect) {
     context_->AddRef();
   }
 
@@ -416,9 +425,32 @@ class RectReadCallback final : public ITfEditSession {
       selection.range->Release();
       return S_OK;
     }
-    const HRESULT extent = acp->SetExtent(start_, length_);
+    LONG caret = 0;
+    LONG length = 0;
+    const HRESULT extent = acp->GetExtent(&caret, &length);
+    if (FAILED(extent) || length != 0 || caret < 0) {
+      acp->Release();
+      selection.range->Release();
+      return S_OK;
+    }
+    caret_ = caret;
+    caret_ok_ = true;
+    if (!want_rect_) {
+      acp->Release();
+      selection.range->Release();
+      return S_OK;
+    }
+    if (expected_caret_ != caret || token_units_ <= 0 || caret < token_units_) {
+      // The caret moved since the menu was drawn, or there is no token range to read. No
+      // rectangle is returned: the window hides instead of pointing at a guessed position.
+      acp->Release();
+      selection.range->Release();
+      return S_OK;
+    }
+    const LONG start = caret - token_units_;
+    const HRESULT token_extent = acp->SetExtent(start, token_units_);
     acp->Release();
-    if (FAILED(extent)) {
+    if (FAILED(token_extent)) {
       selection.range->Release();
       return S_OK;
     }
@@ -441,12 +473,14 @@ class RectReadCallback final : public ITfEditSession {
   }
 
   bool ran() const { return ran_; }
+  bool caret_ok() const { return caret_ok_; }
+  LONG caret() const { return caret_; }
   bool ok() const { return ok_; }
   RECT rect() const { return rect_; }
   bool clipped() const { return clipped_; }
 
  private:
-  ~RectReadCallback() {
+  ~CaretReadCallback() {
     if (context_ != nullptr) {
       context_->Release();
     }
@@ -454,9 +488,12 @@ class RectReadCallback final : public ITfEditSession {
 
   std::atomic<LONG> reference_count_{1};
   ITfContext* context_ = nullptr;
-  LONG start_ = 0;
-  LONG length_ = 0;
+  LONG expected_caret_ = 0;
+  LONG token_units_ = 0;
+  bool want_rect_ = false;
   bool ran_ = false;
+  bool caret_ok_ = false;
+  LONG caret_ = 0;
   bool ok_ = false;
   bool clipped_ = false;
   RECT rect_{};
@@ -464,39 +501,79 @@ class RectReadCallback final : public ITfEditSession {
       epocanva::tsf::edit::ModuleObjectKind::kRectRead};
 };
 
-}  // namespace
-
-bool ReadCompositionRect(ITfContext* context, TfClientId client_id, LONG start_utf16,
-                         LONG length_utf16, RECT* rect, bool* clipped,
-                         std::wstring* why) {
-  if (rect == nullptr || clipped == nullptr) {
-    return false;
-  }
-  if (context == nullptr || client_id == 0 || start_utf16 < 0 || length_utf16 <= 0) {
+bool RunCaretRead(ITfContext* context, TfClientId client_id, LONG expected_caret,
+                  LONG token_units, bool want_rect, LONG* caret_out, RECT* rect,
+                  bool* clipped, std::wstring* why) {
+  if (context == nullptr || client_id == 0) {
     if (why != nullptr) {
-      *why = L"no valid composition range";
+      *why = L"no context or client for the caret read";
     }
     return false;
   }
-  RectReadCallback* callback = new RectReadCallback(context, start_utf16, length_utf16);
+  CaretReadCallback* callback =
+      new CaretReadCallback(context, expected_caret, token_units, want_rect);
   HRESULT session_hr = S_OK;
   const HRESULT request = context->RequestEditSession(
       client_id, callback, TF_ES_SYNC | TF_ES_READ, &session_hr);
   const bool ran = callback->ran();
+  const bool caret_ok = callback->caret_ok();
+  const LONG caret = callback->caret();
   const bool ok = callback->ok();
   const RECT read_rect = callback->rect();
   const bool read_clipped = callback->clipped();
   callback->Release();
   if (FAILED(request) || session_hr == TF_E_SYNCHRONOUS || FAILED(session_hr) || !ran ||
-      !ok) {
+      !caret_ok) {
     if (why != nullptr) {
-      *why = L"the composition rectangle could not be read";
+      *why = L"the caret could not be read";
+    }
+    return false;
+  }
+  if (caret_out != nullptr) {
+    *caret_out = caret;
+  }
+  if (!want_rect) {
+    return true;
+  }
+  if (!ok) {
+    if (why != nullptr) {
+      *why = L"the token rectangle is unavailable at this caret";
     }
     return false;
   }
   *rect = read_rect;
   *clipped = read_clipped;
   return true;
+}
+
+}  // namespace
+
+bool ReadCaretPosition(ITfContext* context, TfClientId client_id, LONG* caret_utf16,
+                       std::wstring* why) {
+  if (caret_utf16 == nullptr) {
+    return false;
+  }
+  return RunCaretRead(context, client_id, -1, 0, false, caret_utf16, nullptr, nullptr,
+                      why);
+}
+
+bool ReadTokenRect(ITfContext* context, TfClientId client_id, LONG caret_utf16,
+                   LONG token_units_utf16, RECT* rect, bool* clipped,
+                   LONG* observed_caret_utf16, std::wstring* why) {
+  if (observed_caret_utf16 != nullptr) {
+    *observed_caret_utf16 = -1;
+  }
+  if (rect == nullptr || clipped == nullptr) {
+    return false;
+  }
+  if (caret_utf16 < 0 || token_units_utf16 <= 0) {
+    if (why != nullptr) {
+      *why = L"no valid token range";
+    }
+    return false;
+  }
+  return RunCaretRead(context, client_id, caret_utf16, token_units_utf16, true,
+                      observed_caret_utf16, rect, clipped, why);
 }
 
 CandidateUi::CandidateUi(TfClientId client_id, CandidateUiHost* host, HMODULE module)
@@ -512,6 +589,7 @@ CandidateUi::CandidateUi(TfClientId client_id, CandidateUiHost* host, HMODULE mo
                   selection.snapshot_version = bridge_->version;
                   selection.context_id = bridge_->context_id;
                   selection.generation = bridge_->generation;
+                  selection.caret_utf16 = bridge_->caret_utf16;
                 }
                 selection.page_index = static_cast<int>(index);
                 if (host_ != nullptr) {
@@ -700,7 +778,7 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
   }
   if (!begun_) {
     element_->SetData(strings, selected, document, flags, snapshot.identity.context_id,
-                      snapshot.identity.generation);
+                      snapshot.identity.generation, snapshot.caret_utf16);
     BOOL show = TRUE;
     DWORD element_id = 0;
     const HRESULT began = manager_->BeginUIElement(element_, &show, &element_id);
@@ -721,10 +799,11 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
     bridge_->version = snapshot.version;
     bridge_->context_id = snapshot.identity.context_id;
     bridge_->generation = snapshot.identity.generation;
+    bridge_->caret_utf16 = snapshot.caret_utf16;
     bridge_->last_selected = selected;
   } else {
     element_->SetData(strings, selected, document, flags, snapshot.identity.context_id,
-                      snapshot.identity.generation);
+                      snapshot.identity.generation, snapshot.caret_utf16);
     const HRESULT updated = manager_->UpdateUIElement(element_id_);
     if (FAILED(updated)) {
       ++diagnostics_.update_failures;
@@ -738,6 +817,7 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
     bridge_->version = snapshot.version;
     bridge_->context_id = snapshot.identity.context_id;
     bridge_->generation = snapshot.identity.generation;
+    bridge_->caret_utf16 = snapshot.caret_utf16;
     bridge_->last_selected = selected;
   }
   if (document != nullptr) {

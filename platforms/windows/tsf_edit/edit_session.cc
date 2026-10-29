@@ -296,6 +296,8 @@ class EditSessionCallback final : public ITfEditSession {
             outcome.termination_notifications_after_call;
         result.composition_start_utf16 = outcome.composition_start_utf16;
         result.composition_length_utf16 = outcome.composition_length_utf16;
+        result.observed_selection_start_utf16 = outcome.observed_selection_start_utf16;
+        result.observed_selection_length_utf16 = outcome.observed_selection_length_utf16;
         result.text_may_have_changed = outcome.text_may_have_changed;
         result.mutation_verified = outcome.mutation_verified;
         result.composition_active = outcome.composition_active;

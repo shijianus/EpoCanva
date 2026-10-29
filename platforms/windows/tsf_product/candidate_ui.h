@@ -50,6 +50,9 @@ struct CandidateUiSelection {
   std::uint64_t context_id = 0;
   std::uint64_t generation = 0;
   int page_index = -1;
+  // The collapsed caret ACP (UTF-16 code-unit offset) the menu was drawn at. The
+  // coordinator and the writer both refuse a selection from another position.
+  LONG caret_utf16 = 0;
 };
 
 // The controller implements this. All calls are on the STA.
@@ -146,13 +149,22 @@ class CandidateUi {
   CandidateUiDiagnostics diagnostics_;
 };
 
-// Reads the caret rectangle of the composition range [start_utf16, start+length) with a
-// synchronous read-only TSF edit session. Returns false when no legal session or no
-// non-empty, visible rectangle exists. `clipped` reports ITfContextView::GetTextExt's own
-// clipped flag. Never reads document text.
-bool ReadCompositionRect(ITfContext* context, TfClientId client_id, LONG start_utf16,
-                         LONG length_utf16, RECT* rect, bool* clipped,
-                         std::wstring* why);
+// Reads the collapsed default-selection caret with a synchronous read-only TSF edit
+// session. Returns false when no legal session or no collapsed caret exists. Never reads
+// document text.
+bool ReadCaretPosition(ITfContext* context, TfClientId client_id, LONG* caret_utf16,
+                       std::wstring* why);
+
+// Reads the screen rectangle of the host token [caret_utf16 - token_units_utf16,
+// caret_utf16) with a synchronous read-only TSF edit session. The session first verifies
+// that the live default selection is collapsed at exactly `caret_utf16`; a moved caret
+// yields no rectangle, so the window is hidden rather than placed at a guessed position.
+// `clipped` reports ITfContextView::GetTextExt's own clipped flag. Never reads text.
+// `observed_caret_utf16` (optional) receives the live caret even when the rectangle is
+// unavailable, so the caller can distinguish "moved" from "no layout".
+bool ReadTokenRect(ITfContext* context, TfClientId client_id, LONG caret_utf16,
+                   LONG token_units_utf16, RECT* rect, bool* clipped,
+                   LONG* observed_caret_utf16, std::wstring* why);
 
 }  // namespace product
 }  // namespace tsf

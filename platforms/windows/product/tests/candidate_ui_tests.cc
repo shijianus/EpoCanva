@@ -31,7 +31,6 @@ using epocanva::tsf::product::CandidateUiSelection;
 using epocanva::tsf::product::CandidateWindow;
 using epocanva::tsf::product::CandidateWindowItem;
 using epocanva::tsf::product::ComputeCandidateWindowLayout;
-using epocanva::tsf::product::ReadCompositionRect;
 
 int g_failures = 0;
 

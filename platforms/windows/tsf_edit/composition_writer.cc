@@ -676,9 +676,18 @@ CompositionWriteOutcome CompositionWriter::ReplaceToken(const EditPlan& plan,
     outcome.operation_hr = hr;
     return outcome;
   }
+  outcome.observed_selection_start_utf16 = start;
+  outcome.observed_selection_length_utf16 = length;
   if (length != 0) {
     caret->Release();
     outcome.reason = EditRejectReason::kSelectionNotCollapsed;
+    return outcome;
+  }
+  if (start != plan.selection_start_utf16()) {
+    // The menu was drawn at a different caret. The same token text may exist elsewhere in
+    // the document, so a text comparison alone would replace the wrong occurrence.
+    caret->Release();
+    outcome.reason = EditRejectReason::kSelectionMoved;
     return outcome;
   }
   const LONG expected_length = static_cast<LONG>(expected.size());

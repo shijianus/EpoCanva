@@ -113,6 +113,11 @@ struct ControllerDiagnostics {
   std::uint64_t replacement_attempts = 0;
   std::uint64_t replacement_applied = 0;
   std::uint64_t replacement_refused = 0;
+  // The last resolved replacement, as the controller saw it (enum values; text-free).
+  int last_replacement_outcome = 0;
+  int last_replacement_edit_status = 0;
+  int last_replacement_edit_reason = 0;
+  long long last_replacement_expected_units = 0;
   std::uint64_t internal_text_losses = 0;
   std::uint64_t host_edits_matched = 0;
   std::uint64_t host_edits_unexpected = 0;
@@ -124,9 +129,13 @@ struct ControllerDiagnostics {
   std::size_t suggestion_queue_depth = 0;
   bool suggestion_active = false;
   bool suggestion_in_flight = false;
+  bool token_abandoned = false;
+  bool suggestion_stale_now = false;
   bool replacement_pending = false;
   bool candidate_menu_open = false;
   std::uint64_t candidate_version = 0;
+  long long candidate_caret_utf16 = -1;
+  std::size_t candidate_input_units = 0;
   int candidate_selected = -1;
   std::size_t candidate_items = 0;
   std::uint64_t candidate_stale_selections = 0;
@@ -299,6 +308,10 @@ class ProductTextController final : public StaWakeTarget,
   std::size_t host_edits_expected_ = 0;
   std::uint64_t suggestion_work_id_ = 0;
   bool suggestion_stale_ = false;
+  // The current token's suggestion stream was abandoned after a drop. The rest of that
+  // token must not be fed to the engine as if it were a complete prefix; the flag clears at
+  // the next token boundary or when the host state is re-read on a new target.
+  bool token_abandoned_ = false;
   // A token boundary arrived while the stream was stale or a reset could not run yet.
   // The reset is performed once no work item owns the binding.
   bool stream_reset_owed_ = false;
@@ -312,6 +325,11 @@ class ProductTextController final : public StaWakeTarget,
   std::uint64_t candidate_ui_version_ = 0;
   std::uint64_t candidate_dismissed_version_ = 0;
   std::uint64_t candidate_stale_selections_ = 0;
+  // The last real TSF caret/rectangle read for the displayed menu version. -1 means the
+  // menu has no verified anchor and the window must stay hidden.
+  std::uint64_t candidate_anchor_version_ = 0;
+  LONG candidate_anchor_caret_utf16_ = -1;
+  RECT candidate_anchor_rect_{};
 
   std::uint64_t wakes_ = 0;
   std::uint64_t stale_wakes_ = 0;
@@ -335,6 +353,10 @@ class ProductTextController final : public StaWakeTarget,
   std::uint64_t replacement_attempts_ = 0;
   std::uint64_t replacement_applied_ = 0;
   std::uint64_t replacement_refused_ = 0;
+  int last_replacement_outcome_ = 0;
+  int last_replacement_edit_status_ = 0;
+  int last_replacement_edit_reason_ = 0;
+  long long last_replacement_expected_units_ = 0;
   // UTF-16 units the product suppressed or could not account for. Ordinary text keys never
   // enter this counter because they are never eaten; a replacement that may have mutated the
   // document without verification counts its whole expected token.

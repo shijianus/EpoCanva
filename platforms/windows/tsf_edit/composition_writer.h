@@ -91,6 +91,10 @@ struct CompositionWriteOutcome {
   std::uint64_t termination_notifications_after_call = 0;
   LONG composition_start_utf16 = -1;
   LONG composition_length_utf16 = -1;
+  // The live default-selection caret this operation actually read (ACP, UTF-16 code
+  // units), or -1 when no selection could be read. Diagnostics only; never a write target.
+  LONG observed_selection_start_utf16 = -1;
+  LONG observed_selection_length_utf16 = -1;
   bool text_may_have_changed = false;
   bool mutation_verified = false;
   bool composition_active = false;

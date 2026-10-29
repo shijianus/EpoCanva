@@ -75,6 +75,29 @@ extern "C" int EpoCanvaTestQueryCounters(EpoCanvaTestCounters* out) {
   out->candidate_stale = diagnostics.candidate_stale_selections;
   out->candidate_menu_open = candidates.valid ? 1 : 0;
   out->candidate_selected = diagnostics.candidate_selected;
+  out->candidate_caret = diagnostics.candidate_caret_utf16;
+  out->candidate_input_units = diagnostics.candidate_input_units;
+  out->target_revalidations = diagnostics.coordinator.target_revalidations;
+  out->target_refusals = diagnostics.coordinator.target_refusals;
+  out->last_target_revalidation =
+      static_cast<unsigned long long>(diagnostics.coordinator.last_target_revalidation.status);
+  out->last_edit_request_hr =
+      static_cast<long long>(diagnostics.coordinator.last_edit_request_hr);
+  out->last_edit_session_hr =
+      static_cast<long long>(diagnostics.coordinator.last_edit_session_hr);
+  out->last_edit_operation_hr =
+      static_cast<long long>(diagnostics.coordinator.last_edit_operation_hr);
+  out->target_callback_checks = diagnostics.coordinator.target_callback_checks;
+  out->target_rejections = diagnostics.coordinator.target_rejections;
+  out->permission_rechecks = diagnostics.coordinator.permission_rechecks;
+  out->last_replacement_outcome = diagnostics.last_replacement_outcome;
+  out->last_replacement_edit_status = diagnostics.last_replacement_edit_status;
+  out->last_replacement_edit_reason = diagnostics.last_replacement_edit_reason;
+  out->last_replacement_expected_units = diagnostics.last_replacement_expected_units;
+  out->last_edit_observed_caret =
+      diagnostics.coordinator.last_edit_observed_caret_utf16;
+  out->last_suggestion_expected_caret =
+      diagnostics.coordinator.last_suggestion_expected_caret_utf16;
   out->page_no = candidates.page_no;
   out->page_size = candidates.page_size;
   out->is_last_page = candidates.is_last_page ? 1 : 0;
@@ -183,6 +206,11 @@ extern "C" int EpoCanvaTestQueryCounters(EpoCanvaTestCounters* out) {
       diagnostics.coordinator.retirement.unresolved_engine_results;
   out->pending_edit_event =
       diagnostics.coordinator.retirement.pending_edit_event != nullptr ? 1 : 0;
+  out->token_abandoned = diagnostics.token_abandoned ? 1 : 0;
+  out->suggestion_stale_now = diagnostics.suggestion_stale_now ? 1 : 0;
+  out->binding_invalidations = diagnostics.binding.invalidations;
+  out->binding_last_loss_reason =
+      static_cast<unsigned long long>(diagnostics.binding.last_loss_reason);
   return 0;
 }
 
@@ -239,6 +267,7 @@ extern "C" int EpoCanvaTestSelectCandidate(unsigned long long snapshot_version,
   selection.context_id = snapshot.identity.context_id;
   selection.generation = snapshot.identity.generation;
   selection.page_index = page_index;
+  selection.caret_utf16 = snapshot.caret_utf16;
   controller->OnUiFinalize(selection);
   return 0;
 }

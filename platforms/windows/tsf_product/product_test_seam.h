@@ -126,6 +126,33 @@ struct EpoCanvaTestCounters {
   unsigned long long unresolved_close;
   unsigned long long unresolved_engine;
   int pending_edit_event;
+  // W3-A: the current token was abandoned after a suggestion drop and waits for a boundary.
+  int token_abandoned;
+  // The suggestion stream is stale right now (a reset is owed or in flight).
+  int suggestion_stale_now;
+  // Binding invalidations and the last observed target-loss reason (enum values).
+  unsigned long long binding_invalidations;
+  unsigned long long binding_last_loss_reason;
+  // The current candidate snapshot's token caret (ACP, UTF-16 code units) or -1.
+  long long candidate_caret;
+  // The engine's raw input length for the current menu (UTF-16 code units).
+  unsigned long long candidate_input_units;
+  // Coordinator target revalidation totals and the last status/refusal cause.
+  unsigned long long target_revalidations;
+  unsigned long long target_refusals;
+  unsigned long long last_target_revalidation;
+  long long last_edit_request_hr;
+  long long last_edit_session_hr;
+  long long last_edit_operation_hr;
+  unsigned long long target_callback_checks;
+  unsigned long long target_rejections;
+  unsigned long long permission_rechecks;
+  int last_replacement_outcome;
+  int last_replacement_edit_status;
+  int last_replacement_edit_reason;
+  long long last_replacement_expected_units;
+  long long last_edit_observed_caret;
+  long long last_suggestion_expected_caret;
 };
 
 __declspec(dllexport) int EpoCanvaTestQueryCounters(EpoCanvaTestCounters* out);

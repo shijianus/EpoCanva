@@ -414,6 +414,8 @@ struct CoordinatorSnapshot {
   HRESULT last_edit_request_hr = S_OK;
   HRESULT last_edit_session_hr = S_OK;
   HRESULT last_edit_operation_hr = S_OK;
+  // The live selection the last edit operation read (ACP, UTF-16 code units), or -1.
+  LONG last_edit_observed_caret_utf16 = -1;
   // The coordinator's document mirror. UTF-16 code units / code-unit offsets.
   LONG tracked_caret_utf16 = 0;
   bool composition_active = false;
@@ -441,6 +443,7 @@ struct CoordinatorSnapshot {
   // UTF-16 units of the expected token in the last suggestion replacement. Used only to
   // size an unverifiable mutation, never to reproduce text.
   std::uint64_t last_suggestion_expected_units = 0;
+  LONG last_suggestion_expected_caret_utf16 = -1;
   // W2-B candidate snapshot accounting. Text-free.
   std::uint64_t candidate_version = 0;
   std::uint64_t candidate_snapshots = 0;
@@ -633,9 +636,11 @@ class ContextCoordinator {
     input::KeyText text{};
     // kRaw: the degraded raw run, held until its permission verdict arrives.
     std::u16string raw_text;
-    // kSuggestionReplace: the expected token and the selected candidate text.
+    // kSuggestionReplace: the expected token, the selected candidate text and the exact
+    // caret ACP the menu was drawn at.
     std::u16string replace_expected;
     std::u16string replace_text;
+    LONG replace_caret_utf16 = 0;
     // kCandidate: the accepted index.
     std::size_t candidate_index = 0;
     // The apply-time re-verification: the edit plan whose submission is held until the
@@ -740,7 +745,8 @@ class ContextCoordinator {
   void SubmitRawPlan(std::u16string raw_utf16);
   // Builds and submits the host-owned token replacement plan. The caller owns the work
   // ledger entry (FinishWorkLedger already ran) and the permission verdict.
-  void SubmitSuggestionPlan(std::u16string expected_text, std::u16string replacement_text);
+  void SubmitSuggestionPlan(std::u16string expected_text, std::u16string replacement_text,
+                            LONG expected_caret_utf16);
   // Terminal accounting for a raw work item. Never touches the document.
   void NoteRawTerminal(bool applied);
   void FinishWorkLedger(WorkKind kind);
@@ -831,6 +837,7 @@ class ContextCoordinator {
   HRESULT last_edit_request_hr_ = S_OK;
   HRESULT last_edit_session_hr_ = S_OK;
   HRESULT last_edit_operation_hr_ = S_OK;
+  LONG last_edit_observed_caret_utf16_ = -1;
 
   SubmitStatus last_submit_status_ = SubmitStatus::kAccepted;
   std::uint64_t submit_refusals_ = 0;
@@ -892,6 +899,7 @@ class ContextCoordinator {
   std::uint64_t raw_units_refused_ = 0;
   std::uint64_t last_raw_units_ = 0;
   std::uint64_t last_suggestion_expected_units_ = 0;
+  LONG last_suggestion_expected_caret_utf16_ = -1;
   std::uint64_t last_suggestion_replacement_units_ = 0;
   LONG last_raw_composition_start_ = -1;
   std::uint64_t last_raw_composition_units_ = 0;

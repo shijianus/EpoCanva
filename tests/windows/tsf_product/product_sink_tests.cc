@@ -1,4 +1,4 @@
-// EpoCanva W2 -- product DLL verification through real TSF keystroke routing.
+﻿// EpoCanva W2 -- product DLL verification through real TSF keystroke routing.
 //
 // WHAT THIS IS, AND IS NOT. The test loads the real epocanva_tsf.dll by absolute path in a
 // controlled STA host (real msctf thread manager, document manager, context and
@@ -514,6 +514,27 @@ struct SeamCounters {
   unsigned long long unresolved_close;
   unsigned long long unresolved_engine;
   int pending_edit_event;
+  int token_abandoned;
+  int suggestion_stale_now;
+  unsigned long long binding_invalidations;
+  unsigned long long binding_last_loss_reason;
+  long long candidate_caret;
+  unsigned long long candidate_input_units;
+  unsigned long long target_revalidations;
+  unsigned long long target_refusals;
+  unsigned long long last_target_revalidation;
+  long long last_edit_request_hr;
+  long long last_edit_session_hr;
+  long long last_edit_operation_hr;
+  unsigned long long target_callback_checks;
+  unsigned long long target_rejections;
+  unsigned long long permission_rechecks;
+  int last_replacement_outcome;
+  int last_replacement_edit_status;
+  int last_replacement_edit_reason;
+  long long last_replacement_expected_units;
+  long long last_edit_observed_caret;
+  long long last_suggestion_expected_caret;
 };
 
 using SeamQueryFn = int (*)(SeamCounters*);
@@ -672,6 +693,10 @@ bool WaitForCandidateMenu(TestHost& host, const ProductSeam& seam,
                 << " sug_drop=" << (counters != nullptr ? counters->suggestion_dropped : 0)
                 << " sug_stale=" << (counters != nullptr ? counters->suggestion_stale : 0)
                 << " token=" << (counters != nullptr ? counters->host_token_units : 0)
+                << " abandoned=" << (counters != nullptr ? counters->token_abandoned : 0)
+                << " stale_now=" << (counters != nullptr ? counters->suggestion_stale_now : 0)
+                << " invalid=" << (counters != nullptr ? counters->binding_invalidations : 0)
+                << "/" << (counters != nullptr ? counters->binding_last_loss_reason : 0)
                 << " bound=" << (counters != nullptr ? counters->coordinator_bound : 0)
                 << " raw=" << (counters != nullptr ? counters->raw_active : 0)
                 << "/" << (counters != nullptr ? counters->raw_submitted : 0)
@@ -2292,6 +2317,8 @@ bool RunCandidateCase(const std::filesystem::path& stage,
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the stale-selection token stays with the host: " + error);
   reference.HostInsert(L"hel");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "candidate: the stale-selection token is exactly in the document");
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
              "candidate: the stale-selection menu opened");
   const unsigned long long old_version = counters.candidate_version;
@@ -2299,9 +2326,25 @@ bool RunCandidateCase(const std::filesystem::path& stage,
   LocalCheck(SendCharAdaptive(&route, L'l', &extra_eaten, &error) && !extra_eaten,
              "candidate: another character stays with the host");
   reference.HostInsert(L"l");
-  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 8000) &&
-                 counters.candidate_version > old_version,
-             "candidate: a newer stable menu exists before the stale click");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "candidate: the extra character is exactly in the document");
+  const std::uint64_t set_text_before_stable =
+      test_case.doc->diagnostics().store.set_text_calls;
+  const bool stable_ok =
+      WaitForStableMenu(*test_case.host, seam, &counters, 8000) &&
+      counters.candidate_version > old_version;
+  std::cout << "  [debug] after stable doc=" << test_case.doc->text_utf16().size()
+            << " ref=" << reference.text.size()
+            << " set_text_delta="
+            << (test_case.doc->diagnostics().store.set_text_calls - set_text_before_stable)
+            << " caret=" << test_case.doc->selection_start_utf16()
+            << " v=" << counters.candidate_version
+            << " input=" << counters.candidate_input_units
+            << " host_token=" << counters.host_token_units
+            << " plans=" << counters.plans_submitted
+            << " eapplied=" << counters.edits_applied
+            << " erefused=" << counters.edits_refused << std::endl;
+  LocalCheck(stable_ok, "candidate: a newer stable menu exists before the stale click");
   const unsigned long long newer_version = counters.candidate_version;
   const std::wstring before_stale = test_case.doc->text_utf16();
   (void)seam.select(old_version, 1);
@@ -2313,9 +2356,56 @@ bool RunCandidateCase(const std::filesystem::path& stage,
   LocalCheck(after_stale.candidate_stale >= 1,
              "candidate: the stale selection is reported");
   const std::wstring newer_completion = ReadCandidateText(seam, 1);
+  const std::size_t before_newer = test_case.doc->text_utf16().size();
   (void)seam.select(newer_version, 1);
   reference.ReplaceToken(L"hell", newer_completion);
   (void)WaitForText(*test_case.host, test_case.doc, reference.text, 8000);
+  {
+    SeamCounters after_newer = {};
+    (void)seam.query(&after_newer);
+    std::cout << "  [debug] newer v=" << newer_version
+              << " completion_len=" << newer_completion.size()
+              << " before=" << before_newer
+              << " after=" << test_case.doc->text_utf16().size()
+              << " ref=" << reference.text.size()
+              << " snapshot_caret=" << after_newer.candidate_caret
+              << " input_units=" << after_newer.candidate_input_units
+              << " host_token=" << after_newer.host_token_units
+              << " doc_caret=" << test_case.doc->selection_start_utf16()
+              << " attempts=" << after_newer.replacement_attempts
+              << " applied=" << after_newer.replacement_applied
+              << " refused=" << after_newer.replacement_refused
+              << " stale=" << after_newer.candidate_stale
+              << " v_now=" << after_newer.candidate_version
+              << " menu_now=" << after_newer.candidate_menu_open
+              << " submit=" << after_newer.last_submit_status
+              << " stale_now=" << after_newer.suggestion_stale_now
+              << " abandoned=" << after_newer.token_abandoned
+              << " outcome=" << after_newer.work_outcome
+              << " bound=" << after_newer.coordinator_bound
+              << " invalid=" << after_newer.binding_invalidations << "/"
+              << after_newer.binding_last_loss_reason
+              << " reval=" << after_newer.target_revalidations << "/"
+              << after_newer.target_refusals << "/"
+              << after_newer.last_target_revalidation
+              << " plans=" << after_newer.plans_submitted
+              << " eapplied=" << after_newer.edits_applied
+              << " erefused=" << after_newer.edits_refused
+              << " hr=" << std::hex << after_newer.last_edit_request_hr << "/"
+              << after_newer.last_edit_session_hr << "/"
+              << after_newer.last_edit_operation_hr << std::dec
+              << " cb=" << after_newer.target_callback_checks << "/"
+              << after_newer.target_rejections
+              << " perm=" << after_newer.permission_rechecks
+              << " repl=" << after_newer.last_replacement_outcome << "/"
+              << after_newer.last_replacement_edit_status << "/"
+              << after_newer.last_replacement_edit_reason << "/"
+              << after_newer.last_replacement_expected_units
+              << " plan_caret=" << after_newer.last_suggestion_expected_caret
+              << " live_caret=" << after_newer.last_edit_observed_caret
+              << " last_edit=" << after_newer.last_edit_status << "/"
+              << after_newer.last_edit_reason << std::endl;
+  }
   CheckDocExact(test_case.doc->text_utf16(), reference.text,
                 "candidate: the current selection replaced the token exactly once");
   bool separator3_eaten = true;
@@ -2443,6 +2533,428 @@ bool RunCandidateCase(const std::filesystem::path& stage,
   LocalCheck(test_case.doc->text_utf16() == reference.text,
              "candidate: dismiss left the misspelled original intact");
 
+  EndCase(&test_case);
+  return true;
+}
+
+void DumpReadyState(const SeamCounters& c, const char* label) {
+  std::cout << "  [ready-fail " << label << "] bound=" << c.coordinator_bound
+            << " gate=" << c.gate << " perm=" << c.permission
+            << " phase=" << c.coordinator_phase
+            << " engine=" << c.engine_ready
+            << " losses=" << c.target_losses
+            << " rebinds=" << c.rebind_requests
+            << " bind_status=" << c.last_bind_status
+            << " refused=" << c.binds_refused
+            << " observer_drop=" << c.observer_last_drop
+            << " awaiting=" << c.observer_awaiting_bind
+            << " sel_reads=" << c.observer_selection_reads
+            << " sel_refusals=" << c.observer_selection_refusals
+            << std::endl;
+}
+
+bool RequireReady(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
+                  const char* label) {
+  SeamCounters counters = {};
+  const bool ready = ReadyToType(host, sink, context, 20000, &counters);
+  LocalCheck(ready, label);
+  if (!ready) {
+    DumpReadyState(counters, label);
+  }
+  return ready;
+}
+
+// Waits for a submitted replacement to reach a terminal state without guessing: the
+// controller reports pending work, the coordinator phase and the queue; all must be idle.
+bool WaitForReplacementSettled(TestHost& host, const ProductSeam& seam,
+                               DWORD timeout_ms, SeamCounters* counters) {
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  for (;;) {
+    SeamCounters current = {};
+    if (seam.query != nullptr && seam.query(&current) == 0) {
+      if (counters != nullptr) {
+        *counters = current;
+      }
+      if (current.replacement_pending == 0 && current.coordinator_phase == 0 &&
+          current.queue_pending == 0 && current.queue_in_flight == 0 &&
+          current.suggestion_pending == 0 && current.suggestion_in_flight == 0) {
+        return true;
+      }
+    }
+    if (::GetTickCount64() >= deadline) {
+      return false;
+    }
+    PumpSlice(host, 10);
+  }
+}
+
+// B-layer fault injection for the only product document write: an explicit candidate
+// replacement. The oracle is the test's own ReferenceDoc plus the controlled store's
+// backing text; product counters are printed as evidence, never used to trim expectations.
+bool RunReplacementFaultCase(const std::filesystem::path& stage,
+                             const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.initial_text_utf16 = L"";
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "faults: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ProductSeam seam = test_case.seam;
+  LocalCheck(seam.usable(), "faults: controlled seam available");
+  if (!seam.usable()) {
+    EndCase(&test_case);
+    return false;
+  }
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  ReferenceDoc reference;
+  std::string error;
+  SeamCounters counters = {};
+  const TfClientId app_client = test_case.host->client_id();
+
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 20000),
+             "faults: the engine path is ready");
+
+  // A. The same token text exists earlier in the document. The menu is drawn for the last
+  // occurrence; after a real caret move the old selection must write nothing.
+  LocalCheck(SendTextHost(&route, L"hel ", &error), "faults A: seed text: " + error);
+  reference.HostInsert(L"hel ");
+  LocalCheck(SendTextHost(&route, L"x ", &error), "faults A: separator: " + error);
+  reference.HostInsert(L"x ");
+  LocalCheck(SendTextHost(&route, L"hel", &error), "faults A: token stays with host: " + error);
+  reference.HostInsert(L"hel");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "faults A: the duplicate token is exactly in the document");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 10000),
+             "faults A: the menu is stable");
+  const unsigned long long duplicate_version = counters.candidate_version;
+  const std::wstring duplicate_completion = ReadCandidateText(seam, 1);
+  const std::size_t duplicate_before = test_case.doc->text_utf16().size();
+  const std::uint64_t duplicate_set_text =
+      test_case.doc->diagnostics().store.set_text_calls;
+  LocalCheck(SUCCEEDED(test_case.doc->SetSelectionForTest(app_client, 3)),
+             "faults A: the caret moved to the earlier occurrence");
+  PumpSlice(*test_case.host, 300);
+  (void)seam.select(duplicate_version, 1);
+  PumpSlice(*test_case.host, 300);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "faults A: the selection from the old caret wrote nothing");
+  LocalCheck(test_case.doc->text_utf16().size() == duplicate_before,
+             "faults A: the document length is unchanged");
+  LocalCheck(test_case.doc->diagnostics().store.set_text_calls == duplicate_set_text,
+             "faults A: no SetText was issued");
+  LocalCheck(!duplicate_completion.empty(), "faults A: the menu had a real completion");
+  LocalCheck(SUCCEEDED(test_case.doc->SetSelectionForTest(
+                 app_client, static_cast<LONG>(reference.text.size()))),
+             "faults A: the caret returned to the end");
+  PumpSlice(*test_case.host, 200);
+  bool a_space = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &a_space, &error) &&
+                 !a_space,
+             "faults A: boundary stays with the host: " + error);
+  reference.HostInsert(L" ");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "faults A: the boundary text is exact");
+
+  // B. A replacement is queued (deferred lock) while the host keeps editing. The queued
+  // plan must not overwrite the host's newer input, and must not issue SetText.
+  RequireReady(*test_case.host, sink, context, "faults B: ready");
+  LocalCheck(SendTextHost(&route, L"hel", &error), "faults B: token: " + error);
+  reference.HostInsert(L"hel");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 10000),
+             "faults B: the menu is stable");
+  const unsigned long long queued_version = counters.candidate_version;
+  const std::uint64_t queued_set_text = test_case.doc->diagnostics().store.set_text_calls;
+  test_case.doc->store()->SetAsyncLocks(true);
+  (void)seam.select(queued_version, 1);
+  LocalCheck(SendTextHost(&route, L"ab", &error),
+             "faults B: the host keeps typing while the write is queued: " + error);
+  reference.HostInsert(L"ab");
+  SeamCounters after_queued = {};
+  LocalCheck(WaitForReplacementSettled(*test_case.host, seam, 8000, &after_queued),
+             "faults B: the queued replacement reached a terminal state");
+  test_case.doc->store()->SetAsyncLocks(false);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "faults B: the newer host input was not overwritten");
+  // The host wrote the two pending characters through ITfRange::SetText itself, so the
+  // store must show exactly those two calls and no third (product) write.
+  LocalCheck(test_case.doc->diagnostics().store.set_text_calls == queued_set_text + 2,
+             "faults B: only the host's two SetText calls reached the store");
+  LocalCheck(after_queued.replacement_refused >= 1,
+             "faults B: the queued replacement is reported refused");
+  bool b_space = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &b_space, &error) &&
+                 !b_space,
+             "faults B: boundary stays with the host: " + error);
+  reference.HostInsert(L" ");
+
+  // C. The token text changes after the menu was drawn. Read-back comparison must refuse,
+  // and no SetText may run.
+  RequireReady(*test_case.host, sink, context, "faults C: ready");
+  LocalCheck(SendTextHost(&route, L"hel", &error), "faults C: token: " + error);
+  reference.HostInsert(L"hel");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text, "faults C: token exact");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 10000),
+             "faults C: the menu is stable");
+  const unsigned long long mismatch_version = counters.candidate_version;
+  const std::uint64_t mismatch_set_text =
+      test_case.doc->diagnostics().store.set_text_calls;
+  const LONG mismatch_caret = test_case.doc->selection_start_utf16();
+  std::string client_error;
+  const TfClientId external_client =
+      epocanva::tsf::context::test::ExternalClientId(
+          test_case.host->thread_manager_for_test(), &client_error);
+  ExternalEditResult external;
+  LocalCheck(external_client != 0 &&
+                 RunExternalEdit(*test_case.host, test_case.doc, external_client,
+                                 ExternalEditMode::kReplaceText, mismatch_caret - 3,
+                                 mismatch_caret, L"hex", &external, &error),
+             "faults C: the external token edit ran: " + error);
+  reference.ReplaceToken(L"hel", L"hex");
+  PumpSlice(*test_case.host, 300);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "faults C: the external edit owns the new text");
+  (void)seam.select(mismatch_version, 1);
+  PumpSlice(*test_case.host, 300);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "faults C: the read-back mismatch wrote nothing");
+  // The external replacement is one host SetText; the stale product selection must add
+  // none.
+  LocalCheck(test_case.doc->diagnostics().store.set_text_calls == mismatch_set_text + 1,
+             "faults C: only the host's external SetText reached the store");
+  bool c_space = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &c_space, &error) &&
+                 !c_space,
+             "faults C: boundary stays with the host: " + error);
+  reference.HostInsert(L" ");
+
+  // D. Focus switches while the replacement is queued. Neither document may receive a
+  // write; the old target's pending plan must become stale.
+  RequireReady(*test_case.host, sink, context, "faults D: ready");
+  LocalCheck(SendTextHost(&route, L"hel", &error), "faults D: token: " + error);
+  reference.HostInsert(L"hel");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text, "faults D: token exact");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 10000),
+             "faults D: the menu is stable");
+  const unsigned long long focus_version = counters.candidate_version;
+  const std::uint64_t focus_set_text = test_case.doc->diagnostics().store.set_text_calls;
+  test_case.doc->store()->SetAsyncLocks(true);
+  (void)seam.select(focus_version, 1);
+  TestDocumentOptions child_options;
+  child_options.initial_text_utf16 = L"";
+  TestDocument* child =
+      test_case.host->CreateChildContext(test_case.doc, child_options, &error);
+  LocalCheck(child != nullptr, "faults D: a child context was pushed: " + error);
+  if (child != nullptr) {
+    PumpSlice(*test_case.host, 800);
+    test_case.doc->store()->SetAsyncLocks(false);
+    SeamCounters after_focus = {};
+    (void)WaitForReplacementSettled(*test_case.host, seam, 8000, &after_focus);
+    CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                  "faults D: the parent kept its text with no queued write");
+    CheckDocExact(child->text_utf16(), L"",
+                  "faults D: the child never received the parent's replacement");
+    LocalCheck(test_case.doc->diagnostics().store.set_text_calls == focus_set_text,
+               "faults D: the stale queued replacement issued no SetText");
+    (void)child->Disconnect();
+    PumpSlice(*test_case.host, 500);
+    RequireReady(*test_case.host, sink, context, "faults D: the parent context is bound again");
+  }
+  bool d_space = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &d_space, &error) &&
+                 !d_space,
+             "faults D: boundary stays with the host: " + error);
+  reference.HostInsert(L" ");
+
+  // E. The write applies and then reports failure: the product must not roll back, must
+  // count an unverifiable loss, must stop enhancement writes on this context, and must keep
+  // the host's ordinary input working. A fresh context is the explicit recovery path.
+  RequireReady(*test_case.host, sink, context, "faults E: ready");
+  LocalCheck(SendTextHost(&route, L"hel", &error), "faults E: token: " + error);
+  reference.HostInsert(L"hel");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text, "faults E: token exact");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 10000),
+             "faults E: the menu is stable");
+  const unsigned long long uncertain_version = counters.candidate_version;
+  const std::wstring uncertain_completion = ReadCandidateText(seam, 1);
+  const std::uint64_t uncertain_set_text = test_case.doc->diagnostics().store.set_text_calls;
+  const std::uint64_t uncertain_losses = counters.internal_text_losses;
+  test_case.doc->store()->SetMutationFault(
+      epocanva::tsf::edit::test::MutationFault::kEFailAfterMutation);
+  (void)seam.select(uncertain_version, 1);
+  SeamCounters after_uncertain = {};
+  LocalCheck(WaitForReplacementSettled(*test_case.host, seam, 10000, &after_uncertain),
+             "faults E: the uncertain write reached a terminal state");
+  test_case.doc->store()->SetMutationFault(
+      epocanva::tsf::edit::test::MutationFault::kNone);
+  reference.ReplaceToken(L"hel", uncertain_completion);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "faults E: the possibly-successful write is not rolled back or duplicated");
+  LocalCheck(test_case.doc->diagnostics().store.set_text_calls == uncertain_set_text + 1,
+             "faults E: exactly one write reached the store");
+  LocalCheck(after_uncertain.internal_text_losses == uncertain_losses + 3,
+             "faults E: the unverifiable token is counted as an internal loss");
+  LocalCheck(after_uncertain.replacement_refused >= 1,
+             "faults E: the uncertain replacement is reported refused");
+  LocalCheck(after_uncertain.gate != 0,
+             "faults E: the context gate is closed for further enhancements");
+
+  // The host keeps its ordinary input even while the enhancement path is locked down.
+  const std::uint64_t uncertain_losses_after = after_uncertain.internal_text_losses;
+  LocalCheck(SendTextHost(&route, L"ok", &error),
+             "faults E: ordinary text still reaches the host: " + error);
+  reference.HostInsert(L"ok");
+  bool e_space = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &e_space, &error) &&
+                 !e_space,
+             "faults E: boundary stays with the host: " + error);
+  reference.HostInsert(L" ");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "faults E: the host's text is complete after the uncertain write");
+  CheckNoSuppressedText(route, "faults E host input");
+  PumpSlice(*test_case.host, 300);
+  SeamCounters after_host_text = {};
+  (void)seam.query(&after_host_text);
+  LocalCheck(after_host_text.candidate_menu_open == 0,
+             "faults E: no new enhancement menu opened on the locked-down context");
+  LocalCheck(after_host_text.internal_text_losses == uncertain_losses_after,
+             "faults E: ordinary host input was not counted as a product loss");
+  (void)seam.select(uncertain_version, 1);
+  PumpSlice(*test_case.host, 300);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "faults E: a later selection on the locked context wrote nothing");
+
+  // Recovery: a new context has its own permission and uncertainty state. The parent stays
+  // latched; the child must bind, accept host text and apply a real candidate.
+  TestDocumentOptions recover_options;
+  recover_options.initial_text_utf16 = L"";
+  TestDocument* recovered =
+      test_case.host->CreateChildContext(test_case.doc, recover_options, &error);
+  LocalCheck(recovered != nullptr, "faults E: recovery child context: " + error);
+  if (recovered != nullptr) {
+    LocalCheck(ReadyToType(*test_case.host, sink, recovered->context(), 20000),
+               "faults E: the new context is bound and suggestible");
+    InputRoute recovered_route{test_case.host, recovered, sink, recovered->context()};
+    ReferenceDoc recovered_reference;
+    LocalCheck(SendTextHost(&recovered_route, L"hel", &error),
+               "faults E: recovery token stays with the host: " + error);
+    recovered_reference.HostInsert(L"hel");
+    SeamCounters recovery_menu = {};
+    LocalCheck(WaitForStableMenu(*test_case.host, seam, &recovery_menu, 10000),
+               "faults E: the recovery menu opened");
+    const std::wstring recovery_completion = ReadCandidateText(seam, 1);
+    (void)seam.select(recovery_menu.candidate_version, 1);
+    recovered_reference.ReplaceToken(L"hel", recovery_completion);
+    (void)WaitForText(*test_case.host, recovered, recovered_reference.text, 10000);
+    CheckDocExact(recovered->text_utf16(), recovered_reference.text,
+                  "faults E: the new context applied its own candidate");
+    CheckNoSuppressedText(recovered_route, "faults E recovery");
+    (void)recovered->Disconnect();
+  }
+
+  EndCase(&test_case);
+  LocalCheck(test_case.product.module == nullptr,
+             "faults: the product module was unloaded after the host teardown");
+  return true;
+}
+
+// After a suggestion drop the remaining keys of the same token must not be presented as a
+// complete prefix. The controller abandons that token until a boundary, then resynchronises
+// from the current caret and accepts a fresh token normally.
+bool RunSuggestionResyncCase(const std::filesystem::path& stage,
+                             const std::filesystem::path& user_root) {
+  Case test_case;
+  TestDocumentOptions options;
+  options.initial_text_utf16 = L"";
+  if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
+    LocalCheck(false, "resync: host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ProductSeam seam = test_case.seam;
+  ITfKeyEventSink* sink = test_case.product.sink;
+  ITfContext* context = test_case.doc->context();
+  InputRoute route{test_case.host, test_case.doc, sink, context};
+  ReferenceDoc reference;
+  std::string error;
+  SeamCounters counters = {};
+  LocalCheck(seam.usable(), "resync: controlled seam available");
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 20000),
+             "resync: the engine path is ready");
+
+  // One long token, sent without pumping, overflows the bounded suggestion queue and makes
+  // the stream stale. Every character still belongs to the host.
+  std::wstring burst;
+  for (int repeat = 0; repeat < 12; ++repeat) {
+    burst += L"abcdefghij";
+  }
+  LocalCheck(SendTextHost(&route, burst, &error),
+             "resync: the burst token stays with the host: " + error);
+  reference.HostInsert(burst);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "resync: the burst is exactly in the document");
+  CheckNoSuppressedText(route, "resync burst");
+
+  // The reset owed after the drop must settle; the abandoned flag must remain set.
+  bool settled = false;
+  const ULONGLONG deadline = ::GetTickCount64() + 10000;
+  for (;;) {
+    if (seam.query(&counters) == 0 && counters.token_abandoned != 0 &&
+        counters.suggestion_stale_now == 0 && counters.suggestion_in_flight == 0 &&
+        counters.queue_pending == 0 && counters.queue_in_flight == 0) {
+      settled = true;
+      break;
+    }
+    if (::GetTickCount64() >= deadline) {
+      break;
+    }
+    PumpSlice(*test_case.host, 10);
+  }
+  LocalCheck(settled, "resync: the dropped token settled into the abandoned state");
+  LocalCheck(counters.suggestion_dropped > 0,
+             "resync: the bounded stream really dropped suggestions");
+  LocalCheck(counters.candidate_menu_open == 0,
+             "resync: no menu is offered for the incomplete prefix");
+
+  // More characters of the same token must not start a suffix-only menu.
+  LocalCheck(SendTextHost(&route, L"tail", &error),
+             "resync: the continuation stays with the host: " + error);
+  reference.HostInsert(L"tail");
+  PumpSlice(*test_case.host, 800);
+  SeamCounters after_suffix = {};
+  (void)seam.query(&after_suffix);
+  LocalCheck(after_suffix.token_abandoned != 0,
+             "resync: the token stays abandoned after the suffix keys");
+  LocalCheck(after_suffix.candidate_menu_open == 0,
+             "resync: the suffix is not presented as a complete prefix");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "resync: the suffix text is intact");
+
+  // The boundary clears the abandonment; the next token is a completely new prefix.
+  bool space_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
+                 !space_eaten,
+             "resync: the boundary stays with the host: " + error);
+  reference.HostInsert(L" ");
+  SeamCounters after_boundary = {};
+  (void)seam.query(&after_boundary);
+  LocalCheck(after_boundary.token_abandoned == 0,
+             "resync: the boundary clears the abandoned token");
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "resync: the fresh token stays with the host: " + error);
+  reference.HostInsert(L"hel");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 15000),
+             "resync: a real menu opens for the fresh token");
+  const std::wstring completion = ReadCandidateText(seam, 1);
+  (void)seam.select(counters.candidate_version, 1);
+  reference.ReplaceToken(L"hel", completion);
+  (void)WaitForText(*test_case.host, test_case.doc, reference.text, 10000);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "resync: the fresh token accepted its own completion");
+  CheckNoSuppressedText(route, "resync total");
   EndCase(&test_case);
   return true;
 }
@@ -3619,9 +4131,9 @@ int main(int argc, char** argv) {
       lexicon.empty() || run_root.empty() || !run_root.is_absolute()) {
     std::cout
         << "usage error: --product-dll --rime-dll --data-dir --lexicon "
-           "--run-root <absolute> [--mode input|engine-missing|candidate|continuous|"
-           "capacity|capacity-continue|unload-contract|degraded-keys|startup|"
-           "startup-lifecycle] "
+           "--run-root <absolute> [--mode input|engine-missing|candidate|"
+           "replacement-faults|suggestion-resync|continuous|capacity|capacity-continue|"
+           "unload-contract|degraded-keys|startup|startup-lifecycle] "
            "[--watchdog-ms N]\n";
     return 2;
   }
@@ -3728,6 +4240,22 @@ int main(int argc, char** argv) {
     LocalCheck(PrepareUserRoot(user_root, settings, &why),
                "candidate: settings and marker written");
     RunCandidateCase(stage, user_root);
+  } else if (mode == "suggestion-resync") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "resync: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "resync: settings and marker written");
+    RunSuggestionResyncCase(stage, user_root);
+  } else if (mode == "replacement-faults") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "faults: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "faults: settings and marker written");
+    RunReplacementFaultCase(stage, user_root);
   } else if (mode == "continuous") {
     std::wstring why;
     LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,

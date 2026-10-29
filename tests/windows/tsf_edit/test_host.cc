@@ -217,6 +217,110 @@ void TestDocument::SetRefuseSelectionReads(bool refuse) {
   }
 }
 
+namespace {
+
+class SetSelectionEditSession final : public ITfEditSession {
+ public:
+  SetSelectionEditSession(ITfContext* context, LONG caret_utf16)
+      : context_(context), caret_utf16_(caret_utf16) {
+    context_->AddRef();
+  }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override {
+    if (object == nullptr) {
+      return E_INVALIDARG;
+    }
+    *object = nullptr;
+    if (riid == IID_IUnknown || riid == IID_ITfEditSession) {
+      *object = static_cast<ITfEditSession*>(this);
+      AddRef();
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override {
+    return static_cast<ULONG>(reference_count_.fetch_add(1) + 1);
+  }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const LONG remaining = reference_count_.fetch_sub(1) - 1;
+    if (remaining == 0) {
+      delete this;
+    }
+    return static_cast<ULONG>(remaining);
+  }
+
+  HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
+    ran_ = true;
+    TF_SELECTION current = {};
+    ULONG fetched = 0;
+    if (FAILED(context_->GetSelection(cookie, TF_DEFAULT_SELECTION, 1, &current,
+                                      &fetched)) ||
+        fetched != 1 || current.range == nullptr) {
+      if (current.range != nullptr) {
+        current.range->Release();
+      }
+      return S_OK;
+    }
+    ITfRangeACP* acp = nullptr;
+    const HRESULT qi =
+        current.range->QueryInterface(IID_ITfRangeACP, reinterpret_cast<void**>(&acp));
+    if (FAILED(qi) || acp == nullptr) {
+      current.range->Release();
+      return S_OK;
+    }
+    const HRESULT extent = acp->SetExtent(caret_utf16_, 0);
+    acp->Release();
+    if (FAILED(extent)) {
+      current.range->Release();
+      return S_OK;
+    }
+    TF_SELECTION selection = {};
+    selection.range = current.range;
+    // The selection reader treats TF_AE_NONE as an unsupported shape; a real application
+    // sets one end active even for a collapsed caret.
+    selection.style.ase = TF_AE_END;
+    selection.style.fInterimChar = FALSE;
+    result_ = context_->SetSelection(cookie, 1, &selection);
+    current.range->Release();
+    return S_OK;
+  }
+
+  bool ran() const { return ran_; }
+  HRESULT result() const { return result_; }
+
+ private:
+  ~SetSelectionEditSession() {
+    if (context_ != nullptr) {
+      context_->Release();
+    }
+  }
+
+  std::atomic<LONG> reference_count_{1};
+  ITfContext* context_ = nullptr;
+  LONG caret_utf16_ = 0;
+  bool ran_ = false;
+  HRESULT result_ = E_FAIL;
+};
+
+}  // namespace
+
+HRESULT TestDocument::SetSelectionForTest(TfClientId client, LONG caret_utf16) {
+  if (context_ == nullptr || client == 0 || caret_utf16 < 0) {
+    return E_INVALIDARG;
+  }
+  SetSelectionEditSession* callback = new SetSelectionEditSession(context_, caret_utf16);
+  HRESULT session_hr = S_OK;
+  const HRESULT request = context_->RequestEditSession(
+      client, callback, TF_ES_SYNC | TF_ES_READWRITE, &session_hr);
+  const bool ran = callback->ran();
+  const HRESULT result = callback->result();
+  callback->Release();
+  if (FAILED(request) || session_hr == TF_E_SYNCHRONOUS || FAILED(session_hr) || !ran) {
+    return FAILED(request) ? request : (FAILED(session_hr) ? session_hr : E_FAIL);
+  }
+  return result;
+}
+
 HRESULT TestDocument::SetContextCompartment(REFGUID guid, TfClientId client,
                                             LONG value) {
   if (context_ == nullptr) {
