@@ -213,6 +213,11 @@
 
 1. **C 层未执行**：没有已授权的隔离环境；正式注册 TIP、StrictTsf 真实前台、
    真实 `ITfUIElementMgr`、真实 `GetTextExt` 仍未验证。本报告不以 B 层通过冒充 C 层。
+   具体授权请求沿用 `docs/windows/isolation-verification-plan.md`：一台可回滚的
+   Windows 11 x64 VM/测试机（本地管理员、快照）、固定测试应用与数据、允许临时写入
+   CLSID `{B440F702-63E4-4D47-BCC4-074899ABA836}` 的 `InprocServer32` 与
+   `GUID_TFCAT_TIP_KEYBOARD` 分类并注册/启用 en-US profile、测试后删除；
+   未获授权前不执行任何注册、切换或系统级修改。本轮没有重复让用户运行 Lab。
 2. **候选窗口锚点**：建议模式下文档没有产品组合，`UpdateCandidateUi` 不读
    `GetTextExt`；真实自绘窗口的位置/显示属于未验证项。受控测试走宿主绘制路径。
 3. **替换后当前 token 的建议**：重置引擎流后，当前 token 的剩余字符可能不再产生菜单
