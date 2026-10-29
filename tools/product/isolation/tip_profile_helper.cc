@@ -1,36 +1,82 @@
-// EpoCanva W2-B-R -- W3 isolation helper (NOT BUILT OR RUN IN THIS ROUND).
+// EpoCanva W3-A -- isolation registration helper. NOT part of the product package.
 //
-// Registers the EpoCanva CLSID as a TSF keyboard text service profile, and enables or
-// disables that profile for the current session. The product DLL deliberately has no
-// DllRegisterServer, so a separate, explicit helper is the only supported way to do this.
+// WHAT IT DOES. It performs only the TSF language-profile operations that the COM class
+// registration cannot express:
+//   register    ITfInputProcessorProfiles::Register + AddLanguageProfile (en-US)
+//   unregister  RemoveLanguageProfile + Unregister
+//   activate    ITfInputProcessorProfileMgr::ActivateProfile (session enable)
+//   deactivate  DeactivateProfile (session disable)
+//   status      read-only report: COM registration, profile presence, active profile
 //
-// BUILD (W3, on the authorized isolation machine only):
-//   cl /EHsc /std:c++17 /DUNICODE /D_UNICODE tip_profile_helper.cc ole32.lib oleaut32.lib uuid.lib
-// RUN (after the CLSID InprocServer32 key points at the staged product DLL):
-//   tip_profile_helper.exe register
-//   tip_profile_helper.exe activate
-//   tip_profile_helper.exe deactivate
-//   tip_profile_helper.exe unregister
+// WHAT IT DOES NOT DO. It never writes the CLSID/InprocServer32/category keys (that is
+// register_tip.ps1), never changes another input method, never selects a keyboard layout for
+// the user, and never claims that a successful profile registration means the TIP is active
+// in an application. Every command prints the HRESULT it observed and then re-reads the
+// state to verify the claim; a verification mismatch exits non-zero.
 //
-// This source is not part of any product target, is not staged, and is never executed by
-// the test suite.
+// BUILD (authorized isolation machine, from the product build tree):
+//   cmake -S platforms/windows/engine_bridge -B build/isolation-tools -G "Visual Studio 17 2022" -A x64 \
+//         -DEPOCANVA_BUILD_ISOLATION_TOOLS=ON
+//   cmake --build build/isolation-tools --config Release --target epocanva_tip_profile_helper
+//
+// The CLSID and profile GUID come from platforms/windows/tsf/identifiers.h -- the same
+// frozen product identity the DLL and the installer use. There is no test-only identity.
 #include <windows.h>
 #include <msctf.h>
+#include <objbase.h>
 
 #include <cstdio>
 #include <cwchar>
 #include <string>
 
+#include "identifiers.h"
+
 namespace {
 
-// Must match platforms/windows/tsf/identifiers.h.
-const CLSID kTextServiceClsid = {
-    0xB440F702, 0x63E4, 0x4D47, {0xBC, 0xC4, 0x07, 0x48, 0x99, 0xAB, 0xA8, 0x36}};
-// Test-only profile GUID; stable so uninstall can find it. Not a product identity.
-const GUID kProfileGuid = {
-    0x6C2C7B5E, 0x9E4A, 0x4E7E, {0x8F, 0x7A, 0x2B, 0x7B, 0x0C, 0x5F, 0x5A, 0x11}};
 constexpr LANGID kEnglishUs = 0x0409;
-constexpr wchar_t kDescription[] = L"EpoCanva English (isolation test)";
+constexpr wchar_t kDescription[] = L"EpoCanva English";
+constexpr wchar_t kProductClsidText[] = L"{B440F702-63E4-4D47-BCC4-074899ABA836}";
+constexpr wchar_t kProductProfileText[] = L"{7D3E2A94-5C61-4F0B-9E3A-1B8D6C4F2A71}";
+
+const GUID& Clsid() { return epocanva::tsf::kTextServiceClsid; }
+const GUID& ProfileGuid() { return epocanva::tsf::kEnglishLanguageProfileGuid; }
+
+void PrintHr(const wchar_t* what, HRESULT hr) {
+  std::wprintf(L"%-32ls 0x%08lX\n", what, static_cast<unsigned long>(hr));
+}
+
+bool SameGuid(const GUID& left, const GUID& right) {
+  return ::IsEqualGUID(left, right) != FALSE;
+}
+
+std::wstring ReadInprocServer32(HKEY root) {
+  HKEY key = nullptr;
+  const std::wstring path = std::wstring(L"Software\\Classes\\CLSID\\") +
+                            kProductClsidText + L"\\InprocServer32";
+  if (::RegOpenKeyExW(root, path.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
+    return std::wstring();
+  }
+  wchar_t value[1024] = {};
+  DWORD bytes = sizeof(value);
+  DWORD type = 0;
+  const LONG status =
+      ::RegQueryValueExW(key, nullptr, nullptr, &type, reinterpret_cast<BYTE*>(value),
+                         &bytes);
+  ::RegCloseKey(key);
+  if (status != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+    return std::wstring();
+  }
+  return std::wstring(value);
+}
+
+void PrintComRegistration() {
+  const std::wstring machine = ReadInprocServer32(HKEY_LOCAL_MACHINE);
+  const std::wstring user = ReadInprocServer32(HKEY_CURRENT_USER);
+  std::wprintf(L"com_registration HKLM     %ls %ls\n", machine.empty() ? L"absent" : L"present",
+               machine.c_str());
+  std::wprintf(L"com_registration HKCU     %ls %ls\n", user.empty() ? L"absent" : L"present",
+               user.c_str());
+}
 
 ITfInputProcessorProfiles* Profiles() {
   ITfInputProcessorProfiles* profiles = nullptr;
@@ -38,12 +84,8 @@ ITfInputProcessorProfiles* Profiles() {
                                         CLSCTX_INPROC_SERVER,
                                         IID_ITfInputProcessorProfiles,
                                         reinterpret_cast<void**>(&profiles));
-  if (FAILED(hr)) {
-    std::fwprintf(stderr, L"CoCreateInstance(CLSID_TF_InputProcessorProfiles) failed 0x%08lX\n",
-                  static_cast<unsigned long>(hr));
-    return nullptr;
-  }
-  return profiles;
+  PrintHr(L"CoCreateInstance(profiles)", hr);
+  return SUCCEEDED(hr) ? profiles : nullptr;
 }
 
 ITfInputProcessorProfileMgr* ProfileManager() {
@@ -52,12 +94,57 @@ ITfInputProcessorProfileMgr* ProfileManager() {
                                         CLSCTX_INPROC_SERVER,
                                         IID_ITfInputProcessorProfileMgr,
                                         reinterpret_cast<void**>(&manager));
-  if (FAILED(hr)) {
-    std::fwprintf(stderr, L"CoCreateInstance(ITfInputProcessorProfileMgr) failed 0x%08lX\n",
-                  static_cast<unsigned long>(hr));
-    return nullptr;
+  PrintHr(L"CoCreateInstance(profile mgr)", hr);
+  return SUCCEEDED(hr) ? manager : nullptr;
+}
+
+struct ProfileState {
+  bool present = false;
+  bool active_keyboard = false;
+  bool enabled = false;
+  HRESULT get_profile_hr = E_FAIL;
+  HRESULT get_active_hr = E_FAIL;
+  TF_INPUTPROCESSORPROFILE profile{};
+};
+
+ProfileState ReadState(ITfInputProcessorProfileMgr* manager) {
+  ProfileState state;
+  state.get_profile_hr = manager->GetProfile(
+      TF_PROFILETYPE_INPUTPROCESSOR, kEnglishUs, Clsid(), ProfileGuid(), nullptr,
+      &state.profile);
+  state.present = SUCCEEDED(state.get_profile_hr);
+  if (state.present) {
+    state.enabled = (state.profile.dwFlags & TF_IPP_FLAG_ENABLED) != 0;
   }
-  return manager;
+  TF_INPUTPROCESSORPROFILE active{};
+  state.get_active_hr = manager->GetActiveProfile(GUID_TFCAT_TIP_KEYBOARD, &active);
+  if (SUCCEEDED(state.get_active_hr) &&
+      (active.dwFlags & TF_IPP_FLAG_ACTIVE) != 0 && SameGuid(active.clsid, Clsid()) &&
+      SameGuid(active.guidProfile, ProfileGuid())) {
+    state.active_keyboard = true;
+  }
+  return state;
+}
+
+void PrintState(const ProfileState& state) {
+  std::wprintf(L"profile_present          %ls\n", state.present ? L"yes" : L"no");
+  std::wprintf(L"profile_enabled          %ls\n", state.enabled ? L"yes" : L"no");
+  std::wprintf(L"profile_active_keyboard  %ls\n",
+               state.active_keyboard ? L"yes" : L"no");
+  PrintHr(L"GetProfile", state.get_profile_hr);
+  PrintHr(L"GetActiveProfile", state.get_active_hr);
+}
+
+int Status() {
+  PrintComRegistration();
+  ITfInputProcessorProfileMgr* manager = ProfileManager();
+  if (manager == nullptr) {
+    return 1;
+  }
+  const ProfileState state = ReadState(manager);
+  PrintState(state);
+  manager->Release();
+  return 0;
 }
 
 int Register() {
@@ -65,18 +152,28 @@ int Register() {
   if (profiles == nullptr) {
     return 1;
   }
-  HRESULT hr = profiles->Register(kTextServiceClsid);
-  std::wprintf(L"Register CLSID: 0x%08lX\n", static_cast<unsigned long>(hr));
+  HRESULT hr = profiles->Register(Clsid());
+  PrintHr(L"Register CLSID", hr);
   if (SUCCEEDED(hr)) {
-    hr = profiles->AddLanguageProfile(kTextServiceClsid, kEnglishUs, kProfileGuid,
-                                      kDescription,
-                                      static_cast<ULONG>(std::wcslen(kDescription)),
-                                      nullptr, 0, 0);
-    std::wprintf(L"AddLanguageProfile en-US: 0x%08lX\n",
-                 static_cast<unsigned long>(hr));
+    hr = profiles->AddLanguageProfile(
+        Clsid(), kEnglishUs, ProfileGuid(), kDescription,
+        static_cast<ULONG>(std::wcslen(kDescription)), nullptr, 0, 0);
+    PrintHr(L"AddLanguageProfile en-US", hr);
   }
   profiles->Release();
-  return SUCCEEDED(hr) ? 0 : 2;
+
+  ITfInputProcessorProfileMgr* manager = ProfileManager();
+  if (manager == nullptr) {
+    return 1;
+  }
+  const ProfileState state = ReadState(manager);
+  PrintState(state);
+  manager->Release();
+  if (!state.present) {
+    std::fwprintf(stderr, L"verification failed: the profile is still absent\n");
+    return 3;
+  }
+  return 0;
 }
 
 int Unregister() {
@@ -84,13 +181,25 @@ int Unregister() {
   if (profiles == nullptr) {
     return 1;
   }
-  HRESULT hr = profiles->RemoveLanguageProfile(kTextServiceClsid, kEnglishUs,
-                                               kProfileGuid);
-  std::wprintf(L"RemoveLanguageProfile: 0x%08lX\n", static_cast<unsigned long>(hr));
-  hr = profiles->Unregister(kTextServiceClsid);
-  std::wprintf(L"Unregister CLSID: 0x%08lX\n", static_cast<unsigned long>(hr));
+  HRESULT removed =
+      profiles->RemoveLanguageProfile(Clsid(), kEnglishUs, ProfileGuid());
+  PrintHr(L"RemoveLanguageProfile", removed);
+  const HRESULT unregistered = profiles->Unregister(Clsid());
+  PrintHr(L"Unregister CLSID", unregistered);
   profiles->Release();
-  return SUCCEEDED(hr) ? 0 : 2;
+
+  ITfInputProcessorProfileMgr* manager = ProfileManager();
+  if (manager == nullptr) {
+    return 1;
+  }
+  const ProfileState state = ReadState(manager);
+  PrintState(state);
+  manager->Release();
+  if (state.present) {
+    std::fwprintf(stderr, L"verification failed: the profile is still present\n");
+    return 3;
+  }
+  return 0;
 }
 
 int SetActive(bool active) {
@@ -100,30 +209,41 @@ int SetActive(bool active) {
   }
   const DWORD flags =
       TF_IPPMF_FORSESSION | (active ? TF_IPPMF_ENABLEPROFILE : TF_IPPMF_DISABLEPROFILE);
-  const HRESULT hr =
+  const HRESULT changed =
       active ? manager->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR, kEnglishUs,
-                                        kTextServiceClsid, kProfileGuid, nullptr, flags)
+                                        Clsid(), ProfileGuid(), nullptr, flags)
              : manager->DeactivateProfile(TF_PROFILETYPE_INPUTPROCESSOR, kEnglishUs,
-                                          kTextServiceClsid, kProfileGuid, nullptr,
-                                          flags);
-  std::wprintf(L"%s profile: 0x%08lX\n", active ? L"Activate" : L"Deactivate",
-               static_cast<unsigned long>(hr));
+                                          Clsid(), ProfileGuid(), nullptr, flags);
+  PrintHr(active ? L"ActivateProfile" : L"DeactivateProfile", changed);
+  const ProfileState state = ReadState(manager);
+  PrintState(state);
   manager->Release();
-  return SUCCEEDED(hr) ? 0 : 2;
+  if (active && !state.active_keyboard) {
+    std::fwprintf(stderr,
+                  L"verification failed: the profile is not the active keyboard TIP\n");
+    return 3;
+  }
+  if (!active && state.active_keyboard) {
+    std::fwprintf(stderr, L"verification failed: the profile is still active\n");
+    return 3;
+  }
+  return 0;
 }
 
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+  std::wprintf(L"product_clsid   %ls\n", kProductClsidText);
+  std::wprintf(L"product_profile %ls\n", kProductProfileText);
   if (argc < 2) {
     std::fwprintf(stderr,
-                  L"usage: tip_profile_helper.exe register|unregister|activate|deactivate\n");
+                  L"usage: epocanva_tip_profile_helper "
+                  L"register|unregister|activate|deactivate|status\n");
     return 2;
   }
   const HRESULT com = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   if (FAILED(com)) {
-    std::fwprintf(stderr, L"CoInitializeEx failed 0x%08lX\n",
-                  static_cast<unsigned long>(com));
+    PrintHr(L"CoInitializeEx", com);
     return 1;
   }
   int result = 2;
@@ -136,6 +256,8 @@ int wmain(int argc, wchar_t** argv) {
     result = SetActive(true);
   } else if (command == L"deactivate") {
     result = SetActive(false);
+  } else if (command == L"status") {
+    result = Status();
   } else {
     std::fwprintf(stderr, L"unknown command: %ls\n", argv[1]);
   }

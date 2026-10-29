@@ -372,6 +372,24 @@ target_include_directories(epocanva_key_admission_tests PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../tsf_context"
   "${CMAKE_CURRENT_LIST_DIR}/../tsf_edit")
 
+# W3-A: the isolated registration helper is opt-in and is never part of the product
+# package. It exists so an authorized isolation machine can register/remove the formal TSF
+# profile and verify each step; the default product build does not contain it.
+option(EPOCANVA_BUILD_ISOLATION_TOOLS
+       "Build the isolation registration helper (not staged or installed)" OFF)
+if(EPOCANVA_BUILD_ISOLATION_TOOLS)
+  add_executable(epocanva_tip_profile_helper
+    "${CMAKE_CURRENT_LIST_DIR}/../../../tools/product/isolation/tip_profile_helper.cc"
+    "${_tsf_source_dir}/identifiers.cc")
+  target_compile_definitions(epocanva_tip_profile_helper PRIVATE ${_product_definitions})
+  target_compile_options(epocanva_tip_profile_helper PRIVATE ${_product_options})
+  target_include_directories(epocanva_tip_profile_helper PRIVATE "${_tsf_source_dir}")
+  target_link_libraries(epocanva_tip_profile_helper PRIVATE
+    ole32 oleaut32 uuid advapi32)
+  set_target_properties(epocanva_tip_profile_helper PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/isolation-tools")
+endif()
+
 set_target_properties(epocanva_product_unit_tests epocanva_product_engine_tests
                       epocanva_ui_tests epocanva_candidate_ui_tests
                       epocanva_sta_waker_tests

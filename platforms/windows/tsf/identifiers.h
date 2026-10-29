@@ -25,6 +25,13 @@ namespace tsf {
 // {B440F702-63E4-4D47-BCC4-074899ABA836}
 extern const GUID kTextServiceClsid;
 
+// Language profile GUID of the EpoCanva English (en-US) keyboard profile.
+// {7D3E2A94-5C61-4F0B-9E3A-1B8D6C4F2A71}
+// Frozen for the same reason as the CLSID: registration, removal and support must recognise
+// the same profile across builds. The DLL itself does not read it; the isolation helper and
+// the future installer use this one identity.
+extern const GUID kEnglishLanguageProfileGuid;
+
 }  // namespace tsf
 }  // namespace epocanva
 
