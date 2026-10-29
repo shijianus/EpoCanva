@@ -1,7 +1,10 @@
-# 候选窗口与 TSF UIElement 契约（W2-B）
+# 候选窗口与 TSF UIElement 契约（W2-B，W2-C 改选择语义）
 
-本文件只写 **W2-B 已实现**的候选交互。它不是任务书，也不替代 `AGENTS.md` 的永久规则。
+本文件只写 **已实现**的候选交互。它不是任务书，也不替代 `AGENTS.md` 的永久规则。
 TSF 接口以磁盘上的 `msctf.h`（Windows SDK 10.0.26100.0）为准。
+
+W2-C 只改一件事：候选选择不再是引擎命令，而是一次经过范围校验的**原文替换**；
+原文在建议期间始终属于宿主。其余 UIElement 生命周期、分类、页大小与窗口规则未变。
 
 ## 1. 数据来源与快照版本
 
@@ -33,19 +36,24 @@ UI 只发起请求，不调用引擎、不 `SetText`。请求携带：
 - **快照自身的** `context_id` 与 `generation`
 - 页内索引 `page_index`
 
-`ContextCoordinator::SubmitCandidateSelection` 只有在以下全部成立时才调用引擎：
-快照有效、版本一致、快照 identity 与请求一致、当前绑定 identity 与请求一致、组合仍活动、
-索引在该页内。否则返回 `kCandidateStale`，计入 `candidate_stale_refusals`，不派发任何
-引擎命令。因此焦点变化、外部编辑、raw 模式、绑定重建后的旧点击不会提交到新文档。
+W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
+（`ContextCoordinator::SubmitSuggestionReplacement`）。只有以下全部成立才继续：
+快照有效、版本一致、快照 identity 与请求一致、当前绑定 identity 与请求一致、
+索引在该页内。否则返回 `kCandidateStale`，计入 `candidate_stale_refusals`，不提交任何编辑。
+
+真正的写入由 `CompositionWriter::ReplaceToken` 完成：它读取折叠 caret，取 caret 前
+`expected` 长度的范围，逐单元读回并比较；文本不同、范围越界、选择非折叠、前一个字符
+仍是 token 字符、替换文本为空都会**拒绝且不调用 SetText**。因此焦点变化、外部编辑、
+绑定重建后的旧点击不会删除或覆盖用户已经输入的原文；最坏结果是增强被拒绝，原文保留。
 
 ## 4. 键盘与鼠标
 
 | 输入 | 行为 |
 | --- | --- |
 | ↑ / ↓（无修饰） | 菜单打开时被吃掉，循环移动显式选择；初始从“无选择”进入原文/末项 |
-| Enter | 有显式选择 → 走第 3 节的校验选择；无显式选择 → 保持原引擎 Enter 契约（提交原文/引擎高亮项） |
-| Space | 不拦截，始终按原文提交契约处理（空格处理器提交原文 + U+0020） |
-| Escape | 关闭菜单/清空选择，并走引擎 Escape 取消组合 |
+| Enter | 有显式选择 → 走第 3 节的显式替换；无显式选择 → **直通宿主**（宿主插入换行）；不自动接受建议 |
+| Space | 不拦截，宿主插入自己的空格；菜单关闭，选择不生效 |
+| Escape | 关闭菜单/清空选择；若引擎仍在组合，向**引擎流**发送取消（不写文档） |
 | 鼠标点击 | 只回调“接受该页内索引”，与 Enter 走同一校验路径；窗口 `WS_EX_NOACTIVATE`，点击不抢焦点 |
 
 不增加数字候选快捷键，不自动插入空格，不自动接受建议，不改变技术 token 的原文提交。
@@ -70,6 +78,10 @@ UI 只发起请求，不调用引擎、不 `SetText`。请求携带：
 
 - 位置只来自真实的 TSF 文本范围：`ITfContext::GetSelection` → `ITfRangeACP::SetExtent`
   （UTF-16 code unit ACP）→ `ITfContextView::GetTextExt`，用同步只读编辑会话读取。
+- **W2-C 限制**：原文归宿主后文档里没有产品组合，`UpdateCandidateUi` 只在
+  `coordinator.composition_active` 时读取组合矩形；建议模式下该值为 false，因此受控窗口
+  没有 TSF 文本矩形可锚定。受控测试全部走宿主绘制（`pbShow=FALSE`）路径；真实
+  `ITfUIElementMgr` 下自绘窗口的位置仍属 C 层未验证项，不用鼠标位置或屏幕角落冒充。
 - 无布局、零矩形、不可见、无焦点、读取失败 → 隐藏窗口；**绝不**用鼠标位置或屏幕角落冒充
   光标位置。
 - 每个引擎页最多显示 8 行（schema `page_size: 8`）。产品当前的最大菜单是
@@ -104,3 +116,14 @@ UI 只发起请求，不调用引擎、不 `SetText`。请求携带：
 - **仍未验证（C 层）**：正式注册 TIP 的真实 `ITfUIElementMgr`、真实前台应用中的窗口
   显示/点击不抢焦点、真实 `GetTextExt`/`ReadCompositionRect`、150/200% DPI 与多显示器。
   受控直接 sink 变体不创建 TSF UI 管理器，不能用它替代这些结论。
+
+## 9. W2-C 替换路径的编辑层验证
+
+`windows.tsf_edit.replace_token` 用真实的 RequestEditSession/锁回调覆盖：
+
+- 成功替换只改 caret 前的 token（`abc hel` → `abc hello`），不启动产品组合；
+- 同一范围但文本不同（`abc hex`）→ 拒绝，`SetText` 调用数不变；
+- 更长 token 的后缀（`abchel`，expected `hel`）→ 拒绝，长 token 不变；
+- 空替换 → 计划构建阶段拒绝（`kInvalidSelection`），永不删除原文；
+- 非折叠选择 → 拒绝（`kSelectionNotCollapsed`）；
+- TSF 为范围写入开/关的组合计数在结束时为 1/1（无残留组合）。

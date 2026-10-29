@@ -1,7 +1,11 @@
-# W2-A/W2-B 键盘输入与 STA 唤醒契约
+# W2 键盘输入与 STA 唤醒契约（W2-C：原文归宿主）
 
-本文件只写 **已实现的产品契约**（W2-A，W2-B 增补）。它不是任务书，也不替代 `AGENTS.md` 的永久规则。
+本文件只写 **已实现的产品契约**。它不是任务书，也不替代 `AGENTS.md` 的永久规则。
 涉及 librime/TSF 行为的断言以磁盘源码为准（librime `33e7814`，Windows SDK 10.0.26100.0）。
+
+W2-C 的根规则只有一条：**普通原文永远由宿主承载；引擎只产生可取消的增强建议。**
+产品不再为正文维护队列、容量、raw 捕获或重放路径，因此内部队列、容量、引擎延迟和恢复
+过程都不再可能成为丢字原因。历史 W2-A-R/W2-B 的 raw 路径已被删除；其数值归属见 §6。
 
 ## 1. 生命周期
 
@@ -14,8 +18,8 @@
 4. 提交新状态、释放旧控制器/旧线程管理器。
 
 引擎启动完成后，后台线程唤醒 STA；STA 在自己的 `PumpNow` 中采纳租约、构造
-`ContextObserver`（**StrictTsf**）与协调器。启动期间的每个键保持宿主默认效果（原文路径），
-不排队、不组合、不写文档；`HostTokenOwnership` 防止启动完成时接管半个 token。
+`ContextObserver`（**StrictTsf**，`TextOwnershipPolicy::kHostOwned`）与协调器。
+启动期间的每个键保持宿主默认效果（原文路径），不排队、不组合、不写文档。
 
 任一步失败都不修改当前活动状态。`Deactivate` 先 `UnadviseKeyEventSink`，再停止控制器；
 它**不 join** 仍在进行的引擎启动，也不在 STA 上释放可能阻塞的租约（租约释放被移到
@@ -30,72 +34,69 @@
 直接 sink 测试变体（`epocanva_tsf_direct_sink_test.dll`）额外导出受控测试符号
 （`EpoCanvaTest*`），只用于 `tests/windows/tsf_product`，不进入产品 DLL，也不进入暂存包。
 
-## 2. 按键语义
+## 2. 按键语义（W2-C）
 
 | 回调 | 行为 |
 | --- | --- |
-| `OnTestKeyDown` | 预测。抓取线程键盘状态、`ToUnicodeEx`（不改状态）、`ContextCoordinator::Evaluate`、队列容量检查。**不调用引擎、不启动许可查询、不请求编辑。** |
-| `OnKeyDown` | 只有真正接受（入队或提交成功）才置 `pfEaten=TRUE`。快捷键、非引擎候选、无可靠上下文一律 `FALSE`。 |
+| `OnTestKeyDown` | 预测。规则与 `OnKeyDown` 完全一致；**只有显式菜单交互**可能返回 TRUE。纯文本、Space、Enter（无显式选择）、BackSpace、Escape（无菜单）、快捷键恒 FALSE。不调用引擎、不启动许可查询、不请求编辑。 |
+| `OnKeyDown` | 同上。返回 TRUE 的键从不产生原始文本：方向键移动菜单选择，Enter 接受显式选择，Escape 关闭菜单。其它一律 `pfEaten=FALSE`，宿主按自己的默认路径插入/删除/换行。 |
 | `OnTestKeyUp` / `OnKeyUp` | 恒 `FALSE`；不翻译、不派发。 |
 | `OnPreservedKey` | 恒 `FALSE`；本阶段不注册保留键。 |
 
-`DecideKey` 的规则是唯一一套字符规则（`platforms/windows/input/key_decision.cc`），
-控制器不复制第二套。Ctrl/Alt/Win（含 AltGr 的 Ctrl+Alt）走宿主；数字与技术标记按文本
-候选进入引擎，以便 token 层整体保护 URL/邮箱/路径/标识符。
+`DecideKey`（`platforms/windows/input/key_decision.cc`）仍是唯一一套字符规则；控制器用它
+区分“可进入引擎建议流的 token 字符”和“边界/快捷键/隐私拒绝”，但**不再用它决定是否吃键**。
+Ctrl/Alt/Win（含 AltGr 的 Ctrl+Alt）直通；数字与技术标记
+（`@ . _ : / \ ? & = # % + -`）属于 token 字符，不是边界。
 
-## 3. 有界准入与每键状态
+隐私：`Denied` / `Unknown` / 输入被禁用时，控制器清空建议流、丢弃 token 长度，
+**不向引擎发送任何文本**，也不读取字段内容。字段内容本身从未由产品持有。
 
-`KeyAdmissionQueue`（`platforms/windows/tsf_product/key_admission.h`）容量 64；无组合时最多
-使用 48，剩余 16 个槽位保留给已经进入组合的输入。
+## 3. 原文归宿主、建议可丢弃
 
-每个键的状态：`kNotAccepted`（宿主保留）、`kAccepted`（已吃下、排队或在途）、
-`kEngineCompleted`（引擎已消费）、`kEditCompleted`（编辑或“文档已一致”已确认）、
-`kFailed`（带 `KeyFailure` 的明确失败）。同一时刻最多一个在途项；队列 FIFO 顺序不被越过。
+原文的承载者是宿主文档。产品在普通输入期间：
 
-Focus/generation 变化时：排队项全部记为 `kFocusChanged` 失败；在途项立即标失败但保留到
-协调器回到 `Idle` 才释放，下一键不可能越过它。永远不会把旧 generation 的键投递到新文档。
+- 不排队、不缓存、不捕获、不写盘、不重放任何用户文本；
+- 不启动文档编辑会话（因此没有文档写授权延迟影响原文的问题）；
+- 不把 `retained + dropped == typed` 当作正确性条件，因为不存在产品侧的 retained/dropped。
 
-### 压力降级（W2-A-R）
+引擎建议是唯一的异步工作：
 
-只增大容量不是解决。控制器在**高水位**（`KeyAdmissionQueue::kHighWater = 24`）切换策略：
+- 每个可进入引擎的 token 键被复制成 `SuggestionKey`（事件 + 翻译文本 + decision +
+  context/generation），进入**有界 64 项**的 `suggestion_queue_`；
+- 队列满、引擎忙、绑定未就绪、许可 Unknown/Denied、流已过期时，建议被**明确丢弃**
+  （`suggestion_dropped`），菜单关闭；原文不受影响；
+- 同一时刻最多一个建议键在途；顺序提交；不因为建议延迟而阻挡下一个宿主键；
+- `ContextCoordinator::SetSuggestionMode(true)` 保证引擎观察**只**更新候选快照，
+  绝不产生文档编辑（`ResolveEngineResult` 在建议模式下直接 `kNoEdit` 结束）；
+- token 结束时（Space/Return/标点/编辑键/导航），控制器清空建议队列，并在没有在途工作时
+  向引擎发送一个**合成的 Escape**用于取消引擎内部组合。该 Escape 只存在于建议流，
+  不进入文档；不能提交时被丢弃，不会重试到超时。
 
-1. 队列中的**未提交**尾部按 FIFO 撤出（`WithdrawQueued`），逐键折算成一段 UTF-16 原样文本；
-   在途的单个引擎键保持不动。被撤出的键记为 `deferred_raw`，**不是失败**。
-2. 降级期间的文本键、Space、Enter、Escape、BackSpace 的语义是明确的：
-   - Space 追加 U+0020 并结束该段（随后按原文提交）；
-   - Enter 结束该段并提交已捕获后缀，不插入换行（与引擎路径提交组合一致）；
-   - Escape **取消尚未提交的后缀**：清空捕获并记为 `raw_cancelled`，不把它写成迟到文本；
-     已经交给协调器的块不会被撤回，它会按提交时的一次写入生效。取消后该段在块解决时结束；
-   - BackSpace 只回退尚未提交后缀中的**一个 code point**（代理项对整体回退）；后缀为空时
-     记为被忽略的编辑并被吃掉。它**从不**删除已显示组合、已提交文本或宿主既有文本。
-   快捷键与隐私拒绝永远不进入捕获。
-3. 协调器空闲时用新的 `SubmitRawCommit` 把这段文本一次提交到文档：若写者仍拥有组合，
-   plan 用“当前显示文本 + 捕获后缀”替换并结束组合；否则在跟踪的 caret 处插入。
-   **这次提交不调用引擎**，因此没有补全/拼写建议——原文优先。
-4. 提交成功后引擎客户端状态已过期，控制器使绑定退役并重建；重建完成后引擎路径恢复。
-   降级不会把后续字符散给宿主，也不会在超时后自动重放。
-5. 捕获按块进行，每块上限 `kRawTextRun::kDefaultCapacityUtf16 = 1024`。块满时先把整块
-   交给协调器，再让下一个键开启新块；追加是原子的，**不会截断代理项对**。只有当当前块
-   无法交出（前一引擎键或块仍未解决）而新键又放不下时，后续键才继续被吃下并记入
-   `raw_dropped_keys` / `failed_raw_capacity`（`last_failure=raw-capacity`），
-   **不声称该键已应用**；已保留的块按 FIFO 应用，不重放、不重复。提交失败同样走
-   `raw-commit-failed` 计数并以明确失败结束该段。
-6. 隐私/许可在降级途中变成 Denied/Unknown 时，已捕获文本无法再写入：整段记为
-   `kPermissionRefused` 失败，宿主获得之后的按键。这是不可恢复故障的明确报告，不是静默丢弃。
+跨应用/外部编辑：观察者把宿主的插入/删除（`TextOwnershipPolicy::kHostOwned`）视为
+**预期的原文流**，只更新 caret 镜像，不改变 identity/generation，因此绑定和建议流可以继续。
+一个没有被任何直通键解释的编辑（粘贴、自动更正、另一客户端）会结束当前建议流
+（`host_edits_unexpected`），但原文仍然属于宿主，产品不读取、不恢复、不覆盖。
 
-**首 token 规则**（`HostTokenOwnership`，`platforms/windows/tsf_product/key_admission.h`）：
-一旦某个 token 的第一个字符交给宿主（许可 Unknown/Denied、引擎未就绪、队列满且无待应用
-输入等），该 token 余下字符一律直通，直到空格、非 token 标点、编辑键或焦点真正移走。
-`@ . _ : / \ ? & = # % + -` 与字母数字一样是 token 字符，不是边界；快捷键不结束 token。
-许可在 token 中途变为 Allowed 也不会让引擎接管该 token。Unknown/Denied 从不向引擎发送输入。
+焦点/文档切换：建议队列被丢弃，在途结果丢弃，候选菜单关闭；**没有**“已接受原文”需要
+取消或回滚的账目，因为原文从一开始就在自己的文档里。旧 generation 的建议不会写入新文档：
+replacement 提交仍校验快照版本、快照 identity、当前 identity 与目标。
 
-## 3.1 候选选择
+## 3.1 候选选择（显式替换）
 
-候选菜单的读取与选择路径见 `docs/windows/candidate-ui-contract.md`。输入侧只做三件事：
-方向键（无修饰）在菜单打开时由控制器吃掉并移动显式选择；Enter 在有显式选择时走
-`SubmitCandidateSelection`（快照版本 + 快照 context/generation + 页内索引），没有显式选择时
-保持原引擎 Enter 契约；Escape 关闭菜单并走引擎 Escape 取消组合。Space **不**被候选层拦截，
-始终按原文提交契约处理。初始没有显式选择，建议不会被自动接受。
+候选菜单的读取与选择路径见 `docs/windows/candidate-ui-contract.md`。输入侧：
+
+- 菜单只在以下全部成立时可选：快照有效且版本一致、没有建议在途/排队、引擎 token 的
+  UTF-16 长度等于宿主当前 token 长度、版本未被 Escape 取消；
+- Enter（有显式选择）/鼠标 Finalize 走 `SubmitSuggestionReplacement`：
+  无引擎命令，校验快照版本 + 快照 context/generation + 当前绑定 identity + 页内索引；
+- 真正的写入由 `CompositionWriter::ReplaceToken` 在授予的编辑会话里完成：
+  读取折叠 caret，取 caret 前 `expected` 长度的范围，**逐单元读回并比较**；
+  不相等、范围越界、选择非折叠、前一个字符仍是 token 字符、替换文本为空 → **拒绝**，
+  并且 **不调用 SetText**；原文不会被删除或覆盖；
+- 成功替换后，引擎流被重置，下一个 token 重新开始；替换本身是唯一的文档写入路径。
+
+受控测试观测：`ITfRange::SetText` 在该环境下会让 TSF 为这次范围写入开/关一个组合
+（store 计数 start/end 各 1，结束时无活动组合）。这只由编辑层验证，不是产品持有的组合。
 
 ## 4. 固定 STA 唤醒
 
@@ -122,59 +123,79 @@ Focus/generation 变化时：排队项全部记为 `kFocusChanged` 失败；在�
 - 同一进程：`EngineHostBroker` 成功后清掉配置中的一次性 `deployment`，后续租约不重复部署；
 - 跨进程：命名互斥量序列化启动/部署；`engine.lock` 的字节范围锁区分
   **独占部署**（先删除派生的 `engine/build` 强制重编译）与 **共享运行**（每个活动引擎持有）；
-- W2-A-R：`ActivateInternal` 在 `Complete` 之后调用 `EngineStartTransaction::TakeLeaseLock()`，
-  共享锁句柄由激活状态持有到 `Deactivate`（或异常析构）；没有这一步时共享锁随事务结束而释放，
-  另一个进程的部署会取得独占锁并删除仍在使用的编译产物。`Deactivate` 先释放引擎租约
+- `ActivateInternal` 在 `Complete` 之后调用 `EngineStartTransaction::TakeLeaseLock()`，
+  共享锁句柄由激活状态持有到 `Deactivate`（或异常析构）；`Deactivate` 先释放引擎租约
   （停止/加入执行器）再关闭锁句柄；
 - 有其它进程运行时，独占锁失败，本次部署明确**降级为共享执行**：新宿主仍可激活/输入旧配置，
   设置 marker 保留，推迟到下一个真正的引擎启动；不会无限等待，也不会把共享锁升级为独占；
 - 运行中的引擎不会被重新部署；设置修改在下一次引擎启动/宿主重启生效，界面文案已按此声明。
 
-## 6. W2-B-R 增补：同会话容量恢复、降级控制键与事件归属（已实现）
+## 6. 历史归属：W2-B-R 的 1202 / 1024 / 177（已由 W2-C 取代）
 
-### 6.1 同会话恢复回归
+以下是对旧 raw 路径（HEAD `8474e08` 的 `5a5edd2` 实现）的**更正后**归属。
+旧报告 §5 写的“已应用 1024、明确丢弃 177、retained + dropped == typed”并不完整：
+它把 1 个已应用的引擎键排除在“已应用”之外，并把内部容量丢失写成了“明确丢弃”。
 
-`product.integration.sink_capacity_continue` 在**同一激活、同一上下文**中完成：文档锁
-（真实异步锁，而非“不泵消息”）被持有 → 首个引擎键在途 → 发送 `ab` + 1200 个 `x` →
-跨越高水位并填满 1024 单元原文块 → 越界键被吃掉并记为 `raw_dropped_keys` → 释放锁并
-应用整块 → **立刻**继续输入 `after`（无人工稳定窗口）→ Space 结束并提交 → 引擎路径
-在同一会话内恢复 → 输入 `hel`、方向键选择补全、Enter 提交 → 停用并清理。
+固定输入 `product.integration.sink_capacity_continue`：`ab` + 1200 × `x`，
+1202 个 key-down 事件，每个键恰好 1 个 UTF-16 code unit（ASCII，所以两种单位数值相同，
+但含义不同；不得直接相加）。真实异步文档锁被持有，首个引擎键在途。
 
-事件归属（固定输入，1202 个 UTF-16 单元）：
+| 归属 | 实际值 | 依据 |
+| --- | --- | --- |
+| 输入事件（key-down） | 1202 | `SendTextAdaptive` 每单元一个键 |
+| 文本 UTF-16 单元 | 1202 | 全部 ASCII，1 键 = 1 单元 |
+| 已接受（`pfEaten=TRUE`） | 1202 / 1202 | 旧 `HandleRawKey` 对可捕获文本无条件返回 `true` |
+| 已由宿主默认处理 | **0** | 所有键都被产品吃掉，宿主没有机会插入 |
+| 已应用 | **1025** = 1（首个引擎键 `a`）+ 1024（raw 块） | `raw_applied_units == 1024`；文档长度为 1025 |
+| 仍待应用（结算后） | 0 | 队列/在途归零；块只写一次 |
+| 用户明确取消 | 0 | 没有 Escape/取消 |
+| 内部丢失 | **177** | 键 1026–1202（最后 177 个 `x`） |
 
-| 归属 | 观测 |
-| --- | --- |
-| 已接受 | 全部 1202 个键 `pfEaten=TRUE`；`eaten == key_downs` |
-| 已应用 | `raw_applied_units == 1024`；文档 = 键入前缀（含首引擎键），长度 1024/1025 |
-| 明确丢弃 | `raw_dropped_keys == 177`；`retained + dropped == typed` |
-| 取消 | 0 |
-| 待恢复 | 队列/在途均为 0；之后引擎菜单与选择路径恢复 |
-| 重复/迟到 | 300 ms 后文档不变；容量块只应用一次 |
+177 的触发链（逐行可核对）：
 
-该用例结束断言模块已卸载；同会话恢复不再依赖重新激活。
+1. 第 1 个键 `a` 被提交给引擎，其编辑会话因文档锁未授予而在途；
+2. 第 25 个键触发高水位（`QueueDepth() >= kHighWater = 24`），
+   `EnterRawMode()` 撤出队列尾部（键 2–24，23 单元）；
+3. 后续文本键进入 `CaptureRawText`，填满 `RawTextRun::kDefaultCapacityUtf16 = 1024`
+   （键 2–1025，恰好 1024 单元）；
+4. 第 1026 个键的 `Append` 返回 `kNeedsFlush`；`FlushRaw()` 因
+   `HasPendingEngineInput()`（第 1 个键仍未解决）立即返回；重试 `Append` 仍为
+   `kNeedsFlush`，于是 `RecordRawDropped(1, 1)`、`raw_unrecoverable_++`；
+5. `HandleRawKey` 忽略 `CaptureRawText` 的 false，仍然 `return true`，所以这些键
+   `pfEaten=TRUE` 但文本没有进入任何文档；键 1026–1202 共 177 个；
+6. 锁释放后，第 1 个键的编辑与 1024 单元 raw 块依次应用，文档为 1025 单元。
 
-### 6.2 降级期控制键端到端
+因此 177 不是焦点变化、退役或用户取消，而是**容量不足 + 在途键阻塞 flush 的内部丢失**，
+且发生在已经对宿主承诺 `pfEaten=TRUE` 之后。旧用例的参考期望由产品自身状态构造
+（`retained = burst.substr(0, retained.size())`，再用 `retained.size() + dropped_keys ==
+typed_units` 判通过），所以把丢失当成了合法期望；这是测试 oracle 的缺陷，不是输入保真。
 
-`product.integration.sink_degraded_keys` 通过真实控制器、协调器与 TSF 编辑会话：
+W2-C 删除整条 raw 路径后，同样的输入得到：1202 个键全部 `pfEaten=FALSE`、
+宿主插入 1202 单元、产品应用 0 单元、内部丢失 0、仍待应用 0，最终文档等于完整参考。
+`docs/reports/W2-C-input-fidelity.md` 记录实测。
 
-- **BackSpace**：真实 backlog 下的未提交后缀回退一个 code point；文档与预期完全相等，
-  不是“忽略”。
-- **Enter**：结束降级段并提交后缀，不插入换行；此前已提交块保留。
-- **Escape**：只取消未提交后缀；已交给协调器的首块仍按提交时一次生效；取消量被计数，
-  300 ms 后无迟到写入。
-- **空后缀 BackSpace**：被吃掉并记为 `raw_ignored_edits`；不删除已提交/在途文本。
-- **焦点切换**：未提交 run 整体记为明确失败（`raw_failed_units`），既不写入旧文档也
-  不重放到新文档；新上下文只接受自己的 token。
-- **停用竞争**：`sink_unload_contract` 在队列中有编辑会话时停用；陈旧会话不写文档，TSF
-  释放回调后模块才可卸载（见 `tsf-engine-lifetime-contract.md` §11）。
+## 7. 计数单位与验收口径（W2-C）
 
-### 6.3 测试就绪门
+- 长度与偏移一律标注 **UTF-16 code unit**；键事件数与文本单元数是两个单位，不能相加。
+- 独立参考模型只由用户的动作生成（宿主插入、宿主 Backspace、显式候选替换），
+  从不读取产品的 dropped/failed 状态来修剪期望。
+- A 类（无取消、无文档切换）：最终文档必须等于完整参考；`internal_text_losses == 0`；
+  队列/在途为 0。
+- B 类（BackSpace/Escape/Enter）：按本文件 §2/§3.1 的公开契约计算参考；
+  内部溢出不得归入这些操作。
+- C 类（焦点/文档切换）：逐文档验证；旧候选不得写入新文档；原文不因 generation 改变
+  被记作用户取消（W2-C 根本没有原文取消账目）。
+- `pfEaten=TRUE` 的文本必须有实际归属：控制器只在菜单交互上返回 TRUE，测试的逐键账本
+  （`InputRoute::product_suppressed_units`）必须为 0。
 
-`OnTestKeyDown` 在降级运行中也会为“将被原文捕获”的键返回 TRUE；因此 `ReadyToType`
-不能作为“引擎路径已恢复”的判据。测试新增 `WaitForEnginePath`：要求 raw 运行关闭、
-`raw_unapplied_units == 0`、队列/在途为 0、协调器空闲且引擎就绪，再做一次预测。
+### 7.1 已知限制（诚实报告）
 
-### 6.4 未改变的正常模式语义
-
-Enter/Escape/BackSpace 在正常引擎路径、候选菜单下的行为未改动；降级路径的折衷仍与
-§3 一致。未新增数字候选快捷键、自动空格或自动建议接受。
+- 建议模式下文档里没有产品组合，`UpdateCandidateUi` 不读取 `GetTextExt` 矩形；真实
+  TSF UIElement 管理器下的窗口位置/显示尚未在 C 层验证（受控测试用宿主绘制路径）。
+- 一次替换或外部编辑之后，当前 token 的剩余字符可能不再产生菜单（引擎流被重置，
+  而产品不保存 token 文本用于重放）；下一个 token 正常。建议可延迟/丢弃，原文不受影响。
+- 直通键的 host-edit 记账是“一键一编辑”的信用模型；应用把多次插入合并为一次编辑、
+  或 BackSpace 在文档开头无效果时，信用可能剩余，使下一次外部编辑被当作预期编辑。
+  这只会影响建议流，不改变原文；列为残余风险。
+- UTF-16 代理项对的原子追加/回退由 `product.unit.key_admission` 与编辑层测试覆盖；
+  B 层键盘路径没有合法的 astral 输入，未用合成事件冒充。

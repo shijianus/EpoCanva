@@ -90,6 +90,7 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 | W2-B | 候选快照/选择校验、真实 TSF CandidateListUIElement 与自绘窗口、降级控制键、连续输入、异步引擎启动 | 已交付（内部 W2 运行包；未注册；C 层未验证） | `docs/reports/W2-B-candidates.md` |
 | W2-B-R | 同会话容量恢复回归、降级 Enter/Escape/BackSpace 端到端、异步启动/停用/卸载生命周期、候选 UIElement 审查、隔离验证材料 | 已交付（内部运行包 `0.2.3-w2br`；未注册；C 层未验证） | `docs/reports/W2-B-R-crash-and-lifecycle.md` |
 | W2-A-R | 输入可靠性收敛：高水位原样降级（原文优先于补全/拼写建议）、首 token 宿主归属、宿主默认输入与参考文档模型、运行期共享锁取证 | 已交付（内部运行包 `0.2.1-w2r`；未注册） | `docs/reports/W2-A-R-input-reliability.md` |
+| W2-C | 输入保真 P0：普通原文归宿主、引擎建议有界可丢弃、显式候选替换的范围校验；删除 raw 容量路径并更正 177 的归属 | 已交付（内部运行包 `0.2.4-w2c`；未注册；C 层未验证） | `docs/reports/W2-C-input-fidelity.md` |
 | 之后 | 注册/卸载/安装器（W3）、其余英文能力、Android | 未开始 | — |
 
 ## 目录结构
