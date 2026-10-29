@@ -224,7 +224,11 @@
    `product.unit.key_admission` 覆盖，未用合成事件冒充端到端。
 7. `rime.dll` 内嵌构建路径与词表再分发仍是公开分发门。
 8. OneDrive I/O 抖动仍在；连续通过不证明所有竞态不存在。
-9. 未 push/tag/amend/reset --hard/clean；本轮结束后停止，不进入安装器。
+9. `platforms/windows/tsf_product/key_admission.{h,cc}`（`KeyAdmissionQueue` /
+   `RawTextRun`）仍编译进 direct-sink 变体并由 `product.unit.key_admission` 测试，
+   但**已不在产品控制器路径上**；测试 seam 的 `raw_*` 字段恒为 0。删除这个遗留库
+   及其测试属于后续清理，不在本轮 P0 范围。
+10. 未 push/tag/amend/reset --hard/clean；本轮结束后停止，不进入安装器。
 
 ## 12. 变更文件
 
