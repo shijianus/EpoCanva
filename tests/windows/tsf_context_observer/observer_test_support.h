@@ -118,6 +118,9 @@ enum class ExternalEditMode {
   kSetCollapsedSelection = 0,
   kInsertText,
   kSetRangeSelection,
+  // Replaces [start, end) with `text` (an empty text deletes the range). This is the
+  // controlled host's own default-edit primitive for BackSpace.
+  kReplaceText,
 };
 
 struct ExternalEditResult {

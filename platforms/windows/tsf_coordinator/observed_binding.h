@@ -77,6 +77,9 @@ class ObservedBindingController final : public context::ContextObserverSink {
   void OnOwnEditCompleted(ITfContext* context,
                           const context::ObservedTarget& target,
                           const context::SelectionSnapshot& selection) override;
+  void OnHostEditCompleted(ITfContext* context,
+                           const context::ObservedTarget& target,
+                           const context::SelectionSnapshot& selection) override;
 
   // Value-only diagnostics for assertions and text-free logging.
   struct Diagnostics {
@@ -91,6 +94,7 @@ class ObservedBindingController final : public context::ContextObserverSink {
     std::uint64_t invalidations = 0;
     std::uint64_t own_edit_updates = 0;
     std::uint64_t own_edits_stale = 0;
+    std::uint64_t host_edit_updates = 0;
     std::uint64_t engine_clients_requested = 0;
     BindStatus last_bind_status = BindStatus::kOk;
     context::ContextDropReason last_loss_reason = context::ContextDropReason::kNone;

@@ -193,7 +193,15 @@ enum class SubmitStatus : std::uint8_t {
 // directly into the bound document (replacing the owned composition when one exists)
 // without any engine call, because the engine backlog could not be serviced in time.
 // It exists only for text the host already ate; it never replays a refused key.
-enum class WorkKind : std::uint8_t { kNone = 0, kKey, kCandidate, kRaw };
+enum class WorkKind : std::uint8_t {
+  kNone = 0,
+  kKey,
+  kCandidate,
+  kRaw,
+  // Host-owned text: an explicit, versioned candidate selection that replaces the token
+  // immediately before the caret. No engine command is involved.
+  kSuggestionReplace,
+};
 
 enum class WorkPhase : std::uint8_t {
   kIdle = 0,
@@ -409,6 +417,12 @@ struct CoordinatorSnapshot {
   // The coordinator's document mirror. UTF-16 code units / code-unit offsets.
   LONG tracked_caret_utf16 = 0;
   bool composition_active = false;
+  // Test diagnostics: the P3.7 session still owes an edit result, and whether its
+  // completion event is already signalled.
+  bool session_pending = false;
+  bool edit_completion_signaled = false;
+  std::uint64_t edit_pump_checks = 0;
+  std::uint64_t edit_pump_ready = 0;
   LONG composition_start_utf16 = -1;
   LONG composition_length_utf16 = 0;
   // Counters.
@@ -424,6 +438,9 @@ struct CoordinatorSnapshot {
   std::uint64_t last_raw_composition_units = 0;
   std::uint64_t last_raw_input_units = 0;
   std::uint64_t last_raw_plan_units = 0;
+  // UTF-16 units of the expected token in the last suggestion replacement. Used only to
+  // size an unverifiable mutation, never to reproduce text.
+  std::uint64_t last_suggestion_expected_units = 0;
   // W2-B candidate snapshot accounting. Text-free.
   std::uint64_t candidate_version = 0;
   std::uint64_t candidate_snapshots = 0;
@@ -556,6 +573,17 @@ class ContextCoordinator {
   // still active. An expired request is kCandidateStale and is never sent to the engine.
   SubmitStatus SubmitCandidateSelection(const CandidateSelectionRequest& request,
                                         WorkId* id);
+  // Host-owned text mode: the engine only produces suggestions; the document already holds
+  // the original text. A validated selection replaces the token that ends at the collapsed
+  // caret with the candidate's text. The same version/identity/generation checks as above
+  // apply, and the plan re-reads the range before writing: a stale menu refuses, it never
+  // removes or rewrites text the user typed.
+  SubmitStatus SubmitSuggestionReplacement(const CandidateSelectionRequest& request,
+                                           WorkId* id);
+  // When true, engine observations update the candidate snapshot but never produce document
+  // edits: ordinary text belongs to the host. Product mode sets this before the first bind.
+  void SetSuggestionMode(bool enabled);
+  bool suggestion_mode() const { return suggestion_mode_; }
   // The current menu copy. The version increments on every engine observation.
   CandidateSnapshot candidate_snapshot() const { return candidate_snapshot_; }
   bool candidate_menu_open() const { return candidate_snapshot_.valid; }
@@ -605,6 +633,9 @@ class ContextCoordinator {
     input::KeyText text{};
     // kRaw: the degraded raw run, held until its permission verdict arrives.
     std::u16string raw_text;
+    // kSuggestionReplace: the expected token and the selected candidate text.
+    std::u16string replace_expected;
+    std::u16string replace_text;
     // kCandidate: the accepted index.
     std::size_t candidate_index = 0;
     // The apply-time re-verification: the edit plan whose submission is held until the
@@ -707,6 +738,9 @@ class ContextCoordinator {
   // Builds and submits the raw commit plan for one degraded run. The caller owns the work
   // ledger entry (FinishWorkLedger already ran) and the permission verdict.
   void SubmitRawPlan(std::u16string raw_utf16);
+  // Builds and submits the host-owned token replacement plan. The caller owns the work
+  // ledger entry (FinishWorkLedger already ran) and the permission verdict.
+  void SubmitSuggestionPlan(std::u16string expected_text, std::u16string replacement_text);
   // Terminal accounting for a raw work item. Never touches the document.
   void NoteRawTerminal(bool applied);
   void FinishWorkLedger(WorkKind kind);
@@ -744,6 +778,11 @@ class ContextCoordinator {
 
   bool bound_ = false;
   bool closed_ = false;
+  bool suggestion_mode_ = false;
+  // Last engine observation said the engine itself is composing (its preedit is not in the
+  // document in suggestion mode). Used only to classify Backspace/Enter/Escape as engine
+  // candidates while the host owns the text.
+  bool engine_composing_ = false;
   std::uint64_t generation_counter_ = 0;
   edit::ContextIdentity identity_{};
   engine::ClientId engine_client_{};
@@ -845,11 +884,15 @@ class ContextCoordinator {
 
   std::uint64_t works_accepted_ = 0;
   std::uint64_t raw_commits_begun_ = 0;
+  std::uint64_t edit_pump_checks_ = 0;
+  std::uint64_t edit_pump_ready_ = 0;
   std::uint64_t raw_commits_applied_ = 0;
   std::uint64_t raw_commits_failed_ = 0;
   std::uint64_t raw_units_applied_ = 0;
   std::uint64_t raw_units_refused_ = 0;
   std::uint64_t last_raw_units_ = 0;
+  std::uint64_t last_suggestion_expected_units_ = 0;
+  std::uint64_t last_suggestion_replacement_units_ = 0;
   LONG last_raw_composition_start_ = -1;
   std::uint64_t last_raw_composition_units_ = 0;
   std::uint64_t last_raw_input_units_ = 0;

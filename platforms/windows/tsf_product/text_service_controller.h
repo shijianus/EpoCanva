@@ -40,6 +40,7 @@
 #include <msctf.h>
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -51,7 +52,8 @@
 #include "context_registry.h"
 #include "coordinator.h"
 #include "engine_executor.h"
-#include "key_admission.h"
+#include "key_decision.h"
+#include "key_event.h"
 #include "observed_binding.h"
 #include "permission_query.h"
 #include "product_engine_bootstrap.h"
@@ -60,6 +62,9 @@
 namespace epocanva {
 namespace tsf {
 namespace product {
+
+namespace input = ::epocanva::windows::input;
+namespace coordinator = ::epocanva::tsf::coordinator;
 
 using ProductEngineAttachment = ::epocanva::product::ProductEngineAttachment;
 using ProductEngineBootstrap = ::epocanva::product::ProductEngineBootstrap;
@@ -95,25 +100,31 @@ struct ControllerDiagnostics {
   std::uint64_t target_losses = 0;
   std::uint64_t target_binds = 0;
   std::uint64_t rebind_requests = 0;
-  // W2-A-R degraded catch-up and first-token ownership. All counts are text-free; the
-  // unapplied units are a length, never text.
-  bool raw_mode = false;
-  bool raw_submitted = false;
-  bool engine_stale = false;
-  std::uint64_t raw_unapplied_units = 0;
-  std::uint64_t raw_keys = 0;
-  std::uint64_t raw_commits = 0;
-  std::uint64_t raw_entered = 0;
-  std::uint64_t raw_exits = 0;
-  std::uint64_t raw_ignored_edits = 0;
-  std::uint64_t raw_cancelled_keys = 0;
-  std::uint64_t raw_cancelled_units = 0;
-  std::uint64_t raw_unrecoverable = 0;
-  std::uint64_t raw_reason_unapplied = 0;
-  std::uint64_t raw_reason_not_candidate = 0;
-  std::uint64_t raw_reason_high_water = 0;
-  std::uint64_t raw_reason_admission = 0;
-  std::uint64_t token_host_keys = 0;
+  // W2-C input ownership. Ordinary text is never captured: every text key returns
+  // pfEaten=FALSE and the host inserts it. The engine only produces cancelable suggestions.
+  // All counts are text-free and lengths are UTF-16 code units.
+  std::uint64_t host_text_keys = 0;
+  std::uint64_t suggestion_queued = 0;
+  std::uint64_t suggestion_submitted = 0;
+  std::uint64_t suggestion_completed = 0;
+  std::uint64_t suggestion_dropped = 0;
+  std::uint64_t suggestion_stale = 0;
+  std::uint64_t suggestion_resets = 0;
+  std::uint64_t replacement_attempts = 0;
+  std::uint64_t replacement_applied = 0;
+  std::uint64_t replacement_refused = 0;
+  std::uint64_t internal_text_losses = 0;
+  std::uint64_t host_edits_matched = 0;
+  std::uint64_t host_edits_unexpected = 0;
+  std::uint64_t reset_boundary = 0;
+  std::uint64_t reset_owed = 0;
+  std::uint64_t reset_submit_refusal = 0;
+  std::uint64_t reset_replacement = 0;
+  std::size_t host_token_units = 0;
+  std::size_t suggestion_queue_depth = 0;
+  bool suggestion_active = false;
+  bool suggestion_in_flight = false;
+  bool replacement_pending = false;
   bool candidate_menu_open = false;
   std::uint64_t candidate_version = 0;
   int candidate_selected = -1;
@@ -121,8 +132,8 @@ struct ControllerDiagnostics {
   std::uint64_t candidate_stale_selections = 0;
   CandidateUiDiagnostics candidate_ui;
   bool pacing = false;
-  KeyAdmissionSnapshot keys;
   coordinator::CoordinatorSnapshot coordinator;
+  coordinator::ObservedBindingController::Diagnostics binding;
   context::ContextObserverSnapshot observer;
 };
 
@@ -172,6 +183,9 @@ class ProductTextController final : public StaWakeTarget,
   void OnOwnEditCompleted(ITfContext* context,
                           const context::ObservedTarget& target,
                           const context::SelectionSnapshot& selection) override;
+  void OnHostEditCompleted(ITfContext* context,
+                           const context::ObservedTarget& target,
+                           const context::SelectionSnapshot& selection) override;
 
   // CandidateUiHost. The UI never calls the engine or writes text itself: every click or
   // host-drawn selection arrives here and is validated against the snapshot version and the
@@ -197,20 +211,8 @@ class ProductTextController final : public StaWakeTarget,
     bool composition_active = false;
   };
 
-  enum class SubmitAttempt {
-    kNoHead = 0,
-    kSubmitted,
-    kWaited,
-    kNotEatenHostKeeps,
-    kFailedEaten,
-  };
-
   bool BuildKey(WPARAM wparam, LPARAM lparam, bool key_down, BuiltKey* key) const;
-  bool AdmissionAvailable(bool composition_active) const;
-  SubmitAttempt SubmitHead(bool immediate);
-  void ResolveInFlight();
   void UpdatePacing();
-  void FailQueuedAndMaybeInvalidate(KeyFailure failure, bool invalidate);
   void RequestRebindSoon();
   void ResetObjects();
   // W2-B candidate presentation and selection. UpdateCandidateUi copies the coordinator's
@@ -225,43 +227,40 @@ class ProductTextController final : public StaWakeTarget,
   // named status; it never blocks and never retries inside a key callback.
   void TryAttachEngine();
   bool BuildEnginePipeline(std::wstring* why);
-  // Literal mode: track a host-kept token so a later attach cannot take over the middle of
-  // a word, and count the key. No engine, query or edit is touched.
+  // Literal mode: count the key. No engine, query or edit is touched.
   void TrackLiteralKey(WPARAM wparam, LPARAM lparam);
 
-  // W2-A-R/W2-B degraded catch-up. Admitted input that cannot be given to the engine
-  // without waiting is withdrawn from the queue in FIFO order and captured as raw UTF-16;
-  // it is committed through the coordinator with NO engine call, replacing the owned
-  // composition (when one exists) with its displayed text plus the captured suffix. Once
-  // such a commit applied, the engine client is stale and the binding is rebuilt before
-  // engine input resumes. The run is a sequence of bounded chunks: a full chunk is flushed
-  // to the coordinator and the next key starts a new chunk, so the bound never splits a key
-  // or a surrogate pair. A chunk that cannot be flushed (the document is not accepting
-  // writes) is the only case that reports an explicit capacity loss.
-  static constexpr std::size_t kRawCapacityUtf16 = RawTextRun::kDefaultCapacityUtf16;
+  // W2-C host-owned text. Ordinary keys are never captured or queued for the document; the
+  // engine receives a bounded, droppable suggestion stream instead. A suggestion that
+  // cannot be submitted is dropped (menu closes); the original text is unaffected.
+  struct SuggestionKey {
+    input::KeyEventSnapshot event;
+    input::KeyText text;
+    input::KeyDecision decision;
+    std::uint64_t context_id = 0;
+    std::uint64_t generation = 0;
+    bool ends_token = false;
+    // A synthetic Escape sent only to reset the engine's suggestion stream. It never
+    // produces a document edit in host-owned mode.
+    bool reset = false;
+  };
+  static constexpr std::size_t kSuggestionQueueCapacity = 64;
 
   bool IsTextKey(const BuiltKey& key) const;
-  // True when every translated UTF-16 code unit is in the English schema alphabet (letters,
-  // digits and the protected marks ' - @ . _ : / \ ? & = # % +). Those marks are token
-  // characters, never boundaries, so a host-owned token stays host-owned across them.
-  bool IsTokenText(const BuiltKey& key) const;
-  // True only for translated characters the degraded run may capture. Shortcuts, privacy
-  // refusals, disabled input, dead keys and untranslatable events are never captured.
-  bool RawCaptureWorthy(const BuiltKey& key) const;
-  bool RawUnapplied() const;
-  bool HasPendingEngineInput() const;
-  std::size_t QueueDepth() const;
-  void EnterRawMode();
-  void FoldWithdrawnKey(const AdmissionKey& key);
-  bool CaptureRawText(std::u16string_view text);
-  // Escape cancels exactly the accepted-but-not-yet-submitted suffix. An already submitted
-  // chunk is not retracted; it applies once and the run ends after it resolves.
-  void CancelRawSuffix();
-  bool HandleRawKey(const BuiltKey& key);
-  void FlushRaw();
-  void ResolveRaw();
-  void FailRawState(KeyFailure failure);
-  void FinishRawRun();
+  bool FeedSuggestionKey(const BuiltKey& key, const coordinator::CoordinatorSnapshot& snapshot,
+                         bool ends_token);
+  void ResolveSuggestionWork();
+  void SubmitNextSuggestion();
+  void QueueEngineReset();
+  void EndSuggestionToken();
+  void ResetSuggestionStream(bool invalidate_binding);
+  void MarkSuggestionStale();
+  void DismissCandidateMenu();
+  bool SubmitReplacement(const CandidateUiSelection& selection);
+  void ResolveReplacement();
+  // UTF-16 code units the host has inserted since the current token started. Used only to
+  // reject a menu drawn for a shorter prefix; the text itself is never copied or stored.
+  std::size_t host_token_units_ = 0;
 
   ITfThreadMgr* thread_manager_ = nullptr;
   TfClientId client_id_ = 0;
@@ -290,7 +289,21 @@ class ProductTextController final : public StaWakeTarget,
   std::unique_ptr<ClientProvider> clients_;
   std::unique_ptr<coordinator::ObservedBindingController> binding_;
   StaResultWaker waker_;
-  KeyAdmissionQueue queue_;
+  std::deque<SuggestionKey> suggestion_queue_;
+  bool suggestion_in_flight_ = false;
+  bool suggestion_in_flight_reset_ = false;
+  bool suggestion_engaged_ = false;
+  // One host edit is expected per passed-through key that changes text. A document edit
+  // observed without this credit came from outside the key stream (paste, autocorrect,
+  // another client); suggestions must not continue across it.
+  std::size_t host_edits_expected_ = 0;
+  std::uint64_t suggestion_work_id_ = 0;
+  bool suggestion_stale_ = false;
+  // A token boundary arrived while the stream was stale or a reset could not run yet.
+  // The reset is performed once no work item owns the binding.
+  bool stream_reset_owed_ = false;
+  bool replacement_pending_ = false;
+  std::uint64_t replacement_work_id_ = 0;
   std::unique_ptr<CandidateUi> candidate_ui_;
   // The context the UI reads its caret rectangle from. Owned for the binding's duration and
   // released on target loss/Stop; never used off the STA.
@@ -299,19 +312,6 @@ class ProductTextController final : public StaWakeTarget,
   std::uint64_t candidate_ui_version_ = 0;
   std::uint64_t candidate_dismissed_version_ = 0;
   std::uint64_t candidate_stale_selections_ = 0;
-
-  bool raw_active_ = false;
-  bool raw_submitted_ = false;
-  bool raw_end_requested_ = false;
-  bool engine_stale_ = false;
-  std::uint64_t raw_work_id_ = 0;
-  RawTextRun raw_run_;
-  std::size_t raw_chunk_keys_ = 0;
-  std::size_t raw_submitted_keys_ = 0;
-  std::size_t raw_submitted_units_ = 0;
-  // A token the host already started. Its remaining characters are never offered to the
-  // engine; the host inserts them, so the field's text stays contiguous.
-  HostTokenOwnership host_token_;
 
   std::uint64_t wakes_ = 0;
   std::uint64_t stale_wakes_ = 0;
@@ -325,20 +325,26 @@ class ProductTextController final : public StaWakeTarget,
   std::uint64_t target_binds_ = 0;
   std::uint64_t rebind_requests_ = 0;
   std::uint64_t pumps_ = 0;
-  std::uint64_t raw_entered_ = 0;
-  std::uint64_t raw_exits_ = 0;
-  std::uint64_t raw_commits_ = 0;
-  std::uint64_t raw_keys_ = 0;
-  std::uint64_t raw_chars_ = 0;
-  std::uint64_t raw_ignored_edits_ = 0;
-  std::uint64_t raw_cancelled_keys_ = 0;
-  std::uint64_t raw_cancelled_units_ = 0;
-  std::uint64_t raw_unrecoverable_ = 0;
-  std::uint64_t raw_reason_unapplied_ = 0;
-  std::uint64_t raw_reason_not_candidate_ = 0;
-  std::uint64_t raw_reason_high_water_ = 0;
-  std::uint64_t raw_reason_admission_ = 0;
-  std::uint64_t token_host_keys_ = 0;
+  std::uint64_t host_text_keys_ = 0;
+  std::uint64_t suggestion_queued_ = 0;
+  std::uint64_t suggestion_submitted_ = 0;
+  std::uint64_t suggestion_completed_ = 0;
+  std::uint64_t suggestion_dropped_ = 0;
+  std::uint64_t suggestion_stale_events_ = 0;
+  std::uint64_t suggestion_resets_ = 0;
+  std::uint64_t replacement_attempts_ = 0;
+  std::uint64_t replacement_applied_ = 0;
+  std::uint64_t replacement_refused_ = 0;
+  // UTF-16 units the product suppressed or could not account for. Ordinary text keys never
+  // enter this counter because they are never eaten; a replacement that may have mutated the
+  // document without verification counts its whole expected token.
+  std::uint64_t internal_text_losses_ = 0;
+  std::uint64_t host_edits_matched_ = 0;
+  std::uint64_t host_edits_unexpected_ = 0;
+  std::uint64_t reset_boundary_ = 0;
+  std::uint64_t reset_owed_ = 0;
+  std::uint64_t reset_submit_refusal_ = 0;
+  std::uint64_t reset_replacement_ = 0;
   std::uint64_t literal_key_downs_ = 0;
   std::uint64_t engine_attach_attempts_ = 0;
   std::uint64_t engine_attach_failures_ = 0;

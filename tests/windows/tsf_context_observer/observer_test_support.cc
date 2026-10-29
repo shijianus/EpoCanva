@@ -113,11 +113,14 @@ class TestEditSession final : public ITfEditSession {
       base->Release();
       return hr;
     }
-    const LONG length_utf16 =
-        mode_ == ExternalEditMode::kInsertText ? 0 : end_utf16_ - start_utf16_;
+    const bool replaces_text = mode_ == ExternalEditMode::kInsertText ||
+                               mode_ == ExternalEditMode::kReplaceText;
+    const LONG length_utf16 = mode_ == ExternalEditMode::kInsertText
+                                  ? 0
+                                  : end_utf16_ - start_utf16_;
     hr = acp->SetExtent(start_utf16_, length_utf16);
     if (SUCCEEDED(hr)) {
-      if (mode_ == ExternalEditMode::kInsertText) {
+      if (replaces_text) {
         hr = acp->SetText(edit_cookie, 0, text_.c_str(),
                           static_cast<LONG>(text_.size()));
       } else {

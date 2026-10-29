@@ -44,27 +44,6 @@ input::KeyEventSnapshot EventFromTsf(WPARAM wparam, LPARAM lparam) {
   return event;
 }
 
-KeyFailure FailureForReject(coordinator::RejectCause cause) {
-  switch (cause) {
-    case coordinator::RejectCause::kPermissionDenied:
-    case coordinator::RejectCause::kPermissionUnknown:
-    case coordinator::RejectCause::kPermissionChangedWhileQueued:
-      return KeyFailure::kPermissionRefused;
-    case coordinator::RejectCause::kEngineRefused:
-    case coordinator::RejectCause::kEngineUnavailable:
-    case coordinator::RejectCause::kEngineSubmitFailed:
-    case coordinator::RejectCause::kEditRefused:
-    case coordinator::RejectCause::kEditFailedBeforeMutation:
-    case coordinator::RejectCause::kTakeFailed:
-      return KeyFailure::kEngineUnavailable;
-    case coordinator::RejectCause::kTargetChangedWhileQueued:
-      return KeyFailure::kTargetChanged;
-    case coordinator::RejectCause::kNone:
-      break;
-  }
-  return KeyFailure::kInternal;
-}
-
 }  // namespace
 
 class ProductTextController::ClientProvider final
@@ -271,14 +250,19 @@ bool ProductTextController::BuildEnginePipeline(std::wstring* why) {
   permission_ = ctx::CreateRealPermissionSource(client_id_);
   coordinator_.reset(
       new coordinator::ContextCoordinator(*executor, client_id_, *permission_));
+  // W2-C ownership: the host inserts ordinary text; the engine only produces a cancelable
+  // candidate snapshot. The coordinator therefore never builds a document edit from an
+  // engine observation, and the observer treats the host's own inserts as the expected
+  // text stream rather than as a reason to abandon the binding.
+  coordinator_->SetSuggestionMode(true);
   ctx::ThreadFocusPolicy focus_policy = ctx::ThreadFocusPolicy::kStrictTsf;
 #ifdef EPOCANVA_TSF_DIRECT_SINK_TEST
   // Controlled direct-sink tests run in a headless STA with no OS foreground focus. The
   // product DLL (which never defines this macro) keeps the StrictTsf policy.
   focus_policy = ctx::ThreadFocusPolicy::kLabWin32Fallback;
 #endif
-  observer_.reset(
-      new ctx::ContextObserver(*registry_, client_id_, focus_policy));
+  observer_.reset(new ctx::ContextObserver(*registry_, client_id_, focus_policy,
+                                           ctx::TextOwnershipPolicy::kHostOwned));
   clients_.reset(new ClientProvider(*executor));
   binding_.reset(new coordinator::ObservedBindingController(
       *observer_, *coordinator_, *registry_, *clients_));
@@ -314,13 +298,10 @@ void ProductTextController::Stop() {
   if (candidate_ui_) {
     candidate_ui_->Stop();
   }
-  FailRawState(KeyFailure::kShutdown);
-  queue_.FailQueued(KeyFailure::kShutdown);
-  if (queue_.HasInFlight()) {
-    queue_.MarkInFlightFailed(KeyFailure::kShutdown);
-  }
+  suggestion_queue_.clear();
+  suggestion_in_flight_ = false;
+  replacement_pending_ = false;
   ResetObjects();
-  queue_.ReleaseFailedInFlight();
   candidate_ui_.reset();
   if (engine_) {
     // Stopping the engine can join its worker. The STA must not carry that wait, so the
@@ -363,59 +344,15 @@ void ProductTextController::TrackLiteralKey(WPARAM wparam, LPARAM lparam) {
   if (!BuildKey(wparam, lparam, true, &key)) {
     return;
   }
-  const bool shortcut = key.event.modifiers.control || key.event.modifiers.alt ||
-                        key.event.modifiers.windows;
-  host_token_.HostKept(key.text, shortcut);
-  if (host_token_.owned() && !shortcut) {
-    ++token_host_keys_;
+  if (IsTextKey(key) && key.event.modifiers.control == false &&
+      key.event.modifiers.alt == false && key.event.modifiers.windows == false) {
+    ++host_text_keys_;
   }
-}
-
-bool ProductTextController::AdmissionAvailable(bool composition_active) const {
-  return queue_.CanAccept(composition_active);
 }
 
 bool ProductTextController::IsTextKey(const BuiltKey& key) const {
   return key.text.status == input::KeyTextStatus::kText &&
          !key.text.utf16_code_units.empty();
-}
-
-bool ProductTextController::IsTokenText(const BuiltKey& key) const {
-  return HostTokenOwnership::IsTokenText(key.text);
-}
-
-bool ProductTextController::RawCaptureWorthy(const BuiltKey& key) const {
-  if (!IsTextKey(key)) {
-    return false;
-  }
-  switch (key.decision.reason) {
-    case input::KeyDecisionReason::kPermissionForbidden:
-    case input::KeyDecisionReason::kPermissionUnknown:
-    case input::KeyDecisionReason::kInputDisabled:
-    case input::KeyDecisionReason::kShortcutModifier:
-    case input::KeyDecisionReason::kKeyRelease:
-    case input::KeyDecisionReason::kNoText:
-    case input::KeyDecisionReason::kDeadKey:
-    case input::KeyDecisionReason::kTranslationFailed:
-    case input::KeyDecisionReason::kUnsupportedModifierCombination:
-      return false;
-    default:
-      // kEngineNotReady is deliberately capturable: a raw commit needs no engine call, so
-      // the degraded run can still apply the text.
-      return true;
-  }
-}
-
-bool ProductTextController::RawUnapplied() const {
-  return raw_active_ || raw_submitted_ || !raw_run_.empty();
-}
-
-bool ProductTextController::HasPendingEngineInput() const {
-  return queue_.HasInFlight() || !queue_.empty();
-}
-
-std::size_t ProductTextController::QueueDepth() const {
-  return queue_.size() + (queue_.HasInFlight() ? 1 : 0);
 }
 
 bool ProductTextController::PredictKey(WPARAM wparam, LPARAM lparam) {
@@ -432,66 +369,31 @@ bool ProductTextController::PredictKey(WPARAM wparam, LPARAM lparam) {
   if (!BuildKey(wparam, lparam, true, &key)) {
     return false;
   }
-  // Candidate navigation is owned by this controller while a real menu is open: the host
-  // must not move its caret, and no engine key is involved.
-  const std::uint32_t vk = key.event.virtual_key;
-  const bool plain_arrow = (vk == VK_UP || vk == VK_DOWN) &&
-                           !key.event.modifiers.control && !key.event.modifiers.alt &&
-                           !key.event.modifiers.shift && !key.event.modifiers.windows;
-  if (plain_arrow && CandidatesOpen()) {
-    return true;
-  }
   const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
   if (!snapshot.bound || snapshot.closed ||
       snapshot.gate != coordinator::CoordinatorGate::kOpen) {
     return false;
   }
-  if (queue_.HasInFlight() && queue_.in_flight_failed()) {
-    return false;
-  }
-  // A token the host already started is never handed to the engine mid-token. The test is
-  // on the character class, not on the decision, because the permission verdict can change
-  // between two characters of the same token.
-  if (host_token_.owned() && IsTokenText(key)) {
-    return false;
-  }
-  if (RawUnapplied()) {
-    // The degraded run eats captured text and the four special keys; shortcuts, privacy
-    // refusals and untranslatable keys stay with the host. This must agree exactly with
-    // HandleKeyDown.
-    const std::uint32_t vk = key.event.virtual_key;
-    if (key.decision.reason != input::KeyDecisionReason::kPermissionForbidden &&
-        key.decision.reason != input::KeyDecisionReason::kPermissionUnknown &&
-        key.decision.reason != input::KeyDecisionReason::kInputDisabled &&
-        key.decision.disposition != input::KeyDisposition::kShortcutPassThrough &&
-        (vk == input::kVirtualKeySpace || vk == input::kVirtualKeyReturn ||
-         vk == input::kVirtualKeyEscape || vk == input::kVirtualKeyBack)) {
-      return true;
-    }
-    return RawCaptureWorthy(key);
-  }
-  if (!key.decision.is_engine_candidate()) {
-    // Translated text the decision layer does not offer to the engine is still eaten when
-    // earlier input is pending, because a host insertion now would be placed after text the
-    // engine has not applied yet. HandleKeyDown enters the raw catch-up for it.
-    if (HasPendingEngineInput() && RawCaptureWorthy(key)) {
-      return true;
-    }
-    return false;
-  }
-  if (QueueDepth() >= KeyAdmissionQueue::kHighWater) {
-    return true;  // the degraded catch-up eats it
-  }
-  if (!AdmissionAvailable(key.composition_active)) {
-    // Full without pending input is a safe pass-through. Full with pending input has no safe
-    // pass-through; the key is eaten into the degraded run.
-    if (!HasPendingEngineInput() && !key.composition_active) {
-      return false;
-    }
+  // Only menu interaction is ever eaten. Every key that produces, deletes or ends original
+  // text stays with the host: the product cannot lose what it never owned, and no queue,
+  // capacity or engine delay can become a text loss.
+  const std::uint32_t vk = key.event.virtual_key;
+  const bool plain_arrow = (vk == VK_UP || vk == VK_DOWN) &&
+                           !key.event.modifiers.control && !key.event.modifiers.alt &&
+                           !key.event.modifiers.shift && !key.event.modifiers.windows;
+  if (plain_arrow && CandidatesOpen()) {
+    ++predicted_eaten_;
     return true;
   }
-  ++predicted_eaten_;
-  return true;
+  if (CandidatesOpen() && vk == VK_RETURN && candidate_selection_ >= 0) {
+    ++predicted_eaten_;
+    return true;
+  }
+  if (CandidatesOpen() && vk == VK_ESCAPE) {
+    ++predicted_eaten_;
+    return true;
+  }
+  return false;
 }
 
 bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
@@ -503,8 +405,7 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
   ++key_downs_;
   if (!engine_ || !coordinator_) {
     // Literal mode while the engine starts, is unavailable, or failed. Every key keeps the
-    // host's own default effect: no queue, no composition, no edit, nothing reordered. The
-    // host-owned token is tracked so a later attach cannot take over mid-word.
+    // host's own default effect; nothing is captured, queued or edited.
     ++literal_key_downs_;
     TrackLiteralKey(wparam, lparam);
     return false;
@@ -516,655 +417,386 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
   }
   const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
   if (!snapshot.bound || snapshot.closed ||
-      snapshot.gate != coordinator::CoordinatorGate::kOpen ||
-      (queue_.HasInFlight() && queue_.in_flight_failed())) {
-    // No live binding. Captured text cannot be applied to a context it was not typed into,
-    // so it is reported as an explicit failure rather than replayed elsewhere.
-    if (RawUnapplied()) {
-      FailRawState(KeyFailure::kFocusChanged);
+      snapshot.gate != coordinator::CoordinatorGate::kOpen) {
+    // No live binding: no suggestion stream can continue, and the host keeps the key. No
+    // text is held or replayed anywhere. A key that changes text still causes one host
+    // edit, which must not later be mistaken for an unrelated external change.
+    const std::uint32_t blocked_vk = key.event.virtual_key;
+    if (IsTextKey(key) || blocked_vk == input::kVirtualKeySpace ||
+        blocked_vk == input::kVirtualKeyReturn || blocked_vk == input::kVirtualKeyBack) {
+      ++host_edits_expected_;
     }
-    host_token_.HostKept(
-        key.text, key.decision.disposition == input::KeyDisposition::kShortcutPassThrough);
-    if (host_token_.owned()) {
-      ++token_host_keys_;
-    }
+    ResetSuggestionStream(false);
     ++not_eaten_;
     return false;
   }
-  // W2-B candidate navigation and acceptance. Arrow keys never reach the host while a real
-  // menu is open; Enter with an explicit selection is a validated selection, not an engine
-  // Return. Space is deliberately not intercepted: it keeps the existing literal-commit
-  // contract. Escape dismisses the menu and then follows the normal engine Escape path.
+  // The only keys the product ever eats are menu interactions. They never change text.
   const std::uint32_t vk = key.event.virtual_key;
   const bool plain_arrow = (vk == VK_UP || vk == VK_DOWN) &&
                            !key.event.modifiers.control && !key.event.modifiers.alt &&
                            !key.event.modifiers.shift && !key.event.modifiers.windows;
   if (CandidatesOpen() && plain_arrow) {
     MoveCandidateSelection(vk == VK_DOWN ? 1 : -1);
-    host_token_.EngineKept();
     ++eaten_;
     return true;
   }
   if (CandidatesOpen() && vk == VK_RETURN && candidate_selection_ >= 0) {
-    const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
+    const coordinator::CandidateSnapshot menu = coordinator_->candidate_snapshot();
     CandidateUiSelection selection;
-    selection.snapshot_version = snapshot.version;
-    selection.context_id = snapshot.identity.context_id;
-    selection.generation = snapshot.identity.generation;
+    selection.snapshot_version = menu.version;
+    selection.context_id = menu.identity.context_id;
+    selection.generation = menu.identity.generation;
     selection.page_index = candidate_selection_;
+    // This is the one explicit enhancement that suppresses a host key. The product still
+    // owns no original text: a refused replacement leaves the typed token in the document.
     (void)FinalizeCandidateSelection(selection);
-    host_token_.EngineKept();
     ++eaten_;
     return true;
   }
   if (CandidatesOpen() && vk == VK_ESCAPE) {
-    // The window closes here; the composition is cancelled through the engine path below,
-    // which also clears the preedit. No captured text is written after this point.
+    // Escape dismisses the cancelable enhancement. It never removes text the user typed.
     candidate_dismissed_version_ = coordinator_->candidate_snapshot().version;
-    candidate_selection_ = -1;
-    if (candidate_ui_) {
-      candidate_ui_->SetSelection(-1);
-      candidate_ui_->End();
+    DismissCandidateMenu();
+    suggestion_queue_.clear();
+    host_token_units_ = 0;
+    if (key.decision.is_engine_candidate() || suggestion_in_flight_) {
+      FeedSuggestionKey(key, snapshot, /*ends_token=*/true);
     }
-  }
-  if (host_token_.owned() && IsTokenText(key)) {
-    ++token_host_keys_;
-    ++not_eaten_;
-    return false;
-  }
-  if (RawUnapplied()) {
-    ++raw_reason_unapplied_;
-    if (HandleRawKey(key)) {
-      host_token_.EngineKept();
-      ++eaten_;
-      waker_.SetPacing(true);
-      return true;
-    }
-    const input::KeyDecisionReason reason = key.decision.reason;
-    const bool shortcut =
-        key.decision.disposition == input::KeyDisposition::kShortcutPassThrough;
-    if (reason == input::KeyDecisionReason::kPermissionForbidden ||
-        reason == input::KeyDecisionReason::kPermissionUnknown ||
-        reason == input::KeyDecisionReason::kInputDisabled) {
-      // The field changed class while a raw run was pending. Nothing captured may be written
-      // there any more; the loss is reported and the host gets its own key.
-      FailRawState(KeyFailure::kPermissionRefused);
-      host_token_.HostKept(key.text, shortcut);
-    } else if (!shortcut) {
-      // A shortcut does not end a word. Every other non-captured key does.
-      host_token_.HostKept(key.text, false);
-    }
-    if (host_token_.owned() && IsTokenText(key)) {
-      ++token_host_keys_;
-    }
-    ++not_eaten_;
-    return false;
-  }
-  if (!key.decision.is_engine_candidate()) {
-    if (HasPendingEngineInput() && RawCaptureWorthy(key)) {
-      // Earlier input is still queued for the engine; letting the host insert this character
-      // now would place it before text that has not been applied yet. Capture it in order.
-      ++raw_reason_not_candidate_;
-      EnterRawMode();
-      if (HandleRawKey(key)) {
-        ++eaten_;
-        waker_.SetPacing(true);
-        return true;
-      }
-    }
-    // A shortcut, key-up-shaped event, or untranslatable key is never admitted. Translated
-    // text here is a genuine pass-through: the host owns the token and keeps owning it.
-    const bool shortcut =
-        key.decision.disposition == input::KeyDisposition::kShortcutPassThrough;
-    host_token_.HostKept(key.text, shortcut);
-    if (host_token_.owned() && !shortcut) {
-      ++token_host_keys_;
-    }
-    ++not_eaten_;
-    return false;
-  }
-  if (QueueDepth() >= KeyAdmissionQueue::kHighWater) {
-    // High water: the queued tail moves to the raw run before the engine can stall further.
-    ++raw_reason_high_water_;
-    EnterRawMode();
-    if (HandleRawKey(key)) {
-      host_token_.EngineKept();
-      ++eaten_;
-      waker_.SetPacing(true);
-      return true;
-    }
-  }
-  if (!AdmissionAvailable(key.composition_active)) {
-    if (!HasPendingEngineInput() && !key.composition_active) {
-      host_token_.HostKept(key.text, /*shortcut=*/false);
-      ++token_host_keys_;
-      ++not_eaten_;
-      return false;
-    }
-    ++raw_reason_admission_;
-    EnterRawMode();
-    if (HandleRawKey(key)) {
-      host_token_.EngineKept();
-      ++eaten_;
-      waker_.SetPacing(true);
-      return true;
-    }
-  }
-
-  const bool was_empty = queue_.empty() && !queue_.HasInFlight();
-  const std::uint64_t id = queue_.Push(key.event, key.text, key.decision,
-                                       snapshot.identity.context_id,
-                                       snapshot.identity.generation);
-  const SubmitAttempt attempt =
-      was_empty ? SubmitHead(true) : SubmitAttempt::kWaited;
-  if (attempt == SubmitAttempt::kNotEatenHostKeeps) {
-    // The key was never queued (SubmitHead dropped it) and no earlier input is pending, so
-    // the host owns this token from its first character.
-    host_token_.HostKept(key.text, /*shortcut=*/false);
-    ++token_host_keys_;
-    ++not_eaten_;
-    return false;
-  }
-  if (attempt == SubmitAttempt::kFailedEaten) {
-    host_token_.EngineKept();
     ++eaten_;
-    waker_.SetPacing(true);
     return true;
   }
-  queue_.ConfirmEaten(id);
-  host_token_.EngineKept();
-  ++eaten_;
+
+  // --- host-owned original text ---------------------------------------------------------
+  // The product never returns TRUE for these; the host inserts, deletes or moves exactly as
+  // its own default path would. Suggestions may be fed to the engine in the background.
+  const bool shortcut =
+      key.decision.disposition == input::KeyDisposition::kShortcutPassThrough;
+  const bool forbidden =
+      key.decision.reason == input::KeyDecisionReason::kPermissionForbidden ||
+      key.decision.reason == input::KeyDecisionReason::kPermissionUnknown ||
+      key.decision.reason == input::KeyDecisionReason::kInputDisabled;
+  if (forbidden) {
+    // Privacy: no text reaches the engine and no token length is retained.
+    ResetSuggestionStream(false);
+    host_token_units_ = 0;
+    ++not_eaten_;
+    return false;
+  }
+  if (shortcut) {
+    // A chord does not change the token or the suggestion stream.
+    ++not_eaten_;
+    return false;
+  }
+
+  const bool ends_token = vk == input::kVirtualKeySpace || vk == input::kVirtualKeyReturn;
+  const bool edits_token = vk == input::kVirtualKeyBack;
+  if (IsTextKey(key) || ends_token || edits_token ||
+      key.decision.reason == input::KeyDecisionReason::kNoText ||
+      key.decision.reason == input::KeyDecisionReason::kDeadKey) {
+    // Any change to the host token invalidates the menu that described the old prefix.
+    DismissCandidateMenu();
+  }
+  if (key.decision.is_engine_candidate()) {
+    FeedSuggestionKey(key, snapshot, ends_token);
+    if (ends_token && suggestion_stale_) {
+      // The token ended while suggestions were stale: reset the engine stream now (or as
+      // soon as its in-flight work resolves) so the next token starts clean.
+      EndSuggestionToken();
+    }
+  } else if (IsTextKey(key) || ends_token || edits_token ||
+             key.decision.requires_composition_boundary()) {
+    // The engine's token is over (punctuation, unsupported content, navigation). Stop
+    // suggesting for it; a fresh engine stream starts with the next token.
+    EndSuggestionToken();
+  }
+
+  if (IsTextKey(key) || ends_token || edits_token) {
+    ++host_edits_expected_;
+  }
+  if (ends_token) {
+    // Space and Return terminate the token even though ToUnicodeEx also reports a
+    // character for them. Their own character is host text, not part of the next token.
+    host_token_units_ = 0;
+    if (vk == input::kVirtualKeySpace) {
+      ++host_text_keys_;
+    }
+  } else if (edits_token) {
+    if (host_token_units_ > 0) {
+      --host_token_units_;
+    }
+  } else if (IsTextKey(key) && key.decision.is_engine_candidate()) {
+    host_token_units_ += key.text.utf16_code_units.size();
+    ++host_text_keys_;
+  } else if (IsTextKey(key)) {
+    // Punctuation outside the engine alphabet ends the token.
+    host_token_units_ = 0;
+    ++host_text_keys_;
+  } else if (key.decision.reason == input::KeyDecisionReason::kNoText ||
+             key.decision.reason == input::KeyDecisionReason::kDeadKey ||
+             key.decision.requires_composition_boundary()) {
+    host_token_units_ = 0;
+  }
+  ++not_eaten_;
+  return false;
+}
+
+bool ProductTextController::FeedSuggestionKey(
+    const BuiltKey& key, const coordinator::CoordinatorSnapshot& snapshot,
+    bool ends_token) {
+  if (suggestion_stale_) {
+    ++suggestion_dropped_;
+    return false;
+  }
+  if (suggestion_queue_.size() >= kSuggestionQueueCapacity) {
+    // The engine is behind. Suggestions are the only thing lost; the host already has the
+    // text and the product stores none of it.
+    MarkSuggestionStale();
+    ++suggestion_dropped_;
+    return false;
+  }
+  SuggestionKey item;
+  item.event = key.event;
+  item.text = key.text;
+  item.decision = key.decision;
+  item.context_id = snapshot.identity.context_id;
+  item.generation = snapshot.identity.generation;
+  item.ends_token = ends_token;
+  suggestion_queue_.push_back(std::move(item));
+  suggestion_engaged_ = true;
+  ++suggestion_queued_;
+  SubmitNextSuggestion();
   waker_.SetPacing(true);
   return true;
 }
 
-void ProductTextController::EnterRawMode() {
-  if (raw_active_) {
+void ProductTextController::SubmitNextSuggestion() {
+  if (suggestion_in_flight_ || replacement_pending_ || !coordinator_ || !engine_) {
     return;
   }
-  raw_active_ = true;
-  ++raw_entered_;
-  host_token_.Reset();
-  std::deque<AdmissionKey> withdrawn = queue_.WithdrawQueued();
-  const std::size_t before = raw_run_.size();
-  for (const AdmissionKey& key : withdrawn) {
-    FoldWithdrawnKey(key);
-  }
-  queue_.RecordDeferredRaw(withdrawn.size(), raw_run_.size() - before);
-}
-
-void ProductTextController::FoldWithdrawnKey(const AdmissionKey& key) {
-  switch (key.decision.disposition) {
-    case input::KeyDisposition::kEngineTextCandidate:
-    case input::KeyDisposition::kEngineSpaceCandidate:
-      CaptureRawText(key.decision.disposition == input::KeyDisposition::kEngineSpaceCandidate
-                         ? std::u16string_view(u" ")
-                         : std::u16string_view(key.text.utf16_code_units));
-      break;
-    case input::KeyDisposition::kEngineEnterCandidate:
-      raw_end_requested_ = true;
-      ++raw_chunk_keys_;
-      break;
-    case input::KeyDisposition::kEngineEscapeCandidate:
-      // Escape inside an already-withdrawn run cancels only what is not yet submitted.
-      CancelRawSuffix();
-      raw_end_requested_ = true;
-      ++raw_chunk_keys_;
-      break;
-    case input::KeyDisposition::kEngineBackSpaceCandidate:
-      if (!raw_run_.BackspaceOneCodePoint()) {
-        ++raw_ignored_edits_;
-      }
-      ++raw_chunk_keys_;
-      break;
-    default:
-      ++raw_ignored_edits_;
-      break;
-  }
-}
-
-bool ProductTextController::CaptureRawText(std::u16string_view text) {
-  if (text.empty()) {
-    return true;
-  }
-  RawTextRun::AppendStatus status = raw_run_.Append(text, kRawCapacityUtf16);
-  if (status == RawTextRun::AppendStatus::kNeedsFlush) {
-    // Hand the full chunk to the coordinator and retry this key in a new chunk. This is
-    // what keeps the bound from turning into a loss while the document is still draining.
-    FlushRaw();
-    if (raw_submitted_) {
-      status = raw_run_.Append(text, kRawCapacityUtf16);
-    }
-  }
-  if (status != RawTextRun::AppendStatus::kAppended) {
-    // The current chunk could not be flushed (an earlier chunk or engine key is still
-    // unresolved). The key is still eaten so the text that IS captured keeps its order; the
-    // loss is reported as an explicit unrecoverable capacity failure, never hidden.
-    queue_.RecordRawDropped(1, text.size());
-    ++raw_unrecoverable_;
-    return false;
-  }
-  ++raw_chunk_keys_;
-  ++raw_keys_;
-  raw_chars_ += text.size();
-  return true;
-}
-
-void ProductTextController::CancelRawSuffix() {
-  if (raw_run_.empty()) {
+  if (suggestion_queue_.empty()) {
     return;
   }
-  raw_cancelled_keys_ += raw_chunk_keys_;
-  raw_cancelled_units_ += raw_run_.size();
-  queue_.RecordRawCancelled(raw_chunk_keys_, raw_run_.size());
-  raw_run_.Clear();
-  raw_chunk_keys_ = 0;
-}
-
-bool ProductTextController::HandleRawKey(const BuiltKey& key) {
-  switch (key.decision.reason) {
-    case input::KeyDecisionReason::kPermissionForbidden:
-    case input::KeyDecisionReason::kPermissionUnknown:
-    case input::KeyDecisionReason::kInputDisabled:
-    case input::KeyDecisionReason::kShortcutModifier:
-    case input::KeyDecisionReason::kKeyRelease:
-      // Never captured: privacy, disabled input or a host-owned chord.
-      return false;
-    default:
-      break;
+  const bool reset_front = suggestion_queue_.front().reset;
+  if (suggestion_stale_ && !reset_front) {
+    return;  // normal suggestions stay off until the engine has been reset
   }
-  const std::uint32_t vk = key.event.virtual_key;
-  if (vk == input::kVirtualKeySpace) {
-    CaptureRawText(u" ");
-    raw_end_requested_ = true;
-    host_token_.Reset();
-    FlushRaw();
-    return true;
-  }
-  if (vk == input::kVirtualKeyReturn) {
-    // Enter ends the run and applies the captured suffix; it inserts no newline, exactly as
-    // the engine path commits a composition without adding a line break.
-    raw_end_requested_ = true;
-    ++raw_chunk_keys_;
-    FlushRaw();
-    return true;
-  }
-  if (vk == input::kVirtualKeyEscape) {
-    // Escape cancels the accepted-but-not-yet-submitted suffix. A chunk already handed to
-    // the coordinator before this key is not retracted (there is no safe cancel for a TSF
-    // write that may be in flight); it applies exactly once. Nothing captured earlier is
-    // submitted later: the suffix is cleared here and the run ends when the chunk resolves.
-    CancelRawSuffix();
-    raw_end_requested_ = true;
-    ++raw_chunk_keys_;
-    ++raw_ignored_edits_;
-    FlushRaw();
-    return true;
-  }
-  if (vk == input::kVirtualKeyBack) {
-    // Backspace edits only the captured suffix. It never deletes displayed composition text
-    // or host text: when the suffix is empty, the key is eaten and counted, not forwarded.
-    if (!raw_run_.BackspaceOneCodePoint()) {
-      ++raw_ignored_edits_;
-    }
-    ++raw_chunk_keys_;
-    FlushRaw();
-    return true;
-  }
-  if (RawCaptureWorthy(key)) {
-    if (!IsTokenText(key)) {
-      // e.g. a comma the engine would not consume: still captured raw, in order.
-      host_token_.Reset();
-    }
-    CaptureRawText(key.text.utf16_code_units);
-    FlushRaw();
-    return true;
-  }
-  return false;  // shortcuts and untranslatable keys stay with the host
-}
-
-void ProductTextController::FlushRaw() {
-  if (!raw_active_ || raw_submitted_ || raw_run_.empty()) {
-    return;
-  }
-  if (HasPendingEngineInput()) {
-    return;  // the in-flight engine key must resolve before the raw run can be applied
-  }
-  const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
-  if (!snapshot.bound || snapshot.closed ||
-      snapshot.gate != coordinator::CoordinatorGate::kOpen ||
-      snapshot.phase != coordinator::WorkPhase::kIdle ||
-      snapshot.retirement.retiring_bindings != 0 ||
-      snapshot.retirement.admission_paused) {
-    return;
-  }
-  if (snapshot.permission != edit::InputPermission::kAllowed) {
-    return;  // a pending refresh resolves; nothing is written under Unknown/Denied
-  }
+  const SuggestionKey& head = suggestion_queue_.front();
   coordinator::WorkId work;
   const coordinator::SubmitStatus status =
-      coordinator_->SubmitRawCommit(raw_run_.text(), &work);
+      coordinator_->SubmitKey(head.event, head.text, &work);
   switch (status) {
     case coordinator::SubmitStatus::kAccepted:
-      raw_submitted_ = true;
-      raw_work_id_ = work.value;
-      raw_submitted_keys_ = raw_chunk_keys_;
-      raw_submitted_units_ = raw_run_.size();
-      raw_run_.Clear();
-      raw_chunk_keys_ = 0;
-      ++raw_commits_;
-      waker_.SetPacing(true);
+      suggestion_in_flight_ = true;
+      suggestion_in_flight_reset_ = reset_front;
+      suggestion_work_id_ = work.value;
+      suggestion_queue_.pop_front();
+      ++suggestion_submitted_;
       return;
     case coordinator::SubmitStatus::kBusy:
     case coordinator::SubmitStatus::kRetiring:
-    case coordinator::SubmitStatus::kPermissionUnknown:
-      return;  // retried by the next pump
-    case coordinator::SubmitStatus::kPermissionDenied:
-      FailRawState(KeyFailure::kPermissionRefused);
-      return;
-    case coordinator::SubmitStatus::kClosed:
-      FailRawState(KeyFailure::kShutdown);
-      return;
-    case coordinator::SubmitStatus::kNotBound:
-    case coordinator::SubmitStatus::kTargetChanged:
-    case coordinator::SubmitStatus::kThreadFocusLost:
-    case coordinator::SubmitStatus::kTargetUnverified:
-    case coordinator::SubmitStatus::kBlockedUncertain:
-    case coordinator::SubmitStatus::kBlockedNeedsResync:
-    case coordinator::SubmitStatus::kBlockedUnsupportedShape:
-      FailRawState(KeyFailure::kTargetChanged);
-      if (coordinator_->bound()) {
-        coordinator_->InvalidateBinding();
-      }
-      RequestRebindSoon();
-      return;
-    case coordinator::SubmitStatus::kEngineNotRunning:
     case coordinator::SubmitStatus::kQueueFull:
-    case coordinator::SubmitStatus::kEngineClientUnavailable:
-    case coordinator::SubmitStatus::kEngineSubmitFailed:
+    case coordinator::SubmitStatus::kNotBound:
+      return;  // retried from the next pump; the host is unaffected
     case coordinator::SubmitStatus::kNotEngineCandidate:
-    case coordinator::SubmitStatus::kInvalidRequest:
-      FailRawState(KeyFailure::kInternal);
+      // The engine stream does not want this key (for example Backspace or a reset with no
+      // engine composition). Drop the suggestion, never the text.
+      if (reset_front) {
+        suggestion_stale_ = false;
+        suggestion_engaged_ = false;
+        ++reset_submit_refusal_;
+      }
+      suggestion_queue_.pop_front();
+      ++suggestion_dropped_;
+      return;
+    default:
+      // Permission/target/engine failures close suggestions for this token. No binding is
+      // torn down for a suggestion failure; the host keeps typing.
+      if (reset_front) {
+        ++reset_submit_refusal_;
+        suggestion_stale_ = false;
+      }
+      suggestion_queue_.pop_front();
+      ++suggestion_dropped_;
+      if (!reset_front) {
+        MarkSuggestionStale();
+      }
       return;
   }
 }
 
-void ProductTextController::ResolveRaw() {
-  if (raw_submitted_) {
+void ProductTextController::ResolveSuggestionWork() {
+  if (suggestion_in_flight_) {
     const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
-    if (snapshot.work_id != raw_work_id_) {
-      FailRawState(KeyFailure::kRawCommitFailed);
-      if (queue_.HasInFlight() && !queue_.in_flight_failed()) {
-        queue_.MarkInFlightFailed(KeyFailure::kRawCommitFailed);
-      }
-    } else if (snapshot.phase == coordinator::WorkPhase::kIdle) {
-      const bool applied = snapshot.outcome == coordinator::WorkOutcome::kApplied;
-      if (applied) {
-        queue_.RecordRawApplied(raw_submitted_keys_, raw_submitted_units_);
-        engine_stale_ = true;
-        raw_submitted_ = false;
-        raw_work_id_ = 0;
-        raw_submitted_keys_ = 0;
-        raw_submitted_units_ = 0;
-      } else {
-        // FailRawState records exactly this submitted chunk and any later captured text.
-        FailRawState(KeyFailure::kRawCommitFailed);
-        if (coordinator_->bound()) {
-          coordinator_->InvalidateBinding();
-        }
-        RequestRebindSoon();
-      }
-      waker_.SetPacing(true);
-    }
-  }
-  FlushRaw();
-  if (raw_active_ && !raw_submitted_ && raw_run_.empty() &&
-      !HasPendingEngineInput() && raw_end_requested_) {
-    FinishRawRun();
-  }
-}
-
-void ProductTextController::FinishRawRun() {
-  raw_active_ = false;
-  raw_end_requested_ = false;
-  ++raw_exits_;
-  if (engine_stale_) {
-    // The engine client never saw the captured keys. It must not be used again on this
-    // binding; a fresh client is built for the same context by the normal rebind path.
-    if (coordinator_->bound()) {
-      coordinator_->InvalidateBinding();
-    }
-    RequestRebindSoon();
-  }
-  waker_.SetPacing(true);
-}
-
-void ProductTextController::FailRawState(KeyFailure failure) {
-  if (raw_submitted_) {
-    queue_.RecordRawFailed(raw_submitted_keys_, raw_submitted_units_);
-  }
-  if (raw_chunk_keys_ != 0 || !raw_run_.empty()) {
-    queue_.RecordRawFailed(raw_chunk_keys_, raw_run_.size());
-  }
-  raw_submitted_ = false;
-  raw_work_id_ = 0;
-  raw_submitted_keys_ = 0;
-  raw_submitted_units_ = 0;
-  raw_chunk_keys_ = 0;
-  raw_run_.Clear();
-  raw_end_requested_ = false;
-  raw_active_ = false;
-  (void)failure;
-  waker_.SetPacing(true);
-}
-
-ProductTextController::SubmitAttempt ProductTextController::SubmitHead(bool immediate) {
-  if (RawUnapplied()) {
-    // While a degraded run owns the caret order, no engine key may overtake it.
-    return SubmitAttempt::kWaited;
-  }
-  AdmissionKey* head = queue_.head();
-  if (head == nullptr) {
-    return SubmitAttempt::kNoHead;
-  }
-  const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
-  const bool composing =
-      snapshot.composition_active || snapshot.owned_composition_active;
-  auto keep = [this, immediate, composing]() {
-    if (immediate && !composing) {
-      queue_.DropHeadNotEaten();
-      return SubmitAttempt::kNotEatenHostKeeps;
-    }
-    return SubmitAttempt::kWaited;
-  };
-
-  if (snapshot.closed) {
-    queue_.FailHead(KeyFailure::kShutdown, true);
-    queue_.FailQueued(KeyFailure::kShutdown);
-    return SubmitAttempt::kFailedEaten;
-  }
-  if (!snapshot.bound || snapshot.gate != coordinator::CoordinatorGate::kOpen) {
-    if (immediate && !composing) {
-      queue_.DropHeadNotEaten();
-      queue_.FailQueued(KeyFailure::kBlockedGate);
-      RequestRebindSoon();
-      return SubmitAttempt::kNotEatenHostKeeps;
-    }
-    queue_.FailHead(KeyFailure::kBlockedGate, true);
-    queue_.FailQueued(KeyFailure::kBlockedGate);
-    coordinator_->InvalidateBinding();
-    RequestRebindSoon();
-    return SubmitAttempt::kFailedEaten;
-  }
-  if (head->context_id != snapshot.identity.context_id ||
-      head->generation != snapshot.identity.generation) {
-    if (immediate && !composing) {
-      queue_.DropHeadNotEaten();
-      queue_.FailQueued(KeyFailure::kBindingRetired);
-      RequestRebindSoon();
-      return SubmitAttempt::kNotEatenHostKeeps;
-    }
-    queue_.FailHead(KeyFailure::kBindingRetired, true);
-    queue_.FailQueued(KeyFailure::kBindingRetired);
-    coordinator_->InvalidateBinding();
-    RequestRebindSoon();
-    return SubmitAttempt::kFailedEaten;
-  }
-  if (snapshot.phase != coordinator::WorkPhase::kIdle ||
-      snapshot.retirement.retiring_bindings != 0 ||
-      snapshot.retirement.admission_paused) {
-    return SubmitAttempt::kWaited;
-  }
-
-  coordinator::WorkId work;
-  const coordinator::SubmitStatus submitted =
-      coordinator_->SubmitKey(head->event, head->text, &work);
-  switch (submitted) {
-    case coordinator::SubmitStatus::kAccepted:
-      if (!queue_.MoveHeadToInFlight(work)) {
-        return SubmitAttempt::kWaited;
-      }
-      return SubmitAttempt::kSubmitted;
-    case coordinator::SubmitStatus::kBusy:
-    case coordinator::SubmitStatus::kRetiring:
-    case coordinator::SubmitStatus::kQueueFull:
-      return SubmitAttempt::kWaited;
-    case coordinator::SubmitStatus::kNotEngineCandidate:
-      if (immediate && !composing) {
-        return keep();
-      }
-      queue_.FailHead(KeyFailure::kPredictionMismatch, true);
-      return SubmitAttempt::kFailedEaten;
-    case coordinator::SubmitStatus::kPermissionDenied:
-    case coordinator::SubmitStatus::kPermissionUnknown:
-      if (immediate && !composing) {
-        return keep();
-      }
-      queue_.FailHead(KeyFailure::kPermissionRefused, true);
-      if (composing) {
-        coordinator_->InvalidateBinding();
-        RequestRebindSoon();
-      }
-      return SubmitAttempt::kFailedEaten;
-    case coordinator::SubmitStatus::kThreadFocusLost:
-    case coordinator::SubmitStatus::kTargetChanged:
-    case coordinator::SubmitStatus::kTargetUnverified:
-    case coordinator::SubmitStatus::kNotBound:
-      if (immediate && !composing) {
-        queue_.DropHeadNotEaten();
-        queue_.FailQueued(KeyFailure::kTargetChanged);
-        RequestRebindSoon();
-        return SubmitAttempt::kNotEatenHostKeeps;
-      }
-      queue_.FailHead(KeyFailure::kTargetChanged, true);
-      queue_.FailQueued(KeyFailure::kTargetChanged);
-      coordinator_->InvalidateBinding();
-      RequestRebindSoon();
-      return SubmitAttempt::kFailedEaten;
-    case coordinator::SubmitStatus::kBlockedUncertain:
-    case coordinator::SubmitStatus::kBlockedNeedsResync:
-    case coordinator::SubmitStatus::kBlockedUnsupportedShape:
-      if (immediate && !composing) {
-        queue_.DropHeadNotEaten();
-        queue_.FailQueued(KeyFailure::kBlockedGate);
-        RequestRebindSoon();
-        return SubmitAttempt::kNotEatenHostKeeps;
-      }
-      queue_.FailHead(KeyFailure::kBlockedGate, true);
-      queue_.FailQueued(KeyFailure::kBlockedGate);
-      coordinator_->InvalidateBinding();
-      RequestRebindSoon();
-      return SubmitAttempt::kFailedEaten;
-    case coordinator::SubmitStatus::kEngineNotRunning:
-    case coordinator::SubmitStatus::kEngineClientUnavailable:
-    case coordinator::SubmitStatus::kEngineSubmitFailed:
-      if (immediate && !composing) {
-        queue_.DropHeadNotEaten();
-        queue_.FailQueued(KeyFailure::kEngineUnavailable);
-        RequestRebindSoon();
-        return SubmitAttempt::kNotEatenHostKeeps;
-      }
-      queue_.FailHead(KeyFailure::kEngineUnavailable, true);
-      queue_.FailQueued(KeyFailure::kEngineUnavailable);
-      coordinator_->InvalidateBinding();
-      RequestRebindSoon();
-      return SubmitAttempt::kFailedEaten;
-    case coordinator::SubmitStatus::kClosed:
-      queue_.FailHead(KeyFailure::kShutdown, true);
-      queue_.FailQueued(KeyFailure::kShutdown);
-      return SubmitAttempt::kFailedEaten;
-    case coordinator::SubmitStatus::kInvalidRequest:
-      queue_.FailHead(KeyFailure::kInternal, true);
-      return SubmitAttempt::kFailedEaten;
-  }
-  return SubmitAttempt::kWaited;
-}
-
-void ProductTextController::FailQueuedAndMaybeInvalidate(KeyFailure failure,
-                                                         bool invalidate) {
-  queue_.FailQueued(failure);
-  if (invalidate && coordinator_->bound()) {
-    coordinator_->InvalidateBinding();
-    RequestRebindSoon();
-  }
-}
-
-void ProductTextController::RequestRebindSoon() { rebind_soon_ = true; }
-
-void ProductTextController::ResolveInFlight() {
-  if (!queue_.HasInFlight()) {
-    return;
-  }
-  const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
-  if (queue_.in_flight_failed()) {
     if (snapshot.phase == coordinator::WorkPhase::kIdle) {
-      queue_.ReleaseFailedInFlight();
+      suggestion_in_flight_ = false;
+      suggestion_work_id_ = 0;
+      ++suggestion_completed_;
+      const bool was_reset = suggestion_in_flight_reset_;
+      suggestion_in_flight_reset_ = false;
+      if (was_reset) {
+        suggestion_stale_ = false;
+        suggestion_engaged_ = false;
+        suggestion_queue_.clear();
+      } else if (snapshot.outcome != coordinator::WorkOutcome::kNoEdit &&
+                 snapshot.outcome != coordinator::WorkOutcome::kApplied) {
+        MarkSuggestionStale();
+      }
     }
+  }
+  if (!suggestion_in_flight_ && !replacement_pending_ &&
+      (suggestion_stale_ || stream_reset_owed_)) {
+    // A token boundary or a failed/stale stream needs the engine's composition cancelled.
+    // A synthetic Escape does that without touching the document or rebuilding the binding.
+    stream_reset_owed_ = false;
+    QueueEngineReset();
+  }
+  if (!suggestion_in_flight_ && !replacement_pending_) {
+    // Also retries a queued reset while the stream is stale: SubmitNextSuggestion refuses
+    // ordinary keys in that state but must still be able to dispatch the reset itself.
+    SubmitNextSuggestion();
+  }
+}
+
+void ProductTextController::QueueEngineReset() {
+  if (!coordinator_ || !engine_ || !coordinator_->bound() || replacement_pending_) {
     return;
   }
-  AdmissionKey* key = queue_.in_flight();
-  if (key == nullptr || snapshot.work_id != key->work.value) {
+  if (suggestion_in_flight_reset_) {
     return;
   }
-  if (snapshot.phase == coordinator::WorkPhase::kEditPending ||
-      (snapshot.phase == coordinator::WorkPhase::kIdle &&
-       (snapshot.outcome == coordinator::WorkOutcome::kApplied ||
-        snapshot.outcome == coordinator::WorkOutcome::kNoEdit))) {
-    queue_.MarkInFlightEngineCompleted();
+  for (const SuggestionKey& queued : suggestion_queue_) {
+    if (queued.reset) {
+      // One reset is already owed; still drive it from here so a busy coordinator is retried
+      // by the next pump instead of leaving the queue permanently blocked.
+      SubmitNextSuggestion();
+      return;
+    }
   }
+  SuggestionKey reset;
+  reset.reset = true;
+  reset.event.virtual_key = input::kVirtualKeyEscape;
+  reset.event.transition = input::KeyTransition::kKeyDown;
+  reset.event.repeat_count = 1;
+  reset.text.status = input::KeyTextStatus::kNoText;
+  const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
+  if (snapshot.identity.context_id != 0) {
+    reset.context_id = snapshot.identity.context_id;
+    reset.generation = snapshot.identity.generation;
+  }
+  suggestion_queue_.push_back(std::move(reset));
+  ++suggestion_resets_;
+  SubmitNextSuggestion();
+  waker_.SetPacing(true);
+}
+
+void ProductTextController::EndSuggestionToken() {
+  const bool had_stream =
+      suggestion_engaged_ || suggestion_in_flight_ ||
+      (coordinator_ && coordinator_->candidate_menu_open());
+  suggestion_queue_.clear();
+  suggestion_engaged_ = false;
+  host_token_units_ = 0;
+  if (had_stream || suggestion_stale_) {
+    // Cancel the engine's stale composition with Escape; the binding and the document stay.
+    if (!suggestion_in_flight_ && !replacement_pending_) {
+      ++reset_boundary_;
+      suggestion_stale_ = true;
+      QueueEngineReset();
+    } else {
+      stream_reset_owed_ = true;
+      ++reset_owed_;
+    }
+  }
+}
+
+void ProductTextController::ResetSuggestionStream(bool invalidate_binding) {
+  suggestion_queue_.clear();
+  suggestion_stale_ = false;
+  suggestion_engaged_ = false;
+  DismissCandidateMenu();
+  host_token_units_ = 0;
+  (void)invalidate_binding;  // suggestion resets never tear down a binding
+}
+
+void ProductTextController::MarkSuggestionStale() {
+  if (!suggestion_stale_) {
+    suggestion_stale_ = true;
+    ++suggestion_stale_events_;
+  }
+  suggestion_dropped_ += suggestion_queue_.size();
+  suggestion_queue_.clear();
+  DismissCandidateMenu();
+}
+
+void ProductTextController::DismissCandidateMenu() {
+  candidate_selection_ = -1;
+  if (candidate_ui_) {
+    candidate_ui_->SetSelection(-1);
+    candidate_ui_->End();
+  }
+}
+
+bool ProductTextController::SubmitReplacement(const CandidateUiSelection& selection) {
+  if (!coordinator_ || !engine_) {
+    return false;
+  }
+  ++replacement_attempts_;
+  coordinator::WorkId work;
+  const coordinator::SubmitStatus status =
+      coordinator_->SubmitSuggestionReplacement(
+          coordinator::CandidateSelectionRequest{selection.snapshot_version,
+                                                 selection.context_id,
+                                                 selection.generation,
+                                                 static_cast<std::size_t>(
+                                                     selection.page_index)},
+          &work);
+  if (status != coordinator::SubmitStatus::kAccepted) {
+    ++replacement_refused_;
+    DismissCandidateMenu();
+    return false;
+  }
+  replacement_pending_ = true;
+  replacement_work_id_ = work.value;
+  DismissCandidateMenu();
+  waker_.SetPacing(true);
+  return true;
+}
+
+void ProductTextController::ResolveReplacement() {
+  if (!replacement_pending_) {
+    return;
+  }
+  const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
   if (snapshot.phase != coordinator::WorkPhase::kIdle) {
     return;
   }
-  switch (snapshot.outcome) {
-    case coordinator::WorkOutcome::kApplied:
-    case coordinator::WorkOutcome::kNoEdit:
-      queue_.CompleteInFlight(KeyState::kEditCompleted, KeyFailure::kNone);
-      break;
-    case coordinator::WorkOutcome::kRejected:
-      queue_.CompleteInFlight(KeyState::kFailed,
-                              FailureForReject(snapshot.cause));
-      break;
-    case coordinator::WorkOutcome::kNeedsResync:
-      queue_.CompleteInFlight(KeyState::kFailed,
-                              snapshot.cause ==
-                                      coordinator::RejectCause::kTargetChangedWhileQueued
-                                  ? KeyFailure::kTargetChanged
-                                  : KeyFailure::kEngineUnavailable);
-      break;
-    case coordinator::WorkOutcome::kUncertain:
-    case coordinator::WorkOutcome::kUnsupportedShape:
-      queue_.CompleteInFlight(KeyState::kFailed, KeyFailure::kBlockedGate);
-      break;
-    case coordinator::WorkOutcome::kAbandonedStale:
-      queue_.CompleteInFlight(KeyState::kFailed, KeyFailure::kFocusChanged);
-      break;
-    case coordinator::WorkOutcome::kNone:
-      return;
+  replacement_pending_ = false;
+  replacement_work_id_ = 0;
+  suggestion_engaged_ = false;
+  if (snapshot.outcome == coordinator::WorkOutcome::kApplied) {
+    ++replacement_applied_;
+  } else {
+    ++replacement_refused_;
+    if (snapshot.last_edit_status == edit::EditStatus::kFailedPossiblyMutated ||
+        snapshot.last_edit_status == edit::EditStatus::kFailedAfterMutation) {
+      // The writer could not prove what the document holds. The whole expected token is
+      // reported as an internal loss rather than assumed to be intact.
+      internal_text_losses_ += snapshot.last_suggestion_expected_units;
+    }
   }
-  if (snapshot.gate != coordinator::CoordinatorGate::kOpen) {
-    queue_.FailQueued(KeyFailure::kBlockedGate);
-  }
+  // Whether the candidate applied or was refused, the engine's state describes the token
+  // before the selection. Cancel only that engine composition; the document and binding
+  // stay as they are.
+  suggestion_queue_.clear();
+  suggestion_stale_ = true;
+  stream_reset_owed_ = false;
+  host_token_units_ = 0;
+  ++reset_replacement_;
+  QueueEngineReset();
+  waker_.SetPacing(true);
 }
+
+void ProductTextController::RequestRebindSoon() { rebind_soon_ = true; }
 
 void ProductTextController::PumpNow() {
   if (!started_ || stopping_) {
@@ -1183,6 +815,12 @@ void ProductTextController::PumpNow() {
       return;
     }
   }
+  if (!coordinator_->bound() && observer_ && observer_->has_current_context()) {
+    // A read failure or a refused bind can leave the observer with no rebind owed while
+    // the coordinator has no binding. Retry on the paced wake until a binding exists; the
+    // observer still performs the real selection read and live target checks each time.
+    rebind_soon_ = true;
+  }
   if (rebind_soon_) {
     rebind_soon_ = false;
     if (observer_) {
@@ -1193,31 +831,19 @@ void ProductTextController::PumpNow() {
   coordinator_->Pump();
   const ClientProvider::Harvest harvest = clients_->TakeReady();
   if (harvest.failed && harvest.failed_client == clients_->last_client()) {
-    FailRawState(KeyFailure::kEngineUnavailable);
-    FailQueuedAndMaybeInvalidate(KeyFailure::kEngineUnavailable, true);
-    if (queue_.HasInFlight()) {
-      queue_.MarkInFlightFailed(KeyFailure::kEngineUnavailable);
-    }
+    // The suggestion client failed. Text already in the document is untouched; only the
+    // suggestion stream is abandoned and the next token gets a fresh client.
+    MarkSuggestionStale();
   }
   binding_->Pump();
   observer_->Pump();
   if (coordinator_->bound() &&
       coordinator_->permission() == edit::InputPermission::kUnknown &&
-      !queue_.HasInFlight() && queue_.empty() && !RawUnapplied()) {
+      !suggestion_in_flight_ && suggestion_queue_.empty() && !replacement_pending_) {
     coordinator_->RefreshPermission();
   }
-  ResolveInFlight();
-  if (RawUnapplied()) {
-    const coordinator::CoordinatorSnapshot snapshot = coordinator_->Snapshot();
-    if (!snapshot.bound || snapshot.closed ||
-        snapshot.gate != coordinator::CoordinatorGate::kOpen) {
-      // The binding that owned the captured run is gone or blocked; its text cannot be
-      // written anywhere else, so the loss is reported explicitly.
-      FailRawState(KeyFailure::kTargetChanged);
-    }
-  }
-  ResolveRaw();
-  SubmitHead(false);
+  ResolveSuggestionWork();
+  ResolveReplacement();
   UpdateCandidateUi();
   UpdatePacing();
 }
@@ -1227,7 +853,12 @@ void ProductTextController::UpdatePacing() {
   if (started_ && !stopping_ && engine_ && coordinator_ && observer_ && clients_) {
     const coordinator::CoordinatorSnapshot coordinator = coordinator_->Snapshot();
     const ctx::ContextObserverSnapshot observer = observer_->Snapshot();
-    if (queue_.HasInFlight() || !queue_.empty() ||
+    if (!coordinator.bound) {
+      // Keep the paced wake alive while a rebind is owed; otherwise a failed selection read
+      // would leave the controller idle with no binding and no future retry.
+      pace = true;
+    }
+    if (suggestion_in_flight_ || !suggestion_queue_.empty() || replacement_pending_ ||
         coordinator.phase != coordinator::WorkPhase::kIdle ||
         coordinator.retirement.retiring_bindings != 0 ||
         coordinator.retirement.admission_paused || clients_->pending() != 0 ||
@@ -1240,13 +871,23 @@ void ProductTextController::UpdatePacing() {
 }
 
 bool ProductTextController::CandidatesOpen() const {
-  if (!engine_ || !coordinator_ || raw_active_ || raw_submitted_) {
+  if (!engine_ || !coordinator_ || suggestion_stale_ || replacement_pending_) {
+    return false;
+  }
+  if (suggestion_in_flight_ || !suggestion_queue_.empty()) {
+    // The menu describes a prefix the engine has already processed; a key is still in
+    // flight, so the displayed menu no longer matches everything the host has typed.
     return false;
   }
   if (!coordinator_->candidate_menu_open()) {
     return false;
   }
-  return coordinator_->candidate_snapshot().version != candidate_dismissed_version_;
+  const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
+  if (snapshot.input_utf16_code_units.size() != host_token_units_) {
+    // A menu that is shorter than what the host has inserted must never be selectable.
+    return false;
+  }
+  return snapshot.version != candidate_dismissed_version_;
 }
 
 void ProductTextController::MoveCandidateSelection(int delta) {
@@ -1276,43 +917,19 @@ bool ProductTextController::FinalizeCandidateSelection(
     return false;
   }
   const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
-  if (!snapshot.valid || snapshot.version != selection.snapshot_version) {
+  if (!snapshot.valid || snapshot.version != selection.snapshot_version ||
+      suggestion_in_flight_ || !suggestion_queue_.empty() ||
+      snapshot.input_utf16_code_units.size() != host_token_units_) {
     ++candidate_stale_selections_;
-    candidate_selection_ = -1;
     candidate_dismissed_version_ = snapshot.version;
-    if (candidate_ui_) {
-      candidate_ui_->SetSelection(-1);
-      candidate_ui_->End();
-    }
+    DismissCandidateMenu();
     return false;
   }
-  coordinator::CandidateSelectionRequest request;
-  request.snapshot_version = selection.snapshot_version;
-  request.context_id = selection.context_id;
-  request.generation = selection.generation;
-  request.page_index = static_cast<std::size_t>(selection.page_index);
-  coordinator::WorkId work;
-  const coordinator::SubmitStatus status =
-      coordinator_->SubmitCandidateSelection(request, &work);
-  if (status != coordinator::SubmitStatus::kAccepted) {
+  if (!SubmitReplacement(selection)) {
     ++candidate_stale_selections_;
-    candidate_selection_ = -1;
-    if (status == coordinator::SubmitStatus::kCandidateStale) {
-      candidate_dismissed_version_ = snapshot.version;
-      if (candidate_ui_) {
-        candidate_ui_->SetSelection(-1);
-        candidate_ui_->End();
-      }
-    } else if (candidate_ui_) {
-      candidate_ui_->SetSelection(-1);
-    }
+    candidate_dismissed_version_ = snapshot.version;
     return false;
   }
-  candidate_selection_ = -1;
-  if (candidate_ui_) {
-    candidate_ui_->SetSelection(-1);
-  }
-  waker_.SetPacing(true);
   return true;
 }
 
@@ -1326,7 +943,8 @@ void ProductTextController::UpdateCandidateUi() {
     return;
   }
   const coordinator::CandidateSnapshot snapshot = coordinator_->candidate_snapshot();
-  if (!snapshot.valid || raw_active_ || raw_submitted_) {
+  if (!snapshot.valid || suggestion_stale_ || replacement_pending_ ||
+      suggestion_in_flight_ || !suggestion_queue_.empty()) {
     candidate_ui_->End();
     candidate_selection_ = -1;
     candidate_ui_version_ = snapshot.version;
@@ -1412,24 +1030,28 @@ void ProductTextController::OnStaWake(std::uint64_t generation) {
 }
 void ProductTextController::OnTargetLost(ctx::ContextDropReason reason) {
   ++target_losses_;
-  FailRawState(KeyFailure::kFocusChanged);
+  // Original text is already in its document. Only the cancelable suggestion stream dies
+  // here; nothing is retracted, replayed or attributed to the user.
+  suggestion_queue_.clear();
+  suggestion_in_flight_ = false;
+  suggestion_engaged_ = false;
+  suggestion_work_id_ = 0;
+  suggestion_stale_ = true;
+  stream_reset_owed_ = false;
+  suggestion_in_flight_reset_ = false;
+  if (replacement_pending_) {
+    ++replacement_refused_;
+    replacement_pending_ = false;
+    replacement_work_id_ = 0;
+  }
+  host_token_units_ = 0;
   if (ui_context_ != nullptr) {
     ui_context_->Release();
     ui_context_ = nullptr;
   }
   candidate_selection_ = -1;
   candidate_ui_version_ = 0;
-  // A host-owned token survives an external edit caused by the host inserting the very
-  // characters we passed through; it ends only when the token itself ends or the target
-  // really moves to another document.
-  if (reason != ctx::ContextDropReason::kExternalTextEdit &&
-      reason != ctx::ContextDropReason::kExternalSelectionEdit) {
-    host_token_.Reset();
-  }
-  queue_.FailQueued(KeyFailure::kFocusChanged);
-  if (queue_.HasInFlight() && !queue_.in_flight_failed()) {
-    queue_.MarkInFlightFailed(KeyFailure::kFocusChanged);
-  }
+  DismissCandidateMenu();
   binding_->OnTargetLost(reason);
   waker_.SetPacing(true);
 }
@@ -1445,12 +1067,42 @@ void ProductTextController::OnTargetBound(ITfContext* context,
     context->AddRef();
     ui_context_ = context;
   }
-  // A fresh binding starts with a fresh engine client. The host-owned token is NOT a
-  // binding fact: a rebind caused by the host inserting passed-through text must not
-  // reopen the token to the engine.
-  engine_stale_ = false;
+  // A fresh binding starts with a fresh engine client and a fresh suggestion stream. The
+  // host's text is unaffected and is never re-read or replayed.
+  suggestion_queue_.clear();
+  suggestion_in_flight_ = false;
+  suggestion_engaged_ = false;
+  suggestion_work_id_ = 0;
+  suggestion_stale_ = false;
+  stream_reset_owed_ = false;
+  replacement_pending_ = false;
+  replacement_work_id_ = 0;
+  host_token_units_ = 0;
+  DismissCandidateMenu();
   binding_->OnTargetBound(context, target);
   waker_.SetPacing(true);
+}
+
+void ProductTextController::OnHostEditCompleted(
+    ITfContext* context, const ctx::ObservedTarget& target,
+    const ctx::SelectionSnapshot& selection) {
+  // The caret mirror is updated; the product never reads, copies or recovers this text.
+  if (binding_) {
+    binding_->OnHostEditCompleted(context, target, selection);
+  }
+  if (host_edits_expected_ > 0) {
+    // This is the host's insertion/deletion for the key we just passed through.
+    --host_edits_expected_;
+    ++host_edits_matched_;
+    return;
+  }
+  ++host_edits_unexpected_;
+  // A document change that none of our passed-through keys explains (paste, autocorrect,
+  // another client). The engine's token no longer matches the document: stop suggesting and
+  // rebuild at the next token. No text is touched.
+  MarkSuggestionStale();
+  host_token_units_ = 0;
+  QueueEngineReset();
 }
 
 void ProductTextController::OnOwnEditCompleted(
@@ -1497,24 +1149,29 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   diagnostics.target_losses = target_losses_;
   diagnostics.target_binds = target_binds_;
   diagnostics.rebind_requests = rebind_requests_;
-  diagnostics.raw_mode = raw_active_;
-  diagnostics.raw_submitted = raw_submitted_;
-  diagnostics.engine_stale = engine_stale_;
-  diagnostics.raw_unapplied_units =
-      static_cast<std::uint64_t>(raw_run_.size());
-  diagnostics.raw_keys = raw_keys_;
-  diagnostics.raw_commits = raw_commits_;
-  diagnostics.raw_entered = raw_entered_;
-  diagnostics.raw_exits = raw_exits_;
-  diagnostics.raw_ignored_edits = raw_ignored_edits_;
-  diagnostics.raw_cancelled_keys = raw_cancelled_keys_;
-  diagnostics.raw_cancelled_units = raw_cancelled_units_;
-  diagnostics.raw_unrecoverable = raw_unrecoverable_;
-  diagnostics.raw_reason_unapplied = raw_reason_unapplied_;
-  diagnostics.raw_reason_not_candidate = raw_reason_not_candidate_;
-  diagnostics.raw_reason_high_water = raw_reason_high_water_;
-  diagnostics.raw_reason_admission = raw_reason_admission_;
-  diagnostics.token_host_keys = token_host_keys_;
+  diagnostics.host_text_keys = host_text_keys_;
+  diagnostics.suggestion_queued = suggestion_queued_;
+  diagnostics.suggestion_submitted = suggestion_submitted_;
+  diagnostics.suggestion_completed = suggestion_completed_;
+  diagnostics.suggestion_dropped = suggestion_dropped_;
+  diagnostics.suggestion_stale = suggestion_stale_events_;
+  diagnostics.suggestion_resets = suggestion_resets_;
+  diagnostics.replacement_attempts = replacement_attempts_;
+  diagnostics.replacement_applied = replacement_applied_;
+  diagnostics.replacement_refused = replacement_refused_;
+  diagnostics.internal_text_losses = internal_text_losses_;
+  diagnostics.host_edits_matched = host_edits_matched_;
+  diagnostics.host_edits_unexpected = host_edits_unexpected_;
+  diagnostics.reset_boundary = reset_boundary_;
+  diagnostics.reset_owed = reset_owed_;
+  diagnostics.reset_submit_refusal = reset_submit_refusal_;
+  diagnostics.reset_replacement = reset_replacement_;
+  diagnostics.host_token_units = host_token_units_;
+  diagnostics.suggestion_queue_depth = suggestion_queue_.size();
+  diagnostics.suggestion_active =
+      suggestion_in_flight_ || !suggestion_queue_.empty() || replacement_pending_;
+  diagnostics.suggestion_in_flight = suggestion_in_flight_;
+  diagnostics.replacement_pending = replacement_pending_;
   if (clients_) {
     diagnostics.engine_client_requests = clients_->requests();
     diagnostics.engine_client_results = clients_->results();
@@ -1536,7 +1193,9 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   if (observer_) {
     diagnostics.observer = observer_->Snapshot();
   }
-  diagnostics.keys = queue_.Snapshot();
+  if (binding_) {
+    diagnostics.binding = binding_->Snapshot();
+  }
   diagnostics.pacing = waker_.Snapshot().paced;
   return diagnostics;
 }

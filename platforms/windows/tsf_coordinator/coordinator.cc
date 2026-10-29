@@ -185,6 +185,8 @@ const char* DescribeWorkKind(WorkKind kind) {
       return "Candidate";
     case WorkKind::kRaw:
       return "Raw";
+    case WorkKind::kSuggestionReplace:
+      return "SuggestionReplace";
   }
   return "UnknownWorkKind";
 }
@@ -614,6 +616,7 @@ void ContextCoordinator::InvalidateBinding() {
   pending_permission_ = PendingPermissionWork{};
   permission_refresh_ = false;
   observed_caret_pending_ = false;
+  engine_composing_ = false;
   // A permission read session that is still queued publishes nothing from now on.
   permission_source_.Abandon();
   RetireCurrentBinding();
@@ -1227,7 +1230,10 @@ input::KeyDecision ContextCoordinator::Evaluate(const input::KeyEventSnapshot& e
   input::InputContext evaluation_context;
   evaluation_context.input_enabled = true;
   evaluation_context.engine_ready = bound_ && engine_client_.valid();
-  evaluation_context.composition_active = view_.composition_active;
+  // In suggestion mode the engine's preedit lives only in the engine; the document has no
+  // composition. The special keys still belong to the engine stream while it is composing.
+  evaluation_context.composition_active =
+      view_.composition_active || (suggestion_mode_ && engine_composing_);
   switch (permission_) {
     case edit::InputPermission::kAllowed:
       evaluation_context.permission = input::InputPermission::kAllowed;
@@ -1603,6 +1609,12 @@ void ContextCoordinator::AdvancePermissionStage() {
     SubmitRawPlan(std::move(work.raw_text));
     return;
   }
+  if (work.kind == WorkKind::kSuggestionReplace) {
+    // The explicit candidate selection's permission read finished Allowed; no engine call
+    // exists for it. The plan re-verifies the token range before writing.
+    SubmitSuggestionPlan(std::move(work.replace_expected), std::move(work.replace_text));
+    return;
+  }
   if (work.kind == WorkKind::kKey &&
       !Evaluate(work.event, work.text).is_engine_candidate()) {
     EndWork(WorkOutcome::kNoEdit, RejectCause::kNone);
@@ -1657,7 +1669,9 @@ void ContextCoordinator::Pump() {
   }
 
   if (phase_ == WorkPhase::kEditPending && session_ != nullptr) {
+    ++edit_pump_checks_;
     if (!session_->HasPending()) {
+      ++edit_pump_ready_;
       ResolveEditResult(session_->PendingResult());
       return;
     }
@@ -1692,6 +1706,7 @@ void ContextCoordinator::InvalidateCandidateSnapshot() {
 }
 
 void ContextCoordinator::UpdateCandidateSnapshot(const engine::EngineState& state) {
+  engine_composing_ = state.valid && state.is_composing;
   CandidateSnapshot snapshot;
   snapshot.version = ++candidate_version_;
   snapshot.identity = identity_;
@@ -1722,6 +1737,91 @@ void ContextCoordinator::UpdateCandidateSnapshot(const engine::EngineState& stat
     ++candidate_snapshots_;
   }
   candidate_snapshot_ = std::move(snapshot);
+}
+
+void ContextCoordinator::SetSuggestionMode(bool enabled) {
+  if (bound_ || closed_ || phase_ != WorkPhase::kIdle) {
+    // Product code sets this immediately after construction, before the first bind. A
+    // change while work exists would silently redefine what the in-flight work means.
+    return;
+  }
+  suggestion_mode_ = enabled;
+}
+
+SubmitStatus ContextCoordinator::SubmitSuggestionReplacement(
+    const CandidateSelectionRequest& request, WorkId* id) {
+  if (id == nullptr) {
+    return RecordSubmit(SubmitStatus::kInvalidRequest);
+  }
+  id->value = 0;
+  if (!suggestion_mode_) {
+    return RecordSubmit(SubmitStatus::kInvalidRequest);
+  }
+  if (closed_) {
+    return RecordSubmit(SubmitStatus::kClosed);
+  }
+  if (phase_ != WorkPhase::kIdle) {
+    return RecordSubmit(SubmitStatus::kBusy);
+  }
+  if (!bound_) {
+    return RecordSubmit(SubmitStatus::kNotBound);
+  }
+  if (RetirementPausesInput()) {
+    return RecordSubmit(SubmitStatus::kRetiring);
+  }
+  SubmitStatus blocked = SubmitStatus::kAccepted;
+  if (GateBlocksSubmit(&blocked)) {
+    return RecordSubmit(blocked);
+  }
+  const SubmitStatus target = RevalidateForSubmit();
+  if (target != SubmitStatus::kAccepted) {
+    return RecordSubmit(target);
+  }
+  if (!candidate_snapshot_.valid ||
+      candidate_snapshot_.version != request.snapshot_version ||
+      candidate_snapshot_.identity.context_id != request.context_id ||
+      candidate_snapshot_.identity.generation != request.generation ||
+      identity_.context_id != request.context_id ||
+      identity_.generation != request.generation ||
+      request.page_index >= candidate_snapshot_.items.size() ||
+      candidate_snapshot_.input_utf16_code_units.empty()) {
+    ++candidate_stale_refusals_;
+    return RecordSubmit(SubmitStatus::kCandidateStale);
+  }
+  std::u16string expected = candidate_snapshot_.input_utf16_code_units;
+  std::u16string replacement =
+      candidate_snapshot_.items[request.page_index].text_utf16_code_units;
+  // The real permission read still precedes every write. A query that cannot answer now
+  // parks the enhancement; an Unknown/Denied answer refuses it. The original text stays.
+  if (!StartPermissionQuery()) {
+    return RecordSubmit(SubmitStatus::kPermissionUnknown);
+  }
+  if (permission_source_.Status() == context::PermissionQueryStatus::kPending) {
+    FinishWorkLedger(WorkKind::kSuggestionReplace);
+    phase_ = WorkPhase::kPermissionPending;
+    engine_request_ = engine::RequestId{};
+    pending_permission_ = PendingPermissionWork{};
+    pending_permission_.kind = WorkKind::kSuggestionReplace;
+    pending_permission_.replace_expected = std::move(expected);
+    pending_permission_.replace_text = std::move(replacement);
+    *id = WorkId{work_id_};
+    last_submit_status_ = SubmitStatus::kAccepted;
+    return SubmitStatus::kAccepted;
+  }
+  bool identity_current = false;
+  if (!PermissionVerdictAllows(&identity_current)) {
+    if (!identity_current) {
+      return RecordSubmit(SubmitStatus::kPermissionUnknown);
+    }
+    return RecordSubmit(permission_ == edit::InputPermission::kDenied
+                            ? SubmitStatus::kPermissionDenied
+                            : SubmitStatus::kPermissionUnknown);
+  }
+  FinishWorkLedger(WorkKind::kSuggestionReplace);
+  SubmitSuggestionPlan(std::move(expected), std::move(replacement));
+  *id = WorkId{work_id_};
+  last_submit_status_ = SubmitStatus::kAccepted;
+  return SubmitStatus::kAccepted;
 }
 
 SubmitStatus ContextCoordinator::SubmitCandidateSelection(
@@ -1805,6 +1905,12 @@ void ContextCoordinator::ResolveEngineResult(const engine::CommandResult& result
   }
 
   UpdateCandidateSnapshot(observation.state);
+  if (suggestion_mode_) {
+    // The host already inserted every ordinary character. An engine observation is only a
+    // suggestion snapshot; it must never create or replace document text.
+    EndWork(WorkOutcome::kNoEdit, RejectCause::kNone);
+    return;
+  }
   BeginApplyAfterEngine(observation);
 }
 
@@ -1881,6 +1987,39 @@ void ContextCoordinator::SubmitRawPlan(std::u16string raw_utf16) {
   }
   last_raw_plan_units_ = decision.text_utf16.size();
   SubmitEditPlan(decision, false);
+}
+
+void ContextCoordinator::SubmitSuggestionPlan(std::u16string expected_text,
+                                              std::u16string replacement_text) {
+  last_suggestion_expected_units_ = expected_text.size();
+  last_suggestion_replacement_units_ = replacement_text.size();
+  const auto expected_utf8 = epocanva::windows::text::ConvertUtf16CodeUnitsToUtf8Bytes(
+      Widen(expected_text));
+  const auto replacement_utf8 = epocanva::windows::text::ConvertUtf16CodeUnitsToUtf8Bytes(
+      Widen(replacement_text));
+  if (!expected_utf8.ok() || !replacement_utf8.ok()) {
+    EndWork(WorkOutcome::kRejected, RejectCause::kEditRefused);
+    return;
+  }
+  EditPlanBuildResult built = EditPlan::BuildReplaceToken(
+      identity_, expected_utf8.utf8_bytes, replacement_utf8.utf8_bytes);
+  if (!built.ok()) {
+    EndWork(WorkOutcome::kRejected, RejectCause::kEditRefused);
+    return;
+  }
+  if (!EnsureTargetCurrent("target-changed-before-suggestion-edit", false)) {
+    return;
+  }
+  ++plans_submitted_;
+  pending_plan_ = std::move(built.plan);
+  submitting_edit_ = true;
+  const EditResult applied = session_->ApplyAsync(pending_plan_.value());
+  submitting_edit_ = false;
+  if (applied.pending()) {
+    phase_ = WorkPhase::kEditPending;
+    return;
+  }
+  ResolveEditResult(applied);
 }
 
 void ContextCoordinator::NoteRawTerminal(bool applied) {
@@ -1965,6 +2104,36 @@ void ContextCoordinator::ResolveEditResult(const EditResult& result) {
   if (result.pending()) {
     // Defensive only: callers hand over final results. Pending stays pending.
     return;
+  }
+
+  if (work_kind_ == WorkKind::kSuggestionReplace && !work_abandoned_) {
+    // An enhancement never owns original text. Applied is applied; every pre-write refusal
+    // is a clean enhancement refusal (no text was touched), and only an uncertain write
+    // latches the context.
+    switch (result.status) {
+      case edit::EditStatus::kApplied:
+        if (pending_plan_.has_value()) {
+          ApplyViewUpdate(pending_plan_.value());
+        }
+        ++edits_applied_;
+        EndWork(WorkOutcome::kApplied, RejectCause::kNone);
+        return;
+      case edit::EditStatus::kFailedPossiblyMutated:
+      case edit::EditStatus::kFailedAfterMutation:
+        EnterUncertainLockdown();
+        return;
+      case edit::EditStatus::kStale:
+        ++edits_stale_;
+        EndWork(WorkOutcome::kRejected, RejectCause::kEditRefused);
+        return;
+      case edit::EditStatus::kFailedBeforeMutation:
+      case edit::EditStatus::kRejected:
+      case edit::EditStatus::kPending:
+      default:
+        ++edits_refused_;
+        EndWork(WorkOutcome::kRejected, RejectCause::kEditRefused);
+        return;
+    }
   }
 
   if (work_abandoned_) {
@@ -2062,6 +2231,20 @@ void ContextCoordinator::ApplyViewUpdate(const EditPlan& plan) {
       view_.composition_active = false;
       view_.composition_text_utf16.clear();
       return;
+    case edit::EditOperation::kReplaceToken: {
+      // Host-owned text replacement. The authoritative caret arrives through the observer's
+      // own-edit notification; this mirror is only a conservative fallback for the moment
+      // before that notification.
+      const LONG expected = static_cast<LONG>(plan.expected_text_utf16().size());
+      LONG caret = view_.caret_utf16 - expected + length;
+      if (caret < 0) {
+        caret = 0;
+      }
+      view_.caret_utf16 = caret;
+      view_.composition_active = false;
+      view_.composition_text_utf16.clear();
+      return;
+    }
   }
 }
 
@@ -2303,6 +2486,15 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.last_edit_operation_hr = last_edit_operation_hr_;
   snapshot.tracked_caret_utf16 = view_.caret_utf16;
   snapshot.composition_active = view_.composition_active;
+  snapshot.edit_pump_checks = edit_pump_checks_;
+  snapshot.edit_pump_ready = edit_pump_ready_;
+  if (session_ != nullptr) {
+    snapshot.session_pending = session_->HasPending();
+    const HANDLE completion = session_->CompletionEvent();
+    snapshot.edit_completion_signaled =
+        completion != nullptr &&
+        ::WaitForSingleObject(completion, 0) == WAIT_OBJECT_0;
+  }
   snapshot.composition_start_utf16 = view_.composition_start_utf16;
   snapshot.composition_length_utf16 =
       static_cast<LONG>(view_.composition_text_utf16.size());
@@ -2316,6 +2508,7 @@ CoordinatorSnapshot ContextCoordinator::Snapshot() const {
   snapshot.last_raw_composition_units = last_raw_composition_units_;
   snapshot.last_raw_input_units = last_raw_input_units_;
   snapshot.last_raw_plan_units = last_raw_plan_units_;
+  snapshot.last_suggestion_expected_units = last_suggestion_expected_units_;
   snapshot.candidate_version = candidate_version_;
   snapshot.candidate_snapshots = candidate_snapshots_;
   snapshot.candidate_items = candidate_snapshot_.items.size();

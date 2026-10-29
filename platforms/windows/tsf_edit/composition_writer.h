@@ -137,6 +137,9 @@ class CompositionWriter {
   // current_text_utf16_. No text call is issued on any path.
   CompositionWriteOutcome FinishOwnedComposition(ITfContext* context,
                                                   TfEditCookie edit_cookie);
+  // Host-owned text: replace exactly the expected token ending at the collapsed caret.
+  CompositionWriteOutcome ReplaceToken(const EditPlan& plan, ITfContext* context,
+                                       TfEditCookie edit_cookie);
 
   CompositionWriteOutcome ReplaceCompositionText(ITfContext* context,
                                                  const std::wstring& new_text,

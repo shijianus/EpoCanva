@@ -149,16 +149,18 @@ ContextDropReason ReasonForSelection(SelectionReadStatus status) {
 
 struct ContextObserver::State {
   State(ContextRegistry& registry, TfClientId own_client_id,
-        ThreadFocusPolicy thread_focus_policy)
+        ThreadFocusPolicy thread_focus_policy, TextOwnershipPolicy text_ownership)
       : registry(&registry),
         own_client_id(own_client_id),
         policy(thread_focus_policy),
+        text_ownership(text_ownership),
         reader(new SelectionReader(own_client_id)) {}
 
   ContextRegistry* registry = nullptr;
   TfClientId own_client_id = 0;
   // Explicit construction-time policy. StrictTsf never probes or accepts a Win32 window.
   ThreadFocusPolicy policy = ThreadFocusPolicy::kStrictTsf;
+  TextOwnershipPolicy text_ownership = TextOwnershipPolicy::kCompositionOwner;
   std::unique_ptr<SelectionReader> reader;
 
   ContextObserverSink* sink = nullptr;
@@ -773,6 +775,20 @@ struct ContextObserver::State {
     }
 
     ++counters.external_edits;
+    if (text_ownership == TextOwnershipPolicy::kHostOwned && target_published &&
+        selection.ok()) {
+      // The host inserted/removed its own text. That is the expected original-text stream,
+      // not a loss of the target: publish the new caret while keeping the identity and
+      // generation, so the engine suggestion stream can continue. No TSF call is made here.
+      ++counters.host_edits_observed;
+      published_caret_utf16 = selection.caret_utf16;
+      if (sink != nullptr) {
+        sink->OnHostEditCompleted(
+            context, ObservedTarget{context_id, generation, published_caret_utf16},
+            selection);
+      }
+      return;
+    }
     // An external change makes the old generation unusable immediately. No TSF session is
     // started here and nothing is written: the controller's OnTargetLost only releases.
     ResetSelectionRead();
@@ -1082,8 +1098,10 @@ class ObserverComSink final : public ITfThreadMgrEventSink,
 // --- ContextObserver ----------------------------------------------------------------------
 
 ContextObserver::ContextObserver(ContextRegistry& registry, TfClientId own_client_id,
-                                 ThreadFocusPolicy thread_focus_policy)
-    : state_(std::make_shared<State>(registry, own_client_id, thread_focus_policy)) {
+                                 ThreadFocusPolicy thread_focus_policy,
+                                 TextOwnershipPolicy text_ownership)
+    : state_(std::make_shared<State>(registry, own_client_id, thread_focus_policy,
+                                     text_ownership)) {
   auto* com_sink = new ObserverComSink(state_);
   state_->sink_unknown =
       static_cast<IUnknown*>(static_cast<ITfThreadMgrEventSink*>(com_sink));

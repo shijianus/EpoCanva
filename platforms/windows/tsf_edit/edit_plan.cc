@@ -77,6 +77,8 @@ const char* DescribeEditOperation(EditOperation operation) {
       return "Cancel";
     case EditOperation::kEndOwnedComposition:
       return "EndOwnedComposition";
+    case EditOperation::kReplaceToken:
+      return "ReplaceToken";
   }
   return "UnknownOperation";
 }
@@ -103,10 +105,11 @@ const char* DescribeEditPlanStatus(EditPlanStatus status) {
 
 EditPlan::EditPlan(EditOperation operation, ContextIdentity context, std::wstring text_utf16,
                    std::int32_t selection_start_utf16, std::int32_t selection_end_utf16,
-                   std::uint64_t sequence)
+                   std::uint64_t sequence, std::wstring expected_text_utf16)
     : operation_(operation),
       context_(context),
       text_utf16_(std::move(text_utf16)),
+      expected_text_utf16_(std::move(expected_text_utf16)),
       selection_start_utf16_(selection_start_utf16),
       selection_end_utf16_(selection_end_utf16),
       sequence_(sequence) {}
@@ -209,6 +212,39 @@ EditPlanBuildResult EditPlan::BuildEndOwnedComposition(ContextIdentity context) 
   }
   EditPlan plan(EditOperation::kEndOwnedComposition, context, std::wstring(), -1, -1,
                 g_next_sequence.fetch_add(1) + 1);
+  EditPlanBuildResult result;
+  result.status = EditPlanStatus::kOk;
+  result.plan = std::move(plan);
+  return result;
+}
+
+EditPlanBuildResult EditPlan::BuildReplaceToken(ContextIdentity context,
+                                                std::string_view expected_utf8,
+                                                std::string_view replacement_utf8) {
+  if (!ValidIdentity(context)) {
+    return Failure(EditPlanStatus::kInvalidContextIdentity,
+                   "context id and generation must be non-zero");
+  }
+  if (expected_utf8.empty()) {
+    return Failure(EditPlanStatus::kInvalidSelection,
+                   "a token replacement needs a non-empty expected token");
+  }
+  if (replacement_utf8.empty()) {
+    // An enhancement never deletes original text, so "replace with nothing" is not a plan.
+    return Failure(EditPlanStatus::kInvalidSelection,
+                   "a token replacement needs non-empty replacement text");
+  }
+  std::wstring expected;
+  std::wstring replacement;
+  EditPlanBuildResult failure;
+  if (!ConvertPlanText(expected_utf8, &expected, &failure)) {
+    return failure;
+  }
+  if (!ConvertPlanText(replacement_utf8, &replacement, &failure)) {
+    return failure;
+  }
+  EditPlan plan(EditOperation::kReplaceToken, context, std::move(replacement), -1, -1,
+                g_next_sequence.fetch_add(1) + 1, std::move(expected));
   EditPlanBuildResult result;
   result.status = EditPlanStatus::kOk;
   result.plan = std::move(plan);

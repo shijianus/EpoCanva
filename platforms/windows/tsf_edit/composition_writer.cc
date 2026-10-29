@@ -336,6 +336,8 @@ CompositionWriteOutcome CompositionWriter::Apply(const EditPlan& plan,
       return Cancel(context, edit_cookie);
     case EditOperation::kEndOwnedComposition:
       return FinishOwnedComposition(context, edit_cookie);
+    case EditOperation::kReplaceToken:
+      return ReplaceToken(plan, context, edit_cookie);
   }
   CompositionWriteOutcome outcome;
   outcome.status = EditStatus::kRejected;
@@ -609,6 +611,177 @@ CompositionWriteOutcome CompositionWriter::Commit(const EditPlan& plan,
   outcome.composition_start_utf16 = start;
   outcome.composition_length_utf16 = static_cast<LONG>(plan.text_utf16().size());
   outcome.composition_active = false;
+  return outcome;
+}
+
+namespace {
+
+bool IsAsciiTokenCharacter(wchar_t unit) {
+  if ((unit >= L'a' && unit <= L'z') || (unit >= L'A' && unit <= L'Z') ||
+      (unit >= L'0' && unit <= L'9')) {
+    return true;
+  }
+  switch (unit) {
+    case L'\'':
+    case L'@':
+    case L'.':
+    case L'_':
+    case L':':
+    case L'/':
+    case L'\\':
+    case L'?':
+    case L'&':
+    case L'=':
+    case L'#':
+    case L'%':
+    case L'+':
+    case L'-':
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
+CompositionWriteOutcome CompositionWriter::ReplaceToken(const EditPlan& plan,
+                                                        ITfContext* context,
+                                                        TfEditCookie edit_cookie) {
+  CompositionWriteOutcome outcome;
+  if (composition_ != nullptr) {
+    // This path only applies to host-owned text; an owned document composition would be a
+    // different editing model and is refused rather than mixed.
+    outcome.reason = EditRejectReason::kCompositionAlreadyActive;
+    return outcome;
+  }
+  const std::wstring& expected = plan.expected_text_utf16();
+  if (expected.empty()) {
+    outcome.reason = EditRejectReason::kNothingToCommit;
+    return outcome;
+  }
+  if (plan.text_utf16().empty()) {
+    // A "replacement" with no text would delete the user's token. Enhancements never delete
+    // original text, so this is refused before the range is touched.
+    outcome.reason = EditRejectReason::kNothingToCommit;
+    return outcome;
+  }
+  ITfRange* caret = nullptr;
+  LONG start = 0;
+  LONG length = 0;
+  EditRejectReason reason = EditRejectReason::kNone;
+  HRESULT hr = S_OK;
+  if (!ReadCollapsedSelection(context, edit_cookie, &caret, &start, &length, &reason,
+                              &hr)) {
+    outcome.reason = reason;
+    outcome.operation_hr = hr;
+    return outcome;
+  }
+  if (length != 0) {
+    caret->Release();
+    outcome.reason = EditRejectReason::kSelectionNotCollapsed;
+    return outcome;
+  }
+  const LONG expected_length = static_cast<LONG>(expected.size());
+  if (start < expected_length) {
+    caret->Release();
+    outcome.reason = EditRejectReason::kSelectionMoved;
+    return outcome;
+  }
+  ITfRangeACP* acp = nullptr;
+  hr = caret->QueryInterface(IID_ITfRangeACP, reinterpret_cast<void**>(&acp));
+  if (FAILED(hr) || acp == nullptr) {
+    caret->Release();
+    outcome.status = EditStatus::kFailedBeforeMutation;
+    outcome.reason = EditRejectReason::kRangeUnavailable;
+    outcome.operation_hr = hr;
+    return outcome;
+  }
+  const LONG token_start = start - expected_length;
+  hr = acp->SetExtent(token_start, expected_length);
+  acp->Release();
+  if (FAILED(hr)) {
+    caret->Release();
+    outcome.status = EditStatus::kFailedBeforeMutation;
+    outcome.reason = EditRejectReason::kRangeUnavailable;
+    outcome.operation_hr = hr;
+    return outcome;
+  }
+  HRESULT read_hr = S_OK;
+  const TextMatch match = ReadRangeText(caret, edit_cookie, expected, &read_hr);
+  if (match == TextMatch::kUnreadable) {
+    caret->Release();
+    outcome.status = EditStatus::kFailedBeforeMutation;
+    outcome.reason = EditRejectReason::kRangeUnavailable;
+    outcome.operation_hr = read_hr;
+    return outcome;
+  }
+  if (match == TextMatch::kDiffers) {
+    // The document no longer holds the token this menu was drawn for. Original text is
+    // never removed or overwritten to make an enhancement fit.
+    caret->Release();
+    outcome.reason = EditRejectReason::kCompositionRangeMismatch;
+    return outcome;
+  }
+  // A token that is really a suffix of a longer run (for example a paste followed by
+  // typing) must not be replaced as if it were the whole word.
+  if (token_start > 0) {
+    ITfRange* before = nullptr;
+    if (FAILED(caret->Clone(&before)) || before == nullptr) {
+      caret->Release();
+      outcome.status = EditStatus::kFailedBeforeMutation;
+      outcome.reason = EditRejectReason::kBoundaryUnverified;
+      return outcome;
+    }
+    ITfRangeACP* before_acp = nullptr;
+    if (FAILED(before->QueryInterface(IID_ITfRangeACP,
+                                      reinterpret_cast<void**>(&before_acp))) ||
+        before_acp == nullptr) {
+      before->Release();
+      caret->Release();
+      outcome.status = EditStatus::kFailedBeforeMutation;
+      outcome.reason = EditRejectReason::kBoundaryUnverified;
+      return outcome;
+    }
+    const HRESULT extent_hr = before_acp->SetExtent(token_start - 1, 1);
+    before_acp->Release();
+    wchar_t unit = 0;
+    HRESULT unit_hr = S_OK;
+    const bool read = SUCCEEDED(extent_hr) &&
+                      ReadOneUnit(before, edit_cookie, &unit, &unit_hr);
+    before->Release();
+    if (!read) {
+      caret->Release();
+      outcome.status = EditStatus::kFailedBeforeMutation;
+      outcome.reason = EditRejectReason::kBoundaryUnverified;
+      outcome.operation_hr = unit_hr;
+      return outcome;
+    }
+    if (IsAsciiTokenCharacter(unit)) {
+      caret->Release();
+      outcome.reason = EditRejectReason::kCompositionRangeMismatch;
+      return outcome;
+    }
+  }
+  hr = caret->SetText(edit_cookie, 0,
+                      plan.text_utf16().empty() ? nullptr : plan.text_utf16().c_str(),
+                      static_cast<LONG>(plan.text_utf16().size()));
+  caret->Release();
+  if (FAILED(hr)) {
+    uncertain_ = true;
+    outcome.status = EditStatus::kFailedPossiblyMutated;
+    outcome.reason = EditRejectReason::kSetTextFailed;
+    outcome.operation_hr = hr;
+    outcome.text_may_have_changed = true;
+    outcome.mutation_verified = false;
+    return outcome;
+  }
+  outcome.status = EditStatus::kApplied;
+  outcome.operation_hr = S_OK;
+  outcome.composition_start_utf16 = token_start;
+  outcome.composition_length_utf16 = static_cast<LONG>(plan.text_utf16().size());
+  outcome.composition_active = false;
+  outcome.text_may_have_changed = true;
+  outcome.mutation_verified = true;
   return outcome;
 }
 

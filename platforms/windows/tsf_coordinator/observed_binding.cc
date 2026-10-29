@@ -163,6 +163,26 @@ void ObservedBindingController::OnOwnEditCompleted(
   ++diagnostics_.own_edit_updates;
 }
 
+void ObservedBindingController::OnHostEditCompleted(
+    ITfContext* context, const context::ObservedTarget& target,
+    const context::SelectionSnapshot& selection) {
+  (void)context;
+  if (!selection.ok() || !coordinator_.bound()) {
+    return;
+  }
+  const edit::ContextIdentity current = coordinator_.identity();
+  if (current.context_id != target.context_id ||
+      current.generation != target.generation) {
+    ++diagnostics_.own_edits_stale;
+    return;
+  }
+  // Host-owned text: the document changed through the host's own input path. The binding
+  // and engine client stay; only the caret mirror is updated. The coordinator never
+  // re-reads or re-writes this text.
+  coordinator_.ObserveRealCaret(selection.caret_utf16);
+  ++diagnostics_.host_edit_updates;
+}
+
 ObservedBindingController::Diagnostics ObservedBindingController::Snapshot() const {
   Diagnostics copy = diagnostics_;
   copy.coordinator_bound = coordinator_.bound();

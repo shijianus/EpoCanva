@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -59,6 +60,22 @@ void LocalCheck(bool condition, const std::string& what) {
   std::cout << (condition ? "  ok   " : "  FAIL ") << what << "\n";
   if (!condition) {
     ++g_failures;
+  }
+}
+
+void CheckDocExact(const std::wstring& actual, const std::wstring& expected,
+                   const std::string& what) {
+  const bool equal = actual == expected;
+  LocalCheck(equal, what);
+  if (!equal) {
+    std::size_t offset = 0;
+    while (offset < actual.size() && offset < expected.size() &&
+           actual[offset] == expected[offset]) {
+      ++offset;
+    }
+    std::cout << "    doc mismatch actual_len=" << actual.size()
+              << " expected_len=" << expected.size()
+              << " first_diff=" << offset << "\n";
   }
 }
 
@@ -255,6 +272,8 @@ bool ActivateProduct(LoadedProduct* product, ITfThreadMgr* thread_manager,
   return true;
 }
 
+void UnregisterSeam(ITfKeyEventSink* sink);
+
 void ReleaseProduct(LoadedProduct* product, bool deactivate) {
   if (product->tip != nullptr) {
     if (deactivate) {
@@ -264,6 +283,7 @@ void ReleaseProduct(LoadedProduct* product, bool deactivate) {
     product->tip = nullptr;
   }
   if (product->sink != nullptr) {
+    UnregisterSeam(product->sink);
     product->sink->Release();
     product->sink = nullptr;
   }
@@ -432,6 +452,68 @@ struct SeamCounters {
   unsigned long long raw_exits;
   unsigned long long raw_failed_keys;
   unsigned long long raw_failed_units;
+  unsigned long long host_text_keys;
+  unsigned long long suggestion_queued;
+  unsigned long long suggestion_submitted;
+  unsigned long long suggestion_completed;
+  unsigned long long suggestion_dropped;
+  unsigned long long suggestion_stale;
+  unsigned long long suggestion_resets;
+  unsigned long long suggestion_pending;
+  unsigned long long replacement_attempts;
+  unsigned long long replacement_applied;
+  unsigned long long replacement_refused;
+  unsigned long long internal_text_losses;
+  unsigned long long host_token_units;
+  int suggestion_active;
+  int suggestion_in_flight;
+  int replacement_pending;
+  int coordinator_bound;
+  unsigned long long last_edit_status;
+  unsigned long long last_edit_reason;
+  unsigned long long pumps;
+  int session_pending;
+  int edit_completion_signaled;
+  unsigned long long plans_submitted;
+  unsigned long long edits_applied;
+  unsigned long long edits_refused;
+  unsigned long long edits_stale;
+  unsigned long long work_kind;
+  unsigned long long work_outcome;
+  unsigned long long edit_pump_checks;
+  unsigned long long edit_pump_ready;
+  unsigned long long coordinator_pumps;
+  unsigned long long host_edits_matched;
+  unsigned long long host_edits_unexpected;
+  unsigned long long reset_boundary;
+  unsigned long long reset_owed;
+  unsigned long long reset_submit_refusal;
+  unsigned long long reset_replacement;
+  unsigned long long target_losses;
+  int observer_awaiting_bind;
+  int observer_published;
+  unsigned long long observer_last_drop;
+  int rebind_pending;
+  unsigned long long last_bind_status;
+  unsigned long long binds_refused;
+  unsigned long long binds_paused_retiring;
+  unsigned long long observer_selection_refusals;
+  unsigned long long observer_selection_reads;
+  int observer_selection_pending;
+  int observer_has_context;
+  int observer_subscribed;
+  unsigned long long retiring_bindings;
+  int admission_paused;
+  unsigned long long retiring_compositions;
+  unsigned long long retired_settled;
+  unsigned long long retired_already_ordinary;
+  unsigned long long retired_blocked;
+  unsigned long long close_requests;
+  unsigned long long close_results;
+  unsigned long long close_failures;
+  unsigned long long unresolved_close;
+  unsigned long long unresolved_engine;
+  int pending_edit_event;
 };
 
 using SeamQueryFn = int (*)(SeamCounters*);
@@ -468,6 +550,8 @@ struct ProductSeam {
 // Test-only crash evidence: the handler prints these text-free counters into the crash
 // report. The buffer is static because the handler cannot rely on allocation.
 ProductSeam g_crash_seam;
+std::mutex g_seam_map_mutex;
+std::map<ITfKeyEventSink*, ProductSeam> g_seam_map;
 
 ProductSeam LoadSeam(LoadedProduct& product) {
   ProductSeam seam;
@@ -490,7 +574,35 @@ ProductSeam LoadSeam(LoadedProduct& product) {
   seam.guarded_objects = reinterpret_cast<SeamGuardedObjectsFn>(
       ::GetProcAddress(product.module, "EpoCanvaTestGuardedObjects"));
   g_crash_seam = seam;
+  if (product.sink != nullptr) {
+    std::lock_guard<std::mutex> guard(g_seam_map_mutex);
+    g_seam_map[product.sink] = seam;
+  }
   return seam;
+}
+
+void UnregisterSeam(ITfKeyEventSink* sink) {
+  if (sink == nullptr) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(g_seam_map_mutex);
+  g_seam_map.erase(sink);
+}
+
+bool QuerySeamForSink(ITfKeyEventSink* sink, SeamCounters* counters) {
+  if (sink == nullptr || counters == nullptr) {
+    return false;
+  }
+  ProductSeam seam;
+  {
+    std::lock_guard<std::mutex> guard(g_seam_map_mutex);
+    const auto found = g_seam_map.find(sink);
+    if (found == g_seam_map.end() || found->second.query == nullptr) {
+      return false;
+    }
+    seam = found->second;
+  }
+  return seam.query(counters) == 0;
 }
 
 const char* CrashCountersForReport() {
@@ -555,6 +667,12 @@ bool WaitForCandidateMenu(TestHost& host, const ProductSeam& seam,
                 << " phase=" << (counters != nullptr ? counters->coordinator_phase : 0)
                 << " req=" << (counters != nullptr ? counters->engine_requests : 0)
                 << " res=" << (counters != nullptr ? counters->engine_results : 0)
+                << " sug_q=" << (counters != nullptr ? counters->suggestion_queued : 0)
+                << " sug_done=" << (counters != nullptr ? counters->suggestion_completed : 0)
+                << " sug_drop=" << (counters != nullptr ? counters->suggestion_dropped : 0)
+                << " sug_stale=" << (counters != nullptr ? counters->suggestion_stale : 0)
+                << " token=" << (counters != nullptr ? counters->host_token_units : 0)
+                << " bound=" << (counters != nullptr ? counters->coordinator_bound : 0)
                 << " raw=" << (counters != nullptr ? counters->raw_active : 0)
                 << "/" << (counters != nullptr ? counters->raw_submitted : 0)
                 << " works=" << (counters != nullptr ? counters->works_accepted : 0)
@@ -581,6 +699,70 @@ std::wstring ReadCandidateText(const ProductSeam& seam, unsigned index) {
   wchar_t buffer[128] = {};
   const int len = seam.text != nullptr ? seam.text(index, buffer, 128) : -1;
   return len >= 0 ? std::wstring(buffer) : std::wstring();
+}
+
+// Selects a candidate only after the menu and the engine stream are stable: the snapshot
+// version must stop changing and no suggestion/replacement work may be in flight. Returns
+// the version and text that were actually current when the click was delivered.
+bool WaitForStableMenu(TestHost& host, const ProductSeam& seam,
+                       SeamCounters* counters, DWORD timeout_ms) {
+  unsigned long long stable_version = 0;
+  int stable_rounds = 0;
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  for (;;) {
+    SeamCounters current = {};
+    if (seam.query != nullptr && seam.query(&current) == 0 &&
+        current.candidate_menu_open != 0 && current.queue_pending == 0 &&
+        current.queue_in_flight == 0 && current.suggestion_pending == 0 &&
+        current.suggestion_in_flight == 0 && current.replacement_pending == 0) {
+      if (stable_rounds > 0 && current.candidate_version == stable_version) {
+        *counters = current;
+        return true;
+      }
+      stable_version = current.candidate_version;
+      stable_rounds = 1;
+    } else {
+      stable_rounds = 0;
+    }
+    if (::GetTickCount64() >= deadline) {
+      if (counters != nullptr) {
+        *counters = current;
+      }
+      return false;
+    }
+    PumpSlice(host, 10);
+  }
+}
+
+bool SelectStableCandidate(TestHost& host, const ProductSeam& seam, int index,
+                           unsigned long long* version, std::wstring* text) {
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    SeamCounters counters = {};
+    if (seam.query == nullptr || seam.query(&counters) != 0) {
+      PumpSlice(host, 10);
+      continue;
+    }
+    if (counters.candidate_version > *version) {
+      *version = counters.candidate_version;
+    }
+    const bool stable = counters.candidate_menu_open != 0 &&
+                        counters.candidate_version == *version &&
+                        counters.queue_pending == 0 && counters.queue_in_flight == 0 &&
+                        counters.suggestion_pending == 0 &&
+                        counters.suggestion_in_flight == 0 &&
+                        counters.replacement_pending == 0;
+    if (stable) {
+      *text = ReadCandidateText(seam, static_cast<unsigned>(index));
+      if (text->empty()) {
+        PumpSlice(host, 10);
+        continue;
+      }
+      (void)seam.select(*version, static_cast<int>(index));
+      return true;
+    }
+    PumpSlice(host, 10);
+  }
+  return false;
 }
 
 void PumpSlice(TestHost& host, DWORD milliseconds) {
@@ -682,13 +864,85 @@ struct InputRoute {
   TestDocument* doc = nullptr;
   ITfKeyEventSink* sink = nullptr;
   ITfContext* context = nullptr;
+  // Units offered by keys that really produce text, and where they went. The product may
+  // only answer TRUE when it delivers the text itself; ordinary input must always be the
+  // host's. This accounting is written from the test's own actions, never from product state.
+  std::size_t typed_text_units = 0;
+  std::size_t host_inserted_units = 0;
+  std::size_t product_suppressed_units = 0;
+
+  bool TextWasSuppressed() const { return product_suppressed_units != 0; }
 };
 
 bool ReadyToType(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
-                 DWORD timeout_ms);
+                 DWORD timeout_ms, SeamCounters* last_observed = nullptr);
 
-bool ApplyHostDefault(InputRoute* route, const std::wstring& text, std::string* error) {
-  if (text.empty()) {
+// Independent reference edit model. It is written from the documented default English
+// behaviour (raw characters preserved, Space commits and inserts one space) and never calls
+// product code. The final controlled-store text must equal its text.
+struct ReferenceDoc {
+  std::wstring text;
+  void HostInsert(const std::wstring& units) { text += units; }
+  void RawAppend(const std::wstring& units) { text += units; }
+  void HostBackspace() {
+    if (text.empty()) {
+      return;
+    }
+    std::size_t remove = 1;
+    if (text.size() >= 2) {
+      const wchar_t last = text[text.size() - 1];
+      const wchar_t previous = text[text.size() - 2];
+      if (last >= 0xDC00 && last <= 0xDFFF && previous >= 0xD800 &&
+          previous <= 0xDBFF) {
+        remove = 2;
+      }
+    }
+    text.resize(text.size() - remove);
+  }
+  // Explicit candidate acceptance: replace the whole current token with a candidate.
+  void ReplaceToken(const std::wstring& token, const std::wstring& replacement) {
+    if (token.empty() || text.size() < token.size()) {
+      return;
+    }
+    if (text.compare(text.size() - token.size(), token.size(), token) == 0) {
+      text.resize(text.size() - token.size());
+      text += replacement;
+    }
+  }
+};
+
+bool ApplyHostDefault(InputRoute* route, UINT vk, const std::wstring& text,
+                      std::string* error) {
+  std::wstring default_text = text;
+  LONG start = route->doc->selection_start_utf16();
+  LONG end = route->doc->selection_end_utf16();
+  if (default_text.empty()) {
+    if (vk == VK_BACK) {
+      if (start != end) {
+        // The selection is replaced by nothing.
+      } else if (start > 0) {
+        // Remove one code point (a surrogate pair is removed as a pair).
+        LONG from = start - 1;
+        const std::wstring& current = route->doc->text_utf16();
+        if (from > 0) {
+          const wchar_t previous = current[static_cast<std::size_t>(from - 1)];
+          const wchar_t last = current[static_cast<std::size_t>(from)];
+          if (previous >= 0xD800 && previous <= 0xDBFF && last >= 0xDC00 &&
+              last <= 0xDFFF) {
+            --from;
+          }
+        }
+        start = from;
+      } else {
+        return true;  // nothing before the caret: the host does nothing
+      }
+    } else if (vk == VK_RETURN) {
+      default_text = L"\n";
+    } else {
+      return true;  // this controlled host has no text default for the key
+    }
+  }
+  if (default_text.empty() && start == end) {
     return true;
   }
   std::string client_error;
@@ -700,10 +954,12 @@ bool ApplyHostDefault(InputRoute* route, const std::wstring& text, std::string* 
     return false;
   }
   ExternalEditResult edit;
-  const LONG caret = route->doc->selection_start_utf16();
-  if (!RunExternalEdit(*route->host, route->doc, client, ExternalEditMode::kInsertText,
-                       caret, caret, text, &edit, error)) {
-    *error = "the host default insert did not run: " + *error;
+  const ExternalEditMode mode = (vk == VK_BACK && default_text.empty())
+                                    ? ExternalEditMode::kReplaceText
+                                    : ExternalEditMode::kInsertText;
+  if (!RunExternalEdit(*route->host, route->doc, client, mode, start, end,
+                       default_text, &edit, error)) {
+    *error = "the host default edit did not run: " + *error;
     return false;
   }
   return true;
@@ -750,7 +1006,15 @@ bool SendVirtualKeyAdaptive(InputRoute* route, UINT vk, const std::wstring& host
     return false;
   }
   *eaten_out = eaten != FALSE;
-  if (!*eaten_out && !ApplyHostDefault(route, host_text, error)) {
+  if (!host_text.empty()) {
+    route->typed_text_units += host_text.size();
+    if (*eaten_out) {
+      route->product_suppressed_units += host_text.size();
+    } else {
+      route->host_inserted_units += host_text.size();
+    }
+  }
+  if (!*eaten_out && !ApplyHostDefault(route, vk, host_text, error)) {
     return false;
   }
   return true;
@@ -849,6 +1113,31 @@ bool SendTextAdaptive(InputRoute* route, const std::wstring& text,
   return true;
 }
 
+// Independent per-key ownership check: a TRUE answer must never swallow characters. The
+// counts come from the test's own keys, not from any product counter.
+void CheckNoSuppressedText(const InputRoute& route, const std::string& prefix) {
+  std::cout << "  [" << prefix << "] typed=" << route.typed_text_units
+            << " host=" << route.host_inserted_units
+            << " suppressed=" << route.product_suppressed_units << std::endl;
+  LocalCheck(route.product_suppressed_units == 0,
+             prefix + ": no text-producing key was swallowed by the product");
+}
+
+// Host-owned text: every key must be passed through, and the host applies its own default.
+bool SendTextHost(InputRoute* route, const std::wstring& text, std::string* error) {
+  std::vector<bool> eaten;
+  if (!SendTextAdaptive(route, text, &eaten, error)) {
+    return false;
+  }
+  for (const bool key_was_eaten : eaten) {
+    if (key_was_eaten) {
+      *error = "a host-owned text key was eaten";
+      return false;
+    }
+  }
+  return true;
+}
+
 bool SendShortcut(InputRoute* route, UINT vk,
                   bool control, bool alt, bool windows, std::string* error) {
   std::array<std::uint8_t, 256> state = {};
@@ -868,18 +1157,29 @@ bool SendShortcut(InputRoute* route, UINT vk,
 }
 
 bool ReadyToType(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
-                 DWORD timeout_ms) {
+                 DWORD timeout_ms, SeamCounters* last_observed) {
+  // In the host-owned model no ordinary key is ever eaten, so readiness is the product's
+  // own state: engine pipeline attached, binding open, permission resolved, no suggestion
+  // work pending. The prediction call is kept only as a liveness probe.
   const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
   const UINT vk = static_cast<UINT>(LOBYTE(::VkKeyScanW(L'a')));
   for (;;) {
-    std::array<std::uint8_t, 256> state = {};
-    ::SetKeyboardState(state.data());
-    BOOL eaten = FALSE;
-    if (SUCCEEDED(sink->OnTestKeyDown(context, vk, KeyLparam(vk, true, false),
-                                      &eaten)) &&
-        eaten != FALSE) {
+    SeamCounters counters = {};
+    const bool have_counters = QuerySeamForSink(sink, &counters);
+    if (last_observed != nullptr && have_counters) {
+      *last_observed = counters;
+    }
+    if (have_counters && counters.engine_ready != 0 &&
+        counters.coordinator_bound != 0 && counters.gate == 0 &&
+        counters.permission == 0 && counters.coordinator_phase == 0 &&
+        counters.queue_pending == 0 && counters.queue_in_flight == 0 &&
+        counters.suggestion_pending == 0 && counters.suggestion_in_flight == 0) {
       return true;
     }
+    std::array<std::uint8_t, 256> state = {};
+    ::SetKeyboardState(state.data());
+    BOOL probe = FALSE;
+    (void)sink->OnTestKeyDown(context, vk, KeyLparam(vk, true, false), &probe);
     if (::GetTickCount64() >= deadline) {
       return false;
     }
@@ -891,6 +1191,14 @@ void PrintSeamCounters(const SeamCounters& counters, const char* label) {
   std::cout << "  [" << label << "]"
             << " keys=" << counters.key_downs
             << " eaten=" << counters.eaten
+            << " host=" << counters.host_text_keys
+            << " sug_q=" << counters.suggestion_queued
+            << " sug_sub=" << counters.suggestion_submitted
+            << " sug_done=" << counters.suggestion_completed
+            << " sug_drop=" << counters.suggestion_dropped
+            << " sug_stale=" << counters.suggestion_stale
+            << " token=" << counters.host_token_units
+            << " bound=" << counters.coordinator_bound
             << " literal=" << counters.literal_key_downs
             << " raw_active=" << counters.raw_active
             << " raw_submitted=" << counters.raw_submitted
@@ -903,11 +1211,26 @@ void PrintSeamCounters(const SeamCounters& counters, const char* label) {
             << " entered=" << counters.raw_entered
             << " exits=" << counters.raw_exits
             << " ignored=" << counters.raw_ignored_edits
+            << " sug_act=" << counters.suggestion_active
+            << " sug_inf=" << counters.suggestion_in_flight
+            << " repl=" << counters.replacement_pending
+            << " losses=" << counters.internal_text_losses
+            << " hedits=" << counters.host_edits_matched
+            << "/" << counters.host_edits_unexpected
+            << " resets=" << counters.reset_boundary
+            << "/" << counters.reset_owed
+            << "/" << counters.reset_submit_refusal
+            << "/" << counters.reset_replacement
+            << " last_edit=" << counters.last_edit_status
+            << "/" << counters.last_edit_reason
             << " queue=" << counters.queue_pending
             << "/" << counters.queue_in_flight
             << " phase=" << counters.coordinator_phase
             << " works=" << counters.works_accepted
+            << " pumps=" << counters.pumps
             << " engine=" << counters.engine_ready
+            << " estate=" << counters.engine_state
+            << " eatt=" << counters.engine_attach_failures
             << " comp=" << counters.composition_active
             << "/" << counters.composition_length
             << " binds=" << counters.target_binds
@@ -972,6 +1295,7 @@ struct Case {
   TestHost* host = nullptr;
   TestDocument* doc = nullptr;
   LoadedProduct product;
+  ProductSeam seam;
   std::string error;
 };
 
@@ -1010,6 +1334,7 @@ bool BeginCase(Case* test_case, const std::filesystem::path& stage,
     }
     return false;
   }
+  test_case->seam = LoadSeam(test_case->product);
   return true;
 }
 
@@ -1068,155 +1393,168 @@ bool RunRawInputCases(const Paths& paths) {
   TestDocumentOptions options;
   options.initial_text_utf16 = L"";
   if (!BeginCase(&test_case, paths.stage, paths.user_root, options, nullptr)) {
-    LocalCheck(false, "case host and activation");
+    LocalCheck(false, "raw: host and activation");
     EndCase(&test_case);
     return false;
   }
+  ProductSeam seam = LoadSeam(test_case.product);
+  LocalCheck(seam.usable(), "raw: controlled seam available");
   auto* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
-             "the product controller bound and resolved permission");
+             "raw: the product controller bound and resolved permission");
   LocalCheck(::GetFileAttributesW(paths.marker.c_str()) == INVALID_FILE_ATTRIBUTES,
-             "the deployment marker was retired after the successful start");
+             "raw: the deployment marker was retired after the successful start");
   LocalCheck(std::filesystem::is_regular_file(paths.state),
-             "the deployment snapshot was recorded");
+             "raw: the deployment snapshot was recorded");
   LocalCheck(std::filesystem::is_regular_file(paths.compiled),
-             "the compiled schema exists in the user engine directory");
+             "raw: the compiled schema exists in the user engine directory");
   const std::string compiled_text = ReadNarrow(paths.compiled);
   LocalCheck(compiled_text.find("max_completions: 4") != std::string::npos,
-             "the compiled schema carries the configured completion count");
+             "raw: the compiled schema carries the configured completion count");
   LocalCheck(compiled_text.find("max_suggestions: 2") != std::string::npos,
-             "the compiled schema carries the configured suggestion count (2, not 1)");
+             "raw: the compiled schema carries the configured suggestion count");
 
+  // Ordinary text is host-owned: the product returns pfEaten=FALSE, and the controlled
+  // application performs its own default insertion. Suggestions are asynchronous and can
+  // never change whether this text is retained.
   std::string error;
-  LocalCheck(SendTextWhenReady(&route, L"Hello", true, &error), "type Hello: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space while composing is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, L"Hello ", 5000),
-             "Hello + Space commits the preserved case");
+  ReferenceDoc reference;
+  LocalCheck(SendTextHost(&route, L"Hello", &error),
+             "raw: Hello stays with the host: " + error);
+  reference.HostInsert(L"Hello");
+  bool space_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
+                 !space_eaten,
+             "raw: Space stays with the host: " + error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "raw: Hello + Space is in the document exactly once");
 
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"helo", true, &error), "type helo: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space after helo is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, L"Hello helo ", 5000),
-             "default raw input does not auto-correct helo");
+  LocalCheck(SendTextHost(&route, L"helo", &error),
+             "raw: helo stays with the host: " + error);
+  reference.HostInsert(L"helo");
+  (void)SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "raw: the default path does not auto-correct helo");
 
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"helo", true, &error), "type helo again: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_BACK, true, &error),
-             "BackSpace while composing is eaten: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space after BackSpace is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, L"Hello helo hel ", 5000),
-             "BackSpace edits the composition");
+  LocalCheck(SendTextHost(&route, L"helo", &error), "raw: helo again: " + error);
+  reference.HostInsert(L"helo");
+  bool back_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_BACK, L"", &back_eaten, &error) &&
+                 !back_eaten,
+             "raw: BackSpace stays with the host and deletes: " + error);
+  reference.HostBackspace();
+  (void)SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "raw: BackSpace deleted exactly one host code point");
 
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"123-45_67@x.y", true, &error),
-             "digits and technical marks are forwarded: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space after marks is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y ", 5000),
-             "digits and marks are committed unchanged");
+  LocalCheck(SendTextHost(&route, L"123-45_67@x.y", &error),
+             "raw: digits and technical marks stay with the host: " + error);
+  reference.HostInsert(L"123-45_67@x.y");
+  (void)SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "raw: digits and marks are unchanged");
 
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"user@example.com", true, &error),
-             "email is accepted: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space after email is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y user@example.com ", 5000),
-             "email is committed unchanged");
+  LocalCheck(SendTextHost(&route, L"user@example.com", &error),
+             "raw: email stays with the host: " + error);
+  reference.HostInsert(L"user@example.com");
+  (void)SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text, "raw: email is unchanged");
 
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"https://example.com/a?x=1&y=2#z", true, &error),
-             "URL is accepted: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space after URL is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y user@example.com "
-                         L"https://example.com/a?x=1&y=2#z ",
-                         5000),
-             "URL is committed unchanged");
+  LocalCheck(SendTextHost(&route, L"https://example.com/a?x=1&y=2#z", &error),
+             "raw: URL stays with the host: " + error);
+  reference.HostInsert(L"https://example.com/a?x=1&y=2#z");
+  (void)SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text, "raw: URL is unchanged");
 
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"C:\\tmp\\file.txt", true, &error),
-             "path is accepted: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space after path is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y user@example.com "
-                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt ",
-                         5000),
-             "path is committed unchanged");
+  LocalCheck(SendTextHost(&route, L"C:\tmp\file.txt", &error),
+             "raw: path stays with the host: " + error);
+  reference.HostInsert(L"C:\tmp\file.txt");
+  (void)SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text, "raw: path is unchanged");
 
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"foo_bar123", true, &error),
-             "identifier is accepted: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space after identifier is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y user@example.com "
-                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
-                         L"foo_bar123 ",
-                         5000),
-             "identifier is committed unchanged");
+  LocalCheck(SendTextHost(&route, L"foo_bar123", &error),
+             "raw: identifier stays with the host: " + error);
+  reference.HostInsert(L"foo_bar123");
+  (void)SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "raw: identifier is unchanged");
 
+  // Enter is host-owned. The controlled host inserts the newline its own default defines.
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"enter", true, &error),
-             "type enter: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_RETURN, true, &error),
-             "Enter while composing is eaten: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space after Enter is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y user@example.com "
-                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
-                         L"foo_bar123 enter ",
-                         5000),
-             "Enter does not lose the composition and Space commits it");
+  LocalCheck(SendTextHost(&route, L"enter", &error), "raw: type enter: " + error);
+  reference.HostInsert(L"enter");
+  bool enter_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_RETURN, L"", &enter_eaten, &error) &&
+                 !enter_eaten,
+             "raw: Enter stays with the host: " + error);
+  reference.HostInsert(L"\n");
+  (void)SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "raw: Enter and Space left the host's full text");
 
   error.clear();
   LocalCheck(SendShortcut(&route, 'C', true, false, false, &error),
-             "Ctrl+C passes to the host: " + error);
+             "raw: Ctrl+C passes to the host: " + error);
   LocalCheck(SendShortcut(&route, 'V', true, false, false, &error),
-             "Ctrl+V passes to the host: " + error);
+             "raw: Ctrl+V passes to the host: " + error);
   LocalCheck(SendShortcut(&route, 'Z', true, false, false, &error),
-             "Ctrl+Z passes to the host: " + error);
+             "raw: Ctrl+Z passes to the host: " + error);
   LocalCheck(SendShortcut(&route, 'X', false, true, false, &error),
-             "Alt+X passes to the host: " + error);
+             "raw: Alt+X passes to the host: " + error);
   LocalCheck(SendShortcut(&route, 'R', false, false, true, &error),
-             "Win+R passes to the host: " + error);
-  LocalCheck(test_case.doc->text_utf16() ==
-                 L"Hello helo hel 123-45_67@x.y user@example.com "
-                 L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
-                 L"foo_bar123 enter ",
-             "shortcut pass-through changed no text");
+             "raw: Win+R passes to the host: " + error);
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "raw: shortcut pass-through changed no text");
 
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"quickbrownfox", true, &error),
-             "fast typing is accepted back to back: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "space after fast typing is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y user@example.com "
-                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
-                         L"foo_bar123 enter quickbrownfox ",
-                         8000),
-             "fast typing keeps order and commits once");
+  LocalCheck(SendTextHost(&route, L"quickbrownfox", &error),
+             "raw: fast typing stays with the host: " + error);
+  reference.HostInsert(L"quickbrownfox");
+  (void)SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "raw: fast typing keeps order and is inserted once");
 
+  // Escape closes an open suggestion menu; it never removes the host's text. Whether the
+  // menu happened to be open at this instant, the original text must remain complete.
   error.clear();
-  LocalCheck(SendTextWhenReady(&route, L"zzz", true, &error), "type zzz: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_ESCAPE, true, &error),
-             "Escape while composing is eaten: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc,
-                         L"Hello helo hel 123-45_67@x.y user@example.com "
-                         L"https://example.com/a?x=1&y=2#z C:\\tmp\\file.txt "
-                         L"foo_bar123 enter quickbrownfox ",
-                         5000),
-             "Escape cancels the composition without changing committed text");
+  LocalCheck(SendTextHost(&route, L"zzz", &error), "raw: type zzz: " + error);
+  reference.HostInsert(L"zzz");
+  bool escape_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_ESCAPE, L"", &escape_eaten, &error),
+             "raw: Escape is delivered: " + error);
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "raw: Escape left every typed character in the document");
+
+  // No product-owned text exists to lose. The per-key ledger and the product's own
+  // accounting must both say so, and the document must equal the independent reference.
+  SeamCounters counters = {};
+  (void)seam.query(&counters);
+  LocalCheck(counters.host_text_keys > 0,
+             "raw: ordinary keys were counted as host-owned");
+  LocalCheck(counters.internal_text_losses == 0,
+             "raw: the product reports zero internal text losses");
+  CheckNoSuppressedText(route, "raw");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "raw: the whole session equals the independent reference");
 
   EndCase(&test_case);
   return g_failures == 0;
@@ -1261,9 +1599,9 @@ bool RunPermissionCase(const Paths& paths, TestDocumentOptions options,
       // The read-only store refuses the host's own write as well; the attempt must not be
       // skipped, and the refusal must leave the document unchanged.
       error.clear();
-      (void)ApplyHostDefault(&route, L"a", &error);
+      (void)ApplyHostDefault(&route, vk, L"a", &error);
     } else {
-      LocalCheck(ApplyHostDefault(&route, L"a", &error),
+      LocalCheck(ApplyHostDefault(&route, vk, L"a", &error),
                  label + ": the host default input ran: " + error);
     }
   }
@@ -1294,9 +1632,15 @@ bool RunExternalEditCase(const Paths& paths) {
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "external edit: ready to type");
   std::string error;
-  LocalCheck(SendText(&route, L"abc", true, &error), "external edit: type abc: " + error);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, L"baseabc", 5000),
-             "external edit: composition is visible");
+  ReferenceDoc reference;
+  reference.text = L"base";
+  LocalCheck(SendTextHost(&route, L"abc", &error),
+             "external edit: abc stays with the host: " + error);
+  reference.HostInsert(L"abc");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "external edit: the host text is visible immediately");
+  SeamCounters before_external = {};
+  (void)test_case.seam.query(&before_external);
   const TfClientId external =
       epocanva::tsf::context::test::ExternalClientId(
           test_case.host->thread_manager_for_test(), &error);
@@ -1304,17 +1648,32 @@ bool RunExternalEditCase(const Paths& paths) {
   LocalCheck(RunExternalEdit(*test_case.host, test_case.doc, external,
                              ExternalEditMode::kInsertText, 0, 0, L"X", &edit, &error),
              "external edit: another client writes: " + error);
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 10000),
-             "external edit: the new binding is ready");
+  const bool external_ready = ReadyToType(*test_case.host, sink, context, 10000);
+  LocalCheck(external_ready,
+             "external edit: the binding is still ready (host text is not a loss)");
+  if (!external_ready) {
+    SeamCounters stalled = {};
+    (void)test_case.seam.query(&stalled);
+    PrintSeamCounters(stalled, "external edit readiness timeout");
+  }
+  SeamCounters after_external_counters = {};
+  (void)test_case.seam.query(&after_external_counters);
+  LocalCheck(after_external_counters.target_binds == before_external.target_binds,
+             "external edit: the host's own edit did not force a rebind");
   const std::wstring after_external = test_case.doc->text_utf16();
   error.clear();
-  LocalCheck(SendText(&route, L"def", true, &error),
-             "external edit: typing after the external write is accepted: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "external edit: space is eaten: " + error);
-  const std::wstring expected = after_external + L"def ";
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 8000),
-             "external edit: the new binding commits after rebinding");
+  LocalCheck(SendTextHost(&route, L"def", &error),
+             "external edit: typing after the external write stays with the host: " + error);
+  reference.text = after_external + L"def";
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "external edit: the host inserted its text after the external write");
+  bool space_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
+                 !space_eaten,
+             "external edit: Space stays with the host: " + error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "external edit: the full host text is intact after the external write");
   EndCase(&test_case);
   return true;
 }
@@ -1323,6 +1682,8 @@ bool RunExternalEditCase(const Paths& paths) {
 struct SessionResult {
   bool ok = false;
   std::wstring text;
+  std::size_t suppressed_units = 0;
+  SeamCounters counters = {};
   std::string error;
 };
 
@@ -1357,6 +1718,7 @@ void RunSessionWorker(const std::filesystem::path& stage, const std::wstring& wo
     delete host;
     return;
   }
+  (void)LoadSeam(product);
   activated->fetch_add(1);
   const ULONGLONG deadline = ::GetTickCount64() + 15000;
   while (activated->load() < 2 && ::GetTickCount64() < deadline) {
@@ -1364,15 +1726,27 @@ void RunSessionWorker(const std::filesystem::path& stage, const std::wstring& wo
   }
   ITfContext* context = document->context();
   InputRoute route{host, document, product.sink, context};
-  if (!ReadyToType(*host, product.sink, context, 15000)) {
+  ReferenceDoc reference;
+  bool space_eaten = true;
+  result->counters.pumps = ~0ull;
+  if (!ReadyToType(*host, product.sink, context, 15000, &result->counters)) {
     result->error = "the session never became ready";
-  } else if (!SendText(&route, word, true, &result->error) ||
-             !SendVirtualKey(&route, VK_SPACE, true, &result->error) ||
-             !WaitForText(*host, document, word + L" ", 8000)) {
-    result->error = "the session did not commit its word";
+  } else if (!SendTextHost(&route, word, &result->error)) {
+    result->error = "the session did not keep its word with the host";
+  } else if (!SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten,
+                                    &result->error) ||
+             space_eaten) {
+    result->error = "the session's Space was not the host's";
   } else {
-    result->ok = true;
-    result->text = document->text_utf16();
+    reference.HostInsert(word);
+    reference.HostInsert(L" ");
+    if (!WaitForText(*host, document, reference.text, 8000)) {
+      result->error = "the session did not commit its word";
+    } else {
+      result->ok = true;
+      result->text = document->text_utf16();
+      result->suppressed_units = route.product_suppressed_units;
+    }
   }
   ReleaseProduct(&product, true);
   ::DestroyWindow(window);
@@ -1398,10 +1772,18 @@ bool RunMultiSessionCase(const std::filesystem::path& stage,
   std::thread b(RunSessionWorker, stage, L"beta", &activated, &second);
   a.join();
   b.join();
-  LocalCheck(first.ok && first.text == L"alpha ",
-             "session A committed its own text");
-  LocalCheck(second.ok && second.text == L"beta ",
-             "session B committed its own text");
+  if (!first.ok) {
+    std::cout << "  [multi] session A error: " << first.error << std::endl;
+    PrintSeamCounters(first.counters, "multi A");
+  }
+  if (!second.ok) {
+    std::cout << "  [multi] session B error: " << second.error << std::endl;
+    PrintSeamCounters(second.counters, "multi B");
+  }
+  LocalCheck(first.ok && first.text == L"alpha " && first.suppressed_units == 0,
+             "session A committed its own text with no suppressed key");
+  LocalCheck(second.ok && second.text == L"beta " && second.suppressed_units == 0,
+             "session B committed its own text with no suppressed key");
   const bool unloaded = FreeDeferredProductModules(15000, "multi-session");
   LocalCheck(unloaded, "multi-session: both load references were released");
   return first.ok && second.ok;
@@ -1466,6 +1848,7 @@ bool RunStrictUnregisteredCase(const std::filesystem::path& stage,
 struct HoldSessionResult {
   std::atomic<bool> ready{false};
   std::atomic<bool> ok{false};
+  SeamCounters counters = {};
   std::string error;
 };
 
@@ -1501,8 +1884,11 @@ void HoldSessionWorker(const std::filesystem::path& stage, HANDLE ready_event,
     delete host;
     return;
   }
+  (void)LoadSeam(product);
   result->ready.store(true);
-  result->ok.store(ReadyToType(*host, product.sink, document->context(), 15000));
+  result->counters.pumps = ~0ull;
+  result->ok.store(
+      ReadyToType(*host, product.sink, document->context(), 15000, &result->counters));
   ::SetEvent(ready_event);
   (void)::WaitForSingleObject(release_event, 30000);
   ReleaseProduct(&product, true);
@@ -1529,10 +1915,31 @@ bool RunFocusSwitchCase(const Paths& paths) {
              "focus: the parent context is ready");
   std::string error;
   InputRoute parent_route{test_case.host, test_case.doc, sink, parent_context};
-  LocalCheck(SendText(&parent_route, L"one", true, &error) &&
-                 SendVirtualKey(&parent_route, VK_SPACE, true, &error) &&
-                 WaitForText(*test_case.host, test_case.doc, L"parentone ", 5000),
-             "focus: the parent context accepts text");
+  ReferenceDoc parent_reference;
+  parent_reference.text = L"parent";
+  bool space_eaten = true;
+  LocalCheck(SendTextHost(&parent_route, L"one", &error) &&
+                 SendVirtualKeyAdaptive(&parent_route, VK_SPACE, L" ", &space_eaten,
+                                        &error) &&
+                 !space_eaten,
+             "focus: the parent context accepts host-owned text: " + error);
+  parent_reference.HostInsert(L"one ");
+  CheckDocExact(test_case.doc->text_utf16(), parent_reference.text,
+                "focus: the parent text is the exact host reference");
+  // A real menu in the parent, so its selection can be attempted after the switch.
+  LocalCheck(SendTextHost(&parent_route, L"hel", &error),
+             "focus: the parent's suggestion token stays with the host: " + error);
+  parent_reference.HostInsert(L"hel");
+  SeamCounters parent_menu = {};
+  (void)test_case.seam.query(&parent_menu);
+  const bool parent_menu_open =
+      WaitForCandidateMenu(*test_case.host, test_case.seam, &parent_menu, 2, 8000);
+  LocalCheck(parent_menu_open, "focus: the parent menu opened before the switch");
+  if (!parent_menu_open) {
+    (void)test_case.seam.query(&parent_menu);
+    PrintSeamCounters(parent_menu, "focus parent menu timeout");
+  }
+  const unsigned long long parent_version = parent_menu.candidate_version;
 
   TestDocumentOptions child_options;
   child_options.initial_text_utf16 = L"";
@@ -1547,12 +1954,30 @@ bool RunFocusSwitchCase(const Paths& paths) {
                "focus: the child context is bound");
     error.clear();
     InputRoute child_route{test_case.host, child, sink, child->context()};
-    LocalCheck(SendText(&child_route, L"child", true, &error) &&
-                   SendVirtualKey(&child_route, VK_SPACE, true, &error) &&
-                   WaitForText(*test_case.host, child, L"child ", 8000),
-               "focus: the child context accepts text");
-    LocalCheck(test_case.doc->text_utf16() == L"parentone ",
-               "focus: the parent document was not written after the switch");
+    ReferenceDoc child_reference;
+    bool child_space = true;
+    LocalCheck(SendTextHost(&child_route, L"child", &error) &&
+                   SendVirtualKeyAdaptive(&child_route, VK_SPACE, L" ", &child_space,
+                                          &error) &&
+                   !child_space,
+               "focus: the child context accepts host-owned text: " + error);
+    child_reference.HostInsert(L"child ");
+    CheckDocExact(child->text_utf16(), child_reference.text,
+                  "focus: the child text is the exact host reference");
+    // A selection drawn from the parent menu must not write into the child.
+    const std::wstring child_before_parent_click = child->text_utf16();
+    (void)test_case.seam.select(parent_version, 1);
+    PumpSlice(*test_case.host, 300);
+    CheckDocExact(child->text_utf16(), child_before_parent_click,
+                  "focus: the parent's stale selection wrote nothing into the child");
+    CheckDocExact(test_case.doc->text_utf16(), parent_reference.text,
+                  "focus: the parent document kept its own complete text");
+    CheckNoSuppressedText(parent_route, "focus parent");
+    CheckNoSuppressedText(child_route, "focus child");
+    SeamCounters focus_counters = {};
+    (void)test_case.seam.query(&focus_counters);
+    LocalCheck(focus_counters.internal_text_losses == 0,
+               "focus: the product reports zero internal text losses across the switch");
   }
   EndCase(&test_case);
   return true;
@@ -1606,6 +2031,10 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
   const bool ready_signalled = ::WaitForSingleObject(ready_event, 25000) == WAIT_OBJECT_0;
   LocalCheck(ready_signalled && deferred.ok.load(),
              "timing: the second session joins the running engine");
+  if (!deferred.ok.load()) {
+    std::cout << "  [timing] second session error: " << deferred.error << std::endl;
+    PrintSeamCounters(deferred.counters, "timing second session");
+  }
   LocalCheck(std::filesystem::is_regular_file(marker),
              "timing: the new settings marker survives while the engine runs");
   const std::string during = ReadNarrow(compiled);
@@ -1654,22 +2083,21 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
   std::string error;
   InputRoute renewed_route{renewed.host, renewed.doc, renewed.product.sink,
                            renewed.doc->context()};
-  LocalCheck(SendText(&renewed_route, L"timing", true, &error) &&
-                 SendVirtualKey(&renewed_route, VK_SPACE, true, &error) &&
-                 WaitForText(*renewed.host, renewed.doc, L"timing ", 8000),
-             "timing: the restarted engine accepts input");
+  ReferenceDoc renewed_reference;
+  bool renewed_space = true;
+  LocalCheck(SendTextHost(&renewed_route, L"timing", &error) &&
+                 SendVirtualKeyAdaptive(&renewed_route, VK_SPACE, L" ", &renewed_space,
+                                        &error) &&
+                 !renewed_space,
+             "timing: the restarted engine keeps its input with the host: " + error);
+  renewed_reference.HostInsert(L"timing ");
+  CheckDocExact(renewed.doc->text_utf16(), renewed_reference.text,
+                "timing: the restarted engine's document is the host reference");
+  CheckNoSuppressedText(renewed_route, "timing");
   EndCase(&renewed);
   return true;
 }
 
-// Independent reference edit model. It is written from the documented default English
-// behaviour (raw characters preserved, Space commits and inserts one space) and never calls
-// product code. The final controlled-store text must equal its text.
-struct ReferenceDoc {
-  std::wstring text;
-  void HostInsert(const std::wstring& units) { text += units; }
-  void RawAppend(const std::wstring& units) { text += units; }
-};
 
 bool RunEngineMissingCase(const std::filesystem::path& stage,
                           const std::filesystem::path& user_root,
@@ -1750,7 +2178,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
     EndCase(&test_case);
     return false;
   }
-  ProductSeam seam = LoadSeam(test_case.product);
+  ProductSeam seam = test_case.seam;
   LocalCheck(seam.usable(), "candidate: controlled seam available");
   if (!seam.usable()) {
     EndCase(&test_case);
@@ -1763,12 +2191,13 @@ bool RunCandidateCase(const std::filesystem::path& stage,
   std::string error;
   SeamCounters counters;
 
-  // 1. Real engine page and explicit kinds; Enter with no user selection commits the
-  // literal, never an automatically suggested completion.
+  // 1. The host owns the literal text. Enter with no explicit selection is host input, not
+  // an automatic acceptance of the suggestion.
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "candidate: the engine path is ready");
-  LocalCheck(SendText(&route, L"hel", true, &error),
-             "candidate: the first token is eaten: " + error);
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "candidate: the first token stays with the host: " + error);
+  reference.HostInsert(L"hel");
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
              "candidate: the real menu opened");
   LocalCheck(counters.page_size == 8 && counters.is_last_page == 1 &&
@@ -1776,102 +2205,104 @@ bool RunCandidateCase(const std::filesystem::path& stage,
              "candidate: the engine's real page size is 8 and this is its last page");
   LocalCheck(seam.kind(0) == 0, "candidate: index 0 is the original text");
   LocalCheck(seam.kind(1) == 1, "candidate: index 1 is a completion");
-  const bool no_selection_enter_eaten =
-      SendVirtualKey(&route, VK_RETURN, true, &error);
-  LocalCheck(no_selection_enter_eaten,
-             "candidate: Enter with no selection is eaten");
-  reference.RawAppend(L"hel");
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
-             "candidate: Enter with no selection committed the literal, not a suggestion");
+  bool no_selection_enter_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_RETURN, L"", &no_selection_enter_eaten,
+                                    &error) &&
+                 !no_selection_enter_eaten,
+             "candidate: Enter with no selection stays with the host: " + error);
+  reference.HostInsert(L"\n");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "candidate: Enter with no selection did not auto-accept a suggestion");
 
   // 2. Arrow navigation selects an explicit row; Enter accepts that row through the
-  // validated selection path (not an engine Return).
+  // validated replacement path.
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "candidate: ready for arrow navigation");
-  LocalCheck(SendText(&route, L"hel", true, &error),
-             "candidate: the second token is eaten: " + error);
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "candidate: the second token stays with the host: " + error);
+  reference.HostInsert(L"hel");
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
              "candidate: the second menu opened");
-  const std::wstring completion = ReadCandidateText(seam, 1);
-  LocalCheck(!completion.empty(), "candidate: the completion text is available");
+  PrintSeamCounters(counters, "candidate second menu");
   bool down1 = false;
   bool down2 = false;
-  LocalCheck(SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down1, &error) &&
-                 down1,
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down1, &error) && down1,
              "candidate: the first Down is eaten by the menu");
-  LocalCheck(SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down2, &error) &&
-                 down2,
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down2, &error) && down2,
              "candidate: the second Down is eaten by the menu");
   (void)seam.query(&counters);
   LocalCheck(counters.candidate_selected == 1,
              "candidate: the explicit selection is the completion row");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 8000),
+             "candidate: the selection menu is stable before Enter");
+  const std::wstring completion = ReadCandidateText(seam, 1);
+  LocalCheck(!completion.empty(), "candidate: the completion text is available");
   LocalCheck(SendVirtualKey(&route, VK_RETURN, true, &error),
              "candidate: Enter accepts the explicit selection");
-  reference.RawAppend(completion);
+  reference.ReplaceToken(L"hel", completion);
   LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
-             "candidate: the selected completion was committed once");
+             "candidate: the selected completion replaced the token exactly once");
 
-  // 3. Space keeps the literal commit contract even while a completion is selected.
+  // 3. Space is host input even while a completion is selected.
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "candidate: ready for the Space contract");
-  LocalCheck(SendText(&route, L"hel", true, &error),
-             "candidate: the third token is eaten: " + error);
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "candidate: the third token stays with the host: " + error);
+  reference.HostInsert(L"hel");
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
              "candidate: the third menu opened");
   bool down3 = false;
   bool down4 = false;
   (void)SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down3, &error);
   (void)SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down4, &error);
-  bool space_eaten = false;
+  bool space_eaten = true;
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
-                 space_eaten,
-             "candidate: Space is eaten while the menu is open");
-  reference.RawAppend(L"hel ");
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
-             "candidate: Space committed the original text, not the selected completion");
+                 !space_eaten,
+             "candidate: Space stays with the host while the menu is open: " + error);
+  reference.HostInsert(L" ");
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "candidate: Space inserted the host's space, not the selected completion");
 
-  // 4. Escape closes the menu and cancels the composition; nothing is written late.
+  // 4. Escape dismisses the menu and cancels only the enhancement; the typed token stays.
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "candidate: ready for Escape");
-  LocalCheck(SendText(&route, L"wor", true, &error),
-             "candidate: the cancelled token is eaten: " + error);
+  LocalCheck(SendTextHost(&route, L"wor", &error),
+             "candidate: the Escape token stays with the host: " + error);
+  reference.HostInsert(L"wor");
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
-             "candidate: the cancelled menu opened");
-  LocalCheck(SendVirtualKey(&route, VK_ESCAPE, true, &error),
-             "candidate: Escape is eaten");
+             "candidate: the Escape menu opened");
+  bool escape_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_ESCAPE, L"", &escape_eaten, &error) &&
+                 escape_eaten,
+             "candidate: Escape is eaten to dismiss the menu");
   LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
-             "candidate: Escape cancelled the composition without adding text");
+             "candidate: Escape kept every typed character");
   PumpSlice(*test_case.host, 300);
   LocalCheck(test_case.doc->text_utf16() == reference.text,
-             "candidate: no late write followed the cancel");
+             "candidate: no late write followed the dismiss");
+  bool separator2_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &separator2_eaten, &error) &&
+                 !separator2_eaten,
+             "candidate: the second separator space stays with the host");
+  reference.HostInsert(L" ");
 
   // 5. Stale selection: a click drawn from an older menu must not commit into the newer one.
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "candidate: ready for the stale-selection case");
-  LocalCheck(SendText(&route, L"hel", true, &error),
-             "candidate: the stale-selection token is eaten: " + error);
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "candidate: the stale-selection token stays with the host: " + error);
+  reference.HostInsert(L"hel");
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
              "candidate: the stale-selection menu opened");
   const unsigned long long old_version = counters.candidate_version;
-  bool extra_eaten = false;
-  LocalCheck(SendCharAdaptive(&route, L'l', &extra_eaten, &error) && extra_eaten,
-             "candidate: another character extends the composition");
-  unsigned long long newer_version = old_version;
-  const ULONGLONG version_deadline = ::GetTickCount64() + 8000;
-  for (;;) {
-    (void)seam.query(&counters);
-    if (counters.candidate_menu_open != 0 &&
-        counters.candidate_version > old_version) {
-      newer_version = counters.candidate_version;
-      break;
-    }
-    if (::GetTickCount64() >= version_deadline) {
-      break;
-    }
-    PumpSlice(*test_case.host, 10);
-  }
-  LocalCheck(newer_version > old_version,
-             "candidate: a newer menu version exists before the stale click");
+  bool extra_eaten = true;
+  LocalCheck(SendCharAdaptive(&route, L'l', &extra_eaten, &error) && !extra_eaten,
+             "candidate: another character stays with the host");
+  reference.HostInsert(L"l");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 8000) &&
+                 counters.candidate_version > old_version,
+             "candidate: a newer stable menu exists before the stale click");
+  const unsigned long long newer_version = counters.candidate_version;
   const std::wstring before_stale = test_case.doc->text_utf16();
   (void)seam.select(old_version, 1);
   PumpSlice(*test_case.host, 300);
@@ -1883,20 +2314,33 @@ bool RunCandidateCase(const std::filesystem::path& stage,
              "candidate: the stale selection is reported");
   const std::wstring newer_completion = ReadCandidateText(seam, 1);
   (void)seam.select(newer_version, 1);
-  reference.RawAppend(newer_completion);
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
-             "candidate: the current selection committed exactly once");
+  reference.ReplaceToken(L"hell", newer_completion);
+  (void)WaitForText(*test_case.host, test_case.doc, reference.text, 8000);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "candidate: the current selection replaced the token exactly once");
+  bool separator3_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &separator3_eaten, &error) &&
+                 !separator3_eaten,
+             "candidate: the third separator space stays with the host");
+  reference.HostInsert(L" ");
+  std::cout << "  [debug] after separator3 doc=" << test_case.doc->text_utf16().size()
+            << " ref=" << reference.text.size()
+            << " caret=" << test_case.doc->selection_start_utf16() << std::endl;
 
-  // 6. External edit invalidates the snapshot; the old click cannot reach the rebuilt
-  // binding.
+  // 6. A genuinely external edit (not one of our passed-through keys) ends the suggestion
+  // stream; a selection from before it must write nothing.
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "candidate: ready for the external-edit case");
-  LocalCheck(SendText(&route, L"hel", true, &error),
-             "candidate: the external-edit token is eaten: " + error);
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "candidate: the external-edit token stays with the host: " + error);
+  reference.HostInsert(L"hel");
+  std::cout << "  [debug] after external token doc=" << test_case.doc->text_utf16().size()
+            << " ref=" << reference.text.size()
+            << " caret=" << test_case.doc->selection_start_utf16() << std::endl;
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
              "candidate: the external-edit menu opened");
   const unsigned long long pre_edit_version = counters.candidate_version;
-  SeamCounters before_external;
+  SeamCounters before_external = {};
   (void)seam.query(&before_external);
   std::string client_error;
   const TfClientId external_client =
@@ -1909,36 +2353,95 @@ bool RunCandidateCase(const std::filesystem::path& stage,
                                  ExternalEditMode::kInsertText, caret, caret, L"X",
                                  &external, &error),
              "candidate: the external edit ran: " + error);
+  std::cout << "  [debug] external caret=" << caret
+            << " doc_len=" << test_case.doc->text_utf16().size()
+            << " ref_len=" << reference.text.size() << std::endl;
+  reference.text.insert(static_cast<std::size_t>(caret), L"X");
   PumpSlice(*test_case.host, 600);
   const std::wstring after_external = test_case.doc->text_utf16();
+  std::cout << "  [debug] after_external=" << after_external.size()
+            << " ref_after=" << reference.text.size() << std::endl;
+  CheckDocExact(after_external, reference.text,
+                "candidate: the external edit added its own text");
   (void)seam.select(pre_edit_version, 0);
   PumpSlice(*test_case.host, 300);
   SeamCounters after_external_counters;
   (void)seam.query(&after_external_counters);
   LocalCheck(test_case.doc->text_utf16() == after_external,
              "candidate: a selection from before the external edit wrote nothing");
-  LocalCheck(after_external_counters.candidate_stale >= 2,
-             "candidate: the pre-edit selection is reported stale");
-  (void)before_external;
+  LocalCheck(after_external_counters.candidate_stale > before_external.candidate_stale ||
+                 after_external_counters.replacement_refused >
+                     before_external.replacement_refused,
+             "candidate: the pre-edit selection is reported stale/refused");
+  bool separator4_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &separator4_eaten, &error) &&
+                 !separator4_eaten,
+             "candidate: the space after the external edit stays with the host");
+  reference.HostInsert(L" ");
 
   // 7. Spelling suggestions are labelled distinctly, and the literal row stays index 0.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
-             "candidate: ready for the spelling classification");
-  LocalCheck(SendText(&route, L"heloo", true, &error),
-             "candidate: the misspelling token is eaten: " + error);
+  const bool spelling_ready =
+      ReadyToType(*test_case.host, sink, context, 15000);
+  if (!spelling_ready) {
+    SeamCounters blocked = {};
+    (void)seam.query(&blocked);
+    PrintSeamCounters(blocked, "spelling readiness timeout");
+  }
+  LocalCheck(spelling_ready, "candidate: ready for the spelling classification");
+  LocalCheck(SendTextHost(&route, L"heloo", &error),
+             "candidate: the misspelling token stays with the host: " + error);
+  reference.HostInsert(L"heloo");
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
              "candidate: the spelling menu opened");
+  PrintSeamCounters(counters, "spelling menu");
+  std::cout << "  [debug] spelling host_edits matched=" << counters.host_edits_matched
+            << " unexpected=" << counters.host_edits_unexpected
+            << " losses=" << counters.target_losses
+            << " awaiting=" << counters.observer_awaiting_bind
+            << " published=" << counters.observer_published
+            << " last_drop=" << counters.observer_last_drop
+            << " rebind_pending=" << counters.rebind_pending
+            << " bind_status=" << counters.last_bind_status
+            << " refused=" << counters.binds_refused
+            << " paused=" << counters.binds_paused_retiring
+            << " reset(boundary=" << counters.reset_boundary
+            << ",owed=" << counters.reset_owed
+            << ",submit=" << counters.reset_submit_refusal
+            << ",replace=" << counters.reset_replacement << ")"
+            << " obs(refusals=" << counters.observer_selection_refusals
+            << ",reads=" << counters.observer_selection_reads
+            << ",pending=" << counters.observer_selection_pending
+            << ",ctx=" << counters.observer_has_context
+            << ",sub=" << counters.observer_subscribed << ")"
+            << " retire=" << counters.retiring_bindings
+            << " paused=" << counters.admission_paused
+            << " retr(comps=" << counters.retiring_compositions
+            << ",settled=" << counters.retired_settled
+            << ",ordinary=" << counters.retired_already_ordinary
+            << ",blocked=" << counters.retired_blocked
+            << ",close_req=" << counters.close_requests
+            << ",close_res=" << counters.close_results
+            << ",close_fail=" << counters.close_failures
+            << ",unres_close=" << counters.unresolved_close
+            << ",unres_eng=" << counters.unresolved_engine
+            << ",edit_evt=" << counters.pending_edit_event << ")" << std::endl;
   bool spelling_seen = false;
   for (int index = 0; index < counters.candidate_items; ++index) {
-    if (seam.kind(index) == 2) {
+    const int kind = seam.kind(index);
+    const std::wstring item = ReadCandidateText(seam, static_cast<unsigned>(index));
+    std::cout << "  [debug] spelling item " << index << " kind=" << kind
+              << " text=" << std::string(item.begin(), item.end()) << std::endl;
+    if (kind == 2) {
       spelling_seen = true;
     }
   }
   LocalCheck(seam.kind(0) == 0, "candidate: the literal row is still index 0");
   LocalCheck(spelling_seen,
              "candidate: the engine's spelling suggestion is labelled as such");
-  LocalCheck(SendVirtualKey(&route, VK_ESCAPE, true, &error),
-             "candidate: Escape closes the spelling menu");
+  bool spelling_escape_eaten = false;
+  (void)SendVirtualKeyAdaptive(&route, VK_ESCAPE, L"", &spelling_escape_eaten, &error);
+  LocalCheck(test_case.doc->text_utf16() == reference.text,
+             "candidate: dismiss left the misspelled original intact");
 
   EndCase(&test_case);
   return true;
@@ -2000,6 +2503,13 @@ bool RunContinuousCase(const std::filesystem::path& stage,
   PumpSlice(*test_case.host, 300);
   LocalCheck(test_case.doc->text_utf16() == after_burst,
              "continuous: no late write changed the document after the run");
+  {
+    SeamCounters counters = {};
+    (void)seam.query(&counters);
+    LocalCheck(counters.internal_text_losses == 0,
+               "continuous: the product reports zero internal text losses");
+  }
+  CheckNoSuppressedText(route, "continuous");
   EndCase(&test_case);
   return true;
 }
@@ -2009,239 +2519,221 @@ bool RunCapacityCase(const std::filesystem::path& stage,
   Case test_case;
   TestDocumentOptions options;
   options.initial_text_utf16 = L"";
+  options.async_locks = true;
   if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
     LocalCheck(false, "capacity: host and activation");
     EndCase(&test_case);
     return false;
   }
-  ProductSeam seam = LoadSeam(test_case.product);
+  ProductSeam seam = test_case.seam;
   LocalCheck(seam.usable(), "capacity: controlled seam available");
   ITfKeyEventSink* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
   std::string error;
-  SeamCounters counters;
+  SeamCounters counters = {};
+  ReferenceDoc reference;
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "capacity: the engine path is ready");
 
-  // The document lock is held for the whole burst. The first key goes to the engine and its
-  // edit cannot complete; the queue crosses the high-water mark, the raw run takes over, and
-  // the run's own 1024 UTF-16 bound is reached while the chunk cannot be flushed.
+  // A real deferred document lock: the product's asynchronous requests are not granted
+  // while the whole burst is typed. Original text does not depend on those requests.
   test_case.host->SetHoldGrantMessages(true);
-  std::wstring burst;
-  burst.reserve(1250);
-  burst += L"ab";
-  for (std::size_t index = 0; index < 1200; ++index) {
-    burst.push_back(L'x');
-  }
-  LocalCheck(SendTextAdaptive(&route, burst, nullptr, &error),
-             "capacity: the whole burst was eaten: " + error);
+  std::wstring burst = L"ab";
+  burst.append(1200, L'x');
+  CrashPhase("capacity: typing the 1202-unit burst while the document lock is held");
+  LocalCheck(SendTextHost(&route, burst, &error),
+             "capacity: every burst key stays with the host: " + error);
+  reference.HostInsert(burst);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "capacity: the whole burst is in the host document before any grant");
   (void)seam.query(&counters);
-  LocalCheck(counters.raw_unrecoverable > 0,
-             "capacity: the bound was really reached while the chunk could not flush");
-  LocalCheck(counters.raw_dropped_keys > 0,
-             "capacity: the overflow is reported as an explicit loss");
-  LocalCheck(counters.raw_applied_units == 0,
-             "capacity: nothing was claimed applied while the document was locked");
+  LocalCheck(counters.host_text_keys >= burst.size(),
+             "capacity: every burst key is accounted as host-owned");
+  LocalCheck(counters.internal_text_losses == 0,
+             "capacity: the product reports zero internal text losses");
+  CheckNoSuppressedText(route, "capacity");
+  // The suggestion stream is allowed to fall behind under this burst; that must not affect
+  // a single original character.
+  LocalCheck(counters.suggestion_queued + counters.suggestion_dropped >= 1000,
+             "capacity: the engine saw (or explicitly dropped) the suggestion backlog");
+
   test_case.host->SetHoldGrantMessages(false);
-  (void)test_case.host->ReleaseHeldGrantMessages();
-
-  const ULONGLONG settle_deadline = ::GetTickCount64() + 25000;
-  for (;;) {
-    (void)seam.query(&counters);
-    if (counters.raw_applied_units >= 1024 || ::GetTickCount64() >= settle_deadline) {
-      break;
-    }
-    PumpSlice(*test_case.host, 20);
-  }
-  LocalCheck(counters.raw_applied_units == 1024,
-             "capacity: exactly one full 1024-unit chunk was applied");
-  const std::wstring retained = test_case.doc->text_utf16();
-  bool prefix_ok = true;
-  for (std::size_t index = 0; index < retained.size(); ++index) {
-    const wchar_t expected = index < 2 ? L"ab"[index] : L'x';
-    if (retained[index] != expected) {
-      prefix_ok = false;
-      break;
-    }
-  }
-  LocalCheck(prefix_ok, "capacity: the retained prefix is the typed prefix, unchanged");
-  LocalCheck(retained.size() == 1024 || retained.size() == 1025,
-             "capacity: the document holds the bounded chunk (plus at most one engine key)");
+  const std::size_t released = test_case.host->ReleaseHeldGrantMessages();
+  std::cout << "  [capacity] released held grants=" << released << std::endl;
   PumpSlice(*test_case.host, 300);
-  LocalCheck(test_case.doc->text_utf16() == retained,
-             "capacity: no duplicate write followed the chunk");
-  EndCase(&test_case);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "capacity: releasing the lock changed no original character");
 
-  // Recovery in a fresh activation: the boundary loss is confined to the stalled session;
-  // a new host session starts with a live engine and accepts a new token normally.
-  Case recovery_case;
-  TestDocumentOptions recovery_options;
-  recovery_options.initial_text_utf16 = L"";
-  if (BeginCase(&recovery_case, stage, user_root, recovery_options, nullptr)) {
-    InputRoute recovery_route{recovery_case.host, recovery_case.doc,
-                              recovery_case.product.sink,
-                              recovery_case.doc->context()};
-    LocalCheck(ReadyToType(*recovery_case.host, recovery_case.product.sink,
-                           recovery_case.doc->context(), 15000),
-               "capacity: a fresh activation becomes ready after the boundary loss");
-    LocalCheck(SendText(&recovery_route, L"after", true, &error) &&
-                   SendVirtualKey(&recovery_route, VK_SPACE, true, &error),
-               "capacity: the fresh session accepts a new token: " + error);
-    LocalCheck(WaitForText(*recovery_case.host, recovery_case.doc, L"after ",
-                           10000),
-               "capacity: the fresh session's document is exact");
-    EndCase(&recovery_case);
-  } else {
-    LocalCheck(false, "capacity: a fresh activation after the boundary");
+  // Boundary sweep around the retired 1024-unit raw bound: one unit below, at, and above it
+  // must all be host text, with no product-side capacity account involved.
+  for (const std::size_t units : {std::size_t{1023}, std::size_t{1024},
+                                  std::size_t{1025}}) {
+    std::wstring boundary;
+    boundary.append(units, L'b');
+    test_case.host->SetHoldGrantMessages(true);
+    LocalCheck(SendTextHost(&route, boundary, &error),
+               "capacity: the " + std::to_string(units) +
+                   "-unit boundary burst stays with the host: " + error);
+    reference.HostInsert(boundary);
+    CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                  "capacity: the " + std::to_string(units) +
+                      "-unit boundary burst is exact while the lock is held");
+    test_case.host->SetHoldGrantMessages(false);
+    (void)test_case.host->ReleaseHeldGrantMessages();
+    PumpSlice(*test_case.host, 50);
+    CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                  "capacity: the " + std::to_string(units) +
+                      "-unit boundary burst survived the grant");
   }
+  CheckNoSuppressedText(route, "capacity boundary sweep");
+  {
+    SeamCounters boundary_counters = {};
+    (void)seam.query(&boundary_counters);
+    LocalCheck(boundary_counters.internal_text_losses == 0,
+               "capacity: zero internal text losses across the boundary sweep");
+  }
+
+  // Continue in the same activation, with no reactivation or settle wait beyond the host
+  // edit itself.
+  LocalCheck(SendTextHost(&route, L"after", &error),
+             "capacity: the continuation stays with the host: " + error);
+  reference.HostInsert(L"after");
+  bool space_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
+                 !space_eaten,
+             "capacity: the continuation Space stays with the host: " + error);
+  reference.HostInsert(L" ");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "capacity: the same session kept the complete original text");
+
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+             "capacity: the engine suggestion path is ready again in this session");
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "capacity: a fresh token stays with the host: " + error);
+  reference.HostInsert(L"hel");
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 15000),
+             "capacity: the recovered engine opened a real menu");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 8000),
+             "capacity: the recovered menu is stable");
+  const std::wstring completion = ReadCandidateText(seam, 1);
+  (void)seam.select(counters.candidate_version, 1);
+  reference.ReplaceToken(L"hel", completion);
+  (void)WaitForText(*test_case.host, test_case.doc, reference.text, 15000);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "capacity: an explicit completion replaced only the new token");
+
+  EndCase(&test_case);
   return true;
 }
 
-// W2-B-R: the original failure shape. The same activation and the same context cross the
-// bounded raw capacity while the document lock is held, the retained chunk applies, and the
-// session keeps typing instead of reactivating. Every step is labelled for the crash report.
 bool RunCapacityContinueCase(const std::filesystem::path& stage,
                              const std::filesystem::path& user_root) {
   Case test_case;
   TestDocumentOptions options;
   options.initial_text_utf16 = L"";
-  // A real deferred lock: RequestLock answers TS_S_ASYNC and the grant arrives as a message
-  // that the host can hold. Without this the burst only "holds" because nothing pumps, which
-  // is not the same as an application that is busy inside a lock.
   options.async_locks = true;
   if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
     LocalCheck(false, "capacity-continue: host and activation");
     EndCase(&test_case);
     return false;
   }
-  ProductSeam seam = LoadSeam(test_case.product);
+  ProductSeam seam = test_case.seam;
   LocalCheck(seam.usable(), "capacity-continue: controlled seam available");
   ITfKeyEventSink* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
   std::string error;
   SeamCounters counters = {};
+  ReferenceDoc reference;
   CrashPhase("capacity-continue: waiting for the engine path");
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "capacity-continue: the engine path is ready");
 
-  // 1. Backlog and boundary: the first engine key is in flight and cannot be granted, then
-  // the burst crosses the high water mark and fills the bounded raw run.
+  // 1. The original failure shape: a real held lock, a long burst, then immediate
+  // continuation in the same activation. The host owns every character, so the lock can
+  // delay suggestions but never the text.
   CrashPhase("capacity-continue: sending the 1202-unit burst under a held lock");
   test_case.host->SetHoldGrantMessages(true);
   std::wstring burst = L"ab";
   burst.append(1200, L'x');
-  std::vector<bool> burst_eaten;
-  LocalCheck(SendTextAdaptive(&route, burst, &burst_eaten, &error),
-             "capacity-continue: the burst was delivered to the sink: " + error);
-  std::size_t eaten_keys = 0;
-  for (const bool key_eaten : burst_eaten) {
-    eaten_keys += key_eaten ? 1u : 0u;
-  }
-  LocalCheck(burst_eaten.size() == burst.size() && eaten_keys == burst.size(),
-             "capacity-continue: every burst key was eaten (host kept none)");
+  LocalCheck(SendTextHost(&route, burst, &error),
+             "capacity-continue: the burst stays with the host: " + error);
+  reference.HostInsert(burst);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "capacity-continue: the full burst is present while the lock is held");
   (void)seam.query(&counters);
-  LocalCheck(counters.raw_unrecoverable > 0,
-             "capacity-continue: the bound was reached while the chunk could not flush");
-  LocalCheck(counters.raw_dropped_keys > 0,
-             "capacity-continue: the overflow is an explicit, counted loss");
-  LocalCheck(counters.raw_applied_units == 0,
-             "capacity-continue: nothing was applied while the document stayed locked");
+  LocalCheck(counters.internal_text_losses == 0,
+             "capacity-continue: zero internal text losses");
+  CheckNoSuppressedText(route, "capacity-continue burst");
   test_case.host->SetHoldGrantMessages(false);
   (void)test_case.host->ReleaseHeldGrantMessages();
 
-  CrashPhase("capacity-continue: waiting for the retained 1024-unit chunk");
-  const ULONGLONG settle_deadline = ::GetTickCount64() + 25000;
-  for (;;) {
-    (void)seam.query(&counters);
-    if (counters.raw_applied_units >= 1024 || ::GetTickCount64() >= settle_deadline) {
-      break;
-    }
-    PumpSlice(*test_case.host, 20);
-  }
-  LocalCheck(counters.raw_applied_units == 1024,
-             "capacity-continue: exactly one 1024-unit chunk was applied");
-  const std::wstring retained = test_case.doc->text_utf16();
-  LocalCheck(retained == burst.substr(0, retained.size()),
-             "capacity-continue: the document is the typed prefix, unit for unit");
-  LocalCheck(retained.size() == 1024 || retained.size() == 1025,
-             "capacity-continue: the document holds the bounded chunk (plus at most one "
-             "engine key)");
-  const std::size_t typed_units = burst.size();
-  const std::size_t dropped_keys = static_cast<std::size_t>(counters.raw_dropped_keys);
-  // This fixed burst uses one UTF-16 unit per key, so key counts and unit counts are equal.
-  // Every typed key is either inside the retained text or explicitly dropped; nothing is
-  // allowed to vanish between those two accounts.
-  LocalCheck(retained.size() + dropped_keys == typed_units,
-             "capacity-continue: retained + dropped accounts for every typed unit");
-  LocalCheck(counters.queue_pending == 0 && counters.queue_in_flight == 0,
-             "capacity-continue: no accepted key is still waiting after the chunk applied");
-
-  // 2. Continue typing in the SAME activation and context as soon as the chunk applied, with
-  // no artificial settle window. The controller is still in the degraded run, so these keys
-  // are captured raw, committed, and only then does the run end.
-  SeamCounters before_continue = {};
-  (void)seam.query(&before_continue);
-  CrashPhase("capacity-continue: typing a new token after the applied chunk");
+  CrashPhase("capacity-continue: typing a new token in the same activation");
   std::vector<bool> continued_eaten;
   LocalCheck(SendTextAdaptive(&route, L"after", &continued_eaten, &error),
              "capacity-continue: the continued token was delivered: " + error);
-  std::size_t continued_keys = 0;
   for (const bool key_eaten : continued_eaten) {
-    continued_keys += key_eaten ? 1u : 0u;
+    LocalCheck(!key_eaten, "capacity-continue: a continued key stayed with the host");
   }
-  LocalCheck(continued_eaten.size() == 5 && continued_keys == 5,
-             "capacity-continue: every continued key stayed in the product path");
-  CrashPhase("capacity-continue: committing the continued token with Space");
+  reference.HostInsert(L"after");
   bool space_eaten = false;
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
-                 space_eaten,
-             "capacity-continue: Space was eaten and ends the degraded run: " + error);
-  const std::wstring continued = retained + L"after ";
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, continued, 25000),
-             "capacity-continue: the continued token is in the document exactly once");
-  (void)seam.query(&counters);
-  LocalCheck(counters.raw_commits > before_continue.raw_commits,
-             "capacity-continue: the continuation went through a real raw commit");
-  const std::wstring after_continuation = test_case.doc->text_utf16();
+                 !space_eaten,
+             "capacity-continue: Space stayed with the host: " + error);
+  reference.HostInsert(L" ");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "capacity-continue: the continuation follows the burst exactly");
+  const std::wstring before_settle = test_case.doc->text_utf16();
   PumpSlice(*test_case.host, 300);
-  LocalCheck(test_case.doc->text_utf16() == after_continuation,
-             "capacity-continue: no late write changed the document after the continuation");
+  CheckDocExact(test_case.doc->text_utf16(), before_settle,
+                "capacity-continue: no late write changed the document");
 
-  // 3. The raw run ended; the binding rebuilds and the engine path comes back in this same
-  // session. Then a fresh token must produce a real menu and a validated selection.
-  CrashPhase("capacity-continue: waiting for the engine path to recover in this session");
-  LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, context, &counters, 30000),
-             "capacity-continue: the same session recovered the engine path");
-  PrintSeamCounters(counters, "after recovery");
-  LocalCheck(counters.raw_active == 0 && counters.raw_submitted == 0,
-             "capacity-continue: the degraded run is closed before engine input resumes");
-  CrashPhase("capacity-continue: typing a fresh token through the recovered engine");
-  LocalCheck(SendText(&route, L"hel", true, &error),
-             "capacity-continue: the fresh token is eaten by the engine path: " + error);
+  // 2. The engine path recovers in the same session; a fresh token produces a real menu and
+  // an explicit replacement.
+  CrashPhase("capacity-continue: waiting for the engine path to recover");
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+             "capacity-continue: the same session recovered");
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "capacity-continue: the fresh token stays with the host: " + error);
+  reference.HostInsert(L"hel");
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 15000),
              "capacity-continue: the recovered engine opened a real menu");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 8000),
+             "capacity-continue: the recovered menu is stable");
   const std::wstring completion = ReadCandidateText(seam, 1);
-  LocalCheck(!completion.empty(),
-             "capacity-continue: the completion text is available");
-  CrashPhase("capacity-continue: selecting the completion and committing");
-  bool down1 = false;
-  bool down2 = false;
-  LocalCheck(SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down1, &error) && down1 &&
-                 SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down2, &error) && down2,
-             "capacity-continue: the menu owns both Down keys");
-  LocalCheck(SendVirtualKey(&route, VK_RETURN, true, &error),
-             "capacity-continue: Enter accepts the explicit selection");
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, continued + completion, 20000),
-             "capacity-continue: the selected completion was committed exactly once");
-  const std::wstring final_text = test_case.doc->text_utf16();
-  PumpSlice(*test_case.host, 300);
-  LocalCheck(test_case.doc->text_utf16() == final_text,
-             "capacity-continue: no late write followed the recovered commit");
+  (void)seam.select(counters.candidate_version, 1);
+  reference.ReplaceToken(L"hel", completion);
+  (void)WaitForText(*test_case.host, test_case.doc, reference.text, 15000);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "capacity-continue: the explicit completion replaced only the new token");
 
-  // 4. Deactivate and clean up the same activation. The module may only be freed after the
-  // host released every product-implemented COM object; EndCase enforces that order.
+  // 3. A second real backlog in the same session: text and control keys remain exact.
+  CrashPhase("capacity-continue: a second held burst with control keys");
+  test_case.host->SetHoldGrantMessages(true);
+  std::wstring second = L"second";
+  second.append(2048, L'y');
+  LocalCheck(SendTextHost(&route, second, &error),
+             "capacity-continue: the second burst stays with the host: " + error);
+  reference.HostInsert(second);
+  bool back_eaten = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_BACK, L"", &back_eaten, &error) &&
+                 !back_eaten,
+             "capacity-continue: BackSpace stays with the host: " + error);
+  reference.HostBackspace();
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_RETURN, L"", &back_eaten, &error) &&
+                 !back_eaten,
+             "capacity-continue: Enter stays with the host: " + error);
+  reference.HostInsert(L"\n");
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "capacity-continue: the second burst and control keys are exact");
+  (void)seam.query(&counters);
+  LocalCheck(counters.internal_text_losses == 0,
+             "capacity-continue: zero internal text losses after two stress bursts");
+  CheckNoSuppressedText(route, "capacity-continue total");
+
   CrashPhase("capacity-continue: deactivating");
   EndCase(&test_case);
   LocalCheck(test_case.product.module == nullptr,
@@ -2249,10 +2741,6 @@ bool RunCapacityContinueCase(const std::filesystem::path& stage,
   return true;
 }
 
-// W2-B-R asynchronous startup lifecycle: deactivate while the background start is blocked,
-// activate a second TIP while the old start is still in flight, then release the old start.
-// The old completion must not be adopted by the new activation, and the module must stay
-// unloadable=false until the background thread really exits.
 bool RunStartupLifecycleCase(const std::filesystem::path& stage,
                              const std::filesystem::path& user_root) {
   ::SetEnvironmentVariableW(L"EPOCANVA_USER_DATA_ROOT", user_root.c_str());
@@ -2440,227 +2928,152 @@ bool RunDegradedKeysCase(const std::filesystem::path& stage,
     EndCase(&test_case);
     return false;
   }
-  ProductSeam seam = LoadSeam(test_case.product);
+  ProductSeam seam = test_case.seam;
   LocalCheck(seam.usable(), "degraded-keys: controlled seam available");
   ITfKeyEventSink* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
   std::string error;
   SeamCounters counters = {};
+  ReferenceDoc reference;
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "degraded-keys: the engine path is ready");
 
-  // Phase A: BackSpace edits only the unsubmitted suffix while a real backlog exists. The
-  // burst is sent without pumping, so the first key is in flight, the queue crosses the high
-  // water mark, and every following key is withdrawn into the raw run.
-  CrashPhase("degraded-keys: building a backlog");
+  // Phase A: a real backlog plus a held write authorization. Ordinary text and BackSpace
+  // are host-owned, so the final document is the exact host reference.
+  CrashPhase("degraded-keys: typing a backlog and BackSpace under a held lock");
+  test_case.host->SetHoldGrantMessages(true);
   std::wstring burst = L"q";
   burst.append(29, L'w');
-  std::vector<bool> burst_eaten;
-  LocalCheck(SendTextAdaptive(&route, burst, &burst_eaten, &error),
-             "degraded-keys: the backlog was delivered: " + error);
-  (void)seam.query(&counters);
-  LocalCheck(counters.raw_active != 0,
-             "degraded-keys: the raw run really took over the backlog");
-  std::wstring typed_suffix = L"abc";
-  std::vector<bool> suffix_eaten;
-  LocalCheck(SendTextAdaptive(&route, typed_suffix, &suffix_eaten, &error),
-             "degraded-keys: the suffix was captured: " + error);
-  CrashPhase("degraded-keys: BackSpace removes one code point from the suffix");
-  bool backspace_eaten = false;
+  burst += L"abc";
+  LocalCheck(SendTextHost(&route, burst, &error),
+             "degraded-keys: the backlog stays with the host: " + error);
+  reference.HostInsert(burst);
+  bool backspace_eaten = true;
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_BACK, L"", &backspace_eaten, &error) &&
-                 backspace_eaten,
-             "degraded-keys: BackSpace is eaten by the degraded run: " + error);
-  bool space_eaten = false;
+                 !backspace_eaten,
+             "degraded-keys: BackSpace stays with the host and deletes: " + error);
+  reference.HostBackspace();
+  bool space_eaten = true;
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
-                 space_eaten,
-             "degraded-keys: Space ends the run and commits it: " + error);
-  // The engine key 'q' plus the withdrawn run "w"*29 plus "ab" plus the committed space.
-  std::wstring expected = L"q";
-  expected.append(29, L'w');
-  expected += L"ab ";
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 25000),
-             "degraded-keys: BackSpace removed exactly the last captured code point");
-  (void)seam.query(&counters);
-  LocalCheck(counters.raw_ignored_edits == 0,
-             "degraded-keys: the BackSpace was a real edit, not an ignored one");
-  LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, context, &counters, 30000),
-             "degraded-keys: the engine path recovered after the BackSpace run");
-
-  // Phase B: Enter ends the degraded segment and commits the captured suffix without adding
-  // a line break; a previously committed block is preserved.
-  CrashPhase("degraded-keys: Enter commits the suffix without a newline");
-  test_case.host->SetHoldGrantMessages(true);
-  std::vector<bool> enter_prefix;
-  LocalCheck(SendTextAdaptive(&route, L"cd", &enter_prefix, &error),
-             "degraded-keys: the Enter prefix was captured: " + error);
-  bool enter_eaten = false;
-  LocalCheck(SendVirtualKeyAdaptive(&route, VK_RETURN, L"", &enter_eaten, &error) &&
-                 enter_eaten,
-             "degraded-keys: Enter is eaten by the degraded run: " + error);
+                 !space_eaten,
+             "degraded-keys: Space stays with the host: " + error);
+  reference.HostInsert(L" ");
   test_case.host->SetHoldGrantMessages(false);
   (void)test_case.host->ReleaseHeldGrantMessages();
-  expected += L"cd";
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 25000),
-             "degraded-keys: Enter committed the suffix exactly once");
-  LocalCheck(expected.find(L'\n') == std::wstring::npos &&
-                 test_case.doc->text_utf16().find(L'\n') == std::wstring::npos,
-             "degraded-keys: Enter inserted no line break");
-  LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, context, &counters, 30000),
-             "degraded-keys: the engine path recovered after Enter");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "degraded-keys: BackSpace deleted exactly the last host code point");
+  (void)seam.query(&counters);
+  LocalCheck(counters.internal_text_losses == 0,
+             "degraded-keys: zero internal text losses after the backlog");
+  CheckNoSuppressedText(route, "degraded-keys backlog");
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+             "degraded-keys: the engine path is ready after the backlog");
 
-  // Phase C: Escape cancels only the suffix that was not yet submitted. The first captured
-  // key of this segment was already handed to the coordinator and still applies once.
-  CrashPhase("degraded-keys: Escape cancels only the unsubmitted suffix");
+  // Phase B: Enter is host input. Its default newline is the host's, and no original
+  // character is lost around it.
+  CrashPhase("degraded-keys: Enter under a held lock");
   test_case.host->SetHoldGrantMessages(true);
-  std::vector<bool> escape_prefix;
-  LocalCheck(SendTextAdaptive(&route, L"efg", &escape_prefix, &error),
-             "degraded-keys: the Escape segment was captured: " + error);
+  LocalCheck(SendTextHost(&route, L"cd", &error),
+             "degraded-keys: the Enter prefix stays with the host: " + error);
+  reference.HostInsert(L"cd");
+  bool enter_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_RETURN, L"", &enter_eaten, &error) &&
+                 !enter_eaten,
+             "degraded-keys: Enter stays with the host: " + error);
+  reference.HostInsert(L"\n");
+  test_case.host->SetHoldGrantMessages(false);
+  (void)test_case.host->ReleaseHeldGrantMessages();
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "degraded-keys: Enter kept the host's complete text and newline");
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+             "degraded-keys: the engine path is ready after Enter");
+
+  // Phase C: Escape dismisses the suggestion menu without removing the typed token.
+  CrashPhase("degraded-keys: Escape dismisses only suggestions");
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "degraded-keys: the Escape token stays with the host: " + error);
+  reference.HostInsert(L"hel");
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 15000),
+             "degraded-keys: the Escape menu opened");
   bool escape_eaten = false;
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_ESCAPE, L"", &escape_eaten, &error) &&
                  escape_eaten,
-             "degraded-keys: Escape is eaten by the degraded run: " + error);
-  test_case.host->SetHoldGrantMessages(false);
-  (void)test_case.host->ReleaseHeldGrantMessages();
-  expected += L"e";  // 'f' and 'g' were cancelled; 'e' was already submitted.
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 25000),
-             "degraded-keys: Escape cancelled the suffix and kept the submitted chunk");
-  (void)seam.query(&counters);
-  LocalCheck(counters.raw_cancelled_units >= 2,
-             "degraded-keys: the cancelled suffix is counted");
-  const std::wstring after_escape = test_case.doc->text_utf16();
+             "degraded-keys: Escape is eaten to dismiss the menu");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "degraded-keys: Escape kept every typed character");
   PumpSlice(*test_case.host, 300);
-  LocalCheck(test_case.doc->text_utf16() == after_escape,
-             "degraded-keys: no cancelled text was written late");
-  LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, context, &counters, 30000),
-             "degraded-keys: the engine path recovered after Escape");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "degraded-keys: no late write followed the dismiss");
+  bool escape_space = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &escape_space, &error) &&
+                 !escape_space,
+             "degraded-keys: the Space after Escape stays with the host: " + error);
+  reference.HostInsert(L" ");
 
-  // Phase D: BackSpace with an empty suffix is eaten and ignored; it never deletes text that
-  // was already committed or is already owned by the coordinator. To reach that state the
-  // session must already be in the degraded run with an empty, unsubmitted suffix.
-  CrashPhase("degraded-keys: re-entering the degraded run for the empty-suffix BackSpace");
-  std::wstring second_burst = L"r";
-  second_burst.append(29, L'v');
-  std::vector<bool> second_eaten;
-  LocalCheck(SendTextAdaptive(&route, second_burst, &second_eaten, &error),
-             "degraded-keys: the second backlog was delivered: " + error);
-  (void)seam.query(&counters);
-  LocalCheck(counters.raw_active != 0,
-             "degraded-keys: the second backlog re-entered the raw run");
-  const std::size_t applied_before = static_cast<std::size_t>(counters.raw_applied_units);
-  const ULONGLONG second_deadline = ::GetTickCount64() + 25000;
-  for (;;) {
-    (void)seam.query(&counters);
-    if ((counters.raw_applied_units > applied_before &&
-         counters.raw_unapplied_units == 0 && counters.raw_submitted == 0) ||
-        ::GetTickCount64() >= second_deadline) {
-      break;
-    }
-    PumpSlice(*test_case.host, 20);
-  }
-  LocalCheck(counters.raw_applied_units > applied_before &&
-                 counters.raw_active != 0 && counters.raw_unapplied_units == 0 &&
-                 counters.raw_submitted == 0,
-             "degraded-keys: the second chunk applied and the run is empty but still active");
-  expected += second_burst;
-
-  CrashPhase("degraded-keys: BackSpace with an empty suffix deletes nothing");
-  test_case.host->SetHoldGrantMessages(true);
-  std::vector<bool> host_prefix;
-  LocalCheck(SendTextAdaptive(&route, L"h", &host_prefix, &error),
-             "degraded-keys: the preserved prefix was captured: " + error);
-  (void)seam.query(&counters);
-  LocalCheck(counters.raw_active != 0 && counters.raw_unapplied_units == 0,
-             "degraded-keys: the preserved prefix was submitted, leaving an empty suffix");
-  SeamCounters before_empty_backspace = counters;
-  bool empty_backspace_eaten = false;
+  // Phase D: BackSpace at an empty token deletes the host's own preceding character; the
+  // product neither eats it nor ignores it.
+  CrashPhase("degraded-keys: BackSpace with an empty token suffix");
+  bool empty_backspace_eaten = true;
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_BACK, L"", &empty_backspace_eaten,
                                     &error) &&
-                 empty_backspace_eaten,
-             "degraded-keys: the empty-suffix BackSpace is eaten: " + error);
-  (void)seam.query(&counters);
-  LocalCheck(counters.raw_ignored_edits > before_empty_backspace.raw_ignored_edits,
-             "degraded-keys: the empty-suffix BackSpace is reported as ignored");
-  std::vector<bool> tail_eaten;
-  LocalCheck(SendTextAdaptive(&route, L"i", &tail_eaten, &error),
-             "degraded-keys: the following text was captured: " + error);
-  bool tail_space = false;
+                 !empty_backspace_eaten,
+             "degraded-keys: the empty-suffix BackSpace stays with the host: " + error);
+  reference.HostBackspace();
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "degraded-keys: the host BackSpace deleted its own preceding space");
+  LocalCheck(SendTextHost(&route, L"hi", &error),
+             "degraded-keys: the following text stays with the host: " + error);
+  reference.HostInsert(L"hi");
+  bool tail_space = true;
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &tail_space, &error) &&
-                 tail_space,
-             "degraded-keys: Space ends the run: " + error);
-  test_case.host->SetHoldGrantMessages(false);
-  (void)test_case.host->ReleaseHeldGrantMessages();
-  expected += L"hi ";
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 25000),
-             "degraded-keys: the ignored BackSpace deleted no committed or pending text");
+                 !tail_space,
+             "degraded-keys: the tail Space stays with the host: " + error);
+  reference.HostInsert(L" ");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "degraded-keys: the document is exact after all control keys");
 
-  // Phase E: a focus change while a raw run is pending. The already-submitted chunk still
-  // applies to the document it was typed into; the unsubmitted suffix is failed and must
-  // never be replayed into either document. The new context accepts its own input.
-  CrashPhase("degraded-keys: focus change during a pending raw run");
-  SeamCounters before_focus_switch = {};
-  (void)seam.query(&before_focus_switch);
-  test_case.host->SetHoldGrantMessages(true);
-  std::vector<bool> focus_prefix;
-  LocalCheck(SendTextAdaptive(&route, L"mn", &focus_prefix, &error),
-             "degraded-keys: the pending focus token was captured: " + error);
+  // Phase E: focus change while suggestion work is pending. Original text already belongs
+  // to its document; nothing may be replayed into the child, and the child gets only its
+  // own input.
+  CrashPhase("degraded-keys: focus change with pending suggestions");
+  LocalCheck(SendTextHost(&route, L"mn", &error),
+             "degraded-keys: the parent token stays with the host: " + error);
+  reference.HostInsert(L"mn");
+  const std::wstring parent_before_switch = reference.text;
   TestDocumentOptions child_options;
   child_options.initial_text_utf16 = L"";
-  const std::wstring parent_before_switch = test_case.doc->text_utf16();
-  // The application never grants the held lock: switch focus while both the submitted
-  // chunk and its suffix are still unresolved. Dropping (not granting) the grant also keeps
-  // the child's own TSF sessions from inheriting the held message.
-  test_case.host->SetHoldGrantMessages(false);
-  const std::size_t dropped_grants = test_case.host->DropHeldGrantMessages();
-  std::cout << "  [degraded-keys] dropped held grants before the switch="
-            << dropped_grants << std::endl;
   TestDocument* child =
       test_case.host->CreateChildContext(test_case.doc, child_options, &error);
   LocalCheck(child != nullptr, "degraded-keys: a child context is pushed: " + error);
   if (child != nullptr) {
     PumpSlice(*test_case.host, 500);
     ITfContext* child_context = child->context();
-    LocalCheck(WaitForEnginePath(*test_case.host, seam, sink, child_context, &counters,
-                                 30000),
+    LocalCheck(ReadyToType(*test_case.host, sink, child_context, 30000),
                "degraded-keys: the child context became the bound target");
     InputRoute child_route{test_case.host, child, sink, child_context};
-    LocalCheck(WaitForText(*test_case.host, child, L"", 100),
-               "degraded-keys: the new context starts empty");
-    std::vector<bool> child_eaten;
-    LocalCheck(SendTextAdaptive(&child_route, L"z", &child_eaten, &error),
-               "degraded-keys: the child token was accepted: " + error);
-    bool child_space = false;
+    LocalCheck(SendTextHost(&child_route, L"z", &error),
+               "degraded-keys: the child token stays with the host: " + error);
+    bool child_space = true;
     LocalCheck(SendVirtualKeyAdaptive(&child_route, VK_SPACE, L" ", &child_space,
                                       &error) &&
-                   child_space,
-               "degraded-keys: the child Space committed: " + error);
-    LocalCheck(WaitForText(*test_case.host, child, L"z ", 15000),
-               "degraded-keys: the child document holds only its own token");
-    // The lock was never granted, so neither the submitted chunk nor its suffix may be
-    // written; the focus change reports the whole pending run as an explicit failure.
-    const std::wstring parent_after = test_case.doc->text_utf16();
-    LocalCheck(parent_after == parent_before_switch,
-               "degraded-keys: no captured text was replayed into the old document");
+                   !child_space,
+               "degraded-keys: the child Space stays with the host: " + error);
+    CheckDocExact(child->text_utf16(), L"z ",
+                  "degraded-keys: the child document holds only its own token");
+    CheckDocExact(test_case.doc->text_utf16(), parent_before_switch,
+                  "degraded-keys: the old document kept its own complete text");
     (void)seam.query(&counters);
-    LocalCheck(counters.raw_failed_units >= before_focus_switch.raw_failed_units + 2,
-               "degraded-keys: the whole pending run is reported as an explicit failure");
-    LocalCheck(counters.raw_unapplied_units == 0 && counters.raw_submitted == 0,
-               "degraded-keys: no captured unit is left in an unspecified state");
-    PumpSlice(*test_case.host, 300);
-    LocalCheck(test_case.doc->text_utf16() == parent_after,
-               "degraded-keys: the failed suffix was not replayed into the parent late");
+    LocalCheck(counters.internal_text_losses == 0,
+               "degraded-keys: no internal loss across the focus change");
+    CheckNoSuppressedText(route, "degraded-keys parent");
+    CheckNoSuppressedText(child_route, "degraded-keys child");
   }
 
-  CrashPhase("degraded-keys: deactivating");
   EndCase(&test_case);
-  LocalCheck(test_case.product.module == nullptr,
-             "degraded-keys: the product module was unloaded after the host teardown");
   return true;
 }
 
-// W2-B-R unload contract: TSF owns an ITfEditSession callback the DLL implemented, so the
-// DLL must refuse to unload. Granting the deferred lock lets TSF run and release that
-// callback; only then may the module go away. No step forces FreeLibrary.
 bool RunUnloadContractCase(const std::filesystem::path& stage,
                            const std::filesystem::path& user_root) {
   Case test_case;
@@ -2686,26 +3099,37 @@ bool RunUnloadContractCase(const std::filesystem::path& stage,
       ::GetProcAddress(test_case.product.module, "DllCanUnloadNow"));
   LocalCheck(can_unload != nullptr, "unload-contract: DllCanUnloadNow is exported");
 
-  // Queue a real edit session and hold its grant.
-  CrashPhase("unload-contract: queueing an edit session behind a held grant");
+  // Queue a real document edit session and hold its grant. In host-owned mode the only
+  // document edit is an explicit candidate selection, so the token and its menu come first.
+  CrashPhase("unload-contract: opening a menu for an explicit replacement");
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "unload-contract: the token stays with the host: " + error);
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 15000),
+             "unload-contract: the replacement menu opened");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 8000),
+             "unload-contract: the replacement menu is stable");
+  const std::wstring before_selection = test_case.doc->text_utf16();
+  CrashPhase("unload-contract: queueing a replacement edit session behind a held grant");
   test_case.host->SetHoldGrantMessages(true);
-  std::vector<bool> eaten;
-  LocalCheck(SendTextAdaptive(&route, L"hel", &eaten, &error),
-             "unload-contract: the token was delivered: " + error);
-  // Wait, bounded, for the engine result to be harvested and the edit session to be
-  // requested. A fixed 500 ms slice is not a fact: on a slow engine start the result can
-  // arrive later, and this test must observe a queued session, not a still-empty pipeline.
+  (void)seam.select(counters.candidate_version, 1);
+  // The session's lock request answers TF_S_ASYNC and its grant message is held, so the
+  // coordinator owns a queued ITfEditSession that TSF may still call after Deactivate.
   const ULONGLONG queue_deadline = ::GetTickCount64() + 20000;
   for (;;) {
     (void)seam.query(&counters);
-    if ((counters.queue_in_flight >= 1 && counters.coordinator_phase != 0) ||
-        ::GetTickCount64() >= queue_deadline) {
+    if (counters.session_pending != 0 || ::GetTickCount64() >= queue_deadline) {
       break;
     }
-    PumpSlice(*test_case.host, 50);
+    PumpSlice(*test_case.host, 20);
   }
-  LocalCheck(counters.queue_in_flight >= 1 && counters.coordinator_phase != 0,
+  LocalCheck(counters.session_pending != 0,
              "unload-contract: an edit session really is queued inside TSF");
+  long long kinds_before[6] = {0, 0, 0, 0, 0, 0};
+  if (seam.guarded_objects != nullptr) {
+    (void)seam.guarded_objects(kinds_before, 6);
+  }
+  LocalCheck(kinds_before[0] >= 1,
+             "unload-contract: TSF owns a live edit-session callback");
   PrintModuleState(seam, "with a queued session");
 
   CrashPhase("unload-contract: deactivating while TSF owns the callback");
@@ -2986,9 +3410,7 @@ bool RunColdTokenCase(const std::filesystem::path& stage,
   TestDocumentOptions options;
   // The field is first classified as Unknown (the metadata cannot be read), which is the
   // cold-start shape: the first character must be the host's. After that first insertion the
-  // test flips the metadata to a readable Allowed field, so the old binding is replaced and
-  // a fresh binding would happily take the next character -- unless the host-owned token is
-  // honoured.
+  // test flips the metadata to a readable Allowed field.
   options.scope_answer = epocanva::tsf::edit::test::TestScopeAnswer::kWrongType;
   options.initial_text_utf16 = L"";
   if (!BeginCase(&test_case, stage, user_root, options, nullptr)) {
@@ -3004,34 +3426,38 @@ bool RunColdTokenCase(const std::filesystem::path& stage,
   bool first_eaten = true;
   LocalCheck(SendCharAdaptive(&route, L'a', &first_eaten, &error),
              "token: the first character was typed: " + error);
-  LocalCheck(!first_eaten, "token: the unknown-permission first character stayed with the host");
+  LocalCheck(!first_eaten,
+             "token: the unknown-permission first character stayed with the host");
   reference.HostInsert(L"a");
-  // The field becomes readable. The host insertion above already invalidated the old
-  // binding; the rebind now resolves Allowed and the engine path is available.
+  // The field becomes readable. The host insertion above already updated the caret; the
+  // rebind now resolves Allowed and the suggestion path is available.
   test_case.doc->SetScopeAnswer(epocanva::tsf::edit::test::TestScopeAnswer::kNone, {});
   PumpSlice(*test_case.host, 1000);
   std::vector<bool> eaten;
   LocalCheck(SendTextAdaptive(&route, L"bc", &eaten, &error),
              "token: the rest of the token was typed: " + error);
   LocalCheck(eaten.size() == 2 && !eaten[0] && !eaten[1],
-             "token: the now-Allowed engine did not take over the middle of the token");
+             "token: no character in the middle of the token was eaten");
   reference.HostInsert(L"bc");
   bool space_eaten = true;
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error),
              "token: the boundary space was typed: " + error);
   LocalCheck(!space_eaten, "token: the boundary space also stayed with the host");
   reference.HostInsert(L" ");
-  LocalCheck(test_case.doc->text_utf16() == reference.text,
-             "token: the host-owned token is contiguous in the document");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "token: the whole token is contiguous in the document");
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "token: the engine is ready for the next token");
-  LocalCheck(SendText(&route, L"de", true, &error),
-             "token: a fresh token is eaten: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "token: the fresh boundary is eaten: " + error);
-  reference.RawAppend(L"de ");
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
-             "token: the reference document matches (host token + engine token)");
+  LocalCheck(SendTextHost(&route, L"de", &error),
+             "token: a fresh token stays with the host: " + error);
+  reference.HostInsert(L"de");
+  bool fresh_space = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &fresh_space, &error) &&
+                 !fresh_space,
+             "token: the fresh boundary stays with the host: " + error);
+  reference.HostInsert(L" ");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "token: the reference document matches (host token + host token)");
   EndCase(&test_case);
   return true;
 }
@@ -3050,69 +3476,92 @@ bool RunPressureCase(const std::filesystem::path& stage,
   ITfKeyEventSink* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
+  ProductSeam seam = test_case.seam;
   LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
              "pressure: the engine path is ready");
   ReferenceDoc reference;
+  std::string error;
+  SeamCounters counters = {};
 
-  // Phase A -- burst with the first edit deliberately stalled. Every key is eaten while the
-  // document lock is held, so the engine backlog crosses the high water mark and the raw
-  // catch-up takes over. Releasing the locks must apply the exact same text, once.
+  // Phase A -- a real backlog with the document lock held. The host inserts every character
+  // synchronously; the engine suggestion stream is bounded and may drop suggestions. The
+  // document must still equal the full reference, once.
   std::wstring burst;
-  for (int repeat = 0; repeat < 5; ++repeat) {
+  for (int repeat = 0; repeat < 20; ++repeat) {
     burst += L"Aa1@x.y_Z-9";
   }
   test_case.host->SetHoldGrantMessages(true);
-  std::string error;
-  LocalCheck(SendText(&route, burst, true, &error),
-             "pressure: the burst was accepted with every key eaten: " + error);
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "pressure: the closing space was eaten: " + error);
+  LocalCheck(SendTextHost(&route, burst, &error),
+             "pressure: every burst key stayed with the host: " + error);
+  reference.HostInsert(burst);
+  bool space_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
+                 !space_eaten,
+             "pressure: the closing space stayed with the host: " + error);
+  reference.HostInsert(L" ");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "pressure: the exact burst text is present while the lock is held");
+  (void)seam.query(&counters);
+  LocalCheck(counters.internal_text_losses == 0,
+             "pressure: zero internal text losses");
+  CheckNoSuppressedText(route, "pressure burst");
+  LocalCheck(counters.suggestion_queued + counters.suggestion_dropped >= 100,
+             "pressure: the suggestion stream really accumulated and/or dropped work");
   test_case.host->SetHoldGrantMessages(false);
   (void)test_case.host->ReleaseHeldGrantMessages();
-  reference.RawAppend(burst);
-  reference.RawAppend(L" ");
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 25000),
-             "pressure: the exact burst text was applied once, in order");
   const std::wstring after_burst = test_case.doc->text_utf16();
   PumpSlice(*test_case.host, 300);
-  LocalCheck(test_case.doc->text_utf16() == after_burst,
-             "pressure: no late duplicate edit changed the document");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
-             "pressure: the engine is fresh after the degraded run");
-  LocalCheck(SendText(&route, L"tail", true, &error) &&
-                 SendVirtualKey(&route, VK_SPACE, true, &error),
-             "pressure: the engine path accepts the next token: " + error);
-  reference.RawAppend(L"tail ");
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 10000),
-             "pressure: the next token follows the degraded run in order");
+  CheckDocExact(test_case.doc->text_utf16(), after_burst,
+                "pressure: no late duplicate edit changed the document");
 
-  // Phase B -- sustained typing while the engine consumes results but every edit is
-  // stalled. This exercises the same admission path with a delayed *edit* rather than only
-  // an unpumped burst.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+             "pressure: the engine is ready after the backlog");
+  LocalCheck(SendTextHost(&route, L"tail", &error),
+             "pressure: the next token stays with the host: " + error);
+  reference.HostInsert(L"tail");
+  bool tail_space = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &tail_space, &error) &&
+                 !tail_space,
+             "pressure: the next boundary stays with the host: " + error);
+  reference.HostInsert(L" ");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "pressure: the next token follows the burst in order");
+
+  // Phase B -- sustained typing with a stalled write authorization, group by group. The
+  // document must remain exact after every group.
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
              "pressure: ready for the sustained phase");
   std::wstring sustained;
-  for (int repeat = 0; repeat < 3; ++repeat) {
+  for (int repeat = 0; repeat < 10; ++repeat) {
     sustained += L"Qq2#r_s-T7";
   }
   test_case.host->SetHoldGrantMessages(true);
   for (std::size_t offset = 0; offset < sustained.size(); offset += 5) {
     const std::wstring group = sustained.substr(offset, 5);
-    LocalCheck(SendText(&route, group, true, &error),
-               "pressure: sustained group accepted: " + error);
+    LocalCheck(SendTextHost(&route, group, &error),
+               "pressure: sustained group stayed with the host: " + error);
+    reference.HostInsert(group);
     PumpSlice(*test_case.host, 10);
+    CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                  "pressure: the sustained text is exact at this group");
   }
-  LocalCheck(SendVirtualKey(&route, VK_SPACE, true, &error),
-             "pressure: the sustained closing space was eaten: " + error);
+  bool sustained_space = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &sustained_space,
+                                    &error) &&
+                 !sustained_space,
+             "pressure: the sustained closing space stayed with the host: " + error);
+  reference.HostInsert(L" ");
   test_case.host->SetHoldGrantMessages(false);
   (void)test_case.host->ReleaseHeldGrantMessages();
-  reference.RawAppend(sustained);
-  reference.RawAppend(L" ");
-  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 25000),
-             "pressure: the sustained text was applied once, in order");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "pressure: the sustained text is complete and in order");
+  (void)seam.query(&counters);
+  LocalCheck(counters.internal_text_losses == 0,
+             "pressure: zero internal losses across sustained typing");
+  CheckNoSuppressedText(route, "pressure total");
   EndCase(&test_case);
 
-  // Deactivation while a degraded run is pending and the document lock is held must return
+  // Deactivation while suggestion work is queued and the document lock is held must return
   // without waiting for the engine. The process surviving its own teardown is the assertion.
   Case stopping;
   TestDocumentOptions stop_options;
@@ -3124,11 +3573,11 @@ bool RunPressureCase(const std::filesystem::path& stage,
                     15000)) {
       stopping.host->SetHoldGrantMessages(true);
       std::string stop_error;
-      (void)SendText(&stop_route, L"pending-degraded-run", true, &stop_error);
-      LocalCheck(true, "pressure: a degraded run is pending at deactivation");
+      (void)SendTextHost(&stop_route, L"pending-degraded-run", &stop_error);
+      LocalCheck(true, "pressure: suggestion work is pending at deactivation");
     }
     EndCase(&stopping);
-    LocalCheck(true, "pressure: deactivation with a pending run returned");
+    LocalCheck(true, "pressure: deactivation with pending work returned");
   } else {
     LocalCheck(false, "pressure: the stop-race case activated");
   }

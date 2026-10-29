@@ -113,6 +113,16 @@ struct ObservedTarget {
   bool valid() const { return context_id != 0 && generation != 0; }
 };
 
+// Who owns ordinary text in the bound document. The composition-owner policy treats an
+// external write as a loss of the binding (the writer can no longer vouch for its range).
+// The host-owned policy treats it as the expected stream of host-inserted characters: the
+// caret is re-read and published to the sink WITHOUT changing the identity/generation, so
+// suggestions can continue while original text is never owned by the product.
+enum class TextOwnershipPolicy : std::uint8_t {
+  kCompositionOwner = 0,
+  kHostOwned,
+};
+
 enum class ObservedEditKind : std::uint8_t { kOwn = 0, kExternal };
 
 struct ObservedEdit {
@@ -135,6 +145,15 @@ class ContextObserverSink {
   virtual void OnTargetBound(ITfContext* context, const ObservedTarget& target) = 0;
   virtual void OnOwnEditCompleted(ITfContext* context, const ObservedTarget& target,
                                   const SelectionSnapshot& selection) = 0;
+  // Host-owned text policy only. The document changed through the host's own input path and
+  // the new caret was read successfully. Runs inside OnEndEdit's read-only callback; it may
+  // update a mirror but must not write.
+  virtual void OnHostEditCompleted(ITfContext* context, const ObservedTarget& target,
+                                   const SelectionSnapshot& selection) {
+    (void)context;
+    (void)target;
+    (void)selection;
+  }
 };
 
 // Value-only diagnostics for assertions and text-free logging.
@@ -164,6 +183,9 @@ struct ContextObserverSnapshot {
   bool awaiting_bind = false;
   bool selection_read_pending = false;
 
+  // Host-owned policy: external edits accepted as the host's own text stream (caret
+  // republished without changing identity/generation).
+  std::uint64_t host_edits_observed = 0;
   std::uint64_t focus_notifications = 0;
   std::uint64_t focus_loss_notifications = 0;
   std::uint64_t push_notifications = 0;
@@ -228,7 +250,8 @@ class ContextObserver : public TargetRevalidator {
   // thread-focus policy must be chosen explicitly by the caller; there is no implicit
   // fallback and no product switch that ignores it.
   ContextObserver(ContextRegistry& registry, TfClientId own_client_id,
-                  ThreadFocusPolicy thread_focus_policy);
+                  ThreadFocusPolicy thread_focus_policy,
+                  TextOwnershipPolicy text_ownership = TextOwnershipPolicy::kCompositionOwner);
   ~ContextObserver();
 
   ContextObserver(const ContextObserver&) = delete;

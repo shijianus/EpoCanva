@@ -328,7 +328,7 @@ class EditSessionCallback final : public ITfEditSession {
         }
       }
       result_ = result;
-      done_ = true;
+      done_.store(true);
       if (state_->has_pending && state_->pending_session_id == session_id_) {
         if (state_->abandon_pending) {
           state_->abandon_pending = false;
@@ -351,7 +351,7 @@ class EditSessionCallback final : public ITfEditSession {
   }
 
   EditResult Result() const { return result_; }
-  bool Done() const { return done_; }
+  bool Done() const { return done_.load(); }
   HRESULT DoEditSessionHr() const { return result_.edit_session_hr; }
 
  private:
@@ -361,7 +361,7 @@ class EditSessionCallback final : public ITfEditSession {
   ITfContext* context_ = nullptr;
   std::uint64_t session_id_ = 0;
   EditResult result_;
-  bool done_ = false;
+  std::atomic<bool> done_{false};
   // TSF owns a reference until the session is granted or cancelled; a deactivated text
   // service still cannot unload while this object can still be called.
   ModuleObjectGuard module_guard_{ModuleObjectKind::kEditSession};
@@ -715,6 +715,24 @@ EditResult CompositionEditSession::Submit(const EditPlan& plan, bool asynchronou
   }
 
   if (phr_session == TF_S_ASYNC) {
+    if (callback->Done()) {
+      // The host granted the lock and ran the callback inside RequestEditSession while
+      // still reporting TF_S_ASYNC. Publishing this callback as "pending" would overwrite
+      // its final result with kPending and leave the session waiting for a completion that
+      // already happened. Treat the completed callback as the final result.
+      EditResult final = callback->Result();
+      final.request_hr = request_hr;
+      final.phr_session_hr = phr_session;
+      final.edit_session_hr = callback->DoEditSessionHr();
+      {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->has_pending = false;
+        state->pending_session_id = 0;
+        state->pending_result = final;
+      }
+      callback->Release();
+      return final;
+    }
     // Waiting. The callback, not this return, establishes whether text was applied. The
     // construction reference is transferred to `pending_callback`; it is released by
     // PendingResult/Close. TSF's own reference (if any) is released when the session is

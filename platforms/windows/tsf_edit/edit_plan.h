@@ -53,6 +53,10 @@ enum class EditOperation : std::uint8_t {
   kCommit,
   kCancel,
   kEndOwnedComposition,
+  // Host-owned text: replace exactly the token that ends at the collapsed caret with the
+  // selected candidate. The plan carries the expected token so the executor can refuse a
+  // range that no longer holds it; the host's own text is never removed on a mismatch.
+  kReplaceToken,
 };
 
 const char* DescribeEditOperation(EditOperation operation);
@@ -112,9 +116,18 @@ class EditPlan {
   // against its last-written text and ends only that composition.
   static EditPlanBuildResult BuildEndOwnedComposition(ContextIdentity context);
 
+  // Host-owned text: `expected_utf8` is the token the menu was drawn for and
+  // `replacement_utf8` is the candidate text. The writer replaces the expected token that
+  // immediately precedes the collapsed caret, and refuses when the document range differs.
+  static EditPlanBuildResult BuildReplaceToken(ContextIdentity context,
+                                               std::string_view expected_utf8,
+                                               std::string_view replacement_utf8);
+
   EditOperation operation() const { return operation_; }
   ContextIdentity context() const { return context_; }
   const std::wstring& text_utf16() const { return text_utf16_; }
+  // Only for kReplaceToken; empty for every other operation.
+  const std::wstring& expected_text_utf16() const { return expected_text_utf16_; }
   // -1 when the operation does not carry a caret (Update, Cancel).
   std::int32_t selection_start_utf16() const { return selection_start_utf16_; }
   std::int32_t selection_end_utf16() const { return selection_end_utf16_; }
@@ -123,11 +136,12 @@ class EditPlan {
  private:
   EditPlan(EditOperation operation, ContextIdentity context, std::wstring text_utf16,
            std::int32_t selection_start_utf16, std::int32_t selection_end_utf16,
-           std::uint64_t sequence);
+           std::uint64_t sequence, std::wstring expected_text_utf16 = std::wstring());
 
   EditOperation operation_;
   ContextIdentity context_;
   std::wstring text_utf16_;
+  std::wstring expected_text_utf16_;
   std::int32_t selection_start_utf16_ = -1;
   std::int32_t selection_end_utf16_ = -1;
   std::uint64_t sequence_ = 0;

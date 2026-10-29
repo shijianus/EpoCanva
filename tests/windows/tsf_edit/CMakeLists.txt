@@ -98,6 +98,7 @@ epocanva_add_tsf_edit_case(windows.tsf_edit.uncertain_state_refusal edit-uncerta
 epocanva_add_tsf_edit_case(windows.tsf_edit.failure_write_then_step edit-fail-write-then-step)
 epocanva_add_tsf_edit_case(windows.tsf_edit.permission_denied_unknown edit-permission-refused)
 epocanva_add_tsf_edit_case(windows.tsf_edit.composition_rejected edit-composition-rejected)
+epocanva_add_tsf_edit_case(windows.tsf_edit.replace_token edit-replace-token)
 epocanva_add_tsf_edit_case(windows.tsf_edit.resource_cleanup edit-resource-cleanup)
 
 # The composition layer's falsifiability control.

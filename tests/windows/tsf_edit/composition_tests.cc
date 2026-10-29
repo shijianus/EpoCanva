@@ -1111,6 +1111,111 @@ int RunResourceCleanup() {
   return Finish();
 }
 
+// W2-C host-owned text: the explicit candidate replacement must apply only to the exact
+// token that ends at the collapsed caret, and must never delete or rewrite other text.
+int RunReplaceToken() {
+  {
+    Fixture fixture;
+    if (!fixture.Init(Document(L"abc hel", 7))) {
+      return Finish();
+    }
+    const auto plan =
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello"),
+                   "ReplaceToken plan built");
+    if (!plan.has_value()) {
+      return Finish();
+    }
+    const TestStoreDiagnostics before = StoreDiag(fixture);
+    const EditResult result = fixture.session->ApplySync(*plan);
+    ExpectStatus(result, EditStatus::kApplied, "ReplaceToken applied");
+    CheckText(fixture.document->text_utf16(), L"abc hello",
+              "the token was replaced exactly at the caret");
+    Check(!fixture.session->active_composition(), "no composition is active", "");
+    const TestStoreDiagnostics store = StoreDiag(fixture);
+    Check(store.composition_start_calls == store.composition_end_calls,
+          "every composition TSF opened for the write was also closed",
+          "starts=" + std::to_string(store.composition_start_calls) +
+              " ends=" + std::to_string(store.composition_end_calls));
+  }
+  {
+    Fixture fixture;
+    if (!fixture.Init(Document(L"abc hex", 7))) {
+      return Finish();
+    }
+    const auto plan =
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello"),
+                   "ReplaceToken plan built for a mismatched range");
+    if (!plan.has_value()) {
+      return Finish();
+    }
+    const TestStoreDiagnostics before = StoreDiag(fixture);
+    const EditResult result = fixture.session->ApplySync(*plan);
+    ExpectRejected(result, EditRejectReason::kCompositionRangeMismatch,
+                   "a different token in the same range is refused");
+    CheckText(fixture.document->text_utf16(), L"abc hex",
+              "the refused replacement changed nothing");
+    Check(StoreDiag(fixture).set_text_calls == before.set_text_calls,
+          "the refused replacement issued no SetText", "");
+  }
+  {
+    Fixture fixture;
+    if (!fixture.Init(Document(L"abchel", 6))) {
+      return Finish();
+    }
+    const auto plan =
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello"),
+                   "ReplaceToken plan built for a token suffix");
+    if (!plan.has_value()) {
+      return Finish();
+    }
+    const TestStoreDiagnostics before = StoreDiag(fixture);
+    const EditResult result = fixture.session->ApplySync(*plan);
+    ExpectRejected(result, EditRejectReason::kCompositionRangeMismatch,
+                   "a suffix of a longer token is not replaced");
+    CheckText(fixture.document->text_utf16(), L"abchel",
+              "the longer token is untouched");
+    Check(StoreDiag(fixture).set_text_calls == before.set_text_calls,
+          "the refused suffix replacement issued no SetText", "");
+  }
+  {
+    Fixture fixture;
+    if (!fixture.Init(Document(L"abc hel", 7))) {
+      return Finish();
+    }
+    const EditPlanBuildResult empty =
+        EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "");
+    Check(empty.status == EditPlanStatus::kInvalidSelection,
+          "an empty replacement is refused when the plan is built",
+          DescribeEditPlanStatus(empty.status));
+    const TestStoreDiagnostics before = StoreDiag(fixture);
+    CheckText(fixture.document->text_utf16(), L"abc hel",
+              "an empty replacement never deletes the user's token");
+    Check(StoreDiag(fixture).set_text_calls == before.set_text_calls,
+          "the empty replacement issued no SetText", "");
+  }
+  {
+    Fixture fixture;
+    TestDocumentOptions options = Document(L"abc hel", 7);
+    options.initial_selection_start_utf16 = 5;
+    options.initial_selection_end_utf16 = 7;
+    if (!fixture.Init(options)) {
+      return Finish();
+    }
+    const auto plan =
+        AcceptPlan(EditPlan::BuildReplaceToken(fixture.session->identity(), "hel", "hello"),
+                   "ReplaceToken plan built for a selection");
+    if (!plan.has_value()) {
+      return Finish();
+    }
+    const EditResult result = fixture.session->ApplySync(*plan);
+    ExpectRejected(result, EditRejectReason::kSelectionNotCollapsed,
+                   "a non-collapsed selection is refused");
+    CheckText(fixture.document->text_utf16(), L"abc hel",
+              "the refused selection replacement changed nothing");
+  }
+  return Finish();
+}
+
 int RunCanFail() {
   Check(false, "self-check: this composition claim is deliberately false", "false");
   return kExitSelfCheckFailed;
@@ -1187,6 +1292,9 @@ int RunCompositionCase(const std::string& case_name) {
   }
   if (case_name == "edit-resource-cleanup") {
     return RunResourceCleanup();
+  }
+  if (case_name == "edit-replace-token") {
+    return RunReplaceToken();
   }
   if (case_name == "edit-can-fail") {
     return RunCanFail();
