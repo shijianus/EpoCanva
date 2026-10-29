@@ -35,16 +35,30 @@ UI 只发起请求，不调用引擎、不 `SetText`。请求携带：
 - `snapshot_version`
 - **快照自身的** `context_id` 与 `generation`
 - 页内索引 `page_index`
+- **该菜单展示时从真实 TSF 选区读到的折叠 caret ACP**（UTF-16 code-unit 偏移）
+
+W3-A 起，caret 是菜单身份的一部分：引擎观察可能早于宿主最后一次编辑通知，因此快照里的
+caret 镜像可能落后一个通知。控制器在菜单版本首次展示时用只读 `GetSelection` 读取真实
+caret，把它记为这一版本的锚点（不读文本），并把差异回填给协调器镜像。选择请求必须
+携带这个锚点；协调器只接受 `caret >= input 长度` 的位置，真正的等价校验在写入会话内。
 
 W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
 （`ContextCoordinator::SubmitSuggestionReplacement`）。只有以下全部成立才继续：
 快照有效、版本一致、快照 identity 与请求一致、当前绑定 identity 与请求一致、
-索引在该页内。否则返回 `kCandidateStale`，计入 `candidate_stale_refusals`，不提交任何编辑。
+索引在该页内、位置不早于 token 起点。否则返回 `kCandidateStale`，计入
+`candidate_stale_refusals`，不提交任何编辑。
 
-真正的写入由 `CompositionWriter::ReplaceToken` 完成：它读取折叠 caret，取 caret 前
-`expected` 长度的范围，逐单元读回并比较；文本不同、范围越界、选择非折叠、前一个字符
-仍是 token 字符、替换文本为空都会**拒绝且不调用 SetText**。因此焦点变化、外部编辑、
-绑定重建后的旧点击不会删除或覆盖用户已经输入的原文；最坏结果是增强被拒绝，原文保留。
+真正的写入由 `CompositionWriter::ReplaceToken` 完成：它读取折叠 caret，要求
+**live caret == 计划中的菜单 caret**，取 caret 前 `expected` 长度的范围，逐单元读回并
+比较；caret 移动、文本不同、范围越界、选择非折叠、前一个字符仍是 token 字符、替换文本
+为空都会**拒绝且不调用 SetText**。因此：
+
+- 光标在菜单展示后移到别处 → 拒绝，即使新位置前面恰好是相同字符串；
+- 相同字符串出现在文档其他位置 → 不会按文本相等就替换；
+- 外部编辑、焦点变化、绑定重建后的旧点击 → 拒绝，原文保留。
+
+“相同字符串”只有在**菜单展示时锚定的同一 caret** 且该范围逐单元等于引擎输入时才会被
+替换；位置不可确认时失败关闭。
 
 ## 4. 键盘与鼠标
 
@@ -78,12 +92,19 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
 
 - 位置只来自真实的 TSF 文本范围：`ITfContext::GetSelection` → `ITfRangeACP::SetExtent`
   （UTF-16 code unit ACP）→ `ITfContextView::GetTextExt`，用同步只读编辑会话读取。
-- **W2-C 限制**：原文归宿主后文档里没有产品组合，`UpdateCandidateUi` 只在
-  `coordinator.composition_active` 时读取组合矩形；建议模式下该值为 false，因此受控窗口
-  没有 TSF 文本矩形可锚定。受控测试全部走宿主绘制（`pbShow=FALSE`）路径；真实
-  `ITfUIElementMgr` 下自绘窗口的位置仍属 C 层未验证项，不用鼠标位置或屏幕角落冒充。
-- 无布局、零矩形、不可见、无焦点、读取失败 → 隐藏窗口；**绝不**用鼠标位置或屏幕角落冒充
-  光标位置。
+- **W3-A 定位来源**：原文归宿主后文档里没有产品组合，因此锚点是
+  `[live caret - input 长度, live caret)` 这一 token 范围，不是组合，也不是合成 anchor。
+  控制器在菜单版本首次展示时读取真实 caret；读到的 caret 与快照镜像不同时，用真实值
+  重同步（`ObserveRealCaret`），不把落后的镜像当成位置。
+- 矩形读取会在同一会话里再次核对 live caret 等于锚点；不相等、无布局、零矩形、不可见、
+  读取失败 → 隐藏窗口。**绝不**用鼠标位置或屏幕角落冒充光标位置。
+- 宿主接管绘制（`pbShow=FALSE`）时窗口不创建；元素继续回答候选查询。
+- 光标移动、鼠标点击其他位置、选区替换、删除/粘贴等外部编辑都会在宿主编辑通知或下一次
+  真实 caret 读取时被观察到；旧版本菜单的选择由版本/caret/范围/文本四重校验拒绝。
+  滚动和窗口移动不改变 ACP；新的 `GetTextExt` 只在菜单版本更新时读取，窗口位置可能保持
+  到下一次菜单更新或关闭。
+- **仍未验证（C 层）**：真实 DPI 变化后的自动重定位、真实多显示器/负坐标、真实
+  `GetTextExt` 与宿主绘制协商；受控布局测试不能冒充这些结论（见 §7）。
 - 每个引擎页最多显示 8 行（schema `page_size: 8`）。产品当前的最大菜单是
   1 原文 + 最多 7 补全，或 1 原文 + 最多 3 拼写建议，因此一页即末页；页脚显示真实页号。
 - 窗口按监视器工作区夹取，底部空间不足时翻到光标上方；DPI 变化重建字体并重新定位；
@@ -96,8 +117,13 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
   截图；真实 `ITfCandidateListUIElement` 对象在受控假管理器下的 Begin/Update/End、
   宿主绘制抑制、宿主 End、选择/最终化回调、版本与 identity 传递；100/150/200% 度量与
   多显示器/小工作区的纯布局；方向键/Enter/Space/Escape 的文档结果、过期版本与外部编辑拒绝。
-- **未验证（C 层）**：正式注册的 TIP 在真实应用/StrictTsf 前台下的候选窗口显示与点击。
-  本机没有已授权的隔离环境；直接 sink 变体不创建 TSF UI 管理器。该门留给 W3。
+- W3-A 新增 B 层证据：真实控制器/协调器/编辑层的替换故障注入（写前拒绝、读回不一致、
+  排队后宿主继续编辑、同文本他处、焦点切换、`SetText` 成功后报错的不确定状态）、
+  丢弃后建议流重同步、真实 caret 锚点读取。详见
+  `docs/reports/W3-A-isolation-registration.md`。
+- **未验证（C 层）**：正式注册的 TIP 在真实应用/StrictTsf 前台下的候选窗口显示与点击、
+  真实 `ITfUIElementMgr`、真实 `GetTextExt` 矩形、真实 DPI/多显示器。本机没有已授权的
+  隔离环境；直接 sink 变体不创建 TSF UI 管理器。该门停留在 W3-A 的授权请求处。
 
 ## 8. W2-B-R 审查结论（实现未改变，补充验证）
 
@@ -114,7 +140,7 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
 - **模块记账**：候选元素与 UIElement sink 计入 `DllCanUnloadNow`（见引擎生命周期契约
   §11.3），避免 TSF 在 DLL 卸载后释放它们。
 - **仍未验证（C 层）**：正式注册 TIP 的真实 `ITfUIElementMgr`、真实前台应用中的窗口
-  显示/点击不抢焦点、真实 `GetTextExt`/`ReadCompositionRect`、150/200% DPI 与多显示器。
+  显示/点击不抢焦点、真实 `GetTextExt`/`ReadTokenRect`、150/200% DPI 与多显示器。
   受控直接 sink 变体不创建 TSF UI 管理器，不能用它替代这些结论。
 
 ## 9. W2-C 替换路径的编辑层验证
@@ -127,3 +153,23 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
 - 空替换 → 计划构建阶段拒绝（`kInvalidSelection`），永不删除原文；
 - 非折叠选择 → 拒绝（`kSelectionNotCollapsed`）；
 - TSF 为范围写入开/关的组合计数在结束时为 1/1（无残留组合）。
+
+## 10. W3-A 替换故障注入与重同步（B 层）
+
+`product.integration.sink_replacement_faults` 用真实控制器、协调器、真实 TSF 编辑会话与
+可注入的 TestTextStore 覆盖：
+
+| 场景 | 宿主真相 | 断言 |
+| --- | --- | --- |
+| 菜单后 caret 移到同文本另一处 | 文档不变 | 旧版本选择被拒；无 SetText；文档逐单元等于独立参考 |
+| 替换排队（异步锁）时宿主继续输入 | 新输入已插入 | 过期计划不覆盖；仅宿主的 SetText；文档等于参考 |
+| 菜单展示后 token 被外部改成同长文本 | 新文本在文档中 | 读回不一致拒绝；无产品 SetText |
+| 替换排队时焦点切到新上下文 | 两个文档都不变 | 旧计划不写入任一文档；父文档保持原文 |
+| `SetText` 已改文本但返回失败 | 文本真的变了 | 不回滚、不重复；`internal_text_losses += 3`；后续宿主输入保留；上下文门关闭；新上下文可正常增强 |
+
+oracle 是测试自己维护的 `ReferenceDoc` 与桩存储真实文本，不读取产品的 dropped/refused
+计数器来修剪期望。失败日志会打印计数，但“通过”取决于文档比较。
+
+`product.integration.sink_suggestion_resync` 覆盖丢项后的重同步：单 token 突发使 64 项建议
+队列溢出后，`token_abandoned` 保持到 token 边界；期间继续输入不会把后缀当成完整前缀，
+也不会开菜单；边界后新 token 正常产生菜单并安全替换。`internal_text_losses` 保持 0。
