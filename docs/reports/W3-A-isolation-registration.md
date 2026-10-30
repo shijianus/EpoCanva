@@ -639,7 +639,7 @@ version 与 anchor 检查都在展示前）。observer 的 WinUI 瞬时选择读
 | 应用 | 本轮新建的唯一空文件 + 本轮唯一新建 Notepad 进程（普通权限，`is_elevated=False`） |
 | 输入/选择 | `alpha hel` → 真实候选窗口可见且高度至少两行 → 点击第 1 行（产品契约：第 0 行 RAW，第 1 行补全/拼写，非 RAW）→ 验证文档变化且 `alpha ` 前缀保持；不发送 Down/Enter，不硬编码 Down 次数；候选不存在或不足两行则停止 |
 | 预计用时 | 2–3 分钟测试 + 清理；触发器/agent 硬截止 6 分钟 |
-| 前台空闲要求 | 注册后等待前台空闲 ≥0.9 s 才由提权 relay 置前；每个按键前验证本轮 PID/HWND、文档子窗口焦点、en-US 布局、Shift/Ctrl/Alt/Caps、完整性级别；任何变化立即停止 |
+| 前台空闲要求 | 提权进程只做注册/移除，不置前、不输入；普通权限 agent 创建 Notepad 后自行置前（若 Windows 拒绝，操作者可在测试开始前点击本轮 Notepad 一次）。每个按键前验证本轮 PID/HWND、文档子窗口焦点、en-US 布局、Shift/Ctrl/Alt/Caps、Notepad 令牌完整性；任何变化立即停止 |
 | 停止/恢复/清理 | 失败或超时写 `stop.flag`，agent 不再输入并关闭本轮 Notepad/文件；finally 中 deactivate → unregister profile → `unregister_tip.ps1`，验证 COM、两个类别、TIP key、profile 全部 absent；恢复测试线程原 HKL |
 | UAC 取消 | 立即停止，不自动重试、不沿用旧轮批准；不做任何注册/输入 |
 | 已知限制 | 如果 Notepad 仍返回 `pbShow=FALSE` 且不绘制宿主候选，产品按契约**不会**自绘；本轮将在候选窗口缺失处停止并记录宿主限制，不发送任何选择输入。只有宿主返回 TRUE（或 `Show(TRUE)` 交回）且真实候选窗口可见时才点击第 1 行。若第 1 行结果不是 `held`，记录实际非 RAW 文本和前缀/焦点结果，不以硬编码文本判定失败 |
