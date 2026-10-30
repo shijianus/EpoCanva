@@ -29,8 +29,9 @@
   无选择 `GetSelection` 返回 `S_FALSE`；`Show(FALSE)` 隐藏真实窗口并使 `IsShown=FALSE`。
   冻结包 `build/product/stage/EpoCanva-0.2.5-w3a-r3/`，源码 `488b6f5`，DLL SHA-256
   `911B63A3FB79BFC26A873E879A4A9B5661A4DE938121D1961AB78C62CC5E8294`，manifest 21/21，
-  trace 关闭、导出仅 `DllGetClassObject`/`DllCanUnloadNow`（§11.6）。用正式包的闭环复验
-  尚未执行，必须等一次明确的 UAC 授权（§11.10）。
+  trace 关闭、导出仅 `DllGetClassObject`/`DllCanUnloadNow`（§11.6）。2026-10-30 20:47
+  已按 §11.10 的授权尝试一次，但 agent 在创建 Notepad 前失败，**未输入、未验证正式链路**；
+  结果为“环境或编排原因未执行”，不是通过，也不是产品失败（§11.11）。授权已消耗，不重试。
 - 本轮审查并修正的契约/安全缺陷：
   1. **UIElement 显示契约**：不再按进程名覆盖宿主 `show=FALSE`；宿主决定优先，Notepad
      “返回 FALSE 但不绘制”作为宿主兼容限制记录，不用白名单掩盖（§11.4）。
@@ -551,10 +552,12 @@ trace 关键阶段：`menu_arrow_selection=1`、`finalize_live_caret=9`、
 
 旧 `EpoCanva-0.2.5-w3a-r2/` 及 `build/windows-product/` 保留为对照/测试构建，不覆盖。
 
-- 复验命令（待授权）：`trigger.ps1 -Elevate -Formal -StageDir <r3 绝对路径>`。
-- 两次历史 UAC 均被取消（触发器退出 7），未注册、未启动 Notepad、未输入；因此
-  **正式包闭环仍未验证**。取消后 `status` 仍为 COM/profile absent。
-- 正式复验必须在用户批准一次 UAC 后执行；不得用 trace 或 B 层结果代替正式包结论。
+- 复验命令：`trigger.ps1 -Elevate -Formal -StageDir <r3 绝对路径>`。
+- 历史两次 UAC 均被取消（退出码 7），未注册/输入。2026-10-30 20:47 的一次授权轮次
+  （session `cd017a3e9c404ad1ad5677489b373ba0`）完成了注册/清理，但 agent 在创建 Notepad
+  前失败；没有输入、没有 TIP trace，因此**正式包闭环仍未验证**（§11.11）。
+- 正式复验必须在用户批准一次新的 UAC 后执行；不得用 trace、B 层结果或本轮编排失败
+  代替正式包结论，也不得复用本次授权。
 
 ### 11.7 清理与本轮残留
 
@@ -619,7 +622,9 @@ version 与 anchor 检查都在展示前）。observer 的 WinUI 瞬时选择读
 
 ### 11.9 下一步（严格顺序）
 
-1. 用冻结正式包 `-r3` 重跑一次最小闭环（一次 UAC，§11.10）；通过前不扩大矩阵。
+1. 先修复普通权限 agent 的 Notepad 启动/交互桌面问题（本轮 `CreateProcess` 返回 false，
+   `prev_foreground=0`，未创建 Notepad）；然后**重新申请一次新的 UAC** 用 r3 重跑最小
+   闭环。不得复用 2026-10-30 的授权，也不得把本轮编排失败写成产品失败或通过。
 2. 最小闭环正式通过后，按任务书依次执行：1202 输入与技术 token；移动光标/粘贴/外部
    编辑；过期候选拒绝；真实 `ITfUIElementMgr` 全生命周期；真实 token 矩形/无布局隐藏；
    启动/停用/关闭；设置生效时机；环境实际支持的 DPI/多屏。每项都保持焦点门、仅操作
@@ -647,3 +652,29 @@ version 与 anchor 检查都在展示前）。observer 的 WinUI 瞬时选择读
 本申请对应本轮已经完成的 B 层证据（§11.8）：正式链路实现和回归已冻结，但正式包在真实
 宿主中的 `pbShow` 行为、候选可见性和选择仍必须由这一次 UAC 轮次验证；不得用 trace
 stage8 的自绘结果代替。
+
+### 11.11 正式 r3 本机尝试结果（2026-10-30 20:47，环境/编排未执行）
+
+- 授权与身份：用户批准一次 UAC，范围仅限 r3。执行前复核 stage 存在、
+  `dll_sha256=911B63A3...E8294` 与授权一致、manifest `commit=488b6f5`、21 个文件；
+  脚本 SHA-256 已记录（trigger `53D25388...E4D1`、orchestrator `9896E0E1...4B52`、
+  agent `3FF6244E...384E33`）。执行期间未修改代码/脚本。
+- 注册：CLSID/InprocServer32/键盘类别/UIElement 类别均写入并读回；`register_tip.ps1`
+  exit 0。helper register 首次读回 profile absent、随后异步变为 present/enabled；
+  `ActivateProfile` 返回 `0x00000000`，`profile_active_keyboard=no`（尚无 TSF 宿主，
+  不能据此判断 TIP 激活）。
+- Agent：session `cd017a3e9c404ad1ad5677489b373ba0`，普通权限
+  （`is_elevated=False`），`prev_foreground=0`；`CreateProcess` 未产生 Notepad PID
+  （`notepad_launcher_pid=0`），`Find-NotepadWindow` 无窗口，约 9 秒后
+  `Abort-Agent 'notepad window not found'`。**没有写入 `agent-ready.flag`/
+  `test-start.flag`，没有 Notepad、没有 TIP trace（`trace.txt` 2 字节）、没有按键。**
+- 清理：finally 执行 deactivate/unregister + `unregister_tip.ps1`；最终 HKLM/HKCU
+  COM/TIP absent、两个类别 absent、profile absent、active no；`cleanup_verified=True`；
+  无 Notepad 进程、无 `w3a-test-*.txt` 文件；当前 HKL `zh-CN`。
+- 判定：**环境或编排原因未执行**。不是通过，也不是产品失败；正式包的 `pbShow`、候选
+  可见性和选择**仍未验证**。本轮授权已消耗，未自动重试、未扩大应用范围、未复用授权。
+- 证据：`build/w3a-c-local/evidence-cd017a3e9c404ad1ad5677489b373ba0/`
+  （`agent-result.json`、`agent.log`、`elevated-summary.txt`、`registration.json`、
+  `removal.json`、`status-*.txt`、`diagnose.txt`、`trace.txt`）。
+- 下一步：修复普通权限 agent 的交互桌面/Notepad 启动路径后，重新申请新的 UAC 轮次；
+  未修复前不重试。
