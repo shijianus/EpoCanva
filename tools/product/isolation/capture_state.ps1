@@ -43,6 +43,12 @@ foreach ($hive in @('HKEY_LOCAL_MACHINE', 'HKEY_CURRENT_USER')) {
         if ($null -ne $inprocKey) {
             $lines.Add("    InprocServer32=" + $inprocKey.GetValue('') + " ThreadingModel=" + $inprocKey.GetValue('ThreadingModel'))
         }
+        foreach ($category in @(
+            '{34745C63-B2F0-4784-8B67-5E12C8701A31}',
+            '{49D2F9CF-1F5E-11D7-A6D3-00065B84435C}')) {
+            $categoryPath = Join-Path (Join-Path $path 'Implemented Categories') $category
+            $lines.Add("    category $category present=" + (Test-Path -LiteralPath $categoryPath))
+        }
     } else {
         $lines.Add("  absent: $path")
     }

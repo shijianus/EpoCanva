@@ -1,7 +1,8 @@
 # EpoCanva W3-A -- isolation COM/category removal. NOT RUN IN THIS ROUND.
 #
 # Removes only the keys owned by this product: the CLSID's InprocServer32, the
-# GUID_TFCAT_TIP_KEYBOARD category entry and the EpoCanvaProduct marker. It refuses a CLSID
+# GUID_TFCAT_TIP_KEYBOARD and GUID_TFCAT_TIPCAP_UIELEMENTENABLED category entries and the
+# EpoCanvaProduct marker. It refuses a CLSID
 # that does not carry the product marker and does not point at epocanva_tsf.dll, so another
 # input method's registration can never be deleted here. It does not touch language
 # profiles (use epocanva_tip_profile_helper.exe unregister) or input method settings.
@@ -21,6 +22,7 @@ $ErrorActionPreference = 'Stop'
 $clsid = '{B440F702-63E4-4D47-BCC4-074899ABA836}'
 $profile = '{7D3E2A94-5C61-4F0B-9E3A-1B8D6C4F2A71}'
 $category = '{34745C63-B2F0-4784-8B67-5E12C8701A31}'
+$uiElementCategory = '{49D2F9CF-1F5E-11D7-A6D3-00065B84435C}'
 $markerName = 'EpoCanvaProduct'
 $markerValue = 'epocanva_tsf'
 
@@ -38,7 +40,9 @@ if ($Hive -eq 'HKLM') {
     $basePath = "Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\$clsid"
 }
 $inprocPath = Join-Path $basePath 'InprocServer32'
-$categoryPath = Join-Path (Join-Path $basePath 'Implemented Categories') $category
+$categoryRoot = Join-Path $basePath 'Implemented Categories'
+$categoryPath = Join-Path $categoryRoot $category
+$uiElementCategoryPath = Join-Path $categoryRoot $uiElementCategory
 
 $operations = New-Object System.Collections.Generic.List[string]
 function Record([string]$operation, [string]$path, [string]$result) {
@@ -51,12 +55,14 @@ $existedBefore = Test-Path -LiteralPath $basePath
 $defaultRead = $null
 $markerRead = $null
 $categoryBefore = $false
+$uiElementCategoryBefore = $false
 if ($existedBefore) {
     if (Test-Path -LiteralPath $inprocPath) {
         $defaultRead = (Get-Item -LiteralPath $inprocPath).GetValue('')
     }
     $markerRead = (Get-Item -LiteralPath $basePath).GetValue($markerName)
     $categoryBefore = Test-Path -LiteralPath $categoryPath
+    $uiElementCategoryBefore = Test-Path -LiteralPath $uiElementCategoryPath
 }
 
 if (-not $existedBefore) {
@@ -70,6 +76,10 @@ if (-not $existedBefore) {
     if ($categoryBefore) {
         Remove-Item -LiteralPath $categoryPath -Recurse -Force
         Record 'remove-key' $categoryPath 'ok'
+    }
+    if ($uiElementCategoryBefore) {
+        Remove-Item -LiteralPath $uiElementCategoryPath -Recurse -Force
+        Record 'remove-key' $uiElementCategoryPath 'ok'
     }
     if ($null -ne $markerRead) {
         Remove-ItemProperty -LiteralPath $basePath -Name $markerName -Force
@@ -95,12 +105,14 @@ if (-not $existedBefore) {
 $baseAfter = Test-Path -LiteralPath $basePath
 $inprocAfter = Test-Path -LiteralPath $inprocPath
 $categoryAfter = Test-Path -LiteralPath $categoryPath
+$uiElementCategoryAfter = Test-Path -LiteralPath $uiElementCategoryPath
 $markerAfter = $null
 if ($baseAfter) {
     $markerAfter = (Get-Item -LiteralPath $basePath).GetValue($markerName)
 }
-Write-Host "verify: base_present=$baseAfter inproc_present=$inprocAfter category_present=$categoryAfter marker='$markerAfter'"
-if ($inprocAfter -or $categoryAfter -or $markerAfter -eq $markerValue) {
+Write-Host "verify: base_present=$baseAfter inproc_present=$inprocAfter category_present=$categoryAfter ui_element_category_present=$uiElementCategoryAfter marker='$markerAfter'"
+if ($inprocAfter -or $categoryAfter -or $uiElementCategoryAfter -or
+    $markerAfter -eq $markerValue) {
     throw 'verification failed: product registration content still remains'
 }
 Record 'verify' $basePath 'ok'
@@ -113,13 +125,16 @@ $evidence = [ordered]@{
     clsid = $clsid
     profile_guid = $profile
     category = $category
+    ui_element_category = $uiElementCategory
     existed_before = $existedBefore
     previous_default = $defaultRead
     previous_marker = $markerRead
     previous_category = $categoryBefore
+    previous_ui_element_category = $uiElementCategoryBefore
     base_present_after = $baseAfter
     inproc_present_after = $inprocAfter
     category_present_after = $categoryAfter
+    ui_element_category_present_after = $uiElementCategoryAfter
     operations = @($operations)
 }
 if ($EvidencePath) {

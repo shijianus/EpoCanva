@@ -2,7 +2,8 @@
 #
 # Writes only the minimum COM/TSF category keys for the formal product CLSID:
 #   HKLM|HKCU\Software\Classes\CLSID\{B440F702-...}\InprocServer32
-#   HKLM|HKCU\Software\Classes\CLSID\{B440F702-...}\Implemented Categories\{34745C63-...}
+#   HKLM|HKCU\Software\Classes\CLSID\{B440F702-...}\Implemented Categories\{34745C63-...}  (keyboard TIP)
+#   HKLM|HKCU\Software\Classes\CLSID\{B440F702-...}\Implemented Categories\{49D2F9CF-...}  (UIElement-enabled TIP)
 # It does NOT register or activate the language profile (use epocanva_tip_profile_helper),
 # does NOT change the user's input method and refuses a CLSID owned by another product.
 #
@@ -27,6 +28,9 @@ $ErrorActionPreference = 'Stop'
 $clsid = '{B440F702-63E4-4D47-BCC4-074899ABA836}'
 $profile = '{7D3E2A94-5C61-4F0B-9E3A-1B8D6C4F2A71}'
 $category = '{34745C63-B2F0-4784-8B67-5E12C8701A31}'   # GUID_TFCAT_TIP_KEYBOARD
+# GUID_TFCAT_TIPCAP_UIELEMENTENABLED: the TIP uses ITfUIElementMgr and must be categorized
+# so the host's UILess/visibility control applies (TSF UILess mode requirements).
+$uiElementCategory = '{49D2F9CF-1F5E-11D7-A6D3-00065B84435C}'
 $markerName = 'EpoCanvaProduct'
 $markerValue = 'epocanva_tsf'
 
@@ -79,12 +83,14 @@ if ($Hive -eq 'HKLM') {
 $inprocPath = Join-Path $basePath 'InprocServer32'
 $categoryRoot = Join-Path $basePath 'Implemented Categories'
 $categoryPath = Join-Path $categoryRoot $category
+$uiElementCategoryPath = Join-Path $categoryRoot $uiElementCategory
 
 $existedBefore = Test-Path -LiteralPath $basePath
 $previousDefault = $null
 $previousThreading = $null
 $previousMarker = $null
 $previousCategory = $false
+$previousUiElementCategory = $false
 if ($existedBefore) {
     if (Test-Path -LiteralPath $inprocPath) {
         $inproc = Get-Item -LiteralPath $inprocPath
@@ -94,6 +100,7 @@ if ($existedBefore) {
     $base = Get-Item -LiteralPath $basePath
     $previousMarker = $base.GetValue($markerName)
     $previousCategory = Test-Path -LiteralPath $categoryPath
+    $previousUiElementCategory = Test-Path -LiteralPath $uiElementCategoryPath
     $owned = ($previousMarker -eq $markerValue) -or
              ($null -ne $previousDefault -and $previousDefault -like '*epocanva_tsf.dll')
     if (-not $owned) {
@@ -112,6 +119,7 @@ $createdInproc = -not (Test-Path -LiteralPath $inprocPath)
 $createdThreading = $false
 $createdMarker = ($null -eq $previousMarker)
 $createdCategory = -not $previousCategory
+$createdUiElementCategory = -not $previousUiElementCategory
 $operations = New-Object System.Collections.Generic.List[string]
 
 function Record([string]$operation, [string]$path, [string]$value, [string]$result) {
@@ -126,6 +134,10 @@ function Rollback {
         if ($createdCategory -and (Test-Path -LiteralPath $categoryPath)) {
             Remove-Item -LiteralPath $categoryPath -Recurse -Force
             Record 'rollback' $categoryPath '' 'removed'
+        }
+        if ($createdUiElementCategory -and (Test-Path -LiteralPath $uiElementCategoryPath)) {
+            Remove-Item -LiteralPath $uiElementCategoryPath -Recurse -Force
+            Record 'rollback' $uiElementCategoryPath '' 'removed'
         }
         if ($createdThreading -and (Test-Path -LiteralPath $inprocPath)) {
             Remove-ItemProperty -LiteralPath $inprocPath -Name 'ThreadingModel' -ErrorAction SilentlyContinue
@@ -179,6 +191,10 @@ try {
         New-Item -Path $categoryPath -Force | Out-Null
         Record 'create-key' $categoryPath '' 'ok'
     }
+    if ($createdUiElementCategory) {
+        New-Item -Path $uiElementCategoryPath -Force | Out-Null
+        Record 'create-key' $uiElementCategoryPath '' 'ok'
+    }
 
     # Read-back verification: the script's claim is the read value, not the write call.
     $inprocRead = Get-Item -LiteralPath $inprocPath
@@ -186,10 +202,12 @@ try {
     $threadingRead = $inprocRead.GetValue('ThreadingModel')
     $markerRead = (Get-Item -LiteralPath $basePath).GetValue($markerName)
     $categoryRead = Test-Path -LiteralPath $categoryPath
+    $uiElementCategoryRead = Test-Path -LiteralPath $uiElementCategoryPath
     if ($defaultRead -ne $DllPath) { throw "verification failed: InprocServer32='$defaultRead'" }
     if ($threadingRead -ne 'Apartment') { throw "verification failed: ThreadingModel='$threadingRead'" }
     if ($markerRead -ne $markerValue) { throw "verification failed: marker='$markerRead'" }
     if (-not $categoryRead) { throw 'verification failed: the keyboard category key is absent' }
+    if (-not $uiElementCategoryRead) { throw 'verification failed: the UIElement category key is absent' }
     Record 'verify' $basePath $DllPath 'ok'
 } catch {
     Rollback
@@ -206,11 +224,13 @@ $evidence = [ordered]@{
     clsid = $clsid
     profile_guid = $profile
     category = $category
+    ui_element_category = $uiElementCategory
     existed_before = $existedBefore
     previous_default = $previousDefault
     previous_threading = $previousThreading
     previous_marker = $previousMarker
     previous_category = $previousCategory
+    previous_ui_element_category = $previousUiElementCategory
     operations = @($operations)
 }
 if ($EvidencePath) {
