@@ -35,12 +35,16 @@ UI 只发起请求，不调用引擎、不 `SetText`。请求携带：
 - `snapshot_version`
 - **快照自身的** `context_id` 与 `generation`
 - 页内索引 `page_index`
-- **该菜单展示时从真实 TSF 选区读到的折叠 caret ACP**（UTF-16 code-unit 偏移）
+- **该 token 的已验证结束 caret ACP**（UTF-16 code-unit 偏移）
 
-W3-A 起，caret 是菜单身份的一部分：引擎观察可能早于宿主最后一次编辑通知，因此快照里的
-caret 镜像可能落后一个通知。控制器在菜单版本首次展示时用只读 `GetSelection` 读取真实
-caret，把它记为这一版本的锚点（不读文本），并把差异回填给协调器镜像。选择请求必须
-携带这个锚点；协调器只接受 `caret >= input 长度` 的位置，真正的等价校验在写入会话内。
+W3-A 起，caret 是菜单身份的一部分，但**不是**“当前光标”。控制器在 token 的第一个
+字符通过宿主之前记录 token 起点（来自已确认的宿主 caret 投影），菜单锚点只接受
+`token 起点 + 该 token 的宿主 UTF-16 单元数`。快照 caret 可能落后宿主最后一次编辑通知
+（实测 8→9），所以展示和选择时会用只读 `GetSelection` 读取真实 caret，但只有它等于
+上述 token 结束位置时才接受；任意其他 caret 都视为另一个 token，即使它前面恰好是相同
+文本。选择请求携带这个锚点；协调器只接受 `caret >= input 长度` 的位置，真正的等价校验
+在写入会话内。锚点更新**不会**扩大写入授权：`CompositionWriter::ReplaceToken` 仍要求
+live caret 等于计划 caret，并逐单元比较 token 文本。
 
 W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
 （`ContextCoordinator::SubmitSuggestionReplacement`）。只有以下全部成立才继续：
@@ -76,29 +80,57 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
 
 `CandidateUi`（`platforms/windows/tsf_product/candidate_ui.*`）：
 
+- 注册身份：CLSID 除 `GUID_TFCAT_TIP_KEYBOARD` 外**必须**实现
+  `GUID_TFCAT_TIPCAP_UIELEMENTENABLED`（`{49D2F9CF-1F5E-11D7-A6D3-00065B84435C}`）。
+  TSF 的 UILess 文档要求使用 `ITfUIElementMgr` 的 TIP 以此类别注册，宿主才能统一控制
+  可见性；注册脚本与状态捕获都检查这一项。
 - 通过 `ITfUIElementMgr::BeginUIElement` 注册每个候选菜单；`UpdateUIElement` 更新；
   `EndUIElement` 结束。元素实现 `ITfCandidateListUIElementBehavior`，提供
   `GetCount/GetString/GetSelection/GetPageIndex/GetCurrentPage` 与
   `SetSelection/Finalize/Abort`；`SetSelection/Finalize` 只回调控制器。
-- `BeginUIElement` 返回的 `pbShow` 是宿主的决定：为 `FALSE` 时**不创建**自绘窗口，
-  只继续回答候选列表查询；宿主接管绘制时不重复弹窗。
-- `ITfUIElementSink` 通过 `ITfUIElementMgr` 的 `ITfSource` 订阅；宿主发起的 End 会隐藏
-  窗口并使后续 End 幂等。`EndUIElement` 回调期间不释放元素引用（元素在管理器调用返回后
-  才释放），避免 TSF 在回调栈上持有已释放对象。
+- `pbShow` 的初值由 TIP 写为 `TRUE`；`BeginUIElement` 返回后读取宿主写回的决定。
+  为 `FALSE` 时**不创建、不显示**任何自绘窗口（没有进程名/文件名例外），同时保留真实
+  `ITfUIElement` 并回答所有查询。按 UILess 契约，`BeginUIElement` 返回 `FALSE` 后必须
+  立即调用一次 `UpdateUIElement`，首次更新带全量标志
+  （`DOCUMENTMGR|COUNT|SELECTION|STRING|PAGEINDEX|CURRENTPAGE`）。
+- `ITfUIElement::Show(FALSE)` 隐藏真实窗口并使 `IsShown` 返回 `FALSE`；后续数据更新不得
+  重新打开。只有宿主显式 `Show(TRUE)` 才把绘制权交回 TIP，控制器在下一个节流唤醒重新
+  读取 anchor 后展示。
+- 没有显式选择时 `GetSelection` 返回 `S_FALSE`（`*puIndex` 无效）；`Finalize` 不会因此
+  隐式接受原文行。显式选择时返回 `S_OK` 与页内索引。
+- `ITfUIElementSink` 通过 `ITfUIElementMgr` 的 `ITfSource` 订阅；管理器发出的 End 会隐藏
+  窗口并使后续 End 幂等。宿主自己的 `ITfUIElementSink` 是独立订阅；本 TIP 的 sink 不修改
+  `pbShow`，也不替宿主做绘制决定。`EndUIElement` 回调期间不释放元素引用（元素在管理器
+  调用返回后才释放），避免 TSF 在回调栈上持有已释放对象。
 - 停止/卸载：`CandidateUi::Stop` 先 End、再注销 sink、释放管理器与窗口；桥接对象在停止时
   置空，迟到回调只能看到 inactive。
+
+**已知宿主限制（证据，不是白名单）**：W3-A trace 轮次在 Windows 11 新 Notepad 中观测到
+`BeginUIElement` 返回 `pbShow=FALSE`，且该宿主没有绘制候选列表；当时 stage8 在所有
+`FALSE` 上自绘，属于违反 UILess 契约的临时诊断路径，已删除。正式链路现在严格按宿主决定
+隐藏自绘窗口；Notepad 是否自绘必须由正式包的 trace/diagnose 重新观测并记录。证据文件：
+`build/w3a-c-local/evidence6/trace-hostdrawn-before.txt`（`ui_host_drawn|1`、
+`ui_host_drawn_hide|1`）与 `docs/reports/W3-A-isolation-registration.md` §11.4/§11.7。
+不得据进程名恢复自绘；如果宿主确实不绘制，结论是宿主兼容限制，不是产品可以越过契约的理由。
 
 ## 6. 位置与显示
 
 - 位置只来自真实的 TSF 文本范围：`ITfContext::GetSelection` → `ITfRangeACP::SetExtent`
   （UTF-16 code unit ACP）→ `ITfContextView::GetTextExt`，用同步只读编辑会话读取。
 - **W3-A 定位来源**：原文归宿主后文档里没有产品组合，因此锚点是
-  `[live caret - input 长度, live caret)` 这一 token 范围，不是组合，也不是合成 anchor。
-  控制器在菜单版本首次展示时读取真实 caret；读到的 caret 与快照镜像不同时，用真实值
-  重同步（`ObserveRealCaret`），不把落后的镜像当成位置。
+  `[anchor caret - input 长度, anchor caret)` 这一 token 范围，不是组合，也不是合成
+  anchor。`anchor caret` 只能等于 `token 起点 + 宿主 token UTF-16 单元数`；token 起点是
+  第一个字符交给宿主前记录的投影 caret，随后由真实宿主编辑通知校准。快照 caret 可能
+  落后一个通知（8→9），所以展示/选择时读取真实 caret，但只有等于 token 结束位置才接受；
+  不会把旧菜单重定位到任意当前光标（即使前面是相同文本）。
 - 矩形读取会在同一会话里再次核对 live caret 等于锚点；不相等、无布局、零矩形、不可见、
-  读取失败 → 隐藏窗口。**绝不**用鼠标位置或屏幕角落冒充光标位置。
-- 宿主接管绘制（`pbShow=FALSE`）时窗口不创建；元素继续回答候选查询。
+  读取失败 → 隐藏窗口。**绝不**用鼠标位置或屏幕角落冒充光标位置。live caret 与锚点
+  不等时立即失效该菜单；这只是显示与授权同时失效，不是重定位。
+- 布局暂不可读时按 pacing 重试，预算 **40 次/宿主 token**，不因候选快照版本变化而重置；
+  token 边界、目标绑定/丢失、宿主 `Show(TRUE)` 才重置。预算耗尽仍无矩形 → 关闭该菜单
+  （不是留下一个不可见的可键盘选择菜单）。全程不忙等、不在 UI 线程等待布局或引擎。
+- 宿主接管绘制（`pbShow=FALSE` 或 `Show(FALSE)`）时窗口不创建/隐藏；元素继续回答候选
+  查询。只有宿主 `Show(TRUE)` 才允许 TIP 再次自绘。
 - 光标移动、鼠标点击其他位置、选区替换、删除/粘贴等外部编辑都会在宿主编辑通知或下一次
   真实 caret 读取时被观察到；旧版本菜单的选择由版本/caret/范围/文本四重校验拒绝。
   滚动和窗口移动不改变 ACP；新的 `GetTextExt` 只在菜单版本更新时读取，窗口位置可能保持
@@ -115,24 +147,33 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
 
 - 已验证（B 层，受控）：真实 Win32 窗口的绘制、8 行、点击索引、`WM_MOUSEACTIVATE=MA_NOACTIVATE`、
   截图；真实 `ITfCandidateListUIElement` 对象在受控假管理器下的 Begin/Update/End、
-  宿主绘制抑制、宿主 End、选择/最终化回调、版本与 identity 传递；100/150/200% 度量与
-  多显示器/小工作区的纯布局；方向键/Enter/Space/Escape 的文档结果、过期版本与外部编辑拒绝。
+  `pbShow` 初值、宿主 `FALSE` 决定、FALSE 后的首次全量 Update、`Show(FALSE)`/`Show(TRUE)`/
+  `IsShown`、无选择 `GetSelection=S_FALSE` 与无选择 Finalize、宿主 End、选择/最终化回调、
+  版本与 identity 传递；100/150/200% 度量与多显示器/小工作区的纯布局；方向键/Enter/
+  Space/Escape 的文档结果、过期版本与外部编辑拒绝；token 锚点纯策略（8→9 接受、异位
+  `hel` 拒绝、未知 token 失败关闭）与每 token 40 次布局重试预算；非折叠选区下的旧选择拒绝。
 - W3-A 新增 B 层证据：真实控制器/协调器/编辑层的替换故障注入（写前拒绝、读回不一致、
   排队后宿主继续编辑、同文本他处、焦点切换、`SetText` 成功后报错的不确定状态）、
   丢弃后建议流重同步、真实 caret 锚点读取。详见
   `docs/reports/W3-A-isolation-registration.md`。
-- **未验证（C 层）**：正式注册的 TIP 在真实应用/StrictTsf 前台下的候选窗口显示与点击、
-  真实 `ITfUIElementMgr`、真实 `GetTextExt` 矩形、真实 DPI/多显示器。本机没有已授权的
-  隔离环境；直接 sink 变体不创建 TSF UI 管理器。该门停留在 W3-A 的授权请求处。
+- **未验证（C 层）**：修正后的正式包（含 `GUID_TFCAT_TIPCAP_UIELEMENTENABLED` 注册、
+  `pbShow` 严格遵从、FALSE 后首次 Update、`S_FALSE`）在真实应用/StrictTsf 前台下的
+  宿主绘制行为与点击、真实 `ITfUIElementMgr`、真实 `GetTextExt` 矩形、真实 DPI/多显示器。
+  本机没有已授权的隔离环境；直接 sink 变体不创建 TSF UI 管理器。trace 构建曾通过，但
+  其 stage8 自绘路径违反 `pbShow` 契约，不能用作正式链路证据。该门停留在 W3-A 的授权
+  请求处；如果 Notepad 在修正后仍不绘制，只能记录宿主限制，不能用自绘绕过。
 
 ## 8. W2-B-R 审查结论（实现未改变，补充验证）
 
-- **无显式选择时的 `GetSelection`**：返回 0（原文行）。这与“无选择时 Enter 提交原文”的
-  契约一致，宿主不会把补全/拼写建议画成预选项。
+- **无显式选择时的 `GetSelection`**：W3-A 修正为 `S_FALSE`，`*puIndex` 无效。TSF 的
+  UILess 文档明确要求无选择时返回 `S_FALSE`；W2-B-R 当时断言 `S_OK`/索引 0 是错误期望，
+  已按契约修正，而不是为了通过测试放宽实现。`Finalize` 在无选择时不会隐式接受原文行。
 - **更新标志**：每次 `UpdateUIElement` 都携带完整集合
   （`TF_CLUIE_DOCUMENTMGR | COUNT | SELECTION | STRING | PAGEINDEX | CURRENTPAGE`）。
   这是保守做法：宿主会重读全部数据；首次 Begin 之后不会出现“缺标志导致旧数据”的状态。
-- **`pbShow=FALSE`**：仍然更新元素数据并回答所有查询，只是不创建自绘窗口；不重复弹窗。
+  宿主返回 `FALSE` 后立即发送的第一次 `UpdateUIElement` 也携带全量标志。
+- **`pbShow=FALSE`**：仍然更新元素数据并回答所有查询，只是不创建/显示自绘窗口；不重复
+  弹窗。没有进程名白名单；Notepad 的 `FALSE`-但不绘制行为作为宿主限制记录。
 - **End 之后元素仍被合法持有**：`EndUIElement` 返回后管理器仍可查询元素；只读查询继续
   返回最后一页数据。元素引用由 `End()`/`Stop()` 在管理器调用返回后释放。
 - **Stop 之后的迟到回调**：桥接对象被置空/inactive；迟到 `SetSelection`/`Finalize` 不
