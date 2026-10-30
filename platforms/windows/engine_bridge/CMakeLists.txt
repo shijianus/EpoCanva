@@ -34,6 +34,12 @@ option(EPOCANVA_BUILD_TSF_LAB
        "Build the optional visible TSF integration lab (not part of normal CTest)" OFF)
 option(EPOCANVA_BUILD_PRODUCT
        "Build the W1 product shell (EpoCanva.exe), product TSF DLL and product tests" OFF)
+# Diagnostic-only, text-free stage tracing. OFF for every package build.
+option(EPOCANVA_PRODUCT_TRACE
+       "Emit text-free TSF stage traces to OutputDebugString" OFF)
+if(EPOCANVA_PRODUCT_TRACE)
+  add_compile_definitions(EPOCANVA_PRODUCT_TRACE=1)
+endif()
 
 if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   message(FATAL_ERROR

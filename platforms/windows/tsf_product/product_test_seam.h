@@ -153,6 +153,14 @@ struct EpoCanvaTestCounters {
   long long last_replacement_expected_units;
   long long last_edit_observed_caret;
   long long last_suggestion_expected_caret;
+  // W3-A: the verified menu anchor, the token-derived expected caret (origin + host units),
+  // the per-token layout retry count and the token caret tracking inputs.
+  long long candidate_anchor_caret;
+  long long candidate_anchor_expected;
+  int candidate_anchor_retries;
+  int candidate_token_origin_valid;
+  long long candidate_token_origin_caret;
+  long long predicted_host_caret;
 };
 
 __declspec(dllexport) int EpoCanvaTestQueryCounters(EpoCanvaTestCounters* out);

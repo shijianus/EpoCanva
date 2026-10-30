@@ -2,6 +2,7 @@
 // activation contract, the abnormal-destruction rule and the deliberate scope limits.
 #include "text_service.h"
 
+#include <cstdio>
 #include <new>
 
 #include "module_state.h"
@@ -23,6 +24,16 @@ namespace epocanva {
 namespace tsf {
 
 namespace {
+
+#ifdef EPOCANVA_PRODUCT_TRACE
+void TraceStage(const char* stage, long long value) {
+  char line[192];
+  std::snprintf(line, sizeof(line), "EPOCANVA_TRACE|%s|%lld\n", stage, value);
+  ::OutputDebugStringA(line);
+}
+#else
+inline void TraceStage(const char*, long long) {}
+#endif
 
 #ifdef EPOCANVA_TSF_ENGINE_HOST
 HRESULT LeaseFailureToHresult(EngineLeaseStatus status) {
@@ -230,6 +241,7 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
   if (thread_manager == nullptr) {
     return E_INVALIDARG;
   }
+  TraceStage("activate_flags", static_cast<long long>(flags));
 
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
   // W2-B asynchronous activation. The controller starts in literal mode immediately and
@@ -277,7 +289,9 @@ HRESULT EpoCanvaTextService::ActivateInternal(ITfThreadMgr* thread_manager,
       }
     }
     // The engine start begins only after the key sink is really advised.
+    TraceStage("activate_key_sink", advised_new ? 1 : 0);
     new_controller->RequestEngineStart();
+    TraceStage("activate_engine_requested", 1);
   } catch (const std::bad_alloc&) {
     if (new_controller) {
       new_controller->Stop();
@@ -573,7 +587,7 @@ void EpoCanvaTextService::UnadviseKeySink(ITfThreadMgr* thread_manager,
 }
 
 HRESULT STDMETHODCALLTYPE EpoCanvaTextService::OnSetFocus(BOOL foreground) {
-  (void)foreground;
+  TraceStage("onsetfocus", foreground ? 1 : 0);
   // A TSF notification: no pumping and no engine or edit work from here.
   return S_OK;
 }
@@ -585,6 +599,7 @@ HRESULT STDMETHODCALLTYPE EpoCanvaTextService::OnTestKeyDown(
     return E_POINTER;
   }
   *eaten = FALSE;
+  TraceStage("ontestkeydown", 1);
   try {
     std::lock_guard<std::mutex> guard(controller_mutex_);
     if (controller_ && controller_->started()) {
@@ -617,6 +632,7 @@ HRESULT STDMETHODCALLTYPE EpoCanvaTextService::OnKeyDown(ITfContext* context,
     return E_POINTER;
   }
   *eaten = FALSE;
+  TraceStage("onkeydown_entry", 1);
   try {
     std::lock_guard<std::mutex> guard(controller_mutex_);
     if (controller_ && controller_->started()) {
@@ -625,6 +641,7 @@ HRESULT STDMETHODCALLTYPE EpoCanvaTextService::OnKeyDown(ITfContext* context,
   } catch (...) {
     *eaten = FALSE;
   }
+  TraceStage("onkeydown_eaten", *eaten ? 1 : 0);
   return S_OK;
 }
 

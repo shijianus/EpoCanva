@@ -219,6 +219,9 @@ struct ContextObserverSnapshot {
   std::uint64_t selection_reads_begun = 0;
   std::uint64_t selection_reads_completed = 0;
   std::uint64_t selection_refusals = 0;
+  // Bounded transient retries for a temporarily unavailable WinUI selection.
+  std::uint64_t selection_retries = 0;
+  std::uint64_t selection_retry_budget_exhausted = 0;
   // The last reason a published target was dropped, and the last reason a candidate could
   // not be published (no callback exists for the latter).
   ContextDropReason last_target_lost_reason = ContextDropReason::kNone;

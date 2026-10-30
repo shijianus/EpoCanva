@@ -3,8 +3,10 @@
 // WHAT TSF SEES. One ITfCandidateListUIElement per candidate menu, registered with the
 // thread's ITfUIElementMgr through BeginUIElement/UpdateUIElement/EndUIElement, plus an
 // ITfUIElementSink so an End issued by TSF is honoured. BeginUIElement's pbShow is the
-// host's decision: when the host says it draws the element, this class never creates or
-// shows its own window, and still answers the candidate-list queries.
+// host's decision: when the host answers FALSE, this class never shows its own window and
+// still answers the candidate-list queries; it sends the initial UpdateUIElement the
+// UILess contract requires. A later ITfUIElement::Show(TRUE) is the only way the host can
+// hand presentation back to the TIP.
 //
 // WHERE THE COPY COMES FROM. CandidateUi::Update receives one immutable CandidateSnapshot
 // from the coordinator. The element keeps its own copy of the strings; nothing here calls
@@ -63,6 +65,9 @@ class CandidateUiHost {
   virtual void OnUiFinalize(const CandidateUiSelection& selection) = 0;
   virtual void OnUiAbort(std::uint64_t snapshot_version, std::uint64_t context_id,
                          std::uint64_t generation) = 0;
+  // The host called ITfUIElement::Show(TRUE) after suppressing TIP drawing. The controller
+  // re-reads the live anchor on the next paced wake; nothing is shown from this callback.
+  virtual void OnUiShowRequested() = 0;
 };
 
 struct CandidateUiBridge;
@@ -82,6 +87,9 @@ struct CandidateUiDiagnostics {
   std::uint64_t clicks = 0;
   std::uint64_t no_anchor_hides = 0;
   std::uint64_t selected_changes = 0;
+  std::uint64_t host_drawn_updates = 0;
+  std::uint64_t show_false_notifications = 0;
+  std::uint64_t show_true_notifications = 0;
 };
 
 class CandidateUi {
@@ -113,6 +121,9 @@ class CandidateUi {
   bool tsf_manager() const { return manager_ != nullptr; }
   bool begun() const { return begun_; }
   bool host_drawn() const { return host_drawn_; }
+  // FALSE while the host draws or called Show(FALSE). Only a host Show(TRUE) re-enables
+  // TIP presentation; a process-name or host heuristic never does.
+  bool tip_ui_allowed() const { return !begun_ || tip_ui_allowed_; }
   bool window_visible() const { return window_.visible(); }
   HWND window_for_test() const { return window_.window_for_test(); }
   CandidateUiDiagnostics Diagnostics() const;
@@ -131,6 +142,8 @@ class CandidateUi {
   void AbortFromElement(std::uint64_t snapshot_version, std::uint64_t context_id,
                         std::uint64_t generation);
   void HideWindowFromElement();
+  void OnElementShow(bool show);
+  bool ElementShown() const;
   void ReleaseElement();
 
   TfClientId client_id_ = 0;
@@ -145,6 +158,7 @@ class CandidateUi {
   DWORD element_id_ = 0;
   bool begun_ = false;
   bool host_drawn_ = false;
+  bool tip_ui_allowed_ = true;
   CandidateWindow window_;
   CandidateUiDiagnostics diagnostics_;
 };

@@ -18,6 +18,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(EPOCANVA_BUILD_TOOLS "Build EpoCanva command line tools" ON)
 option(EPOCANVA_BUILD_TESTS "Build EpoCanva infrastructure tests" ON)
+# Diagnostic-only, text-free stage tracing to the debug output. OFF for every product/
+# package build; ON only in a dedicated diagnosis build.
+option(EPOCANVA_PRODUCT_TRACE "Emit text-free TSF stage traces to OutputDebugString" OFF)
+if(EPOCANVA_PRODUCT_TRACE)
+  add_compile_definitions(EPOCANVA_PRODUCT_TRACE=1)
+endif()
 
 add_library(epocanva_strict INTERFACE)
 target_compile_features(epocanva_strict INTERFACE cxx_std_17)

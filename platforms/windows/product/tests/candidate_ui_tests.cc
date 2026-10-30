@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "candidate_anchor.h"
 #include "candidate_snapshot.h"
 #include "candidate_ui.h"
 #include "candidate_window.h"
@@ -110,6 +111,7 @@ bool SaveScreenshot(HWND window, const std::filesystem::path& path,
 class FakeUiElementManager final : public ITfUIElementMgr, public ITfSource {
  public:
   bool show = true;
+  BOOL show_on_entry = FALSE;
   int begins = 0;
   int updates = 0;
   int ends = 0;
@@ -150,6 +152,7 @@ class FakeUiElementManager final : public ITfUIElementMgr, public ITfSource {
     }
     element = pElement;
     element->AddRef();
+    show_on_entry = *pbShow;
     *pbShow = show ? TRUE : FALSE;
     *id = 1;
     ++begins;
@@ -211,6 +214,7 @@ struct FakeHost final : CandidateUiHost {
   int selections = 0;
   int finals = 0;
   int aborts = 0;
+  int show_requests = 0;
   CandidateUiSelection last;
 
   void OnUiSelectionChanged(const CandidateUiSelection& selection) override {
@@ -224,6 +228,7 @@ struct FakeHost final : CandidateUiHost {
   void OnUiAbort(std::uint64_t, std::uint64_t, std::uint64_t) override {
     ++aborts;
   }
+  void OnUiShowRequested() override { ++show_requests; }
 };
 
 std::vector<CandidateWindowItem> WindowItems() {
@@ -371,10 +376,15 @@ void TestUiLifecycle() {
 
   ui.Update(snapshot, nullptr, &anchor, 1);
   Check(manager->begins == 1, "ui: one BeginUIElement");
+  Check(manager->show_on_entry == TRUE,
+        "ui: the TIP initializes pbShow=TRUE before the host decides");
   Check(ui.begun(), "ui: the element is begun");
   Check(!ui.host_drawn(), "ui: the fake host allows TIP drawing");
   Check(ui.window_visible(), "ui: the real window is visible");
   if (manager->element != nullptr) {
+    BOOL shown = FALSE;
+    Check(SUCCEEDED(manager->element->IsShown(&shown)) && shown == TRUE,
+          "ui: IsShown reports the actually visible TIP window");
     ITfCandidateListUIElement* list = nullptr;
     const HRESULT qi = manager->element->QueryInterface(
         IID_ITfCandidateListUIElement, reinterpret_cast<void**>(&list));
@@ -406,9 +416,8 @@ void TestUiLifecycle() {
   Check(manager->updates >= 1, "ui: an existing element is updated, not begun again");
   Check(manager->begins == 1, "ui: no duplicate BeginUIElement");
 
-  // With no explicit user selection the element answers row 0 (the literal). That is the
-  // same row an Enter without a selection commits, so the host never draws a suggestion as
-  // preselected.
+  // With no explicit selection the UILess contract is S_FALSE: the index is invalid and the
+  // host never draws a suggestion (or the literal row) as preselected.
   ui.Update(snapshot, nullptr, &anchor, -1);
   if (manager->element != nullptr) {
     ITfCandidateListUIElement* list = nullptr;
@@ -417,12 +426,26 @@ void TestUiLifecycle() {
         list != nullptr) {
       UINT selection = 99;
       DWORD flags = 0;
-      Check(SUCCEEDED(list->GetSelection(&selection)) && selection == 0,
-            "ui: with no explicit selection GetSelection answers the literal row");
+      Check(list->GetSelection(&selection) == S_FALSE,
+            "ui: GetSelection answers S_FALSE when nothing is selected");
       Check(SUCCEEDED(list->GetUpdatedFlags(&flags)) &&
-                (flags & TF_CLUIE_COUNT) != 0 && (flags & TF_CLUIE_STRING) != 0,
-            "ui: an update advertises the data the host must re-read");
+                flags == (TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION |
+                          TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE),
+            "ui: every update advertises the complete data set");
       list->Release();
+    }
+  }
+  if (manager->element != nullptr) {
+    ITfCandidateListUIElementBehavior* behavior = nullptr;
+    if (SUCCEEDED(manager->element->QueryInterface(
+            IID_ITfCandidateListUIElementBehavior,
+            reinterpret_cast<void**>(&behavior))) &&
+        behavior != nullptr) {
+      const int before = host.finals;
+      Check(SUCCEEDED(behavior->Finalize()), "ui: Finalize with no selection is accepted");
+      Check(host.finals == before,
+            "ui: Finalize with no selection never accepts the literal row implicitly");
+      behavior->Release();
     }
   }
 
@@ -448,6 +471,30 @@ void TestUiLifecycle() {
     }
   }
 
+  // ITfUIElement::Show is the host's live visibility control. FALSE must hide the real
+  // window and IsShown must follow; a later TRUE may be honoured after the controller
+  // re-reads the anchor.
+  if (manager->element != nullptr) {
+    Check(SUCCEEDED(manager->element->Show(FALSE)),
+          "ui: the host can hide the TIP UI");
+    BOOL shown = TRUE;
+    Check(!ui.window_visible() && SUCCEEDED(manager->element->IsShown(&shown)) &&
+              shown == FALSE,
+          "ui: Show(FALSE) hides the window and IsShown reports it");
+    const int updates_before = manager->updates;
+    ui.Update(snapshot, nullptr, &anchor, 1);
+    Check(manager->updates == updates_before + 1 && !ui.window_visible(),
+          "ui: a data update after Show(FALSE) never reopens the window");
+    Check(SUCCEEDED(manager->element->Show(TRUE)),
+          "ui: the host can hand presentation back to the TIP");
+    Check(host.show_requests == 1,
+          "ui: Show(TRUE) asks the controller for a fresh presentation");
+    ui.Update(snapshot, nullptr, &anchor, 1);
+    Check(ui.window_visible(), "ui: the next update presents after Show(TRUE)");
+    Check(SUCCEEDED(manager->element->IsShown(&shown)) && shown == TRUE,
+          "ui: IsShown follows the visible window again");
+  }
+
   ui.End();
   Check(manager->ends == 1, "ui: EndUIElement issued exactly once");
   Check(!ui.begun() && !ui.window_visible(), "ui: End hides the window");
@@ -466,12 +513,33 @@ void TestUiLifecycle() {
     }
   }
 
-  // Host-drawn: BeginUIElement answers FALSE; no floating window may appear.
+  // Host-drawn: BeginUIElement answers FALSE; no floating window may appear, and the TIP
+  // must send the initial UpdateUIElement the UILess contract requires.
   manager->show = false;
+  const int begin_updates = manager->updates;
   ui.Update(snapshot, nullptr, &anchor, 0);
   Check(ui.begun() && ui.host_drawn(),
         "ui: the host's drawing decision is honoured");
+  Check(manager->show_on_entry == TRUE,
+        "ui: the host receives the TIP's initial pbShow=TRUE");
+  Check(manager->updates == begin_updates + 1,
+        "ui: BeginUIElement FALSE is followed by one full UpdateUIElement");
   Check(!ui.window_visible(), "ui: no second window when the host draws");
+  if (manager->element != nullptr) {
+    BOOL shown = TRUE;
+    Check(SUCCEEDED(manager->element->IsShown(&shown)) && shown == FALSE,
+          "ui: a host-drawn element reports no visible TIP window");
+    ui.Update(snapshot, nullptr, &anchor, 1);
+    Check(manager->updates == begin_updates + 2 && !ui.window_visible(),
+          "ui: host-drawn data updates never create a TIP window");
+    Check(SUCCEEDED(manager->element->Show(TRUE)) && host.show_requests == 2,
+          "ui: the host can take the TIP UI back after host drawing");
+    ui.Update(snapshot, nullptr, &anchor, 1);
+    Check(ui.window_visible(),
+          "ui: Show(TRUE) after host drawing presents the TIP window");
+    Check(SUCCEEDED(manager->element->Show(FALSE)) && !ui.window_visible(),
+          "ui: another Show(FALSE) hides it again");
+  }
   ui.End();
   Check(manager->ends == 2, "ui: host-drawn element ended");
 
@@ -507,6 +575,46 @@ void TestUiLifecycle() {
   Check(true, "ui: teardown completed without a crash");
 }
 
+void TestAnchorPolicy() {
+  using epocanva::tsf::product::CandidateAnchorDecision;
+  using epocanva::tsf::product::CandidateAnchorRetryBudget;
+  using epocanva::tsf::product::CheckCandidateAnchor;
+  using epocanva::tsf::product::kCandidateAnchorMaxRetries;
+
+  // The token starts at 6 and has three host UTF-16 units. The engine snapshot caret may
+  // lag at 8; only the real end 9 is the same token.
+  auto check = CheckCandidateAnchor(true, 6, 3, 9);
+  Check(check.decision == CandidateAnchorDecision::kAccept &&
+            check.expected_caret_utf16 == 9,
+        "anchor: the live caret at the token end is accepted (8 -> 9 lag)");
+  check = CheckCandidateAnchor(true, 6, 3, 3);
+  Check(check.decision == CandidateAnchorDecision::kCaretMismatch &&
+            check.expected_caret_utf16 == 9,
+        "anchor: the same text at another caret is a different token");
+  check = CheckCandidateAnchor(true, 6, 3, 20);
+  Check(check.decision == CandidateAnchorDecision::kCaretMismatch,
+        "anchor: an arbitrary current cursor never retargets the menu");
+  check = CheckCandidateAnchor(false, -1, 3, 9);
+  Check(check.decision == CandidateAnchorDecision::kUnknownToken,
+        "anchor: an unknown token origin fails closed");
+  check = CheckCandidateAnchor(true, 6, 0, 6);
+  Check(check.decision == CandidateAnchorDecision::kUnknownToken,
+        "anchor: an empty token has no menu anchor");
+
+  CandidateAnchorRetryBudget budget;
+  bool all = true;
+  for (int attempt = 0; attempt < kCandidateAnchorMaxRetries; ++attempt) {
+    all = budget.TryAcquire() && all;
+  }
+  Check(all && budget.used() == kCandidateAnchorMaxRetries && budget.exhausted(),
+        "anchor: the per-token retry budget grants exactly 40 attempts");
+  Check(!budget.TryAcquire(),
+        "anchor: the 41st layout retry is refused");
+  budget.Reset();
+  Check(!budget.exhausted() && budget.used() == 0 && budget.TryAcquire(),
+        "anchor: a new token resets the retry budget");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -521,6 +629,7 @@ int main(int argc, char** argv) {
   std::cout << "EpoCanva candidate window / UIElement controlled tests\n";
   TestLayout();
   TestWindow(screenshot);
+  TestAnchorPolicy();
   TestUiLifecycle();
   if (g_failures != 0) {
     std::cout << "FAILED: " << g_failures << " check(s)\n";

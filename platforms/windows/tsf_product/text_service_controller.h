@@ -47,6 +47,7 @@
 #include <string_view>
 #include <vector>
 
+#include "candidate_anchor.h"
 #include "candidate_ui.h"
 #include "context_observer.h"
 #include "context_registry.h"
@@ -135,6 +136,12 @@ struct ControllerDiagnostics {
   bool candidate_menu_open = false;
   std::uint64_t candidate_version = 0;
   long long candidate_caret_utf16 = -1;
+  long long candidate_anchor_caret_utf16 = -1;
+  long long candidate_anchor_expected_utf16 = -1;
+  int candidate_anchor_retries = 0;
+  bool candidate_token_origin_valid = false;
+  long long candidate_token_origin_caret_utf16 = -1;
+  long long predicted_host_caret_utf16 = -1;
   std::size_t candidate_input_units = 0;
   int candidate_selected = -1;
   std::size_t candidate_items = 0;
@@ -203,6 +210,7 @@ class ProductTextController final : public StaWakeTarget,
   void OnUiFinalize(const CandidateUiSelection& selection) override;
   void OnUiAbort(std::uint64_t snapshot_version, std::uint64_t context_id,
                  std::uint64_t generation) override;
+  void OnUiShowRequested() override;
 
   ControllerDiagnostics Snapshot() const;
   // Test support only: a copy of the coordinator's current menu. No product caller uses
@@ -230,6 +238,15 @@ class ProductTextController final : public StaWakeTarget,
   void MoveCandidateSelection(int delta);
   bool FinalizeCandidateSelection(const CandidateUiSelection& selection);
   bool CandidatesOpen() const;
+  // Keyboard interaction is only ours while the TIP may present the list. A host-drawn
+  // element or an explicit Show(FALSE) keeps the keys with the host.
+  bool CandidateKeysActive() const;
+  // The only accepted live-caret position is `token origin + host UTF-16 units`. The origin
+  // is recorded before the first character of the token; a caret anywhere else belongs to a
+  // different token even when the preceding text is identical.
+  bool ExpectedCandidateCaretUtf16(std::int32_t* expected) const;
+  void ResetCandidateAnchorRetry();
+  void NoteHostCaretDeltaUtf16(LONG delta);
   // W2-B asynchronous engine adoption. Runs on the STA outside every TSF notification. It
   // takes the pending lease (or a fast lease on an already running engine) and builds the
   // observer/coordinator pipeline. Failure leaves the controller in literal mode with a
@@ -306,6 +323,10 @@ class ProductTextController final : public StaWakeTarget,
   // observed without this credit came from outside the key stream (paste, autocorrect,
   // another client); suggestions must not continue across it.
   std::size_t host_edits_expected_ = 0;
+  // The projected caret after each passed-through key whose host edit has not been
+  // notified yet. A notification must match one of these positions; a caret that is not in
+  // this token's history is not attributed to our key stream.
+  std::deque<LONG> pending_host_edit_carets_;
   std::uint64_t suggestion_work_id_ = 0;
   bool suggestion_stale_ = false;
   // The current token's suggestion stream was abandoned after a drop. The rest of that
@@ -330,6 +351,16 @@ class ProductTextController final : public StaWakeTarget,
   std::uint64_t candidate_anchor_version_ = 0;
   LONG candidate_anchor_caret_utf16_ = -1;
   RECT candidate_anchor_rect_{};
+  // Projected host caret from our own passed-through keys, reconciled by every real host
+  // edit notification. -1 means unknown; the menu then stays hidden until a real read.
+  LONG predicted_host_caret_utf16_ = -1;
+  bool host_token_origin_valid_ = false;
+  LONG host_token_origin_caret_utf16_ = -1;
+  // A live layout can be momentarily unavailable while the host lays out the latest edit.
+  // While the same token keeps producing menu versions, retry on paced wakes. The budget is
+  // per token, not per snapshot version, so churn cannot extend it.
+  bool candidate_anchor_retry_ = false;
+  CandidateAnchorRetryBudget candidate_anchor_retry_budget_;
 
   std::uint64_t wakes_ = 0;
   std::uint64_t stale_wakes_ = 0;

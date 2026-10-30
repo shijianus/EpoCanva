@@ -98,6 +98,14 @@ extern "C" int EpoCanvaTestQueryCounters(EpoCanvaTestCounters* out) {
       diagnostics.coordinator.last_edit_observed_caret_utf16;
   out->last_suggestion_expected_caret =
       diagnostics.coordinator.last_suggestion_expected_caret_utf16;
+  out->candidate_anchor_caret = diagnostics.candidate_anchor_caret_utf16;
+  out->candidate_anchor_expected = diagnostics.candidate_anchor_expected_utf16;
+  out->candidate_anchor_retries = diagnostics.candidate_anchor_retries;
+  out->candidate_token_origin_valid =
+      diagnostics.candidate_token_origin_valid ? 1 : 0;
+  out->candidate_token_origin_caret =
+      diagnostics.candidate_token_origin_caret_utf16;
+  out->predicted_host_caret = diagnostics.predicted_host_caret_utf16;
   out->page_no = candidates.page_no;
   out->page_size = candidates.page_size;
   out->is_last_page = candidates.is_last_page ? 1 : 0;

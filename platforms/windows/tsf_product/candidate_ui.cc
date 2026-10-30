@@ -4,6 +4,7 @@
 #include <oleauto.h>
 
 #include <atomic>
+#include <cstdio>
 #include <mutex>
 #include <utility>
 
@@ -21,6 +22,16 @@ constexpr GUID kCandidateUiGuid = {
     {0x9b, 0x6d, 0x1e, 0x2f, 0x3c, 0x5a, 0x7e, 0x10}};
 
 const wchar_t kElementDescription[] = L"EpoCanva candidates";
+
+#ifdef EPOCANVA_PRODUCT_TRACE
+void TraceStage(const char* stage, long long value) {
+  char line[192];
+  std::snprintf(line, sizeof(line), "EPOCANVA_TRACE|%s|%lld\n", stage, value);
+  ::OutputDebugStringA(line);
+}
+#else
+inline void TraceStage(const char*, long long) {}
+#endif
 
 std::wstring WidenAscii(const char* text) {
   std::wstring wide;
@@ -127,7 +138,17 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
   }
 
   HRESULT STDMETHODCALLTYPE Show(BOOL show) override {
-    shown_ = show != FALSE;
+    CandidateUi* ui = nullptr;
+    {
+      std::shared_ptr<CandidateUiBridge> bridge = bridge_;
+      if (bridge) {
+        std::lock_guard<std::mutex> guard(bridge->mutex);
+        ui = bridge->ui;
+      }
+    }
+    if (ui != nullptr) {
+      ui->OnElementShow(show != FALSE);
+    }
     return S_OK;
   }
 
@@ -135,7 +156,15 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
     if (show == nullptr) {
       return E_INVALIDARG;
     }
-    *show = shown_ ? TRUE : FALSE;
+    CandidateUi* ui = nullptr;
+    {
+      std::shared_ptr<CandidateUiBridge> bridge = bridge_;
+      if (bridge) {
+        std::lock_guard<std::mutex> guard(bridge->mutex);
+        ui = bridge->ui;
+      }
+    }
+    *show = ui != nullptr && ui->ElementShown() ? TRUE : FALSE;
     return S_OK;
   }
 
@@ -172,10 +201,11 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
       return E_INVALIDARG;
     }
     if (selected_ < 0 || strings_.empty()) {
+      // UILess contract: S_FALSE means the list has no selection and *puIndex is invalid.
       *index = 0;
-    } else {
-      *index = static_cast<UINT>(selected_);
+      return S_FALSE;
     }
+    *index = static_cast<UINT>(selected_);
     return S_OK;
   }
 
@@ -245,7 +275,11 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
   }
 
   HRESULT STDMETHODCALLTYPE Finalize() override {
-    const int selected = selected_ < 0 ? 0 : selected_;
+    if (selected_ < 0) {
+      // GetSelection answered S_FALSE: there is no explicit selection to accept. The
+      // literal row is never implied just because the host finalized the element.
+      return S_OK;
+    }
     CandidateUi* ui = nullptr;
     {
       std::shared_ptr<CandidateUiBridge> bridge = bridge_;
@@ -259,7 +293,7 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
       selection.snapshot_version = version_;
       selection.context_id = context_id_;
       selection.generation = generation_;
-      selection.page_index = selected;
+      selection.page_index = selected_;
       selection.caret_utf16 = caret_utf16_;
       ui->FinalizeFromElement(selection);
     }
@@ -294,7 +328,6 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
   ITfDocumentMgr* document_ = nullptr;
   DWORD flags_ = 0;
   int selected_ = -1;
-  bool shown_ = true;
   // The UI element manager may keep the element after EndUIElement; the module stays
   // loaded until its last Release reaches this object.
   epocanva::tsf::edit::ModuleObjectGuard module_guard_{
@@ -725,6 +758,7 @@ void CandidateUi::End() {
   }
   begun_ = false;
   host_drawn_ = false;
+  tip_ui_allowed_ = false;
   element_id_ = 0;
   ReleaseElement();
   window_.Hide();
@@ -732,6 +766,25 @@ void CandidateUi::End() {
   diagnostics_.host_drawn = false;
   diagnostics_.window_visible = false;
 }
+
+void CandidateUi::OnElementShow(bool show) {
+  if (!show) {
+    ++diagnostics_.show_false_notifications;
+    tip_ui_allowed_ = false;
+    window_.Hide();
+    diagnostics_.window_visible = false;
+    return;
+  }
+  ++diagnostics_.show_true_notifications;
+  tip_ui_allowed_ = true;
+  // Re-read the live anchor on the next paced wake; this COM callback never starts a TSF
+  // edit session or blocks on layout.
+  if (host_ != nullptr) {
+    host_->OnUiShowRequested();
+  }
+}
+
+bool CandidateUi::ElementShown() const { return window_.visible(); }
 
 void CandidateUi::ReleaseElement() {
   if (element_ != nullptr) {
@@ -755,6 +808,7 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
     return;
   }
   ++diagnostics_.updates;
+  TraceStage("ui_update", static_cast<long long>(snapshot.items.size()));
   std::vector<std::wstring> strings;
   strings.reserve(snapshot.items.size());
   std::vector<CandidateWindowItem> window_items;
@@ -776,13 +830,15 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
   if (element_ == nullptr) {
     element_ = new CandidateUiElement(bridge_, snapshot.version);
   }
+  bool newly_begun = false;
   if (!begun_) {
     element_->SetData(strings, selected, document, flags, snapshot.identity.context_id,
                       snapshot.identity.generation, snapshot.caret_utf16);
-    BOOL show = TRUE;
+    BOOL show = TRUE;  // The TIP asks to present; the host writes its decision here.
     DWORD element_id = 0;
     const HRESULT began = manager_->BeginUIElement(element_, &show, &element_id);
     if (FAILED(began) || element_id == 0) {
+      TraceStage("ui_begin_failed", static_cast<long long>(began));
       ++diagnostics_.begin_failures;
       ReleaseElement();
       if (document != nullptr) {
@@ -793,8 +849,11 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
     }
     ++diagnostics_.begins;
     begun_ = true;
+    newly_begun = true;
     element_id_ = element_id;
     host_drawn_ = show == FALSE;
+    tip_ui_allowed_ = !host_drawn_;
+    TraceStage("ui_host_drawn", host_drawn_ ? 1 : 0);
     std::lock_guard<std::mutex> guard(bridge_->mutex);
     bridge_->version = snapshot.version;
     bridge_->context_id = snapshot.identity.context_id;
@@ -806,6 +865,7 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
                       snapshot.identity.generation, snapshot.caret_utf16);
     const HRESULT updated = manager_->UpdateUIElement(element_id_);
     if (FAILED(updated)) {
+      TraceStage("ui_update_failed", static_cast<long long>(updated));
       ++diagnostics_.update_failures;
       End();
       if (document != nullptr) {
@@ -820,25 +880,48 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
     bridge_->caret_utf16 = snapshot.caret_utf16;
     bridge_->last_selected = selected;
   }
+  if (newly_begun && host_drawn_) {
+    // UILess contract: after BeginUIElement answers FALSE the TIP must call
+    // UpdateUIElement so the host can read the full element (all update flags are set).
+    // Without this notification a host-drawn list has no data to draw.
+    const HRESULT updated = manager_->UpdateUIElement(element_id_);
+    if (FAILED(updated)) {
+      TraceStage("ui_host_drawn_update_failed", static_cast<long long>(updated));
+      ++diagnostics_.update_failures;
+      End();
+      if (document != nullptr) {
+        document->Release();
+      }
+      return;
+    }
+    ++diagnostics_.host_drawn_updates;
+  }
   if (document != nullptr) {
     document->Release();
   }
   diagnostics_.begun = begun_;
   diagnostics_.host_drawn = host_drawn_;
-  if (host_drawn_) {
-    // TSF told us the host draws this element. Never create a second, floating list.
+  if (!tip_ui_allowed_) {
+    // pbShow=FALSE (or an explicit Show(FALSE)) is the host's presentation decision. The
+    // element stays registered and answers every query; this class never draws a second UI.
+    TraceStage("ui_host_drawn_honored", 1);
     window_.Hide();
+    diagnostics_.window_created = window_.created();
     diagnostics_.window_visible = false;
     return;
   }
   if (anchor == nullptr) {
+    TraceStage("ui_no_anchor", 1);
     window_.Hide();
+    diagnostics_.window_created = window_.created();
     diagnostics_.window_visible = false;
     ++diagnostics_.no_anchor_hides;
     return;
   }
+  TraceStage("ui_show_attempt", 1);
   window_.Show(window_items, selected, snapshot.page_no, snapshot.page_size,
                snapshot.is_last_page, *anchor);
+  TraceStage("ui_window_visible", window_.visible() ? 1 : 0);
   diagnostics_.window_created = window_.created();
   diagnostics_.window_visible = window_.visible();
 }
@@ -868,6 +951,7 @@ void CandidateUi::OnHostEnd(DWORD element_id) {
   // by End()/Stop() after the manager call.
   begun_ = false;
   host_drawn_ = false;
+  tip_ui_allowed_ = false;
   element_id_ = 0;
   window_.Hide();
   if (bridge_) {

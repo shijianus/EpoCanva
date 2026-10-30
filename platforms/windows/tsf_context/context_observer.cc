@@ -12,6 +12,20 @@ namespace epocanva {
 namespace tsf {
 namespace context {
 
+namespace {
+
+#ifdef EPOCANVA_PRODUCT_TRACE
+void TraceStage(const char* stage, long long value) {
+  char line[192];
+  std::snprintf(line, sizeof(line), "EPOCANVA_TRACE|%s|%lld\n", stage, value);
+  ::OutputDebugStringA(line);
+}
+#else
+inline void TraceStage(const char*, long long) {}
+#endif
+
+}  // namespace
+
 const char* DescribeContextDropReason(ContextDropReason reason) {
   switch (reason) {
     case ContextDropReason::kNone:
@@ -127,6 +141,14 @@ bool SameDocumentManager(ITfDocumentMgr* left, ITfDocumentMgr* right) {
   return same;
 }
 
+bool RetryableSelection(SelectionReadStatus status) {
+  // A WinUI input site can briefly refuse the TIP's read session or expose no default
+  // selection while it processes a key. Keep the published target and retry; the writer
+  // still revalidates the live selection before any text write.
+  return status == SelectionReadStatus::kSessionUnavailable ||
+         status == SelectionReadStatus::kNoSelection;
+}
+
 ContextDropReason ReasonForSelection(SelectionReadStatus status) {
   switch (status) {
     case SelectionReadStatus::kNonCollapsed:
@@ -199,6 +221,11 @@ struct ContextObserver::State {
   LONG published_caret_utf16 = 0;
   bool need_bind = false;
   bool selection_read_active = false;
+  // A transiently unavailable WinUI selection is retried on paced wakes, but only for a
+  // bounded number of attempts per binding. An endless retry would keep the STA awake with
+  // no target and no user-visible progress.
+  static constexpr int kMaxSelectionRetryAttempts = 20;
+  int selection_retry_attempts = 0;
   // Set when a Push/Pop notification may have arrived before the stack reflected it. Pump
   // re-reads GetTop once the notification has returned.
   bool top_recheck = false;
@@ -234,6 +261,7 @@ struct ContextObserver::State {
     }
     context_id = 0;
     generation = 0;
+    selection_retry_attempts = 0;
   }
 
   void ResetSelectionRead() {
@@ -416,6 +444,8 @@ struct ContextObserver::State {
 
   // --- target publication ----------------------------------------------------------------
   void DropPublished(ContextDropReason reason) {
+    TraceStage("observer_drop", static_cast<long long>(reason));
+    selection_retry_attempts = 0;
     if (!target_published) {
       counters.last_refusal_reason = reason;
       return;
@@ -517,6 +547,8 @@ struct ContextObserver::State {
   }
 
   void PublishTarget(LONG caret_utf16) {
+    TraceStage("observer_publish_attempt", caret_utf16);
+    selection_retry_attempts = 0;
     if (sink == nullptr || top_context == nullptr) {
       // No listener to publish to; nothing is bound. SetSink() does not replay the target.
       need_bind = false;
@@ -541,6 +573,7 @@ struct ContextObserver::State {
     generation = record.generation;
     published_caret_utf16 = caret_utf16;
     target_published = true;
+    TraceStage("observer_publish", caret_utf16);
     ++counters.target_binds;
     if (bind_evidence == TargetBindingEvidence::kNone) {
       bind_evidence = TargetBindingEvidence::kRevalidation;
@@ -806,6 +839,7 @@ struct ContextObserver::State {
     ITfDocumentMgr* focus = nullptr;
     const HRESULT focus_hr = thread_mgr->GetFocus(&focus);
     if (FAILED(focus_hr) || focus == nullptr) {
+      TraceStage("observer_focus_none", 1);
       if (focused_dm != nullptr) {
         ++counters.focus_revalidation_changes;
         ResetSelectionRead();
@@ -829,8 +863,19 @@ struct ContextObserver::State {
     focus->Release();
   }
 
+  bool ConsumeSelectionRetry() {
+    if (selection_retry_attempts >= kMaxSelectionRetryAttempts) {
+      ++counters.selection_retry_budget_exhausted;
+      return false;
+    }
+    ++selection_retry_attempts;
+    ++counters.selection_retries;
+    return true;
+  }
+
   void Pump() {
     ++counters.pumps;
+    TraceStage("observer_pump", need_bind ? 1 : 0);
     if (closed || !subscribed) {
       return;
     }
@@ -860,6 +905,11 @@ struct ContextObserver::State {
       ++counters.selection_reads_completed;
       if (!snapshot.ok()) {
         ++counters.selection_refusals;
+        if (RetryableSelection(snapshot.status) && ConsumeSelectionRetry()) {
+          TraceStage("observer_selection_retry", static_cast<long long>(snapshot.status));
+          need_bind = true;
+          return;
+        }
         DropPublished(ReasonForSelection(snapshot.status));
         need_bind = false;
         bind_evidence = TargetBindingEvidence::kNone;
@@ -870,6 +920,12 @@ struct ContextObserver::State {
     }
     if (!reader->Begin(top_context)) {
       ++counters.selection_refusals;
+      if (ConsumeSelectionRetry()) {
+        TraceStage("observer_selection_retry_begin", 1);
+        need_bind = true;
+        return;
+      }
+      TraceStage("observer_selection_retry_exhausted", 1);
       DropPublished(ContextDropReason::kSelectionUnavailable);
       need_bind = false;
       bind_evidence = TargetBindingEvidence::kNone;
@@ -885,6 +941,11 @@ struct ContextObserver::State {
     ++counters.selection_reads_completed;
     if (!snapshot.ok()) {
       ++counters.selection_refusals;
+      if (RetryableSelection(snapshot.status) && ConsumeSelectionRetry()) {
+        TraceStage("observer_selection_retry", static_cast<long long>(snapshot.status));
+        need_bind = true;
+        return;
+      }
       DropPublished(ReasonForSelection(snapshot.status));
       need_bind = false;
       return;
@@ -988,6 +1049,7 @@ struct ContextObserver::State {
     }
     subscribed = true;
     counters.subscribed = true;
+    TraceStage("observer_subscribe", 1);
 
     // Adopt the current focus without assuming a notification will arrive for it. The
     // initial selection read and bind happen in Pump.
@@ -1004,6 +1066,7 @@ struct ContextObserver::State {
     if (top_context == nullptr) {
       bind_evidence = TargetBindingEvidence::kNone;
     }
+    TraceStage("observer_top_context", top_context != nullptr ? 1 : 0);
     return true;
   }
 };

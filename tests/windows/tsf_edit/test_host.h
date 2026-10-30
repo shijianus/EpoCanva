@@ -161,6 +161,8 @@ class TestDocument {
   // Moves the document's default selection with a real synchronous read/write TSF edit
   // session owned by `client`. UTF-16 code units; used to prove positional refusal.
   HRESULT SetSelectionForTest(TfClientId client, LONG caret_utf16);
+  // Sets a non-collapsed default selection [start, end) with the same real edit session.
+  HRESULT SetSelectionRangeForTest(TfClientId client, LONG start_utf16, LONG end_utf16);
   // Flips the document's real read-only state (the store's GetStatus answer).
   void SetReadOnly(bool read_only);
   // Changes the InputScope metadata the document's store publishes.

@@ -535,6 +535,12 @@ struct SeamCounters {
   long long last_replacement_expected_units;
   long long last_edit_observed_caret;
   long long last_suggestion_expected_caret;
+  long long candidate_anchor_caret;
+  long long candidate_anchor_expected;
+  int candidate_anchor_retries;
+  int candidate_token_origin_valid;
+  long long candidate_token_origin_caret;
+  long long predicted_host_caret;
 };
 
 using SeamQueryFn = int (*)(SeamCounters*);
@@ -2371,6 +2377,12 @@ bool RunCandidateCase(const std::filesystem::path& stage,
               << " snapshot_caret=" << after_newer.candidate_caret
               << " input_units=" << after_newer.candidate_input_units
               << " host_token=" << after_newer.host_token_units
+              << " origin=" << after_newer.candidate_token_origin_caret << "/"
+              << after_newer.candidate_token_origin_valid
+              << " expected=" << after_newer.candidate_anchor_expected
+              << " anchor=" << after_newer.candidate_anchor_caret
+              << " predicted=" << after_newer.predicted_host_caret
+              << " retries=" << after_newer.candidate_anchor_retries
               << " doc_caret=" << test_case.doc->selection_start_utf16()
               << " attempts=" << after_newer.replacement_attempts
               << " applied=" << after_newer.replacement_applied
@@ -2767,6 +2779,41 @@ bool RunReplacementFaultCase(const std::filesystem::path& stage,
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &d_space, &error) &&
                  !d_space,
              "faults D: boundary stays with the host: " + error);
+  reference.HostInsert(L" ");
+
+  // F. The caret becomes a non-collapsed selection after the menu was drawn. The old
+  // selection must write nothing: the writer refuses a non-collapsed selection and the
+  // controller refuses a menu whose token is no longer at the live caret.
+  RequireReady(*test_case.host, sink, context, "faults F: ready");
+  LocalCheck(SendTextHost(&route, L"hel", &error), "faults F: token: " + error);
+  reference.HostInsert(L"hel");
+  CheckDocExact(test_case.doc->text_utf16(), reference.text, "faults F: token exact");
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 10000),
+             "faults F: the menu is stable");
+  const unsigned long long range_version = counters.candidate_version;
+  const std::wstring range_before = test_case.doc->text_utf16();
+  const std::uint64_t range_set_text = test_case.doc->diagnostics().store.set_text_calls;
+  const LONG range_end = test_case.doc->selection_start_utf16();
+  const LONG range_start = range_end - 3;
+  LocalCheck(SUCCEEDED(test_case.doc->SetSelectionRangeForTest(app_client, range_start,
+                                                              range_end)),
+             "faults F: the selection became a real non-collapsed range");
+  PumpSlice(*test_case.host, 300);
+  (void)seam.select(range_version, 1);
+  PumpSlice(*test_case.host, 300);
+  CheckDocExact(test_case.doc->text_utf16(), range_before,
+                "faults F: the selection from before the range wrote nothing");
+  LocalCheck(test_case.doc->diagnostics().store.set_text_calls == range_set_text,
+             "faults F: no SetText was issued for a non-collapsed selection");
+  LocalCheck(SUCCEEDED(test_case.doc->SetSelectionForTest(
+                 app_client, static_cast<LONG>(reference.text.size()))),
+             "faults F: the caret returned to the end");
+  PumpSlice(*test_case.host, 500);
+  RequireReady(*test_case.host, sink, context, "faults F: the binding recovered");
+  bool f_space = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &f_space, &error) &&
+                 !f_space,
+             "faults F: boundary stays with the host: " + error);
   reference.HostInsert(L" ");
 
   // E. The write applies and then reports failure: the product must not roll back, must

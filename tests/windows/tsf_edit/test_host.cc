@@ -221,8 +221,8 @@ namespace {
 
 class SetSelectionEditSession final : public ITfEditSession {
  public:
-  SetSelectionEditSession(ITfContext* context, LONG caret_utf16)
-      : context_(context), caret_utf16_(caret_utf16) {
+  SetSelectionEditSession(ITfContext* context, LONG start_utf16, LONG end_utf16)
+      : context_(context), start_utf16_(start_utf16), end_utf16_(end_utf16) {
     context_->AddRef();
   }
 
@@ -268,7 +268,7 @@ class SetSelectionEditSession final : public ITfEditSession {
       current.range->Release();
       return S_OK;
     }
-    const HRESULT extent = acp->SetExtent(caret_utf16_, 0);
+    const HRESULT extent = acp->SetExtent(start_utf16_, end_utf16_ - start_utf16_);
     acp->Release();
     if (FAILED(extent)) {
       current.range->Release();
@@ -297,7 +297,8 @@ class SetSelectionEditSession final : public ITfEditSession {
 
   std::atomic<LONG> reference_count_{1};
   ITfContext* context_ = nullptr;
-  LONG caret_utf16_ = 0;
+  LONG start_utf16_ = 0;
+  LONG end_utf16_ = 0;
   bool ran_ = false;
   HRESULT result_ = E_FAIL;
 };
@@ -308,7 +309,28 @@ HRESULT TestDocument::SetSelectionForTest(TfClientId client, LONG caret_utf16) {
   if (context_ == nullptr || client == 0 || caret_utf16 < 0) {
     return E_INVALIDARG;
   }
-  SetSelectionEditSession* callback = new SetSelectionEditSession(context_, caret_utf16);
+  SetSelectionEditSession* callback = new SetSelectionEditSession(context_, caret_utf16,
+                                                                 caret_utf16);
+  HRESULT session_hr = S_OK;
+  const HRESULT request = context_->RequestEditSession(
+      client, callback, TF_ES_SYNC | TF_ES_READWRITE, &session_hr);
+  const bool ran = callback->ran();
+  const HRESULT result = callback->result();
+  callback->Release();
+  if (FAILED(request) || session_hr == TF_E_SYNCHRONOUS || FAILED(session_hr) || !ran) {
+    return FAILED(request) ? request : (FAILED(session_hr) ? session_hr : E_FAIL);
+  }
+  return result;
+}
+
+HRESULT TestDocument::SetSelectionRangeForTest(TfClientId client, LONG start_utf16,
+                                               LONG end_utf16) {
+  if (context_ == nullptr || client == 0 || start_utf16 < 0 ||
+      end_utf16 < start_utf16) {
+    return E_INVALIDARG;
+  }
+  SetSelectionEditSession* callback =
+      new SetSelectionEditSession(context_, start_utf16, end_utf16);
   HRESULT session_hr = S_OK;
   const HRESULT request = context_->RequestEditSession(
       client, callback, TF_ES_SYNC | TF_ES_READWRITE, &session_hr);
