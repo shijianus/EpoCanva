@@ -637,12 +637,12 @@ version 与 anchor 检查都在展示前）。observer 的 WinUI 瞬时选择读
 | DLL SHA-256 | `911B63A3FB79BFC26A873E879A4A9B5661A4DE938121D1961AB78C62CC5E8294` |
 | 注册身份/范围 | CLSID `{B440F702-63E4-4D47-BCC4-074899ABA836}`；en-US profile `{7D3E2A94-5C61-4F0B-9E3A-1B8D6C4F2A71}`；HKLM `Software\Classes\CLSID` 下本产品键 + `GUID_TFCAT_TIP_KEYBOARD` + `GUID_TFCAT_TIPCAP_UIELEMENTENABLED`；仅此产品，不触碰其他输入法 |
 | 应用 | 本轮新建的唯一空文件 + 本轮唯一新建 Notepad 进程（普通权限，`is_elevated=False`） |
-| 输入/选择 | `alpha hel` → 真实候选窗口可见 → 确认 Down 两次后的选中项确为非 RAW 补全 → Enter；不得盲按 Down/Enter |
+| 输入/选择 | `alpha hel` → 真实候选窗口可见且高度至少两行 → 点击第 1 行（产品契约：第 0 行 RAW，第 1 行补全/拼写，非 RAW）→ 验证文档变化且 `alpha ` 前缀保持；不发送 Down/Enter，不硬编码 Down 次数；候选不存在或不足两行则停止 |
 | 预计用时 | 2–3 分钟测试 + 清理；触发器/agent 硬截止 6 分钟 |
 | 前台空闲要求 | 注册后等待前台空闲 ≥0.9 s 才由提权 relay 置前；每个按键前验证本轮 PID/HWND、文档子窗口焦点、en-US 布局、Shift/Ctrl/Alt/Caps、完整性级别；任何变化立即停止 |
 | 停止/恢复/清理 | 失败或超时写 `stop.flag`，agent 不再输入并关闭本轮 Notepad/文件；finally 中 deactivate → unregister profile → `unregister_tip.ps1`，验证 COM、两个类别、TIP key、profile 全部 absent；恢复测试线程原 HKL |
 | UAC 取消 | 立即停止，不自动重试、不沿用旧轮批准；不做任何注册/输入 |
-| 已知限制 | 如果 Notepad 仍返回 `pbShow=FALSE` 且不绘制宿主候选，产品按契约**不会**自绘；本轮将在候选窗口缺失处停止并记录宿主限制，不发送 Down/Enter。只有宿主返回 TRUE（或 `Show(TRUE)` 交回）且真实候选窗口可见时才继续选择 |
+| 已知限制 | 如果 Notepad 仍返回 `pbShow=FALSE` 且不绘制宿主候选，产品按契约**不会**自绘；本轮将在候选窗口缺失处停止并记录宿主限制，不发送任何选择输入。只有宿主返回 TRUE（或 `Show(TRUE)` 交回）且真实候选窗口可见时才点击第 1 行。若第 1 行结果不是 `held`，记录实际非 RAW 文本和前缀/焦点结果，不以硬编码文本判定失败 |
 
 本申请对应本轮已经完成的 B 层证据（§11.8）：正式链路实现和回归已冻结，但正式包在真实
 宿主中的 `pbShow` 行为、候选可见性和选择仍必须由这一次 UAC 轮次验证；不得用 trace
