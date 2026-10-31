@@ -9,8 +9,9 @@
 文档提交：`e9e7038`。本行及随后的纯文档修正只记录 SHA 与最终 git 状态，不改变二进制。
 本轮起点 HEAD 为 `3de9adfe21fd7e8817c39cd7c363aeac7a19687c`；随后提交
 `b9386f4`（UIElement 契约、token 锚点、有界重试、B 层测试）和 `488b6f5`
-（UIElement 能力类别注册工具）。冻结正式包从 `488b6f5` 构建；本报告及两份契约文档
-提交为 `e9e7038`（随后的纯文档修正不改变二进制），代码工作区在构建后无改动。
+（UIElement 能力类别注册工具）。2026-10-31 又提交 `2574ccc`（preflight-first 普通权限
+测试工具；见 §11.12）。冻结正式包仍从 `488b6f5` 构建，产品 DLL/包未重建；本报告及
+两份契约文档提交为 `e9e7038`（随后的纯文档修正不改变二进制），代码工作区在构建后无改动。
 没有 push/tag/amend/reset --hard/clean；没有留下主系统注册（测试后已移除并验证）；
 仍为**内部运行包**。VM 已关闭，未再启动。
 
@@ -622,9 +623,9 @@ version 与 anchor 检查都在展示前）。observer 的 WinUI 瞬时选择读
 
 ### 11.9 下一步（严格顺序）
 
-1. 先修复普通权限 agent 的 Notepad 启动/交互桌面问题（本轮 `CreateProcess` 返回 false，
-   `prev_foreground=0`，未创建 Notepad）；然后**重新申请一次新的 UAC** 用 r3 重跑最小
-   闭环。不得复用 2026-10-30 的授权，也不得把本轮编排失败写成产品失败或通过。
+1. 普通权限 agent 已改为 preflight-first，并完成 3/3 无注册/无输入预检（§11.12）。下一步
+   需要**重新申请一次新的 UAC**，用冻结 r3 包和新工具运行正式最小闭环。不得复用 2026-10-30
+   的授权，也不得把旧编排失败写成产品失败或通过。
 2. 最小闭环正式通过后，按任务书依次执行：1202 输入与技术 token；移动光标/粘贴/外部
    编辑；过期候选拒绝；真实 `ITfUIElementMgr` 全生命周期；真实 token 矩形/无布局隐藏；
    启动/停用/关闭；设置生效时机；环境实际支持的 DPI/多屏。每项都保持焦点门、仅操作
@@ -677,4 +678,51 @@ stage8 的自绘结果代替。
   （`agent-result.json`、`agent.log`、`elevated-summary.txt`、`registration.json`、
   `removal.json`、`status-*.txt`、`diagnose.txt`、`trace.txt`）。
 - 下一步：修复普通权限 agent 的交互桌面/Notepad 启动路径后，重新申请新的 UAC 轮次；
-  未修复前不重试。
+  未修复前不重试。该修复与预检见 §11.12。
+
+### 11.12 普通权限 agent 修复、preflight-first 握手与 3 次预检（2026-10-31）
+
+**旧轮次失败的可证事实与不可归因部分**：2026-10-30 的 agent 只留下
+`notepad_launcher_pid=0`、`notepad_top_hwnd=0`、`prev_foreground=0`、`notepad window not
+found`；旧代码没有记录 `CreateProcess` 的原始 BOOL、`GetLastError` 或异常，因此**不能**
+仅凭这些字段认定 `CreateProcess` 失败或交互桌面不可用。本轮用 agent 同形的
+`CreateProcess` 声明、同一 `D:\EpoCanvaIsolation` 测试目录和 `Start-Process -WindowStyle
+Hidden` 上下文逐一复测，均得到 `raw_return=true`、`win32_error=0`、新的窗口进程；
+旧轮次的一次“agent-exact”诊断命名成了 `CreateProcessAgent`，内核无此导出（错误 203），
+那是诊断脚本自身的问题，不是 agent 的根因。旧轮次唯一异常是 `prev_foreground=0`，而旧
+握手是在 UAC/提权之后才首次启动 agent；因此新设计把普通权限 agent 和 preflight 提前到
+UAC 之前，并完整记录上下文/API。**旧失败的确切根因仍不能由旧证据唯一证明**；本轮修复的是
+可观察的编排缺陷和缺失的失败字段，而不是把假设写成结论。
+
+**发现并修复的真实问题**：
+1. 预检测试文件曾使用相对路径，而 Notepad 的工作目录是 `System32`；Windows 11 Notepad
+   因此恢复旧会话/标签，窗口标题不是本轮唯一文件。修复：所有测试文件使用绝对路径。
+2. Windows 11 Notepad 会复用已有进程/会话；旧 agent 没有预存实例快照。修复：preflight
+   和有正式阶段的 agent 都要求启动前 Notepad 进程数为 0；启动后校验窗口 PID 不在预存集合、
+   标题包含唯一文件、进程创建时间晚于启动；身份不明确时**不关闭**任何窗口。
+3. 旧 agent 的 `CreateProcess` 字段不可诊断。修复：记录 `entered/called/api/raw_return/
+   win32_error/exception/STARTUPINFO.cb/PROCESS_INFORMATION/launcher/window PID/进程创建时间`；
+   使用 `CreateProcessW` + `ExactSpelling` + Unicode + `SetLastError`。
+
+**3 次无注册、无输入预检**（session `15e5e7d576b4438d967a34df93be19d8`，从工具提交
+`2574ccc346c9c26fbaf5b559f8fa05e1680feb9b` 的不可变运行副本运行）：
+
+| run | 结果 | 原始 API | 窗口/UIA | 归属 | 残留 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | ok | `raw=True, error=0` | 新窗口 PID 152468；`RichEditD2DPT` | 非预存，标题含唯一文件，创建时间晚于启动 | 0 Notepad；文件已删 |
+| 2 | ok | `raw=True, error=0` | 新窗口 PID 107840；`RichEditD2DPT` | 同上 | 0 Notepad；文件已删 |
+| 3 | ok | `raw=True, error=0` | 新窗口 PID 83852；`RichEditD2DPT` | 同上 | 0 Notepad；文件已删 |
+
+三次 context 均为：session 1、`WinSta0`、`Default` 线程桌面、`Default` 输入桌面且匹配、
+Medium 完整性、`foreground=29953842`；agent PID 109956/116172/106700，父 PID 102320
+（普通权限 PowerShell），无输入注入。运行副本 SHA-256：
+agent `125B899B...C24D`、preflight lib `A4E3446F...B0D`、runner `FC230CC7...E988`、
+trigger `F742361E...8DCD`、orchestrator `3D49376D...80A8`。证据目录：
+`build/w3a-c-local/preflight/session-15e5e7d576b4438d967a34df93be19d8/`；运行副本：
+`build/w3a-c-local/run-20261031-081141/`。
+
+**新握手顺序**：普通权限 agent 先启动 → preflight → `preflight-ready`（带 session）→
+用户批准一次 UAC → 提权 orchestrator 注册/激活 → `registration-ready`（同 session）→
+同一 agent 创建正式 Notepad → `test-window-ready` → `test-start` → agent 退出 →
+`cleanup-complete`。任何 sleep/wake、会话失效、agent 提前退出、清理先于测试、超时、
+UAC 取消或预存 Notepad 都停止；旧授权不复用。提权侧不置前、不输入。
