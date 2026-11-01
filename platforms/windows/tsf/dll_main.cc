@@ -15,10 +15,12 @@
 // not been verified. Revisit it only with that verification in hand
 // (docs/windows/tsf-bootstrap.md records the decision).
 //
-// THE TWO EXPORTS (epocanva_tsf.def). DllRegisterServer/DllUnregisterServer do NOT
-// exist in this DLL: the P3.1 round is explicitly unregistered, and an absent export is
-// a stronger statement than a stub that would "succeed". The test program asserts both
-// names are absent from the export table.
+// THE EXPORTS (epocanva_tsf.def). DllGetClassObject and DllCanUnloadNow are the COM
+// entry points; W3-B adds DllRegisterServer/DllUnregisterServer, implemented in
+// registration.cc with readback verification, rollback and a foreign-CLSID refusal. The
+// self-registration exports are exported from the product DLL because COM (and regsvr32)
+// require them, but they are still not called by any test: writing the real registry is
+// reserved for an explicitly authorized layer-C session.
 //
 // EXCEPTION BOUNDARY. No C++ exception may escape a COM entry point (AGENTS.md P3.1
 // contract, item 10): the exports wrap their bodies and translate anything that gets

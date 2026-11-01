@@ -1,0 +1,33 @@
+#include <windows.h>
+
+// W3-B: resource identity of the text service DLL itself. The icon is the language-bar
+// identity Windows can read from the module; the numeric version is the 0.2.6 prefix of
+// platforms/windows/product/VERSION (0.2.6-w3b; the suffix is not representable here).
+1 ICON "EpoCanva.ico"
+
+1 VERSIONINFO
+FILEVERSION 0,2,6,0
+PRODUCTVERSION 0,2,6,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "EpoCanva English Alpha text service (internal alpha)"
+      VALUE "FileVersion", "0.2.6.0"
+      VALUE "InternalName", "epocanva_tsf"
+      VALUE "OriginalFilename", "epocanva_tsf.dll"
+      VALUE "ProductName", "EpoCanva English Alpha"
+      VALUE "ProductVersion", "0.2.6.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

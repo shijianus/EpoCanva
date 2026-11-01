@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -35,8 +36,10 @@ constexpr std::array<RequiredFile, 8> kRequiredFiles = {{
 constexpr const char* kCapabilities =
     "English natural keyboard input through a TSF key sink, prefix completion, "
     "one-edit spelling suggestions and a native candidate window (8 per page, arrow "
-    "selection, validated acceptance). No registration, installer, learning, other "
-    "languages or system-wide input in this build.";
+    "selection, validated acceptance). W3-B adds DllRegisterServer/DllUnregisterServer "
+    "for this product's own CLSID and TSF categories and a candidate_display fallback "
+    "setting. No installer, learning, other languages or system-wide input in this "
+    "build until registration is explicitly run.";
 
 struct WindowsVersion {
   DWORD major = 0;
@@ -132,6 +135,49 @@ bool QueryInprocServer(HKEY root, REGSAM access, const std::wstring& subkey,
   return true;
 }
 
+bool EndsWithDll(const std::wstring& path) {
+  constexpr wchar_t kSuffix[] = L"epocanva_tsf.dll";
+  constexpr std::size_t kSuffixLength = 16;
+  if (path.size() < kSuffixLength) {
+    return false;
+  }
+  return ::_wcsicmp(path.c_str() + path.size() - kSuffixLength, kSuffix) == 0;
+}
+
+// A CLSID key alone is not "registered by this product": a foreign tool could own the
+// same GUID, and a half-removed key could remain. The claim is this product's marker or
+// this product's DLL path, read from the same key the COM loader will use.
+bool QueryProductRegistration(HKEY root, REGSAM access, const std::wstring& clsid,
+                              std::wstring* server_path) {
+  const std::wstring base = L"SOFTWARE\\Classes\\CLSID\\" + clsid;
+  const std::wstring inproc = base + L"\\InprocServer32";
+  std::wstring path;
+  if (!QueryInprocServer(root, access, inproc, &path)) {
+    return false;
+  }
+  HKEY key = nullptr;
+  bool marker_ok = false;
+  if (::RegOpenKeyExW(root, base.c_str(), 0, access, &key) == ERROR_SUCCESS) {
+    wchar_t marker[64] = {};
+    DWORD type = 0;
+    DWORD bytes = sizeof(marker) - sizeof(wchar_t);
+    if (::RegQueryValueExW(key, L"EpoCanvaProduct", nullptr, &type,
+                           reinterpret_cast<LPBYTE>(marker), &bytes) == ERROR_SUCCESS &&
+        (type == REG_SZ || type == REG_EXPAND_SZ)) {
+      marker[bytes / sizeof(wchar_t)] = L'\0';
+      marker_ok = ::_wcsicmp(marker, L"epocanva_tsf") == 0;
+    }
+    ::RegCloseKey(key);
+  }
+  if (!marker_ok && !EndsWithDll(path)) {
+    return false;
+  }
+  if (server_path != nullptr) {
+    *server_path = path;
+  }
+  return true;
+}
+
 std::wstring FileStateFromVerification(const FileVerification* verification,
                                        bool manifest_ok) {
   if (verification == nullptr) {
@@ -171,13 +217,11 @@ bool IsTextServiceRegistered(std::wstring* server_path) {
   if (guid.empty()) {
     return false;
   }
-  const std::wstring subkey =
-      L"SOFTWARE\\Classes\\CLSID\\" + guid + L"\\InprocServer32";
-  if (QueryInprocServer(HKEY_LOCAL_MACHINE, KEY_READ | KEY_WOW64_64KEY, subkey,
-                        server_path)) {
+  if (QueryProductRegistration(HKEY_LOCAL_MACHINE, KEY_READ | KEY_WOW64_64KEY, guid,
+                               server_path)) {
     return true;
   }
-  return QueryInprocServer(HKEY_CURRENT_USER, KEY_READ, subkey, server_path);
+  return QueryProductRegistration(HKEY_CURRENT_USER, KEY_READ, guid, server_path);
 }
 
 bool CollectProductStatus(HMODULE module, ProductStatus* status, std::wstring* why) {
@@ -315,14 +359,22 @@ bool CollectProductStatusForPaths(const ProductPaths& paths, ProductStatus* stat
   AddItem(&collected, L"Settings", settings_detail,
           settings_status == SettingsLoadStatus::kLoaded ? StatusLevel::kOk
                                                          : StatusLevel::kWarning);
+  const bool always_self = collected.settings.settings.candidate_display ==
+                           CandidateDisplay::kAlwaysSelf;
+  AddItem(&collected, L"Candidate display",
+          always_self
+              ? L"always_self - the TIP draws even when the host claims the element; "
+                L"if the host also draws, two windows appear"
+              : L"host - the application's presentation decision is followed",
+          always_self ? StatusLevel::kWarning : StatusLevel::kOk);
 
   std::wstring server_path;
   collected.tsf_registered = IsTextServiceRegistered(&server_path);
   AddItem(&collected, L"Text service registration",
           collected.tsf_registered
               ? (L"CLSID is registered: " + server_path)
-              : L"not registered - the key sink is wired, but system registration is "
-                L"the W3 installer step",
+              : L"not registered - run DllRegisterServer (installer step) for the "
+                L"current user or machine",
           collected.tsf_registered ? StatusLevel::kOk : StatusLevel::kWarning);
 
   const WindowsVersion version = ReadWindowsVersion();
@@ -372,6 +424,10 @@ std::string FormatProductReport(const ProductStatus& status) {
     return std::string("unknown");
   }());
   line("settings_file", WideToUtf8(status.paths.settings_file.wstring()));
+  line("candidate_display",
+       status.settings.settings.candidate_display == CandidateDisplay::kAlwaysSelf
+           ? "always_self"
+           : "host");
   line("tsf_registration", status.tsf_registered ? "yes" : "no");
   line("capabilities", kCapabilities);
   for (std::size_t index = 0; index < status.items.size(); ++index) {

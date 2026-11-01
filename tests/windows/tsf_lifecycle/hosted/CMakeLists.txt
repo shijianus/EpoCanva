@@ -46,6 +46,7 @@ add_library(epocanva_tsf_hosted_test SHARED
   "${EpoCanva_Tsf_Source_Dir}/dll_main.cc"
   "${EpoCanva_Tsf_Source_Dir}/identifiers.cc"
   "${EpoCanva_Tsf_Source_Dir}/module_state.cc"
+  "${EpoCanva_Tsf_Source_Dir}/registration.cc"
   "${EpoCanva_Tsf_Source_Dir}/class_factory.cc"
   "${EpoCanva_Tsf_Source_Dir}/text_service.cc"
   "${EpoCanva_Tsf_Source_Dir}/engine_host.cc"

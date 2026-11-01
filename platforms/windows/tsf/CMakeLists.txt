@@ -56,6 +56,7 @@ add_library(epocanva_tsf SHARED
   dll_main.cc
   identifiers.cc
   module_state.cc
+  registration.cc
   class_factory.cc
   text_service.cc
   epocanva_tsf.def)
@@ -63,6 +64,7 @@ target_compile_definitions(epocanva_tsf PRIVATE
   _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(epocanva_tsf PRIVATE
   /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
+target_link_libraries(epocanva_tsf PRIVATE advapi32 ole32)
 
 # The .def file is the only export mechanism: no __declspec(dllexport) exists anywhere
 # in the sources, so the export table and the .def file cannot drift apart.

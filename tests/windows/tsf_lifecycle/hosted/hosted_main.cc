@@ -301,18 +301,21 @@ bool LoadHostedDll(const Options& options, HostDll* dll) {
   dll->lease_probe = reinterpret_cast<hosted::LeaseProbeFn>(
       ::GetProcAddress(dll->module, "EpoCanvaTestLeaseDoubleRelease"));
 
-  const bool product_ok = dll->get_class_object != nullptr && dll->can_unload != nullptr;
+  const bool registration_exports =
+      ::GetProcAddress(dll->module, "DllRegisterServer") != nullptr &&
+      ::GetProcAddress(dll->module, "DllUnregisterServer") != nullptr;
+  const bool product_ok = dll->get_class_object != nullptr && dll->can_unload != nullptr &&
+                          registration_exports;
   const bool seam_ok = dll->set_config != nullptr && dll->clear_config != nullptr &&
                        dll->get_diagnostics != nullptr && dll->set_start_gate != nullptr &&
                        dll->set_stop_gate != nullptr && dll->set_cleanup_gate != nullptr &&
                        dll->set_force_cleanup_failure != nullptr &&
                        dll->lease_probe != nullptr;
-  Check(product_ok, "DllGetClassObject and DllCanUnloadNow are exported");
+  Check(dll->get_class_object != nullptr && dll->can_unload != nullptr,
+        "DllGetClassObject and DllCanUnloadNow are exported");
   Check(seam_ok, "the private test seam exports are present");
-  Check(::GetProcAddress(dll->module, "DllRegisterServer") == nullptr,
-        "DllRegisterServer remains absent");
-  Check(::GetProcAddress(dll->module, "DllUnregisterServer") == nullptr,
-        "DllUnregisterServer remains absent");
+  Check(registration_exports,
+        "DllRegisterServer and DllUnregisterServer are exported");
   return product_ok && seam_ok;
 }
 

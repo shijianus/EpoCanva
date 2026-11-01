@@ -64,6 +64,13 @@ void ModuleSetHostFailed(bool failed);  // one-way latch; never cleared in a pro
 LONG ModuleHostActiveFlag();
 LONG ModuleHostFailedFlag();
 
+// W3-B registration accounting. DllRegisterServer/DllUnregisterServer bracket their whole
+// registry sequence with these so DllCanUnloadNow answers S_FALSE while keys are being
+// written, even though registration owns no COM object and no server lock.
+LONG ModuleBeginRegistration();
+LONG ModuleEndRegistration();
+LONG ModuleRegistrationActiveFlag();
+
 // Read-only counters for the private test seam. No caller in the product path uses these.
 LONG ModuleLiveObjectCount();
 LONG ModuleServerLockCount();

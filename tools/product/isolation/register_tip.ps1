@@ -63,13 +63,11 @@ if ($machine -ne 0x8664) {
 $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
 if ($null -ne $dumpbin) {
     $exports = & $dumpbin.Source /nologo /exports $DllPath 2>&1 | Out-String
-    foreach ($required in @('DllGetClassObject', 'DllCanUnloadNow')) {
+    foreach ($required in @('DllGetClassObject', 'DllCanUnloadNow',
+                            'DllRegisterServer', 'DllUnregisterServer')) {
         if ($exports -notmatch [regex]::Escape($required)) {
             throw "The product DLL does not export $required."
         }
-    }
-    if ($exports -match 'DllRegisterServer') {
-        Write-Host 'note: DllRegisterServer exists; this tool still performs the registration explicitly.'
     }
 } else {
     Write-Warning 'dumpbin.exe is not on PATH; the export check was skipped. The profile helper records its own results.'

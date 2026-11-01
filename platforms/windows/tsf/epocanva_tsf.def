@@ -1,21 +1,23 @@
-; EpoCanva P3.1 -- exports of the unregistered TSF text service DLL.
+; EpoCanva W3-B -- exports of the TSF text service DLL.
 ;
-; Exactly two exports, because exactly two behaviours exist in this round:
-;   DllGetClassObject  the COM class-object entry a host (or the test program, through
-;                      GetProcAddress) calls to reach IClassFactory
-;   DllCanUnloadNow    the unload verdict driven by platforms/windows/tsf/module_state.h
+; Exactly four exports:
+;   DllGetClassObject     the COM class-object entry a host (or a test program, through
+;                         GetProcAddress) calls to reach IClassFactory
+;   DllCanUnloadNow       the unload verdict driven by platforms/windows/tsf/module_state.h
+;   DllRegisterServer     W3-B COM registration: CLSID, InprocServer32, the keyboard TIP
+;                         category and the UIElement-enabled category. No language profile.
+;   DllUnregisterServer   the inverse; only this product's own keys are removed.
 ;
-; Both are marked PRIVATE: they are entry points for GetProcAddress and for the COM
-; loader, and nothing is ever linked against an import library for this DLL (the
-; lifecycle program loads it by absolute path only). PRIVATE keeps them out of any
-; import library and is what the linker expects for hand-exported symbols like these
-; (LNK4104 otherwise); it does not affect GetProcAddress, which resolves them by name
-; from the export table either way.
+; All four are marked PRIVATE: they are entry points for GetProcAddress, the COM loader and
+; regsvr32, and nothing is ever linked against an import library for this DLL (the lifecycle
+; program loads it by absolute path only). PRIVATE keeps them out of any import library and
+; is what the linker expects for hand-exported symbols (LNK4104 otherwise); it does not
+; affect GetProcAddress.
 ;
-; Deliberately ABSENT: DllRegisterServer and DllUnregisterServer. This round performs no
-; registry write, no profile registration and no category registration; an export that
-; does not exist cannot be handed to regsvr32 by accident. The lifecycle test asserts
-; both names are absent from this export table rather than trusting this comment.
+; The B-layer lifecycle tests assert this exact set: all four present, and no fifth
+; registration-like export.
 EXPORTS
     DllCanUnloadNow     PRIVATE
     DllGetClassObject   PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE

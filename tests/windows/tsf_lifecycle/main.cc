@@ -23,8 +23,9 @@
 //
 // MODES
 //   lifecycle       the ten boundary checks the brief lists, on the real exported
-//                   entry points: exports present (and the registration exports
-//                   absent), unknown CLSID refused, an unsupported IID refused at BOTH
+//                   entry points: exports present (including the W3-B registration
+//                   exports, checked but never called here), unknown CLSID refused, an
+//                   unsupported IID refused at BOTH
 //                   levels (DllGetClassObject and QueryInterface) with the module left
 //                   holding no live object, a null out-parameter refused, aggregation
 //                   refused, unload verdict S_FALSE with the factory alive, S_FALSE with
@@ -151,16 +152,18 @@ bool ResolveExports(HMODULE module, void** get_class_object, void** can_unload_n
   if (*get_class_object == nullptr || *can_unload_now == nullptr) {
     return false;
   }
-  // ...and the two registration exports that must NOT: their absence is the round's
-  // "no registration" statement in binary form (see epocanva_tsf.def).
-  Check(::GetProcAddress(module, "DllRegisterServer") == nullptr,
-        "DllRegisterServer is absent (this round registers nothing)",
+  // ...and the two W3-B registration exports, which must exist. This test never calls
+  // them: calling DllRegisterServer here would write the real registry, which only an
+  // explicitly authorized layer-C session may do. Their behaviour is covered by the
+  // fake-backend registration tests.
+  Check(::GetProcAddress(module, "DllRegisterServer") != nullptr,
+        "DllRegisterServer is exported",
         ::GetProcAddress(module, "DllRegisterServer") ? "present" : "absent");
-  Check(::GetProcAddress(module, "DllUnregisterServer") == nullptr,
-        "DllUnregisterServer is absent",
+  Check(::GetProcAddress(module, "DllUnregisterServer") != nullptr,
+        "DllUnregisterServer is exported",
         ::GetProcAddress(module, "DllUnregisterServer") ? "present" : "absent");
-  return ::GetProcAddress(module, "DllRegisterServer") == nullptr &&
-         ::GetProcAddress(module, "DllUnregisterServer") == nullptr;
+  return ::GetProcAddress(module, "DllRegisterServer") != nullptr &&
+         ::GetProcAddress(module, "DllUnregisterServer") != nullptr;
 }
 
 using DllGetClassObjectFn = HRESULT(WINAPI*)(REFCLSID, REFIID, LPVOID*);

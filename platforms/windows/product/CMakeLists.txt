@@ -101,6 +101,8 @@ add_library(epocanva_tsf_product SHARED
   "${_tsf_source_dir}/dll_main.cc"
   "${_tsf_source_dir}/identifiers.cc"
   "${_tsf_source_dir}/module_state.cc"
+  "${_tsf_source_dir}/registration.cc"
+  "${_tsf_source_dir}/registration.h"
   "${_tsf_source_dir}/class_factory.cc"
   "${_tsf_source_dir}/text_service.cc"
   "${_tsf_source_dir}/engine_host.cc"
@@ -116,7 +118,8 @@ add_library(epocanva_tsf_product SHARED
   product_engine_bootstrap.cc
   product_engine_bootstrap.h
   product_engine_config.cc
-  product_engine_config.h)
+  product_engine_config.h
+  EpoCanvaTsf.rc)
 target_compile_definitions(epocanva_tsf_product PRIVATE
   ${_product_definitions}
   ${_product_defines}
@@ -141,7 +144,7 @@ target_link_libraries(epocanva_tsf_product PRIVATE
   epocanva_tsf_coordinator
   epocanva_sta_waker
   epocanva_product_state
-  ole32 uuid oleaut32 bcrypt shell32)
+  ole32 uuid oleaut32 bcrypt shell32 advapi32)
 
 # W2 controlled test variant. It compiles the same product sources and is NOT staged or
 # shipped. An unregistered TIP cannot advise a real key sink (AdviseKeyEventSink answers
@@ -151,6 +154,8 @@ add_library(epocanva_tsf_direct_sink_test SHARED
   "${_tsf_source_dir}/dll_main.cc"
   "${_tsf_source_dir}/identifiers.cc"
   "${_tsf_source_dir}/module_state.cc"
+  "${_tsf_source_dir}/registration.cc"
+  "${_tsf_source_dir}/registration.h"
   "${_tsf_source_dir}/class_factory.cc"
   "${_tsf_source_dir}/text_service.cc"
   "${_tsf_source_dir}/engine_host.cc"
@@ -194,7 +199,7 @@ target_link_libraries(epocanva_tsf_direct_sink_test PRIVATE
   epocanva_tsf_coordinator
   epocanva_sta_waker
   epocanva_product_state
-  ole32 uuid oleaut32 bcrypt shell32)
+  ole32 uuid oleaut32 bcrypt shell32 advapi32)
 
 # A predictable output directory so the staging script never has to parse a CMake
 # target. Debug and Release are kept apart; only Release is packaged.
@@ -221,7 +226,7 @@ target_include_directories(epocanva_product_unit_tests PRIVATE
   "${_product_source_dir}"
   "${_tsf_source_dir}")
 target_link_libraries(epocanva_product_unit_tests PRIVATE
-  epocanva_product_core bcrypt shell32 ole32)
+  epocanva_product_core bcrypt shell32 ole32 version)
 
 add_executable(epocanva_product_engine_tests
   tests/product_engine_tests.cc
@@ -330,6 +335,20 @@ target_include_directories(epocanva_candidate_ui_tests PRIVATE
 target_link_libraries(epocanva_candidate_ui_tests PRIVATE
   ole32 oleaut32 uuid user32 gdi32 shell32)
 
+# W3-B: registration policy against an in-memory registry. The product's Win32 backend is
+# linked only in a layer-C session; this program never reaches the real hives.
+add_executable(epocanva_registration_tests
+  tests/registration_tests.cc
+  "${_tsf_source_dir}/registration.cc"
+  "${_tsf_source_dir}/module_state.cc"
+  "${_tsf_source_dir}/identifiers.cc")
+target_compile_definitions(epocanva_registration_tests PRIVATE ${_product_definitions})
+target_compile_options(epocanva_registration_tests PRIVATE ${_product_options})
+target_include_directories(epocanva_registration_tests PRIVATE
+  "${_product_source_dir}"
+  "${_tsf_source_dir}")
+target_link_libraries(epocanva_registration_tests PRIVATE advapi32 ole32)
+
 add_executable(epocanva_ui_tests
   tests/ui_tests.cc)
 target_compile_definitions(epocanva_ui_tests PRIVATE ${_product_definitions})
@@ -392,6 +411,7 @@ endif()
 
 set_target_properties(epocanva_product_unit_tests epocanva_product_engine_tests
                       epocanva_ui_tests epocanva_candidate_ui_tests
+                      epocanva_registration_tests
                       epocanva_sta_waker_tests
                       epocanva_key_admission_tests
                       epocanva_product_sink_tests PROPERTIES
@@ -400,6 +420,7 @@ set_target_properties(epocanva_product_unit_tests epocanva_product_engine_tests
   RUNTIME_OUTPUT_DIRECTORY_DEBUG "${_product_bin_dir_debug}")
 
 add_dependencies(epocanva_ui_tests EpoCanva)
+add_dependencies(epocanva_product_unit_tests EpoCanva epocanva_tsf_product)
 
 enable_testing()
 set(_product_assert
@@ -414,11 +435,11 @@ add_test(
     -DEXPECTED_EXIT=0
     "-DMARKER=RESULT PASS"
     -DMARKER_POLICY=require
-    "-DPASS_ARGS=--run-root;${_product_run}/unit"
+    "-DPASS_ARGS=--run-root;${_product_run}/unit;--exe;$<TARGET_FILE:EpoCanva>;--product-dll;$<TARGET_FILE:epocanva_tsf_product>;--version-file;${CMAKE_CURRENT_LIST_DIR}/VERSION"
     -DTIMEOUT_SECONDS=120
     -P ${_product_assert})
 set_tests_properties(product.unit.settings_manifest_paths
-  PROPERTIES TIMEOUT 180 LABELS "windows;product;settings;manifest;paths")
+  PROPERTIES TIMEOUT 180 LABELS "windows;product;settings;manifest;paths;version;icon")
 
 add_test(
   NAME product.integration.engine_settings
@@ -777,6 +798,53 @@ add_test(
 set_tests_properties(product.ui.candidate_window
   PROPERTIES TIMEOUT 180
              LABELS "windows;product;ui;candidate;lifecycle;screenshot;no-registration")
+
+# W3-B falsifiability control: the same program claims that a pbShow=FALSE host still gets
+# the default TIP window. That claim is false, so the run must exit 14 without RESULT PASS.
+add_test(
+  NAME product.ui.candidate_display_can_fail
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_candidate_ui_tests>
+    -DCASE=product-candidate-display-can-fail
+    -DEXPECTED_EXIT=14
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=forbid
+    "-DPASS_ARGS=--self-check-fail"
+    -DTIMEOUT_SECONDS=120
+    -P ${_product_assert})
+set_tests_properties(product.ui.candidate_display_can_fail
+  PROPERTIES TIMEOUT 180
+             LABELS "windows;product;ui;candidate;fallback;can-fail")
+
+add_test(
+  NAME product.unit.registration_fake_registry
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_registration_tests>
+    -DCASE=product-registration
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--self-test"
+    -DTIMEOUT_SECONDS=120
+    -P ${_product_assert})
+set_tests_properties(product.unit.registration_fake_registry
+  PROPERTIES TIMEOUT 180
+             LABELS "windows;product;registration;fake-registry;rollback;no-registration")
+
+add_test(
+  NAME product.unit.registration_can_fail
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_registration_tests>
+    -DCASE=product-registration-can-fail
+    -DEXPECTED_EXIT=14
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=forbid
+    "-DPASS_ARGS=--self-check-fail"
+    -DTIMEOUT_SECONDS=120
+    -P ${_product_assert})
+set_tests_properties(product.unit.registration_can_fail
+  PROPERTIES TIMEOUT 180
+             LABELS "windows;product;registration;rollback;can-fail")
 
 add_test(
   NAME product.ui.settings_window

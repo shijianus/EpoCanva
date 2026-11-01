@@ -15,6 +15,7 @@ volatile LONG g_live_objects = 0;
 volatile LONG g_server_locks = 0;
 volatile LONG g_host_active = 0;
 volatile LONG g_host_failed = 0;
+volatile LONG g_registration_active = 0;
 
 }  // namespace
 
@@ -71,6 +72,21 @@ LONG ModuleHostFailedFlag() { return g_host_failed; }
 LONG ModuleLiveObjectCount() { return g_live_objects; }
 LONG ModuleServerLockCount() { return g_server_locks; }
 
+LONG ModuleBeginRegistration() {
+  return InterlockedIncrement(&g_registration_active);
+}
+
+LONG ModuleEndRegistration() {
+  const LONG after = InterlockedDecrement(&g_registration_active);
+  if (after < 0) {
+    InterlockedIncrement(&g_registration_active);
+    return 0;
+  }
+  return after;
+}
+
+LONG ModuleRegistrationActiveFlag() { return g_registration_active; }
+
 bool ModuleCanUnload() {
   // Both counters are read non-atomically here, but DllCanUnloadNow is only meaningful
   // when the caller has released everything it holds and no other thread of the same
@@ -83,7 +99,7 @@ bool ModuleCanUnload() {
   // been destroyed after a clean stop; g_host_failed is one-way. Neither check joins,
   // initialises the engine, calls COM or performs file I/O.
   return g_live_objects == 0 && g_server_locks == 0 && g_host_active == 0 &&
-         g_host_failed == 0;
+         g_host_failed == 0 && g_registration_active == 0;
 }
 
 }  // namespace tsf
