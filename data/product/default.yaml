@@ -3,7 +3,11 @@
 # This file ships read-only in <product>/data. User settings are not written here:
 # EpoCanva.exe writes settings.ini and epocanva_english.custom.yaml below the per-user
 # data root, and the text service deploys that patch at the next engine start.
-config_version: "0.2.0-w2"
+#
+# config_version tracks the product's internal package version (VERSION), not the Rime ABI:
+# it is the string handed to Rime's deploy_config_file so a changed configuration is
+# re-deployed. The same internal version is used for the schema's informational `version`.
+config_version: "0.2.6-w3b"
 
 schema_list:
   - schema: epocanva_english

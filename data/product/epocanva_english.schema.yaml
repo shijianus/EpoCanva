@@ -12,10 +12,13 @@
 #
 # The settings window writes that patch and a deploy marker; the product text service
 # deploys it once at the next engine start.
+#
+# `version` is informational and tracks the product's internal package version
+# (platforms/windows/product/VERSION); it is not a Rime schema-format version.
 schema:
   schema_id: epocanva_english
   name: EpoCanva English
-  version: "0.2.0-w2"
+  version: "0.2.6-w3b"
 
 menu:
   page_size: 8
