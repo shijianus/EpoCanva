@@ -86,7 +86,11 @@ bool SettingsWindow::RegisterClass(HINSTANCE instance) {
   cls.lpfnWndProc = &SettingsWindow::WindowProc;
   cls.cbWndExtra = sizeof(void*);
   cls.hInstance = instance;
-  cls.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);
+  cls.hIcon = ::LoadIconW(instance, MAKEINTRESOURCEW(1));
+  if (cls.hIcon == nullptr) {
+    cls.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);
+  }
+  cls.hIconSm = cls.hIcon;
   cls.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
   cls.hbrBackground = ::GetSysColorBrush(COLOR_WINDOW);
   cls.lpszClassName = ui::kSettingsWindowClass;
@@ -200,7 +204,7 @@ bool SettingsWindow::OnCreate() {
       ui::kStatusEdit, right_x + 14, 158, right_width - 28, 236);
 
   CreateControl(L"BUTTON", L"English completion", BS_GROUPBOX, 0, margin, 108,
-                left_width, 110);
+                left_width, 104);
   completion_enabled_ = CreateControl(
       L"BUTTON", L"Offer prefix &completions", BS_AUTOCHECKBOX | WS_TABSTOP,
       ui::kCompletionEnabled, margin + 14, 136, left_width - 28, 22);
@@ -210,35 +214,44 @@ bool SettingsWindow::OnCreate() {
                                     CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
                                     ui::kCompletionCount, margin + 184, 166, 70, 200);
 
-  CreateControl(L"BUTTON", L"Spelling suggestions", BS_GROUPBOX, 0, margin, 228,
-                left_width, 110);
+  CreateControl(L"BUTTON", L"Spelling suggestions", BS_GROUPBOX, 0, margin, 222,
+                left_width, 104);
   spelling_enabled_ = CreateControl(
       L"BUTTON", L"Offer one-edit &spelling suggestions",
-      BS_AUTOCHECKBOX | WS_TABSTOP, ui::kSpellingEnabled, margin + 14, 256,
+      BS_AUTOCHECKBOX | WS_TABSTOP, ui::kSpellingEnabled, margin + 14, 250,
       left_width - 28, 22);
-  CreateControl(L"STATIC", L"Suggestions per query:", SS_LEFT, 0, margin + 14, 288,
+  CreateControl(L"STATIC", L"Suggestions per query:", SS_LEFT, 0, margin + 14, 282,
                 160, 20);
   spelling_count_ = CreateControl(L"COMBOBOX", L"",
                                   CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
-                                  ui::kSpellingCount, margin + 184, 286, 70, 200);
+                                  ui::kSpellingCount, margin + 184, 280, 70, 200);
 
-  CreateControl(L"BUTTON", L"Candidate display", BS_GROUPBOX, 0, margin, 348,
-                left_width, 90);
+  CreateControl(L"BUTTON", L"Candidate display", BS_GROUPBOX, 0, margin, 336,
+                left_width, 124);
+  candidate_display_host_ = CreateControl(
+      L"BUTTON", L"&Follow the application's candidate display (default)",
+      BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, ui::kCandidateDisplayHost,
+      margin + 14, 360, left_width - 28, 22);
+  candidate_display_always_self_ = CreateControl(
+      L"BUTTON", L"&Always show the EpoCanva candidate window",
+      BS_AUTORADIOBUTTON | WS_TABSTOP, ui::kCandidateDisplayAlwaysSelf, margin + 14,
+      382, left_width - 28, 22);
   CreateControl(L"STATIC",
-                L"Candidate window: not available in this build (planned for W2-B).\r\n"
-                L"Page size: 8 candidates, fixed by the deployed schema.\r\n"
-                L"No candidate-layout option is exposed yet.",
-                SS_LEFT, 0, margin + 14, 372, left_width - 28, 58);
+                L"Always-show is for applications that take ownership of the candidate "
+                L"list but draw nothing. If the application also draws, two windows "
+                L"appear. An application's explicit hide still wins. Applies at the next "
+                L"engine start.",
+                SS_LEFT, 0, margin + 14, 404, left_width - 28, 50);
 
-  CreateControl(L"BUTTON", L"Offline and privacy", BS_GROUPBOX, 0, margin, 448,
-                left_width, 140);
+  CreateControl(L"BUTTON", L"Offline and privacy", BS_GROUPBOX, 0, margin, 470,
+                left_width, 132);
   CreateControl(L"STATIC",
                 L"No network I/O: no telemetry, updates, dictionary sync or cloud "
                 L"lookup.\r\n"
                 L"Settings, logs and Rime user data stay under the user data folder.\r\n"
                 L"No input history or learning. No keystroke, clipboard or field "
                 L"logging.",
-                SS_LEFT, 0, margin + 14, 472, left_width - 28, 106);
+                SS_LEFT, 0, margin + 14, 494, left_width - 28, 100);
 
   CreateControl(L"BUTTON", L"Data locations", BS_GROUPBOX, 0, right_x, 418,
                 right_width, 170);
@@ -260,14 +273,14 @@ bool SettingsWindow::OnCreate() {
   CreateControl(L"BUTTON", L"Open &user data", BS_PUSHBUTTON | WS_TABSTOP,
                 ui::kOpenUser, right_x + 204, 542, 180, 28);
 
-  save_status_ = CreateControl(L"STATIC", L"", SS_LEFT, ui::kSaveStatus, margin, 600,
+  save_status_ = CreateControl(L"STATIC", L"", SS_LEFT, ui::kSaveStatus, margin, 606,
                                860, 20);
   CreateControl(L"BUTTON", L"&About / licences", BS_PUSHBUTTON | WS_TABSTOP,
-                ui::kAbout, margin, 624, 180, 30);
+                ui::kAbout, margin, 628, 180, 30);
   CreateControl(L"BUTTON", L"&Save", BS_DEFPUSHBUTTON | WS_TABSTOP, ui::kSave, 660,
-                624, 100, 30);
+                628, 100, 30);
   CreateControl(L"BUTTON", L"&Close", BS_PUSHBUTTON | WS_TABSTOP, ui::kClose, 770,
-                624, 110, 30);
+                628, 110, 30);
 
   // Group boxes are siblings of their contents; without this they end up above the
   // controls and paint their background over the checkboxes, edits and status text.
@@ -400,6 +413,12 @@ void SettingsWindow::RefreshControlsFromSettings() {
                  static_cast<WPARAM>(settings_.completion_candidates - 1), 0);
   ::SendMessageW(spelling_count_, CB_SETCURSEL,
                  static_cast<WPARAM>(settings_.spelling_candidates - 1), 0);
+  const bool always_self =
+      settings_.candidate_display == CandidateDisplay::kAlwaysSelf;
+  ::SendMessageW(candidate_display_host_, BM_SETCHECK,
+                 always_self ? BST_UNCHECKED : BST_CHECKED, 0);
+  ::SendMessageW(candidate_display_always_self_, BM_SETCHECK,
+                 always_self ? BST_CHECKED : BST_UNCHECKED, 0);
   ::EnableWindow(completion_count_, settings_.completion_enabled ? TRUE : FALSE);
   ::EnableWindow(spelling_count_, settings_.spelling_enabled ? TRUE : FALSE);
   loading_ = false;
@@ -465,6 +484,10 @@ bool SettingsWindow::Save() {
   next.spelling_candidates =
       spelling_index == CB_ERR ? settings_.spelling_candidates
                                : static_cast<int>(spelling_index) + 1;
+  next.candidate_display =
+      ::SendMessageW(candidate_display_always_self_, BM_GETCHECK, 0, 0) == BST_CHECKED
+          ? CandidateDisplay::kAlwaysSelf
+          : CandidateDisplay::kHost;
   if (!next.valid()) {
     ::MessageBoxW(hwnd_, L"The selected values are outside the supported range.",
                   ui::kSettingsWindowTitle, MB_OK | MB_ICONERROR);
@@ -528,6 +551,12 @@ void SettingsWindow::OnCommand(int id, int notification, HWND control) {
     case ui::kCompletionCount:
     case ui::kSpellingCount:
       if (notification == CBN_SELCHANGE) {
+        SetDirty(true);
+      }
+      return;
+    case ui::kCandidateDisplayHost:
+    case ui::kCandidateDisplayAlwaysSelf:
+      if (notification == BN_CLICKED) {
         SetDirty(true);
       }
       return;

@@ -26,6 +26,7 @@ namespace {
 
 using epocanva::tsf::coordinator::CandidateKind;
 using epocanva::tsf::coordinator::CandidateSnapshot;
+using epocanva::tsf::product::CandidateDisplayPreference;
 using epocanva::tsf::product::CandidateUi;
 using epocanva::tsf::product::CandidateUiHost;
 using epocanva::tsf::product::CandidateUiSelection;
@@ -575,6 +576,142 @@ void TestUiLifecycle() {
   Check(true, "ui: teardown completed without a crash");
 }
 
+void TestDisplayStates(bool self_check_fail) {
+  const CandidateSnapshot snapshot = MakeSnapshot();
+  const RECT anchor = {120, 120, 160, 150};
+
+  // State A: the host has ITfUIElementMgr and answers pbShow=TRUE. The TIP window is the
+  // agreed presentation and there is no fallback duplicate.
+  {
+    FakeUiElementManager* manager = new FakeUiElementManager();
+    manager->show = true;
+    FakeHost host;
+    CandidateUi ui(1, &host, ::GetModuleHandleW(nullptr));
+    std::wstring why;
+    Check(ui.StartWithManagerForTest(manager, manager, &why),
+          "states A/B: controlled manager attached");
+    ui.Update(snapshot, nullptr, &anchor, -1);
+    Check(ui.window_visible(), "state A: pbShow=TRUE presents the TIP window");
+    const auto diagnostics = ui.Diagnostics();
+    Check(diagnostics.always_self_draws == 0,
+          "state A: no always_self fallback is used");
+    ui.Stop();
+    manager->Release();
+  }
+
+  // State B default: the host claims the element with pbShow=FALSE. Following the host
+  // means no window; the element still receives its mandatory first full update.
+  {
+    FakeUiElementManager* manager = new FakeUiElementManager();
+    manager->show = false;
+    FakeHost host;
+    CandidateUi ui(1, &host, ::GetModuleHandleW(nullptr));
+    std::wstring why;
+    Check(ui.StartWithManagerForTest(manager, manager, &why),
+          "state B: controlled manager attached");
+    ui.Update(snapshot, nullptr, &anchor, -1);
+    const bool fallback_window = ui.window_visible();
+    // The falsifiability control claims the opposite of the contract below.
+    Check(self_check_fail ? fallback_window : !fallback_window,
+          self_check_fail
+              ? "state B control: deliberately claims the default draws a window"
+              : "state B default: pbShow=FALSE draws no window");
+    Check(ui.host_drawn(), "state B: the host drawing decision is recorded");
+    Check(manager->updates == 1,
+          "state B: pbShow=FALSE is followed by the mandatory full update");
+    ui.Stop();
+    manager->Release();
+  }
+
+  // State B with the user preference always_self: the TIP draws despite pbShow=FALSE.
+  // An explicit host Show(FALSE) still hides it and blocks a later update from reopening.
+  {
+    FakeUiElementManager* manager = new FakeUiElementManager();
+    manager->show = false;
+    FakeHost host;
+    CandidateUi ui(1, &host, ::GetModuleHandleW(nullptr),
+                   CandidateDisplayPreference::kAlwaysSelf);
+    std::wstring why;
+    Check(ui.StartWithManagerForTest(manager, manager, &why),
+          "state B always_self: controlled manager attached");
+    ui.Update(snapshot, nullptr, &anchor, -1);
+    Check(ui.host_drawn() && ui.window_visible(),
+          "state B always_self: the user preference presents the TIP window");
+    Check(ui.Diagnostics().always_self_draws >= 1,
+          "state B always_self: the fallback is accounted separately");
+    if (manager->element != nullptr) {
+      Check(SUCCEEDED(manager->element->Show(FALSE)),
+            "state B always_self: the host can still hide the TIP UI");
+      Check(!ui.window_visible(),
+            "state B always_self: Show(FALSE) hides the window");
+      ui.Update(snapshot, nullptr, &anchor, 1);
+      Check(!ui.window_visible(),
+            "state B always_self: later updates do not reopen after Show(FALSE)");
+      Check(SUCCEEDED(manager->element->Show(TRUE)),
+            "state B always_self: the host can hand presentation back");
+      ui.Update(snapshot, nullptr, &anchor, 1);
+      Check(ui.window_visible(),
+            "state B always_self: Show(TRUE) allows a later presentation");
+    } else {
+      Check(false, "state B always_self: the element exists");
+    }
+    ui.Stop();
+    manager->Release();
+  }
+
+  // State C: the thread has no ITfUIElementMgr. The TIP draws its own window and the
+  // validated click still carries the real snapshot identity through the bridge.
+  {
+    FakeHost host;
+    CandidateUi ui(1, &host, ::GetModuleHandleW(nullptr));
+    std::wstring why;
+    Check(ui.StartWithManagerForTest(nullptr, nullptr, &why),
+          "state C: a thread without UIElementMgr starts");
+    Check(!ui.tsf_manager(), "state C: no manager is reported");
+    ui.Update(snapshot, nullptr, &anchor, -1);
+    Check(ui.window_visible(), "state C: the TIP draws its own window");
+    Check(ui.Diagnostics().no_manager_draws >= 1,
+          "state C: the no-manager fallback is accounted");
+    HWND window = ui.window_for_test();
+    if (window != nullptr) {
+      // WM_LBUTTONDOWN carries client coordinates. A click in the first row's band: one
+      // tenth of the client height lands inside row 0 at every DPI this test may run at.
+      RECT window_rect = {};
+      ::GetWindowRect(window, &window_rect);
+      const int width = window_rect.right - window_rect.left;
+      const int height = window_rect.bottom - window_rect.top;
+      ::SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON,
+                     MAKELPARAM(width / 2, height / 10));
+      Check(host.finals == 1 && host.last.snapshot_version == snapshot.version &&
+                host.last.context_id == snapshot.identity.context_id &&
+                host.last.generation == snapshot.identity.generation &&
+                host.last.page_index == 0,
+            "state C: a click carries the real snapshot identity without a manager");
+    } else {
+      Check(false, "state C: the window has a real HWND");
+    }
+    // No layout: hide instead of inventing a rectangle.
+    ui.Update(snapshot, nullptr, nullptr, -1);
+    Check(!ui.window_visible(), "state C: no token rectangle means no window");
+    ui.Stop();
+  }
+
+  // The same no-layout rule under state A: a missing rectangle never produces a window.
+  {
+    FakeUiElementManager* manager = new FakeUiElementManager();
+    manager->show = true;
+    FakeHost host;
+    CandidateUi ui(1, &host, ::GetModuleHandleW(nullptr));
+    std::wstring why;
+    Check(ui.StartWithManagerForTest(manager, manager, &why),
+          "state A no-layout: controlled manager attached");
+    ui.Update(snapshot, nullptr, nullptr, -1);
+    Check(!ui.window_visible(), "state A: no token rectangle means no window");
+    ui.Stop();
+    manager->Release();
+  }
+}
+
 void TestAnchorPolicy() {
   using epocanva::tsf::product::CandidateAnchorDecision;
   using epocanva::tsf::product::CandidateAnchorRetryBudget;
@@ -619,18 +756,28 @@ void TestAnchorPolicy() {
 
 int main(int argc, char** argv) {
   std::filesystem::path screenshot;
+  bool self_check_fail = false;
   for (int index = 1; index < argc; ++index) {
     const std::string arg = argv[index];
     if (arg == "--screenshot" && index + 1 < argc) {
       screenshot = std::filesystem::path(argv[++index]);
+    } else if (arg == "--self-check-fail") {
+      self_check_fail = true;
     }
   }
   setvbuf(stdout, nullptr, _IONBF, 0);
   std::cout << "EpoCanva candidate window / UIElement controlled tests\n";
-  TestLayout();
-  TestWindow(screenshot);
-  TestAnchorPolicy();
-  TestUiLifecycle();
+  if (self_check_fail) {
+    // Falsifiability control: one deliberately inverted expectation for the state B
+    // default. A suite whose checks were tautologies could not produce this failure.
+    TestDisplayStates(true);
+  } else {
+    TestLayout();
+    TestWindow(screenshot);
+    TestAnchorPolicy();
+    TestUiLifecycle();
+    TestDisplayStates(false);
+  }
   if (g_failures != 0) {
     std::cout << "FAILED: " << g_failures << " check(s)\n";
     return 14;

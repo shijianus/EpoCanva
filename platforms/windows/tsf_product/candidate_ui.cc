@@ -609,10 +609,12 @@ bool ReadTokenRect(ITfContext* context, TfClientId client_id, LONG caret_utf16,
                       observed_caret_utf16, rect, clipped, why);
 }
 
-CandidateUi::CandidateUi(TfClientId client_id, CandidateUiHost* host, HMODULE module)
+CandidateUi::CandidateUi(TfClientId client_id, CandidateUiHost* host, HMODULE module,
+                         CandidateDisplayPreference preference)
     : client_id_(client_id),
       host_(host),
       module_(module),
+      preference_(preference),
       window_(module,
               [this](std::size_t index) {
                 ++diagnostics_.clicks;
@@ -650,6 +652,8 @@ bool CandidateUi::Start(ITfThreadMgr* thread_manager, std::wstring* why) {
   // lifecycle has its own controlled test; this variant never presents a floating window
   // that is not attached to a registered TSF context.
   (void)thread_manager;
+  no_manager_self_draw_ = false;
+  PrepareBridge();
   diagnostics_.tsf_manager = false;
   return true;
 #else
@@ -657,10 +661,12 @@ bool CandidateUi::Start(ITfThreadMgr* thread_manager, std::wstring* why) {
   const HRESULT qi = thread_manager->QueryInterface(
       IID_ITfUIElementMgr, reinterpret_cast<void**>(&manager));
   if (FAILED(qi) || manager == nullptr) {
-    // A controlled direct-sink host may have no UI element manager. The controller then
-    // runs without TSF candidate presentation; it never falls back to a floating window
-    // that is not attached to a real text range.
+    // No UI element manager: the host cannot present the candidate element at all. TSF
+    // allows the TIP to draw its own window in this case (state C); there is no host
+    // visibility decision to follow. The window still anchors only to a real token
+    // rectangle read from the live context.
     diagnostics_.tsf_manager = false;
+    PrepareBridge();
     return true;
   }
   ITfSource* source = nullptr;
@@ -680,13 +686,28 @@ bool CandidateUi::Start(ITfThreadMgr* thread_manager, std::wstring* why) {
 
 bool CandidateUi::StartWithManagerForTest(ITfUIElementMgr* manager, ITfSource* source,
                                           std::wstring* why) {
-  if (manager == nullptr || host_ == nullptr || module_ == nullptr) {
+  if (host_ == nullptr || module_ == nullptr) {
     if (why != nullptr) {
-      *why = L"the candidate UI test start needs a manager, host and module";
+      *why = L"the candidate UI test start needs a host and module";
     }
     return false;
   }
+  if (manager == nullptr) {
+    // Controlled state C: the thread has no UI element manager.
+    PrepareBridge();
+    diagnostics_.tsf_manager = false;
+    return true;
+  }
   return AttachManager(manager, source, why);
+}
+
+void CandidateUi::PrepareBridge() {
+  if (bridge_) {
+    return;
+  }
+  bridge_ = std::make_shared<CandidateUiBridge>();
+  bridge_->ui = this;
+  bridge_->host = host_;
 }
 
 bool CandidateUi::AttachManager(ITfUIElementMgr* manager, ITfSource* source,
@@ -698,9 +719,7 @@ bool CandidateUi::AttachManager(ITfUIElementMgr* manager, ITfSource* source,
   manager_ = manager;
   manager_->AddRef();
   diagnostics_.tsf_manager = true;
-  bridge_ = std::make_shared<CandidateUiBridge>();
-  bridge_->ui = this;
-  bridge_->host = host_;
+  PrepareBridge();
   if (source != nullptr) {
     source_ = source;
     source_->AddRef();
@@ -758,6 +777,7 @@ void CandidateUi::End() {
   }
   begun_ = false;
   host_drawn_ = false;
+  host_show_false_ = false;
   tip_ui_allowed_ = false;
   element_id_ = 0;
   ReleaseElement();
@@ -770,12 +790,23 @@ void CandidateUi::End() {
 void CandidateUi::OnElementShow(bool show) {
   if (!show) {
     ++diagnostics_.show_false_notifications;
+    if (preference_ == CandidateDisplayPreference::kAlwaysSelf) {
+      ++diagnostics_.host_show_false_suppressions;
+    }
+    // An explicit Show(FALSE) is the host withdrawing presentation now. It wins over the
+    // user's always_self preference and suppresses the window until a new element begins
+    // or the host hands presentation back with Show(TRUE).
+    host_show_false_ = true;
     tip_ui_allowed_ = false;
     window_.Hide();
     diagnostics_.window_visible = false;
     return;
   }
   ++diagnostics_.show_true_notifications;
+  host_show_false_ = false;
+  // Show(TRUE) is the host handing presentation back to the TIP, including after a
+  // pbShow=FALSE Begin. The next data update may present.
+  host_drawn_ = false;
   tip_ui_allowed_ = true;
   // Re-read the live anchor on the next paced wake; this COM callback never starts a TSF
   // edit session or blocks on layout.
@@ -785,6 +816,24 @@ void CandidateUi::OnElementShow(bool show) {
 }
 
 bool CandidateUi::ElementShown() const { return window_.visible(); }
+
+bool CandidateUi::self_draw_permitted() const {
+  if (manager_ == nullptr) {
+    return no_manager_self_draw_;
+  }
+  if (host_show_false_) {
+    return false;
+  }
+  if (!begun_) {
+    // Before BeginUIElement the host decision is unknown; read the anchor so the first
+    // update can present immediately when the host answers TRUE.
+    return true;
+  }
+  if (!host_drawn_) {
+    return true;
+  }
+  return preference_ == CandidateDisplayPreference::kAlwaysSelf;
+}
 
 void CandidateUi::ReleaseElement() {
   if (element_ != nullptr) {
@@ -800,7 +849,13 @@ void CandidateUi::ReleaseElement() {
 
 void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
                          ITfContext* context, const RECT* anchor, int selected) {
-  if (manager_ == nullptr || bridge_ == nullptr) {
+  if (bridge_ == nullptr) {
+    return;
+  }
+  if (manager_ == nullptr && !no_manager_self_draw_) {
+    // Controlled direct-sink test variant: no real TSF UI element manager and no window.
+    // Keep the pre-W3-B no-op path so those coordinator/selection tests see exactly the
+    // same timing as before; state C (no manager in a real host) still presents.
     return;
   }
   if (!snapshot.valid || snapshot.items.empty()) {
@@ -821,94 +876,103 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
     window_item.kind = item.kind;
     window_items.push_back(std::move(window_item));
   }
-  ITfDocumentMgr* document = nullptr;
-  if (context != nullptr) {
-    (void)context->GetDocumentMgr(&document);
-  }
-  const DWORD flags = TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION |
-                      TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE;
-  if (element_ == nullptr) {
-    element_ = new CandidateUiElement(bridge_, snapshot.version);
-  }
   bool newly_begun = false;
-  if (!begun_) {
-    element_->SetData(strings, selected, document, flags, snapshot.identity.context_id,
-                      snapshot.identity.generation, snapshot.caret_utf16);
-    BOOL show = TRUE;  // The TIP asks to present; the host writes its decision here.
-    DWORD element_id = 0;
-    const HRESULT began = manager_->BeginUIElement(element_, &show, &element_id);
-    if (FAILED(began) || element_id == 0) {
-      TraceStage("ui_begin_failed", static_cast<long long>(began));
-      ++diagnostics_.begin_failures;
-      ReleaseElement();
-      if (document != nullptr) {
-        document->Release();
-      }
-      window_.Hide();
-      return;
+  if (manager_ != nullptr) {
+    ITfDocumentMgr* document = nullptr;
+    if (context != nullptr) {
+      (void)context->GetDocumentMgr(&document);
     }
-    ++diagnostics_.begins;
-    begun_ = true;
-    newly_begun = true;
-    element_id_ = element_id;
-    host_drawn_ = show == FALSE;
-    tip_ui_allowed_ = !host_drawn_;
-    TraceStage("ui_host_drawn", host_drawn_ ? 1 : 0);
+    const DWORD flags = TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION |
+                        TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE;
+    if (element_ == nullptr) {
+      element_ = new CandidateUiElement(bridge_, snapshot.version);
+    }
+    if (!begun_) {
+      element_->SetData(strings, selected, document, flags, snapshot.identity.context_id,
+                        snapshot.identity.generation, snapshot.caret_utf16);
+      BOOL show = TRUE;  // The TIP asks to present; the host writes its decision here.
+      DWORD element_id = 0;
+      const HRESULT began = manager_->BeginUIElement(element_, &show, &element_id);
+      if (FAILED(began) || element_id == 0) {
+        TraceStage("ui_begin_failed", static_cast<long long>(began));
+        ++diagnostics_.begin_failures;
+        ReleaseElement();
+        if (document != nullptr) {
+          document->Release();
+        }
+        window_.Hide();
+        return;
+      }
+      ++diagnostics_.begins;
+      begun_ = true;
+      newly_begun = true;
+      element_id_ = element_id;
+      host_drawn_ = show == FALSE;
+      tip_ui_allowed_ = !host_drawn_;
+      TraceStage("ui_host_drawn", host_drawn_ ? 1 : 0);
+    } else {
+      element_->SetData(strings, selected, document, flags, snapshot.identity.context_id,
+                        snapshot.identity.generation, snapshot.caret_utf16);
+      const HRESULT updated = manager_->UpdateUIElement(element_id_);
+      if (FAILED(updated)) {
+        TraceStage("ui_update_failed", static_cast<long long>(updated));
+        ++diagnostics_.update_failures;
+        End();
+        if (document != nullptr) {
+          document->Release();
+        }
+        return;
+      }
+    }
+    if (newly_begun && host_drawn_) {
+      // UILess contract: after BeginUIElement answers FALSE the TIP must call
+      // UpdateUIElement so the host can read the full element (all update flags are set).
+      // Without this notification a host-drawn list has no data to draw. This is sent even
+      // when the user's always_self preference also draws the TIP window.
+      const HRESULT updated = manager_->UpdateUIElement(element_id_);
+      if (FAILED(updated)) {
+        TraceStage("ui_host_drawn_update_failed", static_cast<long long>(updated));
+        ++diagnostics_.update_failures;
+        End();
+        if (document != nullptr) {
+          document->Release();
+        }
+        return;
+      }
+      ++diagnostics_.host_drawn_updates;
+    }
+    if (document != nullptr) {
+      document->Release();
+    }
+  }
+  {
     std::lock_guard<std::mutex> guard(bridge_->mutex);
     bridge_->version = snapshot.version;
     bridge_->context_id = snapshot.identity.context_id;
     bridge_->generation = snapshot.identity.generation;
     bridge_->caret_utf16 = snapshot.caret_utf16;
     bridge_->last_selected = selected;
-  } else {
-    element_->SetData(strings, selected, document, flags, snapshot.identity.context_id,
-                      snapshot.identity.generation, snapshot.caret_utf16);
-    const HRESULT updated = manager_->UpdateUIElement(element_id_);
-    if (FAILED(updated)) {
-      TraceStage("ui_update_failed", static_cast<long long>(updated));
-      ++diagnostics_.update_failures;
-      End();
-      if (document != nullptr) {
-        document->Release();
-      }
-      return;
-    }
-    std::lock_guard<std::mutex> guard(bridge_->mutex);
-    bridge_->version = snapshot.version;
-    bridge_->context_id = snapshot.identity.context_id;
-    bridge_->generation = snapshot.identity.generation;
-    bridge_->caret_utf16 = snapshot.caret_utf16;
-    bridge_->last_selected = selected;
-  }
-  if (newly_begun && host_drawn_) {
-    // UILess contract: after BeginUIElement answers FALSE the TIP must call
-    // UpdateUIElement so the host can read the full element (all update flags are set).
-    // Without this notification a host-drawn list has no data to draw.
-    const HRESULT updated = manager_->UpdateUIElement(element_id_);
-    if (FAILED(updated)) {
-      TraceStage("ui_host_drawn_update_failed", static_cast<long long>(updated));
-      ++diagnostics_.update_failures;
-      End();
-      if (document != nullptr) {
-        document->Release();
-      }
-      return;
-    }
-    ++diagnostics_.host_drawn_updates;
-  }
-  if (document != nullptr) {
-    document->Release();
   }
   diagnostics_.begun = begun_;
   diagnostics_.host_drawn = host_drawn_;
-  if (!tip_ui_allowed_) {
-    // pbShow=FALSE (or an explicit Show(FALSE)) is the host's presentation decision. The
-    // element stays registered and answers every query; this class never draws a second UI.
-    TraceStage("ui_host_drawn_honored", 1);
+  if (!self_draw_permitted()) {
+    // The host claimed presentation and the user kept the default (or the host explicitly
+    // called Show(FALSE)). The element, when it exists, stays registered and answers every
+    // query; no second UI is drawn.
+    if (manager_ != nullptr) {
+      TraceStage("ui_host_drawn_honored", 1);
+    }
     window_.Hide();
     diagnostics_.window_created = window_.created();
     diagnostics_.window_visible = false;
     return;
+  }
+  if (manager_ == nullptr) {
+    ++diagnostics_.no_manager_draws;
+    TraceStage("ui_no_manager_self_draw", 1);
+  } else if (host_drawn_) {
+    ++diagnostics_.always_self_draws;
+    TraceStage("ui_always_self_draw", 1);
   }
   if (anchor == nullptr) {
     TraceStage("ui_no_anchor", 1);
@@ -951,6 +1015,7 @@ void CandidateUi::OnHostEnd(DWORD element_id) {
   // by End()/Stop() after the manager call.
   begun_ = false;
   host_drawn_ = false;
+  host_show_false_ = false;
   tip_ui_allowed_ = false;
   element_id_ = 0;
   window_.Hide();

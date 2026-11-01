@@ -9,6 +9,9 @@
 #include "keyboard_state.h"
 #include "module_lifetime.h"
 #include "module_state.h"
+#include "product_display_preference.h"
+#include "product_paths.h"
+#include "product_settings.h"
 
 namespace epocanva {
 namespace tsf {
@@ -180,7 +183,34 @@ bool ProductTextController::Start(const Options& options, std::wstring* why) {
     }
   });
   started_ = true;
-  candidate_ui_.reset(new CandidateUi(client_id_, this, ModuleInstance()));
+  // The candidate-display preference is published by the engine-start transaction on its
+  // bootstrap thread (it already reads settings.ini there). The STA only reads the atomic;
+  // the value is refreshed on every activation and applied when a menu updates.
+  //
+  // A process that attaches to an engine another process already started does not run the
+  // transaction, so it would never publish the value. In that one case read it here, once
+  // per activation. A fresh engine start stays free of synchronous settings I/O on the STA;
+  // that timing is what the direct-sink regression tests exercise.
+  if (ProductEngineBootstrap::Instance().state() == EngineBootstrapState::kReady) {
+    ::epocanva::product::ProductPaths display_paths;
+    std::wstring display_why;
+    if (::epocanva::product::ResolveProductPaths(ModuleInstance(), &display_paths,
+                                                 &display_why)) {
+      const ::epocanva::product::SettingsLoadResult loaded =
+          ::epocanva::product::LoadProductSettings(display_paths.settings_file);
+      ::epocanva::product::SetCandidateDisplayAlwaysSelfForProcess(
+          loaded.settings.candidate_display ==
+          ::epocanva::product::CandidateDisplay::kAlwaysSelf);
+    }
+  }
+  CandidateDisplayPreference display_preference =
+      ::epocanva::product::CandidateDisplayAlwaysSelfForProcess()
+          ? CandidateDisplayPreference::kAlwaysSelf
+          : CandidateDisplayPreference::kFollowHost;
+  TraceStage("candidate_display_always_self",
+             display_preference == CandidateDisplayPreference::kAlwaysSelf ? 1 : 0);
+  candidate_ui_.reset(
+      new CandidateUi(client_id_, this, ModuleInstance(), display_preference));
   std::wstring candidate_why;
   if (!candidate_ui_->Start(thread_manager_, &candidate_why)) {
     candidate_ui_.reset();
@@ -1012,7 +1042,11 @@ void ProductTextController::UpdatePacing() {
 }
 
 bool ProductTextController::CandidateKeysActive() const {
-  return candidate_ui_ == nullptr || candidate_ui_->tip_ui_allowed();
+  // A no-UIElementMgr thread still routes menu keys through the controller (state C);
+  // the direct-sink test variant does the same without a window. For a real manager the
+  // menu is key-active exactly when its TIP window may present (host decision plus the
+  // user's always_self preference; Show(FALSE) turns it off).
+  return candidate_ui_ == nullptr || candidate_ui_->interaction_active();
 }
 
 bool ProductTextController::CandidatesOpen() const {
@@ -1198,6 +1232,10 @@ void ProductTextController::UpdateCandidateUi() {
   if (!candidate_ui_) {
     return;
   }
+  candidate_ui_->SetDisplayPreference(
+      ::epocanva::product::CandidateDisplayAlwaysSelfForProcess()
+          ? CandidateDisplayPreference::kAlwaysSelf
+          : CandidateDisplayPreference::kFollowHost);
   candidate_anchor_retry_ = false;
   if (!engine_ || !coordinator_) {
     TraceStage("candidate_no_engine", 1);
@@ -1264,12 +1302,11 @@ void ProductTextController::UpdateCandidateUi() {
     return;
   }
   TraceStage("candidate_expected_caret", expected_caret);
-  // A real TSF UI element manager is the only reason to create a window, and only while the
-  // host has not taken presentation (pbShow=FALSE or Show(FALSE)). The rectangle is the live
-  // token range [caret - input, caret), never a composition. Elements the host draws still
-  // receive every data update.
-  const bool wants_window =
-      candidate_ui_->tsf_manager() && candidate_ui_->tip_ui_allowed();
+  // A real TSF UI element manager is the only reason to create a window when the host
+  // draws; a thread without one, or the user's always_self fallback, presents the TIP
+  // window itself. The rectangle is the live token range [caret - input, caret), never a
+  // composition. Elements the host draws still receive every data update.
+  const bool wants_window = candidate_ui_->self_draw_permitted();
   TraceStage("candidate_wants_window", wants_window ? 1 : 0);
   TraceStage("candidate_tsf_manager", candidate_ui_->tsf_manager() ? 1 : 0);
   TraceStage("candidate_host_drawn", candidate_ui_->host_drawn() ? 1 : 0);

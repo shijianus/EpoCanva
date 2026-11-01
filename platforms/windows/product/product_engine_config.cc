@@ -13,6 +13,7 @@
 #include "product_io.h"
 #include "product_paths.h"
 #include "product_settings.h"
+#include "product_display_preference.h"
 
 namespace epocanva {
 namespace product {
@@ -296,6 +297,14 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
     std::lock_guard<std::mutex> guard(g_mutex);
     paths = g_paths;
   }
+
+  // W3-B: publish the user's candidate-display preference for the STA to read. This thread
+  // already reads settings.ini for the deployment digest; parsing it here avoids a
+  // synchronous file read on the activating UI thread. Missing/corrupt settings mean the
+  // safe default (follow the host).
+  const SettingsLoadResult display_settings = LoadProductSettings(paths.settings_file);
+  SetCandidateDisplayAlwaysSelfForProcess(
+      display_settings.settings.candidate_display == CandidateDisplay::kAlwaysSelf);
 
   const DWORD self = ::GetCurrentThreadId();
   if (g_lock_owner.load() == self) {

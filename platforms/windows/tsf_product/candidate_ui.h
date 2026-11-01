@@ -90,11 +90,29 @@ struct CandidateUiDiagnostics {
   std::uint64_t host_drawn_updates = 0;
   std::uint64_t show_false_notifications = 0;
   std::uint64_t show_true_notifications = 0;
+  // W3-B fallback accounting. `no_manager_draws` counts menus presented while the thread
+  // had no ITfUIElementMgr; `always_self_draws` counts menus presented against a
+  // pbShow=FALSE host decision; `host_show_false_suppressions` counts explicit Show(FALSE)
+  // calls that kept the window hidden even under kAlwaysSelf.
+  std::uint64_t no_manager_draws = 0;
+  std::uint64_t always_self_draws = 0;
+  std::uint64_t host_show_false_suppressions = 0;
+};
+
+// W3-B: how the TIP treats the host's presentation decision.
+//   kFollowHost  pbShow=TRUE draws, pbShow=FALSE draws nothing; a thread without an
+//                ITfUIElementMgr still gets a window (the TSF-sanctioned downgrade).
+//   kAlwaysSelf  additionally draws when the host claims the element with pbShow=FALSE.
+//                An explicit ITfUIElement::Show(FALSE) always wins over this preference.
+enum class CandidateDisplayPreference {
+  kFollowHost = 0,
+  kAlwaysSelf = 1,
 };
 
 class CandidateUi {
  public:
-  CandidateUi(TfClientId client_id, CandidateUiHost* host, HMODULE module);
+  CandidateUi(TfClientId client_id, CandidateUiHost* host, HMODULE module,
+              CandidateDisplayPreference preference = CandidateDisplayPreference::kFollowHost);
   ~CandidateUi();
 
   CandidateUi(const CandidateUi&) = delete;
@@ -115,6 +133,11 @@ class CandidateUi {
   // still answers queries. `selected` < 0 means no explicit user selection.
   void Update(const coordinator::CandidateSnapshot& snapshot, ITfContext* context,
               const RECT* anchor, int selected);
+  // Applied from the next Update onward. The setting is read on the engine-start thread
+  // and published atomically, so the STA never reads settings.ini during key handling.
+  void SetDisplayPreference(CandidateDisplayPreference preference) {
+    preference_ = preference;
+  }
   void SetSelection(int selected);
   void End();
 
@@ -124,6 +147,14 @@ class CandidateUi {
   // FALSE while the host draws or called Show(FALSE). Only a host Show(TRUE) re-enables
   // TIP presentation; a process-name or host heuristic never does.
   bool tip_ui_allowed() const { return !begun_ || tip_ui_allowed_; }
+  // Whether this menu may present the TIP window right now. This is the host decision
+  // plus the user preference plus the thread's UI-element capability; it is the only
+  // predicate the controller uses for anchor reads.
+  bool self_draw_permitted() const;
+  // Whether menu keys (arrows/Enter/Escape) belong to the product. A thread without any
+  // UI element manager still runs the menu through the controller (state C); the
+  // controlled direct-sink build uses it too.
+  bool interaction_active() const { return manager_ == nullptr || self_draw_permitted(); }
   bool window_visible() const { return window_.visible(); }
   HWND window_for_test() const { return window_.window_for_test(); }
   CandidateUiDiagnostics Diagnostics() const;
@@ -137,6 +168,7 @@ class CandidateUi {
   friend class CandidateUiElement;
 
   bool AttachManager(ITfUIElementMgr* manager, ITfSource* source, std::wstring* why);
+  void PrepareBridge();
   void FinalizeFromElement(const CandidateUiSelection& selection);
   void SelectionFromElement(const CandidateUiSelection& selection);
   void AbortFromElement(std::uint64_t snapshot_version, std::uint64_t context_id,
@@ -149,6 +181,10 @@ class CandidateUi {
   TfClientId client_id_ = 0;
   CandidateUiHost* host_ = nullptr;
   HMODULE module_ = nullptr;
+  CandidateDisplayPreference preference_ = CandidateDisplayPreference::kFollowHost;
+  // A thread without ITfUIElementMgr is the TSF-sanctioned case for the TIP drawing its
+  // own window. The controlled direct-sink build is not a real TSF host and keeps it off.
+  bool no_manager_self_draw_ = true;
   ITfUIElementMgr* manager_ = nullptr;
   ITfSource* source_ = nullptr;
   DWORD sink_cookie_ = 0;
@@ -158,6 +194,7 @@ class CandidateUi {
   DWORD element_id_ = 0;
   bool begun_ = false;
   bool host_drawn_ = false;
+  bool host_show_false_ = false;
   bool tip_ui_allowed_ = true;
   CandidateWindow window_;
   CandidateUiDiagnostics diagnostics_;

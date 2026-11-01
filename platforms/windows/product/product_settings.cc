@@ -63,10 +63,11 @@ SettingsLoadResult Corrupt(const wchar_t* reason) {
   return result;
 }
 
-// A fixed key=value reader for the five keys this product writes. It deliberately does
+// A fixed key=value reader for the keys this product writes. It deliberately does
 // not use GetPrivateProfileStringW: that API caches file contents per path, and an atomic
 // replace cannot invalidate the cache without rewriting the file. Unknown keys are
 // ignored for forward compatibility; a missing or duplicate known key is corruption.
+// `candidate_display` is optional so settings files written before W3-B still load.
 bool ReadSettingsMap(const std::filesystem::path& path,
                      std::map<std::string, std::string>* values,
                      std::wstring* why) {
@@ -112,7 +113,7 @@ bool ReadSettingsMap(const std::filesystem::path& path,
     }
     const bool known = key == "format" || key == "completion_enabled" ||
                        key == "completion_candidates" || key == "spelling_enabled" ||
-                       key == "spelling_candidates";
+                       key == "spelling_candidates" || key == "candidate_display";
     if (!known) {
       continue;
     }
@@ -211,6 +212,17 @@ SettingsLoadResult LoadProductSettings(const std::filesystem::path& path) {
     return Corrupt(L"spelling_candidates is outside 1..3");
   }
 
+  const std::string* candidate_display = find("candidate_display");
+  if (candidate_display != nullptr) {
+    if (*candidate_display == "host") {
+      loaded.candidate_display = CandidateDisplay::kHost;
+    } else if (*candidate_display == "always_self") {
+      loaded.candidate_display = CandidateDisplay::kAlwaysSelf;
+    } else {
+      return Corrupt(L"candidate_display is not host or always_self");
+    }
+  }
+
   result.settings = loaded;
   result.status = SettingsLoadStatus::kLoaded;
   return result;
@@ -245,6 +257,9 @@ std::string BuildSettingsText(const ProductSettings& settings) {
   text += settings.spelling_enabled ? "1" : "0";
   text += "\nspelling_candidates=";
   text += std::to_string(settings.spelling_candidates);
+  text += "\ncandidate_display=";
+  text += settings.candidate_display == CandidateDisplay::kAlwaysSelf ? "always_self"
+                                                                      : "host";
   text += "\n";
   return text;
 }

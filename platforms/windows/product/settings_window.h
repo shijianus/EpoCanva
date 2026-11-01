@@ -82,6 +82,8 @@ class SettingsWindow {
   HWND completion_count_ = nullptr;
   HWND spelling_enabled_ = nullptr;
   HWND spelling_count_ = nullptr;
+  HWND candidate_display_host_ = nullptr;
+  HWND candidate_display_always_self_ = nullptr;
   HWND save_status_ = nullptr;
   HWND path_install_ = nullptr;
   HWND path_user_ = nullptr;

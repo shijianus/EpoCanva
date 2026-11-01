@@ -16,6 +16,8 @@ enum ControlId : int {
   kCompletionCount = 1011,
   kSpellingEnabled = 1020,
   kSpellingCount = 1021,
+  kCandidateDisplayHost = 1025,
+  kCandidateDisplayAlwaysSelf = 1026,
   kOpenInstall = 1030,
   kOpenUser = 1031,
   kSave = 1040,

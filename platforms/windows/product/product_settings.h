@@ -16,11 +16,21 @@
 namespace epocanva {
 namespace product {
 
+// W3-B: `host` follows the application's presentation decision. `always_self` keeps the
+// TIP window even when the host claims the candidate element, which is the only way to see
+// candidates in a host that answers pbShow=FALSE and then draws nothing. It can duplicate
+// the list when the host really does draw. It never overrides an explicit host Show(FALSE).
+enum class CandidateDisplay {
+  kHost = 0,
+  kAlwaysSelf = 1,
+};
+
 struct ProductSettings {
   bool completion_enabled = true;
   int completion_candidates = 7;  // 1..7
   bool spelling_enabled = false;
   int spelling_candidates = 3;  // 1..3
+  CandidateDisplay candidate_display = CandidateDisplay::kHost;
 
   static ProductSettings Defaults() { return ProductSettings{}; }
   bool valid() const;

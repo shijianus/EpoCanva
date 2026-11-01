@@ -3,8 +3,10 @@
 // These tests never start the engine and never touch the real install or user profile.
 // Every file lives below --run-root, which CTest points at build/product/run/unit.
 #include <windows.h>
+#include <shellapi.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -74,12 +76,16 @@ void TestSettingsRoundTrip(const std::filesystem::path& root) {
         "missing settings reports kMissing");
   Check(missing.settings.completion_enabled && !missing.settings.spelling_enabled,
         "defaults are completion on, spelling off");
+  Check(missing.settings.candidate_display ==
+            epocanva::product::CandidateDisplay::kHost,
+        "the default candidate display follows the host");
 
   epocanva::product::ProductSettings wanted;
   wanted.completion_enabled = false;
   wanted.completion_candidates = 5;
   wanted.spelling_enabled = true;
   wanted.spelling_candidates = 2;
+  wanted.candidate_display = epocanva::product::CandidateDisplay::kAlwaysSelf;
   std::string digest;
   std::wstring why;
   Check(epocanva::product::SaveSettingsBundle(paths, wanted, &digest, &why),
@@ -94,6 +100,12 @@ void TestSettingsRoundTrip(const std::filesystem::path& root) {
         "completion values round-trip");
   Check(loaded.settings.spelling_enabled && loaded.settings.spelling_candidates == 2,
         "spelling values round-trip");
+  Check(loaded.settings.candidate_display ==
+            epocanva::product::CandidateDisplay::kAlwaysSelf,
+        "the always_self candidate display round-trips");
+  Check(ReadText(paths.settings_file).find("candidate_display=always_self") !=
+            std::string::npos,
+        "the settings file records candidate_display=always_self");
 
   const std::string patch = ReadText(paths.schema_patch_file);
   Check(patch.find("english/max_completions\": 0") != std::string::npos,
@@ -152,6 +164,29 @@ void TestSettingsRoundTrip(const std::filesystem::path& root) {
   auto bad = epocanva::product::LoadProductSettings(paths.settings_file);
   Check(bad.status == epocanva::product::SettingsLoadStatus::kCorrupt,
         "out-of-range candidates report kCorrupt");
+
+  {
+    // A settings file written before W3-B has no candidate_display key. It must keep
+    // loading instead of being rejected as corrupt, and must follow the host.
+    std::ofstream legacy(paths.settings_file, std::ios::binary | std::ios::trunc);
+    legacy << "[settings]\nformat=1\ncompletion_enabled=1\n"
+              "completion_candidates=7\nspelling_enabled=0\nspelling_candidates=3\n";
+  }
+  auto legacy = epocanva::product::LoadProductSettings(paths.settings_file);
+  Check(legacy.status == epocanva::product::SettingsLoadStatus::kLoaded &&
+            legacy.settings.candidate_display ==
+                epocanva::product::CandidateDisplay::kHost,
+        "a pre-W3-B settings file loads and follows the host");
+
+  {
+    std::ofstream bad_display(paths.settings_file, std::ios::binary | std::ios::trunc);
+    bad_display << "[settings]\nformat=1\ncompletion_enabled=1\n"
+                   "completion_candidates=7\nspelling_enabled=0\nspelling_candidates=3\n"
+                   "candidate_display=sometimes\n";
+  }
+  auto bad_display = epocanva::product::LoadProductSettings(paths.settings_file);
+  Check(bad_display.status == epocanva::product::SettingsLoadStatus::kCorrupt,
+        "an unknown candidate_display value reports kCorrupt");
 
   Check(epocanva::product::SaveSettingsBundle(paths, wanted, &digest, &why),
         "a save repairs the corrupt file");
@@ -273,6 +308,74 @@ void TestManifest(const std::filesystem::path& root) {
                       "bad byte count");
 }
 
+void TestVersionAndIcon(const std::filesystem::path& exe,
+                        const std::filesystem::path& dll,
+                        const std::filesystem::path& version_file) {
+  std::string version = ReadText(version_file);
+  while (!version.empty() &&
+         (version.back() == '\n' || version.back() == '\r' || version.back() == ' ')) {
+    version.pop_back();
+  }
+  Check(version == "0.2.6-w3b", "VERSION is the W3-B internal version");
+  unsigned major = 0;
+  unsigned minor = 0;
+  unsigned patch = 0;
+  if (std::sscanf(version.c_str(), "%u.%u.%u", &major, &minor, &patch) != 3) {
+    Check(false, "VERSION has a numeric major.minor.patch prefix");
+    return;
+  }
+  auto fixed_version = [](const std::filesystem::path& binary, unsigned* m,
+                          unsigned* n, unsigned* p) {
+    DWORD size = ::GetFileVersionInfoSizeW(binary.c_str(), nullptr);
+    if (size == 0) {
+      return false;
+    }
+    std::vector<BYTE> data(size);
+    if (!::GetFileVersionInfoW(binary.c_str(), 0, size, data.data())) {
+      return false;
+    }
+    VS_FIXEDFILEINFO* info = nullptr;
+    UINT length = 0;
+    if (!::VerQueryValueW(data.data(), L"\\", reinterpret_cast<void**>(&info), &length) ||
+        info == nullptr || length < sizeof(VS_FIXEDFILEINFO) ||
+        info->dwSignature != 0xFEEF04BD) {
+      return false;
+    }
+    *m = HIWORD(info->dwFileVersionMS);
+    *n = LOWORD(info->dwFileVersionMS);
+    *p = HIWORD(info->dwFileVersionLS);
+    return true;
+  };
+  for (const auto& binary : {exe, dll}) {
+    unsigned m = 0;
+    unsigned n = 0;
+    unsigned p = 0;
+    const bool ok = fixed_version(binary, &m, &n, &p);
+    const std::string name = binary.filename().string();
+    Check(ok && m == major && n == minor && p == patch,
+          name + " FILEVERSION matches VERSION (" + std::to_string(major) + "." +
+              std::to_string(minor) + "." + std::to_string(patch) + ")");
+    if (ok) {
+      DWORD size = ::GetFileVersionInfoSizeW(binary.c_str(), nullptr);
+      std::vector<BYTE> data(size);
+      if (size != 0 && ::GetFileVersionInfoW(binary.c_str(), 0, size, data.data())) {
+        VS_FIXEDFILEINFO* info = nullptr;
+        UINT length = 0;
+        if (::VerQueryValueW(data.data(), L"\\", reinterpret_cast<void**>(&info),
+                             &length) &&
+            info != nullptr) {
+          Check(HIWORD(info->dwProductVersionMS) == major &&
+                    LOWORD(info->dwProductVersionMS) == minor &&
+                    HIWORD(info->dwProductVersionLS) == patch,
+                name + " PRODUCTVERSION matches VERSION");
+        }
+      }
+    }
+    Check(::ExtractIconExW(binary.c_str(), -1, nullptr, nullptr, 0) > 0,
+          name + " carries at least one icon resource");
+  }
+}
+
 void TestPaths(const std::filesystem::path& root) {
   const std::filesystem::path user_root = root / L"用户 数据";
   epocanva::product::SetUserRootOverrideForProcess(user_root);
@@ -315,14 +418,25 @@ void TestPaths(const std::filesystem::path& root) {
 
 int main(int argc, char** argv) {
   std::filesystem::path run_root;
+  std::filesystem::path exe;
+  std::filesystem::path product_dll;
+  std::filesystem::path version_file;
   for (int index = 1; index < argc; ++index) {
     const std::string argument = argv[index];
     if (argument == "--run-root" && index + 1 < argc) {
       run_root = std::filesystem::path(argv[++index]);
+    } else if (argument == "--exe" && index + 1 < argc) {
+      exe = std::filesystem::path(argv[++index]);
+    } else if (argument == "--product-dll" && index + 1 < argc) {
+      product_dll = std::filesystem::path(argv[++index]);
+    } else if (argument == "--version-file" && index + 1 < argc) {
+      version_file = std::filesystem::path(argv[++index]);
     }
   }
-  if (run_root.empty() || !run_root.is_absolute()) {
-    std::cout << "FAIL: --run-root <absolute path> is required\n";
+  if (run_root.empty() || !run_root.is_absolute() || exe.empty() ||
+      product_dll.empty() || version_file.empty()) {
+    std::cout << "FAIL: --run-root, --exe, --product-dll and --version-file are "
+                 "required\n";
     return 2;
   }
   const std::filesystem::path root = PrepareRoot(run_root, "unit");
@@ -340,6 +454,7 @@ int main(int argc, char** argv) {
   TestAtomicWrite(root / "atomic");
   TestManifest(root / "manifest");
   TestPaths(root / "paths");
+  TestVersionAndIcon(exe, product_dll, version_file);
 
   if (g_failures != 0) {
     std::cout << "FAILED: " << g_failures << " check(s)\n";

@@ -297,6 +297,10 @@ void CheckInitialWindow(HWND window) {
         "completion count combo exists");
   Check(::GetDlgItem(window, ui::kSpellingCount) != nullptr,
         "spelling count combo exists");
+  Check(::GetDlgItem(window, ui::kCandidateDisplayHost) != nullptr,
+        "candidate display host radio exists");
+  Check(::GetDlgItem(window, ui::kCandidateDisplayAlwaysSelf) != nullptr,
+        "candidate display always_self radio exists");
   Check(::GetDlgItem(window, ui::kPathInstall) != nullptr, "install path field exists");
   Check(::GetDlgItem(window, ui::kPathUser) != nullptr, "user path field exists");
   Check(::GetDlgItem(window, ui::kPathSettings) != nullptr,
@@ -305,11 +309,15 @@ void CheckInitialWindow(HWND window) {
 
   for (int id : {ui::kSave, ui::kClose, ui::kAbout, ui::kCompletionEnabled,
                  ui::kSpellingEnabled, ui::kCompletionCount, ui::kSpellingCount,
-                 ui::kPathInstall, ui::kPathUser, ui::kPathSettings,
-                 ui::kPathEngine, ui::kStatusEdit}) {
+                 ui::kPathInstall, ui::kPathUser,
+                 ui::kPathSettings, ui::kPathEngine, ui::kStatusEdit}) {
     HWND control = ::GetDlgItem(window, id);
     Check(control != nullptr && ControlHasTabStop(control),
           "control " + std::to_string(id) + " is in the tab order");
+    if (control != nullptr && !ControlHasTabStop(control)) {
+      std::cout << "control " << id << " style=0x" << std::hex
+                << ::GetWindowLongPtrW(control, GWL_STYLE) << std::dec << "\n";
+    }
     Check(control != nullptr && InsideClient(window, control),
           "control " + std::to_string(id) + " is inside the client area");
   }
@@ -405,6 +413,11 @@ int main(int argc, char** argv) {
   }
 
   std::wstring why;
+  // This program owns its --user-data-root; a settings file left by an earlier run must
+  // not decide the default we are about to assert. Removing it is the reset, not a
+  // deletion of user data outside the test root.
+  std::error_code reset_ec;
+  std::filesystem::remove(user_root / L"settings.ini", reset_ec);
   Process process;
   if (!Launch(exe, user_root, &process, &why)) {
     std::cout << "FAIL: " << ToUtf8(why) << "\n";
@@ -424,12 +437,29 @@ int main(int argc, char** argv) {
   HWND spelling = ::GetDlgItem(window, ui::kSpellingEnabled);
   HWND completion_count = ::GetDlgItem(window, ui::kCompletionCount);
   HWND spelling_count = ::GetDlgItem(window, ui::kSpellingCount);
+  HWND candidate_host = ::GetDlgItem(window, ui::kCandidateDisplayHost);
+  HWND candidate_always = ::GetDlgItem(window, ui::kCandidateDisplayAlwaysSelf);
+  const LONG_PTR always_style =
+      ::GetWindowLongPtrW(candidate_always, GWL_STYLE);
+  Check(candidate_always != nullptr &&
+            (always_style & 0x0000000FL) == BS_AUTORADIOBUTTON &&
+            (always_style & WS_VISIBLE) != 0 &&
+            InsideClient(window, candidate_always),
+        "the always_self radio is a visible member of the same group");
+  // An auto-radio group owns exactly one tab stop, which Windows moves to the checked
+  // button. Requiring both buttons to carry WS_TABSTOP would misread that standard
+  // behaviour as a defect.
+  Check(ControlHasTabStop(candidate_host) || ControlHasTabStop(candidate_always),
+        "the candidate display group is in the tab order");
   HWND save = ::GetDlgItem(window, ui::kSave);
 
+  Check(::SendMessageW(candidate_host, BM_GETCHECK, 0, 0) == BST_CHECKED,
+        "the default candidate display follows the host");
   EnsureCheck(completion, false);
   EnsureCheck(spelling, true);
   ::SendMessageW(completion_count, CB_SETCURSEL, 2, 0);  // 3
   ::SendMessageW(spelling_count, CB_SETCURSEL, 1, 0);    // 2
+  ::SendMessageW(candidate_always, BM_CLICK, 0, 0);       // user opt-in fallback
   Check(::IsWindowEnabled(completion_count) == FALSE,
         "completion count is disabled when completions are off");
   Check(::IsWindowEnabled(spelling_count) == TRUE,
@@ -454,6 +484,8 @@ int main(int argc, char** argv) {
         "saved INI has spelling enabled");
   Check(Contains(settings_text, "spelling_candidates=2"),
         "saved INI has 2 suggestions");
+  Check(Contains(settings_text, "candidate_display=always_self"),
+        "saved INI records the always_self candidate display");
   const std::string patch_text = ReadText(patch_file);
   Check(Contains(patch_text, "english/max_completions\": 0"),
         "saved patch disables completions");
@@ -497,10 +529,15 @@ int main(int argc, char** argv) {
   spelling = ::GetDlgItem(window, ui::kSpellingEnabled);
   completion_count = ::GetDlgItem(window, ui::kCompletionCount);
   spelling_count = ::GetDlgItem(window, ui::kSpellingCount);
+  candidate_host = ::GetDlgItem(window, ui::kCandidateDisplayHost);
+  candidate_always = ::GetDlgItem(window, ui::kCandidateDisplayAlwaysSelf);
   Check(::SendMessageW(completion, BM_GETCHECK, 0, 0) == BST_UNCHECKED,
         "relaunch reads completion disabled");
   Check(::SendMessageW(spelling, BM_GETCHECK, 0, 0) == BST_CHECKED,
         "relaunch reads spelling enabled");
+  Check(::SendMessageW(candidate_always, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            ::SendMessageW(candidate_host, BM_GETCHECK, 0, 0) == BST_UNCHECKED,
+        "relaunch reads the always_self candidate display");
   Check(::SendMessageW(completion_count, CB_GETCURSEL, 0, 0) == 2,
         "relaunch reads completion count 3");
   Check(::SendMessageW(spelling_count, CB_GETCURSEL, 0, 0) == 1,
