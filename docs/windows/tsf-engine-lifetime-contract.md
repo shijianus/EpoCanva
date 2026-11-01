@@ -56,13 +56,15 @@ tests/windows/tsf_lifecycle/hosted/
 | 原骨架 | `epocanva_tsf`（`platforms/windows/tsf` 独立项目） | 无 | P3.1 的 COM 生命周期；不链接引擎；原有 3 条测试继续运行 |
 | 托管测试 | `epocanva_tsf_hosted_test`（由 `platforms/windows/engine_bridge` 引入） | `EPOCANVA_TSF_ENGINE_HOST=1`、`EPOCANVA_TSF_TEST_SEAM=1` | 同一组生产 TSF 源文件 + `engine_host.cc`；链接 `epocanva_engine_executor`；测试接缝只在此变体 |
 
-托管测试 DLL 的 `.def` 只有 `DllGetClassObject`、`DllCanUnloadNow` 和固定的
-`EpoCanvaTest*` 测试函数；产品 `epocanva_tsf.def` 没有被修改，也没有增加正式产品导出。
-`DllRegisterServer` / `DllUnregisterServer` 在两个变体中都不存在。
+托管测试 DLL 的 `.def` 含 `DllGetClassObject`、`DllCanUnloadNow`、两个注册导出（W3-B
+起，只断言存在，测试不调用）和固定的 `EpoCanvaTest*` 测试函数；产品 `epocanva_tsf.def`
+导出**恰好四个**名字：`DllGetClassObject`、`DllCanUnloadNow`、`DllRegisterServer`、
+`DllUnregisterServer`。注册策略在 `platforms/windows/tsf/registration.*`；B 层用内存
+注册表后端测试，真实 HKLM/HKCU 写入只在显式授权的 C 层会话发生。
 
-**真实产品配置与部署尚未完成。** 本轮只有测试接缝调用 `SetEngineHostConfig`；产品从哪里
-取得 rime.dll、共享/用户/日志目录，以及如何安装和注册，均未实现。托管测试 DLL 是从
-`engine_bridge` 项目构建的显式测试变体，不是可部署的输入法。
+**产品配置与部署已完成（W1–W3-A），系统注册尚未执行（W3-B）。** 产品从自身模块目录取得
+数据/`rime.dll`，用户数据在 `%LOCALAPPDATA%\EpoCanva`；W3-B 实现注册导出但本机没有安装
+器工具链，也没有运行系统注册。托管测试 DLL 仍是显式测试变体，不是可部署的输入法。
 
 ## 3. Broker 状态机与不变量
 
@@ -159,7 +161,7 @@ text service state_mutex_  ->  broker mutex  ->  (unlocked) EngineExecutor lifec
 
 ## 5. 模块卸载护栏
 
-`module_state` 现在有四个判断量：
+`module_state` 现在有五个判断量：
 
 | 量 | 含义 | 何时清零 |
 | --- | --- | --- |
@@ -167,9 +169,12 @@ text service state_mutex_  ->  broker mutex  ->  (unlocked) EngineExecutor lifec
 | `g_server_locks` | `LockServer(TRUE)` | 匹配的 `LockServer(FALSE)` |
 | `g_host_active` | 引擎启动/运行/停止/执行器销毁窗口 | 清理完全结束、执行器销毁之后 |
 | `g_host_failed` | 清理失败/异常弃租的单向闩锁 | 永不清除（进程生命周期） |
+| `g_registration_active` | W3-B 注册/反注册的整个注册表序列 | 序列返回前 |
 
 `DllCanUnloadNow` 只返回 `ModuleCanUnload() ? S_OK : S_FALSE`。`ModuleCanUnload` 只读上述
-四个值：不加锁、不 join、不初始化、不调用引擎、不做文件 I/O。
+五个值：不加锁、不 join、不初始化、不调用引擎、不做文件 I/O。注册窗口计数保证
+`DllRegisterServer`/`DllUnregisterServer` 写注册表期间卸载判断为 `S_FALSE`
+（注册本身不创建 COM 对象、不持有服务器锁）。
 
 关键顺序：
 

@@ -132,6 +132,13 @@ cmake --build build/isolation-tools --config Release --target epocanva_tip_profi
 “profile 注册成功 = 已在应用激活”。`status` 分别报告 COM 注册、profile 存在和当前
 键盘 TIP 激活状态。
 
+W3-B 起产品 DLL 自身导出 `DllRegisterServer`/`DllUnregisterServer`：
+`DllRegisterServer` 自动选择作用域（已有本产品注册的 hive 优先；否则提权进程写 HKLM、
+普通进程写 HKCU），只写 CLSID/`InprocServer32`/两个实现类别，逐项回读，失败回滚，
+外来 CLSID 拒绝；`DllUnregisterServer` 从两个 hive 移除本产品内容并回读 absent。
+`register_tip.ps1`/`unregister_tip.ps1` 仍是独立的显式脚本，可用于对照或脚本化证据；
+两者与导出使用同一份 CLSID/类别/标记口径。
+
 ### 3.2 注册、检查、移除
 
 ```
@@ -151,7 +158,8 @@ powershell -File tools/product/isolation/capture_state.ps1 -ReportPath <evidence
 
 - 拒绝未授权开关、非 x64 DLL、非管理员 HKLM；
 - 读取 PE 头验证 `0x8664`，若 `dumpbin` 可用则检查 `DllGetClassObject`/`DllCanUnloadNow`
-  （不要求 `DllRegisterServer` 存在）；
+  以及 W3-B 起的 `DllRegisterServer`/`DllUnregisterServer` 是否在导出表中；脚本本身不调用
+  注册导出，写入范围仍由脚本显式控制；
 - 遇到属于其他产品的 CLSID（无 `EpoCanvaProduct` 标记且路径不是 `epocanva_tsf.dll`）时拒绝；
 - 写入后逐项读回 `InprocServer32`、`ThreadingModel`、标记和类别；任一不符即回滚；
 - 输出 JSON 证据（DLL 路径/SHA-256、写前状态、每个操作的返回值）。
@@ -165,7 +173,10 @@ powershell -File tools/product/isolation/capture_state.ps1 -ReportPath <evidence
 | --- | --- | --- |
 | 正式 TIP 激活 | 记事本 | 输入固定英文 token，Space 提交，文档精确；无网络 I/O |
 | StrictTsf 前台 | 记事本/第二应用 | `ContextObserver` 以 StrictTsf 绑定真实前台焦点；无 Lab fallback |
-| 候选窗口显示 | 记事本 | 真实 `BeginUIElement`；TIP 初值 `pbShow=TRUE`；宿主 FALSE 时不自绘、FALSE 后立即首次全量 Update；宿主 TRUE 时窗口位于真实 token 矩形；宿主不绘制时记录限制 |
+| 候选窗口显示（态 A） | 记事本/第二应用 | 真实 `BeginUIElement`；TIP 初值 `pbShow=TRUE`；宿主 TRUE 时窗口位于真实 token 矩形；无第二窗口 |
+| 候选窗口显示（态 B） | 记事本/第二应用 | 宿主 FALSE 时默认不自绘、FALSE 后立即首次全量 Update；用户设置 `always_self` 后自绘且在证据中标注“可能与宿主重复”；`Show(FALSE)` 后不重开 |
+| 候选窗口显示（态 C） | 至少 4 个真实宿主 | 宿主无 `ITfUIElementMgr`（QI 失败）时 TIP 自绘；锚点仍只来自真实 token 矩形 |
+| 候选显示设置生效 | 记事本 | 设置 EXE 保存 `candidate_display`，下一次引擎启动（TIP 激活）生效；`--diagnose` 的 `candidate_display` 与实际一致 |
 | 点击不抢焦点 | 记事本 | 点击候选后焦点仍在编辑框；`WM_MOUSEACTIVATE=MA_NOACTIVATE` |
 | Enter/Escape/BackSpace | 记事本 | 正常与降级路径；不删除宿主既有文本；无迟到写入；宿主隐藏 UI 时方向键/Enter 不进产品菜单 |
 | 快速连续输入/容量 | 记事本 | 1202 单元突发 → 全部宿主插入；同会话继续输入；无崩溃 |
@@ -174,6 +185,7 @@ powershell -File tools/product/isolation/capture_state.ps1 -ReportPath <evidence
 | 宿主接管绘制 | 记事本/第二应用 | `pbShow=FALSE` 时不重复弹窗；`Show(FALSE)` 后不重开；`Show(TRUE)` 才交回 TIP |
 | 停用/卸载 | 记事本 | 停用后不崩溃；`DllCanUnloadNow` 在 TSF 回调释放前为 S_FALSE |
 | 注册移除/再启用 | 记事本 | 移除后应用恢复原输入法；再次注册可重新启用 |
+| 注册导出语义 | 本机（提权） | `DllRegisterServer` 连续两次结果相同；写入期间 `DllCanUnloadNow` 为 `S_FALSE`；`DllUnregisterServer` 后 HKLM/HKCU 的 CLSID/InprocServer32/两个类别/标记全部 absent；外来 CLSID 被拒绝且原键不变 |
 | 设置生效时机 | 记事本 | 保存后下一次引擎启动/宿主重启生效；界面文案一致 |
 
 ### 4.0 本轮测试编排的会话握手（正式包复验必须使用）
@@ -194,7 +206,8 @@ powershell -File tools/product/isolation/capture_state.ps1 -ReportPath <evidence
   `data/lexicon/epocanva_en_alpha.tsv`），并运行 stage 自带
   `EpoCanva.exe --diagnose <evidence>\diagnose.txt`；要求 `package=ready`、
   `manifest=ok`、`manifest_files=21`、`manifest_failures=0`。不允许只复制 DLL 后注册。
-- 清理：deactivate → unregister profile → `unregister_tip.ps1`；验证 COM、两个类别
+- 清理：deactivate → unregister profile → `DllUnregisterServer`（或
+  `unregister_tip.ps1`）；验证 COM、两个类别
   （`GUID_TFCAT_TIP_KEYBOARD` 与 `GUID_TFCAT_TIPCAP_UIELEMENTENABLED`）、TIP key 和
   profile 全部 absent，并把结果连同 session ID 写入 `cleanup-done.flag`。
 - UAC 取消 → 触发器退出 7，停止；不自动重试、不沿用旧轮批准。

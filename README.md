@@ -42,32 +42,38 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
   （`helloworld` 仍整串保留）。实现形态是编译进 `rime.dll` 的最小英文 Processor
   （`engine/rime_components/english/english_space_processor.cc`），规则本身在
   `engine/languages/en/english_space_policy.h`，测试侧只拼接 API 真正返回过的 commit。
-- 没有：生产词库（默认夹具仍是 **54 行**手写数据，P2.4 的 42k 行是**测试用**派生清单）、
-  词频与上下文**学习**、
+- 没有：词频与上下文**学习**、
   形态变化（复数、`-s/-ed/-ing`、所有格、缩合）、拼写**纠错**、连写**自动分段**、
   缩写展开、跨应用一致性、下一词预测、候选编排与分页；
   大小写方面**只有** ASCII 映射——没有 Unicode case folding、没有句首自动大写、
   没有专名/品牌词大小写恢复（`iPhone`、`GitHub` 一类仍不补全）；
   词形方面**只有**"至多一个 ASCII 分隔符、不在首尾、不两种混用"这一条有限规则——
   没有多分隔符词形、没有 Unicode 弯撇号/破折号规范化、没有自动标点替换、
-  没有 URL/邮箱/代码解析器；没有**系统注册**的 TSF 输入法、Android 前端与安装器
-  （候选窗口已在内部运行包中实现，但未注册到系统）；
+  没有 URL/邮箱/代码解析器；**没有已安装、已激活的系统 TSF 输入法**，没有 Android
+  前端，没有已执行的安装器（W3-B 只交付并测试了注册导出，未运行系统安装）；
   W1 只交付未注册的产品 TSF DLL 与设置壳；W2-A 已把产品 TSF DLL 接到真实
   `ITfKeyEventSink`、上下文观察、真实许可、协调器、固定 STA 唤醒与有界输入队列；
-  W2-A-R 又补上高水位原样降级（文本不丢/不重/不乱序）、首 token 宿主归属与运行期共享锁，
-  但**仍未注册**、未改系统输入法、未做安装器（W3）；候选窗口已由 W2-B 实现；
-  W2-B-R 修复了容量边界后的同会话恢复与 COM 回调/卸载生命周期，并补齐降级控制键与
-  启动/停用端到端回归。
+  W2-A-R 又补上高水位原样降级（文本不丢/不重/不乱序）、首 token 宿主归属与运行期共享锁；
+  候选窗口已由 W2-B 实现；W2-B-R 修复了容量边界后的同会话恢复与 COM 回调/卸载生命周期，
+  并补齐降级控制键与启动/停用端到端回归；W3-A 增加 UIElement 类别、宿主绘制决定遵从与
+  token 锚点；W3-B 增加 `DllRegisterServer`/`DllUnregisterServer`、候选回退显示设置与
+  版本/图标资源，但安装与真实系统注册仍需一次显式授权的 C 层会话。
+- 词库事实：W1 起的内部产品包**已包含** `data/lexicon/epocanva_en_alpha.tsv`
+  （42,356 行，由 `tools/data/build_product_lexicon.py` 从固定 ESDB 提交确定性生成并记录
+  provenance），它随暂存包分发但**仅限内部 Alpha**——跨法域再分发仍需负责人与法务确认
+  （`docs/compliance/english-pilot-data.md` §5）。默认测试夹具仍是 54 行手写词表；
+  pilot 模式使用的 42,356 行清单是另一份**验证装置**，不是产品包里的文件。
 - 因此此刻仓库能演示的输入仍极其有限：默认集成测试补全的是那 54 个词，
   但可以连续打多个词并用空格逐个提交（`Hello world `）；
   pilot 模式补全的是那 42,356 个词，但它是**验证装置**，没有前端、不在分发包里。
   在 `rime_raw` / `rime_probe` 两个夹具里候选文本仍与按键逐字节相同——
   那是链路证明；只有 `english_completion` / `english_pilot` 夹具的候选来自词表查询。
 - W1 起另有一条**内部 Alpha 产品壳**：原生 Win32 的 `EpoCanva.exe`（设置、状态、离线/隐私说明、
-  数据位置、许可入口）、未注册的产品 TSF DLL、`%LOCALAPPDATA%\EpoCanva` 用户数据、
-  只读安装数据与白名单离线暂存包。它**不是**系统输入法：不注册、无系统键盘接管，
-  候选窗口只在产品 DLL 自身的受控会话内出现，
-  这些是 W2/W3 的工作；也不要把内部 Alpha 包当作可公开分发的版本。
+  数据位置、许可入口）、产品 TSF DLL、`%LOCALAPPDATA%\EpoCanva` 用户数据、
+  只读安装数据与白名单离线暂存包。W3-B 让 DLL 自带 `DllRegisterServer`/
+  `DllUnregisterServer` 与图标/版本资源，但**本机尚未执行系统注册**；
+  未注册时它不是系统输入法，候选窗口只在产品 DLL 自身的受控会话内出现。
+  内部 Alpha 包不得公开分发。
 
 
 ## 阶段状态
@@ -91,7 +97,9 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 | W2-B-R | 同会话容量恢复回归、降级 Enter/Escape/BackSpace 端到端、异步启动/停用/卸载生命周期、候选 UIElement 审查、隔离验证材料 | 已交付（内部运行包 `0.2.3-w2br`；未注册；C 层未验证） | `docs/reports/W2-B-R-crash-and-lifecycle.md` |
 | W2-A-R | 输入可靠性收敛：高水位原样降级（原文优先于补全/拼写建议）、首 token 宿主归属、宿主默认输入与参考文档模型、运行期共享锁取证 | 已交付（内部运行包 `0.2.1-w2r`；未注册） | `docs/reports/W2-A-R-input-reliability.md` |
 | W2-C | 输入保真 P0：普通原文归宿主、引擎建议有界可丢弃、显式候选替换的范围校验；删除 raw 容量路径并更正 177 的归属 | 已交付（内部运行包 `0.2.4-w2c`；未注册；C 层未验证） | `docs/reports/W2-C-input-fidelity.md` |
-| 之后 | 注册/卸载/安装器（W3）、其余英文能力、Android | 未开始 | — |
+| W3-A | 正式 TIP 注册/激活身份、UIElement 类别、宿主绘制决定遵从、token 锚点与隔离验证工具 | 已交付（内部运行包 `0.2.5-w3a`；C 层 trace 轮次完成，正式包闭环待复验） | `docs/reports/W3-A-isolation-registration.md` |
+| W3-B | `DllRegisterServer`/`DllUnregisterServer`（HKLM/HKCU、回读、回滚、外来 CLSID 拒绝）、候选回退显示设置、版本/图标资源、安装工具链只读探测 | 已实现并完成 B 层验证（内部 Alpha；未分发；系统注册/安装与 C 层闭环待一次显式 UAC 授权） | `docs/reports/W3-B-install-and-fallback.md` |
+| 之后 | 安装器（工具链缺失，W3-B 未执行）、C 层闭环、其余英文能力、Android | 未开始 | — |
 
 ## 目录结构
 
@@ -111,7 +119,8 @@ data/
   product/                  W1 产品 schema/default/NOTICE（只读安装数据源）
   manifests/                english-pilot.sources.lock.json：试验/产品词表的固定来源
 tools/
-  product/                  W1 构建入口（build_product.ps1）与白名单暂存（stage_product.ps1）
+  product/                  W1 构建入口（build_product.ps1）、白名单暂存（stage_product.ps1）、
+                            make_app_icon.py（离线生成产品图标，无第三方素材）
   data/build_product_lexicon.py  W1 产品词表生成器（复用 P2.4 转换，独立 provenance，不联网）
   toolchain_probe/          C++17 工具链探针
   rime_lifecycle_smoke/     引擎生命周期冒烟（P1.2）
@@ -233,9 +242,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/product/stage_prod
 暂存脚本只接受白名单文件，拒绝 PDB、测试 DLL、日志与文本路径；它对 rime.dll 内嵌的本机
 `__FILE__` 构建前缀给出警告（公开分发前的构建修复项，见 W1 报告）。
 
-**这不是系统输入法**：本轮不注册 CLSID、不安装系统键盘接管；候选窗口只在产品 DLL 的受控会话内出现。设置 EXE 可以保存
-并回读真实设置，产品 TSF DLL 会在下一次被宿主加载/激活时部署设置补丁；不要描述成
-“系统输入已经可用”。设置项之外的预测、学习和其他语言没有可点击的假开关。
+**这不是已安装的系统输入法**：产品 DLL 现在导出 `DllRegisterServer`/`DllUnregisterServer`
+（只写本产品自己的 CLSID、`InprocServer32` 与两个实现类别，支持 HKLM/HKCU、逐项回读、失败回滚），
+但 W3-B 没有在本机执行系统注册，也没有可用的安装器工具链；未注册时没有系统键盘接管，
+候选窗口只在产品 DLL 的受控会话内出现。设置 EXE 可以保存并回读真实设置，
+产品 TSF DLL 会在下一次被宿主加载/激活时部署设置补丁；不要描述成“系统输入已经可用”。
+设置项之外的预测、学习和其他语言没有可点击的假开关。
 
 ## 许可证
 

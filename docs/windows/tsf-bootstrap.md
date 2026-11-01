@@ -4,7 +4,8 @@
 > **不链接引擎**；其 3 条 CTest 继续作为骨架回归。P3.6 另在
 > `build/windows-engine-bridge/test` 中构建显式的托管测试变体
 > `epocanva_tsf_hosted_test.dll`，它复用同一组 TSF 源文件并链接 P3.5 执行器，用私有
-> 测试接缝注入目录并验证 Broker/租约/卸载护栏。真实产品配置、部署与注册仍未完成。
+> 测试接缝注入目录并验证 Broker/租约/卸载护栏。真实产品配置与部署由 W1–W3-A 完成；
+> W3-B 已实现注册导出，但本机尚未执行系统注册（安装器工具链缺失，C 层闭环待授权）。
 > 生命周期契约见 `docs/windows/tsf-engine-lifetime-contract.md`。本文下方“没有引擎接入”
 > 的表述只适用于原骨架目标，不适用于托管测试变体。
 
@@ -16,19 +17,22 @@
 是：
 
 - 一个 x64 的 TSF 文本服务 DLL（`epocanva_tsf`），导出**且只导出**
-  `DllGetClassObject` 与 `DllCanUnloadNow`；
+  `DllGetClassObject`、`DllCanUnloadNow`、`DllRegisterServer`、`DllUnregisterServer`
+  （W3-B 起；见 §5）；
 - 一个 `IClassFactory` 实现（含 `LockServer`）；
 - 一个 `ITfTextInputProcessorEx` 实现（`Activate` / `ActivateEx` / `Deactivate`）；
 - 一个通过绝对路径受控加载该 DLL、并在**系统真实 ThreadMgr** 上跑激活/停用的验证程序。
 
 不是：
 
-- **不是已安装的输入法**。没有 `DllRegisterServer`、没有 `DllUnregisterServer`、没有
-  profile/category 注册、没有安装器、没有注册表写入。任何一次运行都不需要管理员权限。
-- **没有键盘处理**。没有按键 sink、没有 `ITfKeystrokeMgr` AdviseKeyboardEvent、没有
-  `OnTestKeyDown`/`OnKeyDown`。
-- **没有候选窗**。没有 `ITfComposition`、没有 `ITfTextInput`、没有 UI 候选列表、没有
-  宿主文本编辑。
+- **不是已安装的输入法**。W3-B 实现了 `DllRegisterServer`/`DllUnregisterServer`
+  （HKLM/HKCU、逐项回读、失败回滚、外来 CLSID 拒绝），但本轮**没有执行系统注册**，
+  也没有可用安装器工具链；未注册时没有系统键盘接管。注册相关能力只有显式授权的 C 层
+  会话才会写真实注册表。
+- **没有键盘处理**（指本骨架目标）。没有按键 sink、没有 `ITfKeystrokeMgr`
+  AdviseKeyboardEvent、没有 `OnTestKeyDown`/`OnKeyDown`。
+- **没有候选窗**（指本骨架目标）。没有 `ITfComposition`、没有 `ITfTextInput`、
+  没有 UI 候选列表、没有宿主文本编辑。
 - **没有引擎接入**。没有 librime 初始化、没有 IPC、没有引擎服务；`engine/` 与
   `third_party/` 不被本轮任何目标引用。
 
@@ -40,9 +44,10 @@
 ```
 platforms/windows/tsf/        独立顶层 CMake 项目（不是根项目的子目录）
   CMakeLists.txt              项目、CRT、目标定义
-  epocanva_tsf.def            导出表（两个名字，均标 PRIVATE）
-  dll_main.cc                 DllMain + 两个导出入口 + 异常边界
-  module_state.{h,cc}         模块活对象计数 / 服务器锁计数
+  epocanva_tsf.def            导出表（四个名字，均标 PRIVATE）
+  dll_main.cc                 DllMain + COM 入口 + 异常边界
+  module_state.{h,cc}         模块活对象计数 / 服务器锁计数 / 注册窗口计数
+  registration.{h,cc}         W3-B 注册策略、Win32 后端与两个自注册导出
   class_factory.{h,cc}        IClassFactory
   text_service.{h,cc}         ITfTextInputProcessorEx
   identifiers.{h,cc}          冻结的 CLSID
@@ -112,8 +117,9 @@ ctest --test-dir build/windows-tsf/test -C Release -R "^tsf\.lifecycle\." \
 | 运行 | `ctest -C Release ... --no-tests=error --output-on-failure` | **0**，3/3 Passed | `build/windows-tsf-ctest-r5.log` |
 | lifecycle 直跑 | `tsf_lifecycle.exe --dll <绝对路径> --mode lifecycle` | 0，**51 checks / 0 failed** | `build/windows-tsf-lifecycle-direct.log` |
 | threadmgr 直跑 | 同上 `--mode threadmgr` | 0，**16 checks / 0 failed** | `build/windows-tsf-threadmgr-direct.log` |
-| 导出表 | `dumpbin /exports Release/epocanva_tsf.dll` | 2 functions / 2 names：`DllCanUnloadNow`、`DllGetClassObject` | 控制台 |
-| 依赖 | `dumpbin /dependents` | DLL：`KERNEL32.dll`；验证程序：`ole32.dll`、`KERNEL32.dll` | 控制台 |
+| 导出表（P3.1 轮次） | `dumpbin /exports Release/epocanva_tsf.dll` | 当时 2 functions / 2 names：`DllCanUnloadNow`、`DllGetClassObject` | 控制台 |
+| 导出表（W3-B 起） | `dumpbin /exports <staged>\epocanva_tsf.dll` | 4 functions / 4 names：上述两个 + `DllRegisterServer`、`DllUnregisterServer` | W3-B 证据目录 |
+| 依赖（P3.1 轮次） | `dumpbin /dependents` | DLL：`KERNEL32.dll`；验证程序：`ole32.dll`、`KERNEL32.dll` | 控制台 |
 
 工具链（配置日志自陈）：MSVC 19.44.35209（工具集 14.44.35207）、Windows SDK 10.0.26100.0、
 目标 OS 10.0.26200、x64。
@@ -166,7 +172,7 @@ ctest --test-dir build/windows-tsf/test -C Release -R "^tsf\.lifecycle\." \
 析构走同一个 `Deactivate` 路径而不是第二套清理逻辑，正是为了让这条不可观测的路径
 只有一个实现可能出错。
 
-## 5. DllMain 与"不注册"
+## 5. DllMain 与注册导出
 
 `DllMain` 只做一件事：`DLL_PROCESS_ATTACH` 记下 `HINSTANCE`，`DLL_PROCESS_DETACH` 清空。
 不初始化 COM、不初始化引擎、不建线程、不扫文件、不加载语言包、不起日志设施。
@@ -177,12 +183,17 @@ ctest --test-dir build/windows-tsf/test -C Release -R "^tsf\.lifecycle\." \
 CRT 假设上。AGENTS.md 要求核实后再动，所以这里保持不动。
 
 `epocanva_tsf.def` 是唯一的导出机制：源码里没有任何 `__declspec(dllexport)`，
-所以导出表和 .def 不可能漂移。`DllRegisterServer` / `DllUnregisterServer` 是**不存在**，
-不是"存在但返回失败"——不存在的导出没法被 regsvr32 误调。验证程序从导出表断言两者缺失。
+所以导出表和 .def 不可能漂移。W3-B 起导出**恰好四个**名字：
+`DllGetClassObject`、`DllCanUnloadNow`、`DllRegisterServer`、`DllUnregisterServer`。
+后两者只写本产品自己的 CLSID/`InprocServer32` 和
+`GUID_TFCAT_TIP_KEYBOARD`/`GUID_TFCAT_TIPCAP_UIELEMENTENABLED` 两个实现类别，
+不注册 profile、不切换用户输入法；写入逐项回读，失败回滚本轮全部改动，外来 CLSID 直接拒绝。
+它们**存在但本轮从未被真实调用**：真实注册表写入只允许发生在显式授权的 C 层会话。
+B 层用内存注册表后端测试同一套策略（`epocanva_registration_tests`）。
 
-两个名字标了 `PRIVATE`：这是给 `GetProcAddress` 和 COM 装载器用的入口，没有任何东西
-链接这个 DLL 的导入库；不标 PRIVATE 时链接器报 `LNK4104`（本轮早期构建日志里真实出现过，
-加上 PRIVATE 后为 0 warning）。PRIVATE 不影响 `GetProcAddress` 按名解析。
+四个名字都标了 `PRIVATE`：这是给 `GetProcAddress`、COM 装载器和 regsvr32 用的入口，
+没有任何东西链接这个 DLL 的导入库；不标 PRIVATE 时链接器报 `LNK4104`，加上后为 0 warning。
+PRIVATE 不影响 `GetProcAddress` 按名解析。
 
 GUID 一次性生成并**固化在源码**（`identifiers.cc`，`{B440F702-63E4-4D47-BCC4-074899ABA836}`），
 不参与构建期生成。测试程序编译 DLL 的同一份 `identifiers.cc`，所以仓库里这个 CLSID
@@ -193,7 +204,8 @@ GUID 一次性生成并**固化在源码**（`identifiers.cc`，`{B440F702-63E4-
 
 程序只通过命令行给定的**绝对路径**加载 DLL：`LoadLibraryW` → 比对 `GetModuleFileNameW`
 与 `GetFullPathNameW`（证明加载的确实是这个文件，而不是搜索顺序撞上的另一份）→
-`GetProcAddress` 取两个入口 → 之后只经 COM 接口交互。全程不依赖注册表里有 EpoCanva CLSID。
+`GetProcAddress` 取四个导出入口（注册导出只断言存在，不调用）→ 之后只经 COM 接口交互。
+全程不依赖注册表里有 EpoCanva CLSID，也不写任何注册表。
 
 `lifecycle` 模式覆盖的卸载判断序列（51 条检查里的关键 8 条，按实际输出顺序）：
 
@@ -243,11 +255,14 @@ QI `ITfClientId`（`msctf.h:10700-10705`，uuid `d60a7b49-1b9f-4be2-b702-47e9dc0
 
 以下都不是"藏在别处"，是不存在：
 
-- `DllRegisterServer` / `DllUnregisterServer` / 任何注册表写入；
-- TSF profile、category（`CATID_TextService_*`）注册，`ITfTextInputProcessor` 之外的任何
-  TSF 接口实现（`ITfKeystrokeMgr` advise sink、`ITfTextInput`、`ITfComposition`、
-  `ITfDisplayAttributeProvider`、`ITfFn*`）；
-- 按键处理、组合/preedit、候选 UI、宿主文本读写；
+- 已执行的系统注册与安装器（W3-B 只实现并测试了 `DllRegisterServer`/
+  `DllUnregisterServer` 的策略；本机没有 WiX/Inno Setup/NSIS，安装器工作项未执行）；
+- TSF profile 注册（`AddLanguageProfile`）与输入法切换；W3-B 的注册导出只写 CLSID 与
+  两个实现类别，profile 仍由 `epocanva_tip_profile_helper` 显式调用；
+- `ITfTextInputProcessor` 之外的任何 TSF 接口实现（`ITfKeystrokeMgr` advise sink、
+  `ITfTextInput`、`ITfComposition`、`ITfDisplayAttributeProvider`、`ITfFn*`）——产品
+  TSF 层已实现其中若干，但本骨架目标没有；
+- 按键处理、组合/preedit、候选 UI、宿主文本读写（本骨架目标）；
 - UTF-16 ↔ UTF-8 偏移换算（AGENTS.md 第 5 节要求它在 C ABI 边界定义，尚未定义）；
 - librime 初始化、引擎会话、IPC/引擎服务、跨应用一致性；
 - 字段隐私等级识别（`TATTE_*`）。
@@ -256,14 +271,16 @@ QI `ITfClientId`（`msctf.h:10700-10705`，uuid `d60a7b49-1b9f-4be2-b702-47e9dc0
 
 ## 8. 系统变更边界
 
-本轮执行过程中**没有**：regsvr32、注册表写入、输入法 profile/category 注册、安装器、
-提权、全局 PATH 修改、任何网络 I/O 或遥测（AGENTS.md 第 2 节）。链接的系统库只有
-`ole32`（测试程序的 `CoInitializeEx`/`CoCreateInstance`）与 `uuid`（`CLSID_TF_ThreadMgr`
-等常量定义），产物只在 `build/windows-tsf/` 下生成。
+P3.1 与 W3-B 的构建/测试执行过程中**没有**：regsvr32、真实注册表写入、输入法
+profile/category 注册、安装器、提权、全局 PATH 修改、任何网络 I/O 或遥测
+（AGENTS.md 第 2 节）。W3-B 的注册策略只在内存后端上测试；真实 HKLM/HKCU 写入属于
+需显式授权的 C 层会话。链接的系统库在 P3.1 是 `ole32` 与 `uuid`；W3-B 的 DLL 另加
+`advapi32`（注册表 API）。产物只在 `build/` 下生成。
 
 ## 9. 下一阶段
 
 接入的是**输入桥接**，不是把这份骨架补完：C ABI 边界上的 UTF-16/UTF-8 与 caret 单位换算、
 引擎会话与生命周期、`ITfKeystrokeMgr` 的按键 advise、`ITfTextInput`/`ITfComposition`
-的 preedit 与提交。候选 UI 与注册/安装流程在那之后，且注册需要单独一轮的授权与验证——
+的 preedit 与提交。产品 TSF 层（W1–W3-B）已经完成这些的大部分；本骨架仍只验证生命周期。
+注册导出已经存在，但系统注册、安装器与 C 层闭环需要单独一轮授权与验证——
 本轮的产物即便全部通过，也仍然不是一个能装上就用的输入法。

@@ -89,10 +89,21 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
   `GetCount/GetString/GetSelection/GetPageIndex/GetCurrentPage` 与
   `SetSelection/Finalize/Abort`；`SetSelection/Finalize` 只回调控制器。
 - `pbShow` 的初值由 TIP 写为 `TRUE`；`BeginUIElement` 返回后读取宿主写回的决定。
-  为 `FALSE` 时**不创建、不显示**任何自绘窗口（没有进程名/文件名例外），同时保留真实
-  `ITfUIElement` 并回答所有查询。按 UILess 契约，`BeginUIElement` 返回 `FALSE` 后必须
-  立即调用一次 `UpdateUIElement`，首次更新带全量标志
+  按 SDK/官方文档，`TRUE` 表示宿主不绘制、由 TIP 绘制；`FALSE` 表示宿主接管绘制、
+  TIP 不应再画。为 `FALSE` 时默认**不创建、不显示**任何自绘窗口（没有进程名/文件名例外），
+  同时保留真实 `ITfUIElement` 并回答所有查询。按 UILess 契约，`BeginUIElement` 返回
+  `FALSE` 后必须立即调用一次 `UpdateUIElement`，首次更新带全量标志
   （`DOCUMENTMGR|COUNT|SELECTION|STRING|PAGEINDEX|CURRENTPAGE`）。
+- **W3-B 用户回退设置**（`candidate_display=host|always_self`，设置 EXE 写入
+  `settings.ini`；由引擎启动事务在 bootstrap 线程读取并发布，下一次引擎启动生效；
+  若本进程附着到其他进程已启动的引擎，则在本次激活读取一次）：`host` 为默认，严格遵从
+  `pbShow`；`always_self` 在宿主返回 `FALSE` 时仍显示 TIP 窗口，用于“宿主接管但什么都没画”
+  的应用。界面文案明确警告：宿主若同时绘制会出现两个窗口。显式 `Show(FALSE)` **始终优先于**
+  `always_self`，隐藏后不因数据更新重开，只有宿主 `Show(TRUE)` 才交回绘制权。
+  该设置是用户偏好，不是宿主白名单，不按进程名/文件名分支。
+- **W3-B 态 C**：宿主根本没有 `ITfUIElementMgr`（`ITfUIElementMgr` QI 失败）时，TSF 允许
+  TIP 自绘；控制器仍只使用真实 `GetTextExt` token 矩形作为锚点，无布局时关闭菜单而不是
+  伪造位置。`EPOCANVA_TSF_DIRECT_SINK_TEST` 受控变体不进入态 C 自绘（它不是真实宿主）。
 - `ITfUIElement::Show(FALSE)` 隐藏真实窗口并使 `IsShown` 返回 `FALSE`；后续数据更新不得
   重新打开。只有宿主显式 `Show(TRUE)` 才把绘制权交回 TIP，控制器在下一个节流唤醒重新
   读取 anchor 后展示。
@@ -107,11 +118,13 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
 
 **已知宿主限制（证据，不是白名单）**：W3-A trace 轮次在 Windows 11 新 Notepad 中观测到
 `BeginUIElement` 返回 `pbShow=FALSE`，且该宿主没有绘制候选列表；当时 stage8 在所有
-`FALSE` 上自绘，属于违反 UILess 契约的临时诊断路径，已删除。正式链路现在严格按宿主决定
-隐藏自绘窗口；Notepad 是否自绘必须由正式包的 trace/diagnose 重新观测并记录。证据文件：
+`FALSE` 上自绘，属于违反 UILess 契约的临时诊断路径，已删除。正式链路默认严格按宿主决定
+隐藏自绘窗口；W3-B 增加了**用户显式**的 `candidate_display=always_self` 回退，并如实警告
+可能与宿主重复绘制。Notepad 是否自绘必须由正式包的 trace/diagnose 重新观测并记录。证据文件：
 `build/w3a-c-local/evidence6/trace-hostdrawn-before.txt`（`ui_host_drawn|1`、
 `ui_host_drawn_hide|1`）与 `docs/reports/W3-A-isolation-registration.md` §11.4/§11.7。
-不得据进程名恢复自绘；如果宿主确实不绘制，结论是宿主兼容限制，不是产品可以越过契约的理由。
+不得据进程名恢复自绘；如果宿主确实不绘制，默认行为是宿主兼容限制，用户可以选择
+`always_self` 作为显式回退。
 
 ## 6. 位置与显示
 
@@ -129,8 +142,9 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
 - 布局暂不可读时按 pacing 重试，预算 **40 次/宿主 token**，不因候选快照版本变化而重置；
   token 边界、目标绑定/丢失、宿主 `Show(TRUE)` 才重置。预算耗尽仍无矩形 → 关闭该菜单
   （不是留下一个不可见的可键盘选择菜单）。全程不忙等、不在 UI 线程等待布局或引擎。
-- 宿主接管绘制（`pbShow=FALSE` 或 `Show(FALSE)`）时窗口不创建/隐藏；元素继续回答候选
-  查询。只有宿主 `Show(TRUE)` 才允许 TIP 再次自绘。
+- 宿主接管绘制（`pbShow=FALSE` 或 `Show(FALSE)`）时默认窗口不创建/隐藏；元素继续回答候选
+  查询。唯一例外是用户显式 `candidate_display=always_self`（`pbShow=FALSE` 时仍自绘，
+  `Show(FALSE)` 仍强制隐藏）。只有宿主 `Show(TRUE)` 才把绘制权交回 TIP。
 - 光标移动、鼠标点击其他位置、选区替换、删除/粘贴等外部编辑都会在宿主编辑通知或下一次
   真实 caret 读取时被观察到；旧版本菜单的选择由版本/caret/范围/文本四重校验拒绝。
   滚动和窗口移动不改变 ACP；新的 `GetTextExt` 只在菜单版本更新时读取，窗口位置可能保持
@@ -156,6 +170,13 @@ W2-C 起，选择**不再是引擎命令**，而是一次显式的原文替换
   排队后宿主继续编辑、同文本他处、焦点切换、`SetText` 成功后报错的不确定状态）、
   丢弃后建议流重同步、真实 caret 锚点读取。详见
   `docs/reports/W3-A-isolation-registration.md`。
+- W3-B 新增 B 层证据（`product.ui.candidate_window` 与
+  `product.ui.candidate_display_can_fail`）：态 A（TRUE 时 TIP 窗口）、态 B 默认不自绘、
+  态 B + `always_self` 自绘、`Show(FALSE)` 后不重开、`Show(TRUE)` 恢复、态 C 无
+  `ITfUIElementMgr` 自绘且点击携带真实快照 identity、态 A/C 无布局不打开窗口；
+  `settings.ini` 的 `candidate_display` 往返与设置窗口读写、下一次引擎启动生效的设计。
+  控制条故意断言“态 B 默认自绘”，必须以 14 退出。真实宿主中的 A/B/C 观测仍未执行
+  （C 层，待授权）。
 - **未验证（C 层）**：修正后的正式包（含 `GUID_TFCAT_TIPCAP_UIELEMENTENABLED` 注册、
   `pbShow` 严格遵从、FALSE 后首次 Update、`S_FALSE`）在真实应用/StrictTsf 前台下的
   宿主绘制行为与点击、真实 `ITfUIElementMgr`、真实 `GetTextExt` 矩形、真实 DPI/多显示器。
