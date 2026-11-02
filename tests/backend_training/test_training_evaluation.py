@@ -217,7 +217,9 @@ class TrainingContractTests(unittest.TestCase):
             self.assertEqual(excluded, {"non_whitespace_control_or_format": 1})
 
     def test_production_requires_real_corpus_scale(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / "build" / "backend-training") as temp:
+        artifact_root = ROOT / "build" / "backend-training"
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=artifact_root) as temp:
             path = Path(temp) / "tiny.jsonl"
             row = {"id": "fixture", "language": "en", "text": "actual words",
                    "source": "licensed-corpus", "license": "CC-BY", "attribution": "author",

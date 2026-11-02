@@ -195,4 +195,10 @@ Windows普通进程内TSF DLL不存在OS强制网络沙箱；离线保证来自�
 - `tools/data/import_backend_corpora.py`
 - `tools/data/import_zh_fr.py`
 
-最终提交/push结果在实际命令执行后记录；不能用本报告中的计划替代远端事实。
+最终已创建提交 `2d990d32f553537669bb8e394776b8a63009f278`（70个新后端文件），并以TLS证书验证开启的正常push更新 `origin/feat/offline-multilingual-backend`，exit0。随后`git ls-remote`实时确认远端指向同一提交。检查点预发布tag仍指向`4d9bcd3`，没有移动或改写。
+
+`gh auth status`再次观察exit1、未登录，故GitHub Release页面/资产上传未执行。不提取Git凭据绕过认证；本地便携工具需要正常`gh auth login`后才能创建Release。
+
+最终实际稳定门禁返回exit1：五语言质量报告模型绑定、44项无跳过JUnit、31.4MB总体积和神经默认禁用条件通过；语言完整性、端到端尾延迟/额外RSS、离线源码重建、数据/模型交付仍阻塞。保留其他会话工作树修改，不为追求clean状态覆盖或提交它们。独立clean-worktree最终发行验证未执行，不能说已形成稳定release。
+
+最后补入训练测试的`build/backend-training`目录创建，避免全新检出在不存在测试输出根时失败；仅改测试准备，不修改训练/预测算法。重新执行23项训练单测与2项门禁负向测试后追加记录提交。
