@@ -14,6 +14,7 @@
 #include "product_paths.h"
 #include "product_settings.h"
 #include "product_display_preference.h"
+#include "product_backend_resources.h"
 
 namespace epocanva {
 namespace product {
@@ -69,6 +70,14 @@ bool HashRequiredFile(const std::filesystem::path& path, std::string* digest,
 // store user content.
 bool ComputeFingerprint(const ProductPaths& paths, const std::string& settings_token,
                         std::string* fingerprint, std::wstring* why) {
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  std::string manifest, binary;
+  if (!HashRequiredFile(paths.data_dir / L"backend" / L"resources.tsv", &manifest, why) ||
+      !HashRequiredFile(paths.rime_dll, &binary, why)) return false;
+  if (binary != EPOCANVA_PRODUCT_RIME_SHA256) { if (why) *why = L"engine binary identity mismatch"; return false; }
+  const std::string input = std::string("backend-v2") + settings_token + manifest + binary;
+  return Sha256(input.data(), input.size(), fingerprint, why);
+#endif
   std::string schema;
   std::string default_config;
   std::string custom = "missing";
@@ -173,6 +182,10 @@ bool WriteDeployedState(const ProductPaths& paths, const std::string& fingerprin
 
 bool CompiledArtifactPresent(const ProductPaths& paths) {
   std::error_code ec;
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  return std::filesystem::is_regular_file(paths.engine_user_dir / L"build/epocanva_backend_pinyin.schema.yaml", ec) &&
+      std::filesystem::is_regular_file(paths.engine_user_dir / L"build/epocanva_backend_zhuyin.schema.yaml", ec);
+#endif
   for (const std::filesystem::path& candidate :
        {paths.compiled_schema_file, paths.compiled_schema_binary}) {
     if (!std::filesystem::is_regular_file(candidate, ec) || ec) {
@@ -412,7 +425,19 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
   const bool state_matched = state_present && state.fingerprint == fingerprint;
   const bool artifact_present = CompiledArtifactPresent(paths);
 
-  const epocanva::tsf::EngineHostConfig base = BaseConfig(paths);
+  epocanva::tsf::EngineHostConfig base = BaseConfig(paths);
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  if (!LoadBackendResources(paths, &base.backend, why)) { ReleaseStartLock(&mutex_); return false; }
+  base.backend.active_profile_id = static_cast<std::uint32_t>(display_settings.settings.profile_id);
+  base.backend.completion_enabled = display_settings.settings.completion_enabled;
+  base.backend.spelling_enabled = display_settings.settings.spelling_enabled;
+  base.backend.morphology_enabled = display_settings.settings.morphology_enabled;
+  base.backend.abbreviation_enabled = display_settings.settings.abbreviation_enabled;
+  bool profile_found = false;
+  for (const auto& resource : base.backend.profiles)
+    profile_found = profile_found || resource.profile.profile_id == base.backend.active_profile_id;
+  if (!profile_found) return fail(why, L"selected profile is not supplied by the resource manifest");
+#endif
   const bool running = epocanva::tsf::EngineHostBroker::Instance().IsRunningFor(base);
   const bool snapshot_current = state_matched && artifact_present;
   const bool deployment_needed = !snapshot_current;
@@ -460,7 +485,12 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
   if (can_deploy) {
     epocanva::tsf::EngineHostDeployment deployment;
     deployment.config_file = paths.default_config;
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+    deployment.schema_files.push_back(paths.data_dir / L"epocanva_backend_pinyin.schema.yaml");
+    deployment.schema_files.push_back(paths.data_dir / L"epocanva_backend_zhuyin.schema.yaml");
+#else
     deployment.schema_files.push_back(paths.schema_file);
+#endif
     config.deployment = std::move(deployment);
   }
   if (!config.valid() || !epocanva::tsf::SetEngineHostConfig(config)) {
@@ -527,7 +557,8 @@ bool EngineStartTransaction::Complete(std::wstring* why) {
   if (deployment_requested_ || !deferred_while_running_) {
     // Drop the one-shot request from the stored configuration. The broker has already
     // cleared it from the running environment; this keeps later acquisitions matching.
-    (void)epocanva::tsf::SetEngineHostConfig(BaseConfig(paths));
+    auto active = config_; active.deployment.reset();
+    (void)epocanva::tsf::SetEngineHostConfig(active);
   }
 
   if (exclusive_) {

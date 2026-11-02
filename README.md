@@ -24,19 +24,13 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 
 ## 现在能做什么，不能做什么
 
-本轮已新增并测试语言无关纯 C ABI、英文形态/缩写/二编辑拼写及独立频率接口、
-有界隐私学习库、中文拼音/注音核心、法文重音核心、日文 Romaji/Kana 与韩文两套式组合核心。
-英文扩展已编译进真实 Rime DLL，pilot 关闭 39 项、开启 45 项引擎集成测试均通过；
-所有扩展默认关闭，始终保留原文候选。
-核心 Release 聚合为 56 项：55 通过、1 项符号链接能力测试明确跳过。
-正式产品 Release 聚合为 228 项：226 通过、2 项明确跳过、0 失败；当前源码收据已生成，
-但真实焦点/符号链接跳过项仍阻塞完整验收。
+已具备五语言离线 n-gram 模型、真实 Rime 中文词典、Hunspell 法文字典、Mozc 数据驱动的日文解码和韩文两套式组字。后端不是只查询前缀：上下文会影响补全、下一词和多词缩写展开，候选选择采用独立的宿主提交确认协议。
 
-**这不等于五语言产品已完成。** 生产词频尚未提供，学习库未连接候选 ID 与宿主写入确认链路；
-中文汉字/词组、法文词汇、日文 Kanji 数据未获选用与获取批准。其他语言当前只有独立核心，
-没有进入默认产品 schema。ABI 已有真实后端，但 TSF 尚未迁移到该 ABI；安装器及当前包跨宿主验收仍未完成。
-详细边界见 `docs/testing/english-completeness.md`、`docs/testing/learning-store.md`、
-`docs/testing/chinese-core.md`、`docs/testing/french-core.md`、`docs/testing/japanese-korean-core.md`。
+本次审计新增兼容 v1 的 v2 profile 接口、非 ASCII UTF-8 输入、短期上下文导入、模型驱动首字母缩写、部分显式缩写、统一候选评分和前缀索引。US QWERTY、French AZERTY、German QWERTZ、Dvorak 与未知布局中性评分分开建模；语言、键盘布局和输出模式不再混为一个英文 schema。经过来源校验的本地暂存资源提供 13 个 profile，详见 `docs/testing/backend-resource-staging.md`。
+
+**当前仍不可作为完整输入法交付。** Windows 新路径接入统一后端，但采用宿主保留原文、显式选择后替换目标词的模式，不是完整中日韩行内组合输入。产品持久学习尚因字段权限锁生命周期未闭合而禁用；简繁、部分确认、韩文词尾/空格、完整 Unicode 字素编辑和真实多键盘宿主矩阵仍未验收。没有 Android IME 发行物，当前源码的安装器与注册后跨宿主闭环也未完成。
+
+本轮真实命令、测试结果、失败修复和剩余阻塞见 `docs/reports/ime-prediction-audit.md`。此前 44 项后端、228 项产品等记录属于历史源码，不能替代当前构建收据。语言声明保持 blocked/partial，不以核心或受控文本存储测试通过冒充正式宿主验收。
 
 以下为既有英文与 Windows 路径的历史能力说明；P2.4 增加的是验证规模，而不是生产语料词频。
 
@@ -127,9 +121,11 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 | W2-A-R | 输入可靠性收敛：高水位原样降级（原文优先于补全/拼写建议）、首 token 宿主归属、宿主默认输入与参考文档模型、运行期共享锁取证 | 已交付（内部运行包 `0.2.1-w2r`；未注册） | `docs/reports/W2-A-R-input-reliability.md` |
 | W2-C | 输入保真 P0：普通原文归宿主、引擎建议有界可丢弃、显式候选替换的范围校验；删除 raw 容量路径并更正 177 的归属 | 已交付（内部运行包 `0.2.4-w2c`；未注册；C 层未验证） | `docs/reports/W2-C-input-fidelity.md` |
 | W3-A | 正式 TIP 注册/激活身份、UIElement 类别、宿主绘制决定遵从、token 锚点与隔离验证工具 | 已交付（内部运行包 `0.2.5-w3a`；C 层 trace 轮次完成，正式包闭环待复验） | `docs/reports/W3-A-isolation-registration.md` |
-| W3-B | `DllRegisterServer`/`DllUnregisterServer`（HKLM/HKCU、回读、回滚、外来 CLSID 拒绝）、候选回退显示设置、版本/图标资源、安装工具链只读探测 | 已实现并完成 B 层验证（内部 Alpha；未分发；系统注册/安装与 C 层闭环待一次显式 UAC 授权） | `docs/reports/W3-B-install-and-fallback.md` |
+| W3-B | `DllRegisterServer`/`DllUnregisterServer`（HKLM/HKCU、回读、回滚、外来 CLSID 拒绝）、候选回退显示设置、版本/图标资源、安装工具链只读探测 | 已实现并完成 B 层验证；C 层六轮真实会话已执行（2026-11-02）：注册/激活/卸载与零残留六次实证、TIP 已被真实宿主加载并打穿真实键入；**候选窗口真实可见仍未证明**（UAC 预算用尽） | `docs/reports/W3-B-install-and-fallback.md`、`docs/reports/W3-B-c-layer-sessions.md` |
 | 发行准备修复 | 构建身份/收据、权限失败拒绝、运行库绑定、生命周期/共享锁、注册回滚、精确载荷/许可、路径清理与发行检查 | 产品 161 项：160 通过、1 显式跳过；内测候选已重建；公开发行仍阻塞 | `docs/reports/release-readiness-hardening.md` |
-| 之后 | 安装器（工具链缺失）、当前包 C 层闭环、其余英文能力、Android | 尚未交付 | — |
+| 离线五语言后端 | 真实五语言资源、n-gram 预测、确认学习协议及训练评测 | 已有工程检查点；语言完整性、端到端性能与发行门禁未闭合 | `docs/reports/backend-prediction-development.md` |
+| 预测输入法审计 | 上下文缩写、多 profile、键盘评分、资源暂存、统一后端 TSF 接线与回归 | 审计修正；不作为完整输入法交付，实际验收与阻塞见报告 | `docs/reports/ime-prediction-audit.md` |
+| 之后 | 安装器、当前包 C 层闭环、完整中日韩组合与用户学习、其余英文能力、Android | 尚未交付 | — |
 
 ## 目录结构
 
@@ -273,13 +269,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/product/stage_prod
 `__FILE__` 构建前缀给出警告（公开分发前的构建修复项，见 W1 报告）。
 
 **这不是已安装的系统输入法**：产品 DLL 现在导出 `DllRegisterServer`/`DllUnregisterServer`
-（只写本产品自己的 CLSID、`InprocServer32` 与两个实现类别，支持 HKLM/HKCU、逐项回读、失败回滚），
-但 W3-B 没有在本机执行系统注册，也没有可用的安装器工具链；未注册时没有系统键盘接管，
+（只写本产品自己的 CLSID、`InprocServer32` 与两个实现类别，支持 HKLM/HKCU、逐项回读、失败回滚）。
+2026-11-02 的六轮 C 层真实会话（`docs/reports/W3-B-c-layer-sessions.md`）已在真实注册表上
+六次执行注册/激活/卸载并逐项验证残留为零，产品 TIP 也已被真实记事本宿主加载并打穿真实键入；
+但**候选窗口在真实宿主中的可见性尚未证明**，输入法选择器接管尚未演示，
+也没有可用的安装器工具链；平时未注册时没有系统键盘接管，
 候选窗口只在产品 DLL 的受控会话内出现。设置 EXE 可以保存并回读真实设置，
 产品 TSF DLL 会在下一次被宿主加载/激活时部署设置补丁；不要描述成“系统输入已经可用”。
 设置项之外的预测、学习和其他语言没有可点击的假开关。
 
 ## 许可证
 
-项目自身许可证**尚未确定**。在架构负责人确认之前，本仓库不添加任何授权声明、
-LICENSE 文件或版权头承诺。`third_party/` 下的规则仅针对外部依赖，与本项目许可证无关。
+项目自有代码采用 **AGPL-3.0-only**，保留根目录 `LICENSE` 与 `docs/product/license-decision.md` 的许可决定。第三方代码、词典、语料和模型各自保留原许可与署名要求；项目许可并不自动授予这些资料的再分发权。公开分发与稳定发行仍受独立验收门禁约束。

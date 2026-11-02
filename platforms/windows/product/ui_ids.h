@@ -12,6 +12,7 @@ inline constexpr wchar_t kSettingsWindowTitle[] =
 enum ControlId : int {
   kSummary = 1001,
   kStatusEdit = 1002,
+  kProfileChoice = 1003,
   kCompletionEnabled = 1010,
   kCompletionCount = 1011,
   kSpellingEnabled = 1020,

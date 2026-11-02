@@ -59,7 +59,7 @@ class Collector {
     if (limit_ == 0 || candidate.lexeme_ids.empty() ||
         std::any_of(candidate.lexeme_ids.begin(), candidate.lexeme_ids.end(),
                      [](LexemeId id) { return id == 0; }) ||
-        !std::isfinite(candidate.score)) return;
+        !std::isfinite(candidate.score) || !std::isfinite(candidate.match_log_score)) return;
     const auto existing = std::find_if(candidates_.begin(), candidates_.end(),
         [&](const Candidate& previous) { return previous.text_utf8 == candidate.text_utf8; });
     if (existing != candidates_.end()) {
@@ -333,9 +333,9 @@ struct LexicalService::Impl {
     candidate.text_utf8 = display.text_utf8;
     candidate.lexeme_ids.push_back(words[row].id);
     candidate.input_utf8_byte_spans.push_back({0, input_utf8_bytes});
-    candidate.score = Score(row, snapshot);
-    if (type == CandidateType::kAccent) candidate.score -= 0.5;
-    if (type == CandidateType::kMorphology) candidate.score -= 0.25;
+    if (type == CandidateType::kAccent) candidate.match_log_score = -0.5;
+    if (type == CandidateType::kMorphology) candidate.match_log_score = -0.25;
+    candidate.score = Score(row, snapshot) + candidate.match_log_score;
     output->Add(std::move(candidate));
   }
 
@@ -373,6 +373,7 @@ struct LexicalService::Impl {
     settings.morphology_match_budget = options.morphology_match_budget;
     settings.spelling_cell_budget = options.spelling_cell_budget;
     settings.segmentation_transition_budget = options.segmentation_transition_budget;
+    settings.keyboard_layout = options.keyboard_layout;
     const auto supported = english->Suggest(raw_utf8, ranking, settings);
     result->morphology_matches_examined = supported.morphology_matches_examined;
     result->spelling_cells = supported.spelling_cells;
@@ -386,6 +387,7 @@ struct LexicalService::Impl {
       if (candidate.type == CandidateType::kOriginal) continue;
       candidate.text_utf8 = existing.text;
       candidate.score = existing.score;
+      candidate.match_log_score = existing.match_log_score;
       candidate.morphology_forms = existing.morphology_forms;
       candidate.edit_distance = existing.edit_distance;
       bool all_known = !existing.lexeme_ids.empty();

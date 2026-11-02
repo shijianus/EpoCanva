@@ -401,7 +401,10 @@ void TestPersonalAndRandomOracle() {
                                 static_cast<const p::PersonalCounts*>(&counts)}) {
       for (const auto wanted : {1u, 7u, 35u}) {
         CheckOrder(data, *generated, ctx, learned, {}, {}, wanted);
-        CheckOrder(data, *generated, ctx, learned, "alpha", "en", wanted);
+        for (const std::string prefix : {"a", "alpha", "alpha1", "beta", "beta2", "z"}) {
+          for (const std::string language : {"", "en", "fr", "ko"})
+            CheckOrder(data, *generated, ctx, learned, prefix, language, wanted);
+        }
       }
     }
   }
@@ -458,12 +461,116 @@ void TestRankedBeyond4096AndBudget() {
   CHECK(!exact_with_budget.budget_exhausted);
   options.max_suggestions = 64;
   const auto filtered_limited = model->Predict("no-match", {}, options);
-  CHECK(filtered_limited.budget_exhausted);
+  CHECK(filtered_limited.complete && !filtered_limited.budget_exhausted);
+  CHECK(filtered_limited.index_entries_visited == 0);  // Empty immutable prefix range.
   CHECK(filtered_limited.suggestions.empty());
   options.max_index_entries = 0;
   const auto exhaustive = model->Predict(std::nullopt, {}, options);
   CHECK(exhaustive.suggestions.size() == 64 && exhaustive.complete);
   std::cout << "6002-row ranked successor/global search and exact/incomplete budgets verified\n";
+}
+
+void TestPrefixRangeIndexes() {
+  // Thousands of much more frequent unrelated outcomes must not consume a
+  // prefix budget. The model still scores with UNFILTERED probability mass.
+  Corpus corpus;
+  std::vector<p::LexemeId> noise;
+  Lexeme(&corpus.records, "history"); Lexeme(&corpus.records, "newer");
+  for (unsigned ordinal = 0; ordinal < 7000; ++ordinal) {
+    Lexeme(&corpus.records, "noise" + std::to_string(ordinal));
+    noise.push_back(corpus.records.lexicon.back().id);
+    corpus.Sentence({Id("history"), Id("newer"), noise.back()}, 100 + ordinal % 11);
+  }
+  const std::vector<std::pair<std::string, std::string>> words = {
+      {"en", "rare-a"}, {"en", "rare-b"}, {"en", "rare-c"}, {"en", "rare-unseen"},
+      {"fr", "rare-a"}, {"fr", "rare-b"}, {"fr", u8"éclair"}, {"fr", u8"école"},
+      {"fr", u8"àcole"}, {"fr", u8"𐐀cole"}, {"zh", u8"你好"}, {"ja", u8"今日は"},
+      {"ko", u8"좋은"}};
+  for (std::size_t ordinal = 0; ordinal < words.size(); ++ordinal) {
+    const auto& word = words[ordinal];
+    Lexeme(&corpus.records, word.second, word.first);
+    if (word.second != "rare-unseen")
+      corpus.Sentence({Id("history"), Id("newer"), Id(word.second, word.first)}, 1 + ordinal);
+  }
+  // An actually dominant foreign language row must not swamp en-only range
+  // cursors; without a language filter it is the correct conditional winner.
+  corpus.Sentence({Id("history"), Id("newer"), Id("rare-a", "fr")}, 1000);
+  const auto records = corpus.Finish();
+  const auto model = Build(records);
+  const p::Context context{Id("history"), Id("newer")};
+  p::PredictOptions options;
+  options.max_suggestions = 64;
+  options.language_id = "en";
+  options.max_index_entries = 32;
+  const auto sparse = model->Predict("rare-", context, options);
+  CHECK(sparse.complete && !sparse.budget_exhausted);
+  CHECK(sparse.suggestions.size() == 4);
+  CHECK(sparse.index_entries_visited <= 10);  // 4 unigram + 3 bigram + 3 trigram postings.
+  for (const auto& row : sparse.suggestions)
+    CHECK(Near(row.log_probability, std::log(Oracle(records, context, row.lexeme_ids.front()))));
+  const auto absent = model->Predict("not-present", context, options);
+  CHECK(absent.complete && absent.suggestions.empty() && absent.index_entries_visited == 0);
+  options.language_id = "de";
+  const auto wrong_language = model->Predict("rare-", context, options);
+  CHECK(wrong_language.complete && wrong_language.suggestions.empty());
+  CHECK(wrong_language.index_entries_visited == 0);
+  options.language_id = "en";
+  options.max_index_entries = 1;
+  const auto one = model->Predict("rare-", context, options);
+  CHECK(one.budget_exhausted && !one.complete && one.index_entries_visited == 1);
+  CHECK(one.suggestions.size() == 1);
+  CHECK(model->Find(one.suggestions.front().lexeme_ids.front())->language_id == "en");
+  options.max_index_entries = sparse.index_entries_visited;
+  const auto exact_budget = model->Predict("rare-", context, options);
+  CHECK(exact_budget.complete && exact_budget.index_entries_visited == sparse.index_entries_visited);
+  CHECK(exact_budget.suggestions.size() == sparse.suggestions.size());
+  for (std::size_t ordinal = 0; ordinal < sparse.suggestions.size(); ++ordinal)
+    CHECK(exact_budget.suggestions[ordinal].lexeme_ids == sparse.suggestions[ordinal].lexeme_ids);
+
+  p::PersonalCounts personal;
+  personal.unigrams = {{Id("rare-unseen"), 10000}, {noise[4000], 100000000},
+                        {Id("rare-a", "fr"), 100000000}, {0, 7}};
+  personal.bigrams = {{Id("newer"), Id("rare-unseen"), 1000},
+                      {Id("newer"), noise[4001], 100000000}};
+  personal.trigrams = {{Id("history"), Id("newer"), Id("rare-unseen"), 2000},
+                        {Id("history"), Id("newer"), noise[4002], 100000000}};
+  options.max_index_entries = 32;
+  const auto learned = model->Predict("rare-", context, options, &personal);
+  CHECK(learned.complete && learned.personal_preparations == 1);
+  CHECK(learned.index_entries_visited <= 13);  // Three relevant personal postings, others skipped by range.
+  CHECK(learned.suggestions.front().lexeme_ids.front() == Id("rare-unseen"));
+  for (const auto& row : learned.suggestions)
+    CHECK(Near(row.log_probability,
+               std::log(Oracle(records, context, row.lexeme_ids.front(), &personal))));
+  for (const auto* snapshot : {static_cast<const p::PersonalCounts*>(nullptr),
+                              static_cast<const p::PersonalCounts*>(&personal)}) {
+    for (const std::string prefix : {"rare-", "rare-a", "rare-un", u8"é", u8"à", u8"𐐀", u8"你", u8"今", u8"좋"}) {
+      for (const std::string language : {"", "en", "fr", "ko"})
+        CheckOrder(records, *model, context, snapshot, prefix, language, 8);
+    }
+  }
+  CheckOrder(records, *model, {1, Id("newer")}, &personal, "rare-", "en", 8);
+  CheckOrder(records, *model, {Id("newer"), 0}, &personal, u8"é", "fr", 8);
+
+  // Single-language index shares global and language lexical ordering. Odd
+  // range sizes exercise non-power-of-two range-min tree nodes and ties.
+  Corpus mono;
+  for (unsigned ordinal = 0; ordinal < 71; ++ordinal) {
+    Lexeme(&mono.records, "prefix" + std::to_string(ordinal));
+    if (ordinal < 69) mono.Sentence({mono.records.lexicon.back().id}, 5);
+  }
+  const auto mono_records = mono.Finish();
+  const auto mono_model = Build(mono_records);
+  for (const std::string prefix : {"p", "prefix", "prefix1", "prefix6", "prefix70", "missing"}) {
+    CheckOrder(mono_records, *mono_model, {}, nullptr, prefix, "en", 64);
+    CheckOrder(mono_records, *mono_model, {}, nullptr, prefix, {}, 64);
+    CheckOrder(mono_records, *mono_model, {}, nullptr, prefix, "fr", 64);
+  }
+  options.max_suggestions = 64; options.max_index_entries = 1; options.language_id = "en";
+  const auto sole = mono_model->Predict("prefix70", {}, options);
+  CHECK(sole.complete && sole.index_entries_visited == 1 && sole.suggestions.size() == 1);
+  CHECK(sole.suggestions.front().lexeme_ids.front() == Id("prefix70"));  // Unobserved but admitted.
+  std::cout << "prefix range rank indexes: 7000 unrelated rows, Unicode, language/personal union and exact budgets verified\n";
 }
 
 struct OraclePath { p::Context ids; double score; bool terminal; bool eos; };
@@ -702,6 +809,7 @@ int main(int argc, char** argv) {
     TestStaticAndOracle();
     TestPersonalAndRandomOracle();
     TestRankedBeyond4096AndBudget();
+    TestPrefixRangeIndexes();
     TestContinuation();
     TestValidation(fixtures);
     TestConcurrentIsolation();

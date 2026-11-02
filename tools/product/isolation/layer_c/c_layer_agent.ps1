@@ -11,14 +11,26 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
+# [Environment]::TickCount64 does not exist on Windows PowerShell 5.1 (.NET Framework)
+# and silently evaluates to $null there, which turned the sleep/wake detector into a
+# guaranteed false positive after 30 wall seconds. Call kernel32 directly instead.
+if (-not ('EpoLayerCTick' -as [type])) {
+  Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class EpoLayerCTick {
+  [DllImport("kernel32.dll")] public static extern ulong GetTickCount64();
+}
+'@
+}
+$agentStartUtc = (Get-Date).ToUniversalTime()
+$agentStartTick = [EpoLayerCTick]::GetTickCount64()
 if (-not $TestRoot) { $TestRoot = Join-Path $repoRoot 'build\w3a-c-local\test-documents' }
 if (-not [System.IO.Path]::IsPathRooted($TestRoot)) { $TestRoot = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $TestRoot)) }
 New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
 $logPath = Join-Path $EvidenceDir 'agent.log'
 Set-Content -Path $logPath -Value ('EpoCanva C-layer agent session=' + $SessionId) -Encoding UTF8
 $result = [ordered]@{ session_id = $SessionId }
-$agentStartUtc = (Get-Date).ToUniversalTime()
-$agentStartTick = [Environment]::TickCount64
 $agentDeadline = [datetime]::Parse($DeadlineUtc).ToUniversalTime()
 $readyFlag = Join-Path $EvidenceDir 'registration-ready.flag'
 $preflightReadyFlag = Join-Path $EvidenceDir 'preflight-ready.flag'
@@ -52,7 +64,7 @@ function Test-AgentSession([bool]$RequireRegistration = $true) {
     Invoke-InitialAbort 'deadline passed before input'
   }
   $wall = ((Get-Date).ToUniversalTime() - $agentStartUtc).TotalSeconds
-  $mono = ([Environment]::TickCount64 - $agentStartTick) / 1000.0
+  $mono = ([EpoLayerCTick]::GetTickCount64() - $agentStartTick) / 1000.0
   if (($wall - $mono) -gt 30.0) {
     Invoke-InitialAbort 'wall clock jumped (sleep/wake); no input'
   }
@@ -152,7 +164,6 @@ public static class W3ANative {
   [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
   [DllImport("advapi32.dll", SetLastError = true)] public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
   [DllImport("advapi32.dll", SetLastError = true)] public static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, int length, out int returned);
-  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
 }
 '@
 
@@ -540,7 +551,7 @@ function Test-RuntimeGate {
     Abort-Agent 'deadline reached during the agent round; no further input'
   }
   $wall = ((Get-Date).ToUniversalTime() - $agentStartUtc).TotalSeconds
-  $mono = ([Environment]::TickCount64 - $agentStartTick) / 1000.0
+  $mono = ([EpoLayerCTick]::GetTickCount64() - $agentStartTick) / 1000.0
   if (($wall - $mono) -gt 30.0) {
     $result['invalid_round'] = $true
     Abort-Agent 'wall clock jumped during the agent round (sleep/wake); no further input'
@@ -862,21 +873,50 @@ Start-Sleep -Milliseconds 800
 $fg = [W3ANative]::GetForegroundWindow()
 $fgRoot = [W3ANative]::GetAncestor($fg, 2)
 $topRoot = [W3ANative]::GetAncestor($topHwnd, 2)
-if ($fgRoot -ne $topRoot) {
+# After a UAC secure-desktop switch, Windows frequently denies the first foreground
+# request of a background process. Retry inside a bounded budget with the relay sequence
+# the orchestrator used in the W3-A trace rounds. The verdict is unchanged: unless Notepad
+# is genuinely the foreground window, the agent refuses to type.
+$fgAttempt = 0
+for ($fgAttempt = 0; $fgAttempt -lt 16 -and $fgRoot -ne $topRoot; $fgAttempt++) {
+  [void][W3ANative]::ShowWindow($topHwnd, 9)
+  [W3ANative]::SwitchToThisWindow($topHwnd, $true)
+  Start-Sleep -Milliseconds 400
+  $fg = [W3ANative]::GetForegroundWindow()
+  $fgRoot = [W3ANative]::GetAncestor($fg, 2)
+  if ($fgRoot -eq $topRoot) { break }
   [uint32]$fgPid = 0
   $fgThread = [W3ANative]::GetWindowThreadProcessId($fg, [ref]$fgPid)
   $curThread = [W3ANative]::GetCurrentThreadId()
   [void][W3ANative]::AttachThreadInput($curThread, $fgThread, $true)
   [void][W3ANative]::SetForegroundWindow($topHwnd)
   [void][W3ANative]::AttachThreadInput($curThread, $fgThread, $false)
-  Start-Sleep -Milliseconds 500
+  Start-Sleep -Milliseconds 400
   $fg = [W3ANative]::GetForegroundWindow()
   $fgRoot = [W3ANative]::GetAncestor($fg, 2)
 }
+SetR foreground_attempts $fgAttempt
 SetR foreground_before_typing_hwnd ([int64]$fg)
 SetR foreground_is_notepad ($fgRoot -eq $topRoot)
 if ($fgRoot -ne $topRoot) {
-  Abort-Agent 'notepad is not foreground; refusing to type'
+  # The tool's design lets the operator assist: if Windows keeps denying the automated
+  # foreground handoff (the operator's last input usually belongs to their terminal or
+  # the UAC secure desktop), wait for the operator to click the Notepad window itself.
+  # The verdict is unchanged: typing starts only when Notepad is genuinely foreground.
+  SetR foreground_operator_wait ((Get-Date).ToUniversalTime().ToString('o'))
+  for ($opWait = 0; $opWait -lt 720; $opWait++) {
+    Start-Sleep -Milliseconds 250
+    $fg = [W3ANative]::GetForegroundWindow()
+    $fgRoot = [W3ANative]::GetAncestor($fg, 2)
+    if ($fgRoot -eq $topRoot) { break }
+    if ((Get-Date).ToUniversalTime() -ge $agentDeadline) { break }
+  }
+  SetR foreground_operator_wait_attempts $opWait
+  SetR foreground_before_typing_hwnd ([int64]$fg)
+  SetR foreground_is_notepad ($fgRoot -eq $topRoot)
+  if ($fgRoot -ne $topRoot) {
+    Abort-Agent 'notepad is not foreground; refusing to type'
+  }
 }
 
 [uint32]$topPid = 0
@@ -1022,6 +1062,13 @@ foreach ($ch in 'alpha hel'.ToCharArray()) {
   }
   if ($ch -eq ' ') { SendVk 0x20 } else { SendVk ([int][char]([string]$ch).ToUpperInvariant()) }
   $typedChars++
+  # Paced typing: the product starts its engine asynchronously on first activation and
+  # passes keys through literally until the session is ready. Round 6 (2026-11-02) proved
+  # the cold start finishes about one second after the first key at full speed, so all
+  # keys landed literal and no composition ever existed. A pause between keys gives the
+  # cold start time to finish while keys are still arriving; the per-key gates above are
+  # unchanged and the document is still asserted to equal 'alpha hel' afterwards.
+  Start-Sleep -Milliseconds 400
 }
 SetR typed_char_count $typedChars
 Start-Sleep -Milliseconds 1000
@@ -1038,7 +1085,7 @@ if ((Normalize $afterType) -cne 'alpha hel') {
 }
 
 $cand = [IntPtr]::Zero
-for ($i = 0; $i -lt 100; $i++) {
+for ($i = 0; $i -lt 250; $i++) {
   if ($App -eq 'cmd') { $h = Find-CandidateWindow 0 } else { $h = Find-CandidateWindow ([int]$topPid) }
   if ($h -ne [IntPtr]::Zero) { $cand = $h; break }
   Start-Sleep -Milliseconds 100

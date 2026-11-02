@@ -116,7 +116,7 @@ bool ReadSettingsMap(const std::filesystem::path& path,
                        key == "completion_candidates" || key == "spelling_enabled" ||
                        key == "spelling_candidates" || key == "candidate_display" ||
                        key == "morphology_enabled" || key == "abbreviation_enabled" ||
-                       key == "two_edit_spelling_enabled";
+                       key == "two_edit_spelling_enabled" || key == "profile_id";
     if (!known) {
       continue;
     }
@@ -133,7 +133,7 @@ bool ReadSettingsMap(const std::filesystem::path& path,
 }  // namespace
 
 bool ProductSettings::valid() const {
-  return completion_candidates >= 1 && completion_candidates <= 7 &&
+  return profile_id >= 1 && profile_id <= 9999 && completion_candidates >= 1 && completion_candidates <= 7 &&
          spelling_candidates >= 1 && spelling_candidates <= 3;
 }
 
@@ -237,6 +237,9 @@ SettingsLoadResult LoadProductSettings(const std::filesystem::path& path) {
     }
   }
 
+  const auto profile = find("profile_id");
+  if (profile && (!ParseIntExact(*profile, &loaded.profile_id) || !loaded.valid()))
+    return Corrupt(L"profile_id is invalid");
   result.settings = loaded;
   result.status = SettingsLoadStatus::kLoaded;
   return result;
@@ -263,6 +266,7 @@ std::string BuildSettingsText(const ProductSettings& settings) {
   text += "; start, after the generated Rime patch is deployed.\n";
   text += "[settings]\n";
   text += "format=1\n";
+  text += "profile_id=" + std::to_string(settings.profile_id) + "\n";
   text += "completion_enabled=";
   text += settings.completion_enabled ? "1" : "0";
   text += "\ncompletion_candidates=";

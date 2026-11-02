@@ -5,6 +5,7 @@ param(
     [string]$BuildDir = '',
     [string]$RimeDll = '',
     [string]$BaselineDll = '',
+    [string]$BackendResourcesRoot = '',
     [ValidateSet('Release', 'Debug')][string]$Configuration = 'Release',
     [switch]$SkipTests
 )
@@ -59,6 +60,11 @@ $RimeDll = (Get-Item -LiteralPath $RimeDll).FullName
 $BaselineDll = (Get-Item -LiteralPath $BaselineDll).FullName
 $initialRimeHash = (Get-FileHash -LiteralPath $RimeDll -Algorithm SHA256).Hash
 $engineReceipt = Assert-ProductEngineReceipt -RepoRoot $RepoRoot -RimeDll $RimeDll
+if (-not $BackendResourcesRoot) { $BackendResourcesRoot = Join-Path $RepoRoot 'build\product-resources\product' }
+$BackendResourcesRoot = [System.IO.Path]::GetFullPath($BackendResourcesRoot)
+if (-not (Test-Path -LiteralPath (Join-Path $BackendResourcesRoot 'data\backend\resources.tsv') -PathType Leaf)) {
+    Fail 'Verified multilingual resources are missing. Run python -B tools/backend/stage_resources.py --product-root build/product-resources/product --oov error first.' 3
+}
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { Fail "vswhere.exe not found: $vswhere" 3 }
@@ -95,6 +101,8 @@ $configure = @(
     '-G', 'Visual Studio 17 2022', '-A', 'x64',
     "-DCMAKE_GENERATOR_INSTANCE=$vs",
     '-DEPOCANVA_BUILD_PRODUCT=ON', '-DEPOCANVA_BUILD_TSF_LAB=OFF',
+    '-DEPOCANVA_BACKEND_WITH_FRENCH_DICTIONARY=ON',
+    "-DEPOCANVA_PRODUCT_BACKEND_ROOT=$BackendResourcesRoot",
     '-DEPOCANVA_PRODUCT_TRACE=OFF',
     "-DEPOCANVA_PRODUCT_BUILD_ID=$($source.commit)",
     "-DEPOCANVA_RIME_DLL=$RimeDll", "-DEPOCANVA_BASELINE_RIME_DLL=$BaselineDll",

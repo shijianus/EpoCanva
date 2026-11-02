@@ -53,6 +53,17 @@ set(_product_defines
   EPOCANVA_PRODUCT_COMMIT="${EPOCANVA_PRODUCT_COMMIT}"
   EPOCANVA_PRODUCT_RIME_SHA256="${EPOCANVA_PRODUCT_RIME_SHA256}")
 
+# Product uses the shared backend C ABI. Existing runtime/composition/core targets above
+# are reused, so the process contains exactly one Rime owner on the executor worker.
+if(NOT TARGET epocanva_backend)
+  add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../../engine/backend"
+                   "${CMAKE_CURRENT_BINARY_DIR}/unified-backend")
+endif()
+target_sources(epocanva_engine_executor PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/../engine_executor/unified_engine_backend.cc")
+target_compile_definitions(epocanva_engine_executor PRIVATE EPOCANVA_HAS_UNIFIED_BACKEND=1)
+target_link_libraries(epocanva_engine_executor PUBLIC epocanva_backend)
+
 set(_product_source_dir "${CMAKE_CURRENT_LIST_DIR}")
 set(_tsf_source_dir "${CMAKE_CURRENT_LIST_DIR}/../tsf")
 set(_tsf_product_source_dir "${CMAKE_CURRENT_LIST_DIR}/../tsf_product")
@@ -67,6 +78,7 @@ add_library(epocanva_product_state STATIC
   product_io.cc
   product_io.h
   product_settings.cc
+  product_backend_resources.cc
   product_settings.h)
 target_compile_definitions(epocanva_product_state PRIVATE
   ${_product_definitions} ${_product_defines})
@@ -118,6 +130,8 @@ add_library(epocanva_tsf_product SHARED
   "${_tsf_product_source_dir}/key_admission.cc"
   "${_tsf_product_source_dir}/key_admission.h"
   "${_tsf_product_source_dir}/text_service_controller.cc"
+  "${_tsf_product_source_dir}/host_context.cc"
+  "${_tsf_product_source_dir}/unified_host_input.cc"
   "${_tsf_product_source_dir}/text_service_controller.h"
   "${_tsf_product_source_dir}/candidate_window.cc"
   "${_tsf_product_source_dir}/candidate_window.h"
@@ -171,6 +185,8 @@ add_library(epocanva_tsf_direct_sink_test SHARED
   "${_tsf_product_source_dir}/key_admission.cc"
   "${_tsf_product_source_dir}/key_admission.h"
   "${_tsf_product_source_dir}/text_service_controller.cc"
+  "${_tsf_product_source_dir}/host_context.cc"
+  "${_tsf_product_source_dir}/unified_host_input.cc"
   "${_tsf_product_source_dir}/text_service_controller.h"
   "${_tsf_product_source_dir}/candidate_window.cc"
   "${_tsf_product_source_dir}/candidate_window.h"
@@ -313,6 +329,12 @@ add_executable(epocanva_product_sink_tests
   "${_tsf_source_dir}/identifiers.cc")
 target_compile_definitions(epocanva_product_sink_tests PRIVATE ${_product_definitions})
 target_compile_options(epocanva_product_sink_tests PRIVATE ${_product_options})
+set(EPOCANVA_PRODUCT_BACKEND_ROOT
+    "${CMAKE_CURRENT_LIST_DIR}/../../../build/ime-resources/product" CACHE PATH
+    "Explicit pre-staged real backend resources for product tests")
+target_compile_definitions(epocanva_product_sink_tests PRIVATE
+  EPOCANVA_PRODUCT_BACKEND_ROOT="${EPOCANVA_PRODUCT_BACKEND_ROOT}")
+
 target_include_directories(epocanva_product_sink_tests PRIVATE
   "${_product_source_dir}"
   "${_tsf_source_dir}"
@@ -329,6 +351,25 @@ target_link_libraries(epocanva_product_sink_tests PRIVATE
 add_dependencies(epocanva_product_sink_tests epocanva_tsf_product)
 add_dependencies(epocanva_product_sink_tests epocanva_tsf_direct_sink_test)
 add_dependencies(epocanva_product_sink_tests epocanva_product_deployment_tests)
+
+add_executable(epocanva_unified_tsf_tests
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_product/unified_backend_tests.cc"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_edit/test_host.cc"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_edit/test_text_store.cc"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_edit/inputscope_test_guids.cc"
+  "${_tsf_product_source_dir}/host_context.cc")
+target_compile_definitions(epocanva_unified_tsf_tests PRIVATE ${_product_definitions}
+  EPOCANVA_TEST_REPO_ROOT="${CMAKE_CURRENT_LIST_DIR}/../../..")
+target_compile_options(epocanva_unified_tsf_tests PRIVATE ${_product_options})
+target_include_directories(epocanva_unified_tsf_tests PRIVATE
+  "${_tsf_product_source_dir}" "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows"
+  "${CMAKE_CURRENT_LIST_DIR}/../../../tests/windows/tsf_edit")
+target_link_libraries(epocanva_unified_tsf_tests PRIVATE
+  epocanva_tsf_coordinator epocanva_product_state ole32 uuid user32)
+add_test(NAME product.integration.unified_tsf
+  COMMAND epocanva_unified_tsf_tests "${EPOCANVA_PRODUCT_BACKEND_ROOT}"
+    "${EPOCANVA_RIME_DLL}" "${CMAKE_BINARY_DIR}/product/run/unified-tsf")
+set_tests_properties(product.integration.unified_tsf PROPERTIES TIMEOUT 300)
 
 add_executable(epocanva_candidate_ui_tests
   tests/candidate_ui_tests.cc

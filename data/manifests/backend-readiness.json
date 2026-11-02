@@ -3,8 +3,8 @@
   "artifact_scope": "windows-x64-headless-backend",
   "required_languages": ["en", "zh", "fr", "ja", "ko"],
   "languages": [
-    {"id": "en", "status": "partial", "blockers": ["Full Unicode morphology/correction and sentence/punctuation acceptance are incomplete."]},
-    {"id": "zh", "status": "partial", "blockers": ["Prediction quality currently measures characters, not a complete word/phrase model.", "Simplified/traditional output and broad conversion acceptance are incomplete.", "Text-only Rime conversion metadata is not learnable; full Chinese confirmed learning is not connected."]},
+    {"id": "en", "status": "partial", "blockers": ["Full Unicode morphology/correction and sentence/punctuation acceptance are incomplete.", "Contextual abbreviation and prefix-index tests do not replace current formal installed-host acceptance or production learning-lock integration."]},
+    {"id": "zh", "status": "partial", "blockers": ["Prediction quality currently measures characters, not a complete word/phrase model.", "Simplified/traditional output, inline TSF composition and broad conversion acceptance are incomplete.", "Text-only Rime conversion metadata supports transient context ranking but not persistent learning; full Chinese confirmed learning is not connected."]},
     {"id": "fr", "status": "partial", "blockers": ["The selected French dictionary does not provide grammatical generation tags; broad inflection/continuation acceptance is incomplete."]},
     {"id": "ja", "status": "partial", "blockers": ["A bounded lexical Viterbi decoder is implemented, not full Mozc rewrite/segment acceptance.", "Broad conversion and partial-confirmation quality gates are incomplete."]},
     {"id": "ko", "status": "partial", "blockers": ["Two-set composition and corpus word completion/prediction are implemented; full spacing and morphological-ending acceptance is incomplete."]}
@@ -22,6 +22,8 @@
   "release_blockers": [
     "Data/model public redistribution and all required notices/attribution packaging are not fully verified.",
     "Clean-source offline reconstruction and independent backend release package have not been verified.",
-    "End-to-end peak memory and synchronous tail-latency admission remain unverified."
+    "End-to-end peak memory and synchronous tail-latency admission remain unverified.",
+    "Current Windows integration is host-owned suggestion replacement, not complete inline CJK composition; formal installed-host and installer acceptance remain unverified.",
+    "Product personal learning remains disabled until a live field-permission lifetime can cover worker-side access."
   ]
 }

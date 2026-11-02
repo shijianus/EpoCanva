@@ -2,6 +2,7 @@
 // segmentation path oracle and full-matrix spelling oracle do not call the
 // production generators, trie, scorer or DP to derive their expected answers.
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -122,6 +123,7 @@ void StableIdsAndFrequencyValidation() {
           "predictions have no fictitious input byte spans");
     Check(candidate.lexeme_ids.size() == 1 && support->HasLexeme(candidate.lexeme_ids[0]),
           "prediction IDs are known lexical IDs");
+    Near(candidate.match_log_score, 0.0, "prediction has no input match penalty");
   }
   const auto score = support->ScoreLexeme(StableLexemeId("hello"));
   Check(score.known_lexeme && score.has_base_frequency && score.base_count == 1000,
@@ -292,15 +294,74 @@ void ExactLemmaBeatsCompetingPrefixes() {
   Check(Texts(result) == std::vector<std::string>({"walk's", "walked", "walking", "walks", "walks'"}),
         "exact lemma morphology survives competing prefixes and small menu");
   for (const auto& candidate : result.candidates) {
-    Check(candidate.lexeme_ids == std::vector<LexemeId>{StableLexemeId("walk")},
-          "exact lemma winning form keeps lemma ID, not a competing prefix ID");
+    Check(candidate.lexeme_ids == std::vector<LexemeId>{StableLexemeId(
+              candidate.text == "walking" ? "walking" : "walk")},
+          "exact lemma form uses attested surface or documented lemma fallback");
     Near(candidate.score, 0.75, "explicit exact-lemma preference, not incidental insertion order");
+    Near(candidate.match_log_score, 0.75, "exact-lemma match feature is count independent");
   }
   options.max_candidates = 64;
   const auto complete = support->Suggest("walk", {}, options);
   const auto* prefix = Find(complete, "walkaway's");
   Check(prefix != nullptr, "prefix forms still available, not discarded for exact lemma");
   if (prefix) Near(prefix->score, -0.25, "nonexact prefix form has no exact-lemma bonus");
+}
+
+void AttestedMorphologyIdentities() {
+  auto lexicon = Lexicon("walk\t1\nwalked\t1\nwalking\t1\nwalk's\t1\n"
+                         "child\t1\nchildren\t1\ngo\t1\nwent\t1\nbefore\t1\n");
+  if (!lexicon) return;
+  auto support = Support(*lexicon, Frequencies({{"walk", 9000}, {"walked", 9},
+      {"walking", 19}, {"walk's", 29}, {"child", 7000}, {"children", 39},
+      {"go", 5000}, {"went", 49}, {"before", 1}}));
+  if (!support) return;
+  std::vector<LearnedFrequency> learned{{StableLexemeId("walk"), 900000},
+      {StableLexemeId("walked"), 99}, {StableLexemeId("children"), 199}};
+  std::vector<ContextFrequency> context{
+      {StableLexemeId("before"), StableLexemeId("walk"), 900000},
+      {StableLexemeId("before"), StableLexemeId("walked"), 999},
+      {StableLexemeId("before"), StableLexemeId("went"), 1999}};
+  RankingInputs ranking{StableLexemeId("before"), true, &learned, &context};
+  const auto options = Only(CandidateType::kMorphology);
+  struct Example {
+    const char* query;
+    const char* surface;
+    std::uint64_t base;
+    std::uint64_t learned;
+    std::uint64_t context;
+    double match;
+  };
+  const Example examples[] = {
+      {"walk", "walked", 9, 99, 999, 0.75},
+      {"walk", "walking", 19, 0, 0, 0.75},
+      {"Walk", "Walked", 9, 99, 999, 0.75},
+      {"walk", "walk's", 29, 0, 0, 0.75},
+      {"wal", "walked", 9, 99, 999, -0.25},
+      {"child", "children", 39, 199, 0, 0.75},
+      {"go", "went", 49, 0, 1999, 0.75}};
+  for (const auto& example : examples) {
+    const auto result = support->Suggest(example.query, ranking, options);
+    const auto* candidate = Find(result, example.surface);
+    Check(candidate != nullptr, "attested morphology reaches suggestions");
+    if (!candidate) continue;
+    std::string canonical;
+    Check(ToLookupKey(example.surface, &canonical), "surface fixture canonicalized");
+    Check(candidate->lexeme_ids == std::vector<LexemeId>{StableLexemeId(canonical)},
+          "regular irregular and attested possessive forms use SURFACE identity");
+    Near(candidate->match_log_score, example.match,
+         "morphology match channel excludes lemma and surface counts");
+    Near(candidate->score, std::log1p(static_cast<double>(example.base)) +
+         0.75 * std::log1p(static_cast<double>(example.learned)) +
+         1.25 * std::log1p(static_cast<double>(example.context)) + example.match,
+         "morphology total uses surface unigram learned and context only");
+  }
+  const auto fallback = support->Suggest("child", ranking, options);
+  const auto* possessive = Find(fallback, "children's");
+  Check(possessive && possessive->lexeme_ids ==
+            std::vector<LexemeId>{StableLexemeId("child")},
+        "unattested possessive keeps documented admitted lemma fallback");
+  if (possessive) Near(possessive->match_log_score, 0.75,
+                      "possessive fallback retains morphology input feature");
 }
 
 void LearningAndPrediction() {
@@ -430,6 +491,9 @@ void SegmentationOracleAndBoundaries() {
       const auto& candidate = result.candidates[index];
       Check(candidate.text == expected[index].text, "DP agrees with independent exhaustive path ordering");
       Near(candidate.score, expected[index].score, "DP score agrees with independent path equation");
+      Near(candidate.match_log_score,
+           -0.75 * static_cast<double>(expected[index].boundaries_utf8_byte.size() - 1),
+           "segmentation match term omits unigram normalizer and counts");
       Check(candidate.segments_utf8_byte.size() == expected[index].boundaries_utf8_byte.size(), "one span per oracle word");
       std::size_t begin_utf8_byte = 0;
       for (std::size_t word = 0; word < candidate.segments_utf8_byte.size(); ++word) {
@@ -469,6 +533,9 @@ void SegmentationOracleAndBoundaries() {
   for (std::size_t index = 0; index < std::min(contextual.candidates.size(), expected.size()); ++index) {
     Check(contextual.candidates[index].text == expected[index].text, "context DP ordering matches exhaustive oracle");
     Near(contextual.candidates[index].score, expected[index].score, "context path score oracle");
+    Near(contextual.candidates[index].match_log_score,
+         -0.75 * static_cast<double>(expected[index].boundaries_utf8_byte.size() - 1),
+         "learned internal bigrams never enter segmentation match penalty");
   }
   ranking.allow_learning = false;
   Check(Texts(support->Suggest("antartgo", ranking, options)) == Texts(support->Suggest("antartgo", {}, options)),
@@ -592,6 +659,96 @@ void TwoEditSpellingAndKeyboard() {
         VerifySpellingOracle(*synthetic, *generated, query);
       }
     }
+  }
+}
+
+void LayoutAwareSpelling() {
+  using Layout = epocanva::keyboard::Layout;
+  Check(static_cast<std::uint32_t>(Layout::kUnknown) == 0 &&
+            static_cast<std::uint32_t>(Layout::kUsQwerty) == 1 &&
+            static_cast<std::uint32_t>(Layout::kFrenchAzerty) == 2 &&
+            static_cast<std::uint32_t>(Layout::kGermanQwertz) == 3 &&
+            static_cast<std::uint32_t>(Layout::kDvorak) == 4,
+        "keyboard enum values are explicit adapter contract");
+  Check(LanguageSupportOptions{}.keyboard_layout == Layout::kUsQwerty,
+        "unspecified legacy option keeps US QWERTY");
+  const std::array<Layout, 7> layouts{Layout::kUsQwerty, Layout::kFrenchAzerty,
+      Layout::kGermanQwertz, Layout::kDvorak, Layout::kUnknown, Layout::kNeutral,
+      static_cast<Layout>(999)};
+  struct Neighbours {
+    char expected;
+    char typed;
+    std::array<unsigned, 7> costs;
+  };
+  // Literal physical-key relationships, NOT generated from the production
+  // geometry. z-e distinguishes AZERTY; z-t and y-x distinguish QWERTZ;
+  // a-o and p-e distinguish Dvorak, whose punctuation columns must stay intact.
+  const Neighbours examples[] = {
+      {'r', 't', {{60, 60, 60, 60, 100, 100, 100}}},
+      {'q', 'w', {{60, 60, 60, 100, 100, 100, 100}}},
+      {'z', 'e', {{100, 60, 100, 100, 100, 100, 100}}},
+      {'z', 't', {{100, 100, 60, 100, 100, 100, 100}}},
+      {'y', 'x', {{100, 100, 60, 100, 100, 100, 100}}},
+      {'a', 'o', {{100, 100, 100, 60, 100, 100, 100}}},
+      {'p', 'e', {{100, 100, 100, 60, 100, 100, 100}}},
+      {'g', 'h', {{60, 60, 60, 60, 100, 100, 100}}},
+      {'m', 'l', {{100, 60, 100, 100, 100, 100, 100}}}};
+  for (const auto& example : examples) {
+    // A synthetic admitted dictionary word isolates one substitution. Prefix
+    // and morphology features are disabled, and the middle byte cannot align
+    // as insertion/deletion at the one-edit minimum.
+    std::string surface = "xxxx";
+    surface[1] = example.expected;
+    std::string raw = "xxxx";
+    raw[1] = example.typed;
+    auto lexicon = Lexicon(surface + "\t1\n");
+    if (!lexicon) continue;
+    auto support = Support(*lexicon);
+    if (!support) continue;
+    for (std::size_t layout_ordinal = 0; layout_ordinal < layouts.size(); ++layout_ordinal) {
+      auto options = Only(CandidateType::kSpelling);
+      options.keyboard_layout = layouts[layout_ordinal];
+      const auto result = support->Suggest(raw, {}, options);
+      const auto* candidate = Find(result, surface);
+      Check(candidate && candidate->edit_distance == 1,
+            "layout change preserves one-edit admission and distance");
+      if (!candidate) continue;
+      const auto expected_cost = example.costs[layout_ordinal];
+      Check(candidate->keyboard_cost == expected_cost,
+            "selected layout matches literal physical-key neighbour oracle");
+      Near(candidate->match_log_score, -4.0 - 0.005 * expected_cost,
+           "layout spelling penalty exposed without count features");
+      Near(candidate->score, candidate->match_log_score,
+           "frequency-unavailable spelling has only input penalty");
+      if (layout_ordinal == 0) {
+        const auto legacy = support->Suggest(raw, {}, Only(CandidateType::kSpelling));
+        Check(Find(legacy, surface) && Find(legacy, surface)->keyboard_cost == expected_cost,
+              "default and explicit QWERTY costs agree");
+      }
+    }
+  }
+
+  auto keys = Lexicon("test\t1\ntess\t1\n");
+  if (!keys) return;
+  auto keyboard = Support(*keys);
+  if (!keyboard) return;
+  auto options = Only(CandidateType::kSpelling);
+  const auto qwerty = keyboard->Suggest("tesr", {}, options);
+  Check(!qwerty.candidates.empty() && qwerty.candidates.front().text == "test",
+        "known-layout neighbour changes equal-frequency ordering");
+  for (const auto layout : {Layout::kUnknown, Layout::kNeutral, static_cast<Layout>(999)}) {
+    options.keyboard_layout = layout;
+    const auto neutral = keyboard->Suggest("tesr", {}, options);
+    Check(Texts(neutral) == std::vector<std::string>({"tess", "test"}),
+          "unknown layout gives neutral tie order rather than QWERTY preference");
+    for (const auto& candidate : neutral.candidates) {
+      Check(candidate.keyboard_cost == 100, "unknown substitution has no neighbour discount");
+      Near(candidate.match_log_score, -4.5, "neutral one-edit penalty literal oracle");
+    }
+    const auto swapped = keyboard->Suggest("tset", {}, options);
+    const auto* test = Find(swapped, "test");
+    Check(test && test->keyboard_cost == 80 && test->edit_distance == 1,
+          "neutral keeps layout-independent adjacent-byte transposition");
   }
 }
 
@@ -740,9 +897,11 @@ int main(int argc, char** argv) {
   StableIdsAndFrequencyValidation();
   MorphologyLiteralOracle();
   ExactLemmaBeatsCompetingPrefixes();
+  AttestedMorphologyIdentities();
   LearningAndPrediction();
   SegmentationOracleAndBoundaries();
   TwoEditSpellingAndKeyboard();
+  LayoutAwareSpelling();
   ExpansionProtectionCompatibilityAndBudgets();
   return Finish();
 }

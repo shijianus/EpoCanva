@@ -133,7 +133,8 @@ typedef struct epocanva_backend_candidate {
   uint32_t kind;
   uint32_t lexeme_count; /* at most 8; zero IDs means no learning */
   uint64_t lexeme_ids[8];
-  double score; /* model score, not a calibrated probability */
+  double score; /* log-model + match features, not a probability; an exact
+                   resource abbreviation precedes inferred candidates */
   uint64_t input_begin_utf8_byte;
   uint64_t input_end_utf8_byte;
 } epocanva_backend_candidate;
@@ -211,6 +212,109 @@ epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_ack_commit(
     epocanva_backend_session_handle session, const epocanva_backend_request* request,
     uint64_t commit_token, uint32_t applied,
     epocanva_backend_ack_result* out_result) EPOCANVA_ENGINE_NOEXCEPT;
+
+/* Additive v2 interfaces leave every v1 layout and entry point unchanged. */
+#define EPOCANVA_BACKEND_PROFILE_ABI_VERSION 2u
+enum {
+  EPOCANVA_BACKEND_KEYBOARD_NEUTRAL = 0,
+  EPOCANVA_BACKEND_KEYBOARD_US_QWERTY = 1,
+  EPOCANVA_BACKEND_KEYBOARD_FRENCH_AZERTY = 2,
+  EPOCANVA_BACKEND_KEYBOARD_GERMAN_QWERTZ = 3,
+  EPOCANVA_BACKEND_KEYBOARD_DVORAK = 4
+};
+enum {
+  EPOCANVA_BACKEND_OUTPUT_LATIN = 1,
+  EPOCANVA_BACKEND_OUTPUT_HANZI = 2,
+  EPOCANVA_BACKEND_OUTPUT_HIRAGANA = 3,
+  EPOCANVA_BACKEND_OUTPUT_KATAKANA = 4,
+  EPOCANVA_BACKEND_OUTPUT_KANJI = 5,
+  EPOCANVA_BACKEND_OUTPUT_HANGUL = 6
+};
+enum {
+  EPOCANVA_BACKEND_KANA = 7,
+  /* One model lexical token, NOT one byte, Unicode scalar or grapheme cluster. */
+  EPOCANVA_BACKEND_NEXT_UNIT = 4,
+  EPOCANVA_BACKEND_UNIT_LEXICAL_TOKEN = 1,
+  EPOCANVA_BACKEND_INVALID_PROFILE = -105
+};
+
+typedef struct epocanva_backend_profile {
+  uint32_t struct_size_bytes;
+  uint32_t abi_version; /* EPOCANVA_BACKEND_PROFILE_ABI_VERSION */
+  uint32_t profile_id; /* nonzero, unique within one backend */
+  uint32_t language;
+  uint32_t input_mode;
+  uint32_t output_mode;
+  uint32_t keyboard_layout;
+  uint32_t reserved;
+  epocanva_utf8_view variant_id;
+  epocanva_utf8_view abbreviation_path;
+  epocanva_utf8_view abbreviation_sha256;
+} epocanva_backend_profile;
+
+/* Multiple profiles may share a language but bind different model catalogs. */
+typedef struct epocanva_backend_profile_resource {
+  epocanva_backend_profile profile;
+  epocanva_backend_resource resource; /* unchanged v1 resource */
+} epocanva_backend_profile_resource;
+
+typedef struct epocanva_backend_profile_options {
+  uint32_t struct_size_bytes;
+  uint32_t abi_version;
+  const epocanva_backend_profile_resource* profiles;
+  uint32_t profile_count; /* resource records, 1..32 */
+  uint32_t allow_test_fixture;
+  const epocanva_engine_options* rime_options;
+  epocanva_utf8_view learning_root;
+} epocanva_backend_profile_options;
+
+typedef struct epocanva_backend_profile_snapshot {
+  uint32_t struct_size_bytes;
+  uint32_t abi_version;
+  epocanva_backend_snapshot snapshot; /* caller initializes its v1 header */
+  uint32_t profile_id;
+  uint32_t output_mode;
+  uint32_t keyboard_layout;
+  uint32_t unit_kind; /* NEXT_UNIT is a complete model lexical token */
+} epocanva_backend_profile_snapshot;
+
+/* A monotonic caller event token counts confirmed edits, not text units.
+ * Confirmation updates transient context only. Ordinary unselected text is NOT
+ * persisted; learning remains exclusive to admitted candidates and commit ACK.
+ * Sensitive/Unknown confirmation discards transient text and never persists.
+ */
+typedef struct epocanva_backend_text_confirmation {
+  uint32_t struct_size_bytes;
+  uint32_t abi_version;
+  epocanva_backend_request request; /* unchanged v1 request */
+  uint64_t event_token;
+  epocanva_utf8_view text; /* one confirmed word/phrase, <=4096 UTF-8 bytes */
+} epocanva_backend_text_confirmation;
+
+epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_open_profiles(
+    const epocanva_backend_profile_options* options,
+    epocanva_backend_handle* out_backend) EPOCANVA_ENGINE_NOEXCEPT;
+epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_profile_session_open(
+    epocanva_backend_handle backend, const epocanva_backend_profile* profile,
+    const epocanva_backend_session_options* options,
+    epocanva_backend_session_handle* out_session) EPOCANVA_ENGINE_NOEXCEPT;
+epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_push_utf8(
+    epocanva_backend_session_handle session, const epocanva_backend_request* request,
+    epocanva_utf8_view text) EPOCANVA_ENGINE_NOEXCEPT;
+/* Replaces transient preceding context; no history log or persistence. The
+ * caller must supply confirmed text from the current field under permission.
+ * Invalidates the old candidate menu and refuses while commit ACK is pending. */
+epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_set_context(
+    epocanva_backend_session_handle session, const epocanva_backend_request* request,
+    epocanva_utf8_view preceding_text) EPOCANVA_ENGINE_NOEXCEPT;
+epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_confirm_text(
+    epocanva_backend_session_handle session,
+    const epocanva_backend_text_confirmation* confirmation,
+    epocanva_backend_ack_result* out_result) EPOCANVA_ENGINE_NOEXCEPT;
+epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_read_profile_snapshot(
+    epocanva_backend_session_handle session, const epocanva_backend_request* request,
+    epocanva_backend_profile_snapshot* out_snapshot, char* buffer,
+    uint64_t capacity_utf8_bytes) EPOCANVA_ENGINE_NOEXCEPT;
 
 #ifdef __cplusplus
 }

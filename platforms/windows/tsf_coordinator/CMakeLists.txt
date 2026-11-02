@@ -49,6 +49,7 @@ target_link_libraries(epocanva_tsf_edit_layer
 add_library(epocanva_tsf_coordinator STATIC
   coordinator.h
   coordinator.cc
+  backend_integration.cc
   engine_to_plan.h
   engine_to_plan.cc
   observed_binding.h

@@ -45,6 +45,25 @@ int wmain(int argc, wchar_t** argv) {
       std::printf("FAIL runtime-fault %s\n", label);
     }
   };
+  if (mode == 0) {
+    for (const auto& unsafe : std::vector<std::filesystem::path>{
+        L"\\\\not-a-server.invalid\\share", L"\\\\?\\C:\\unsafe", L"\\\\.\\pipe\\unsafe",
+        L"C:relative", L"C:\\CON.txt", L"C:\\safe\\file:stream", L"C:\\safe.\\child",
+        options.shared_data_dir / L".." / L"escape"}) {
+      for (int field = 0; field < 4; ++field) {
+        auto bad = options;
+        if (field == 0) bad.rime_dll_path = unsafe;
+        if (field == 1) bad.shared_data_dir = unsafe;
+        if (field == 2) bad.user_data_dir = unsafe;
+        if (field == 3) bad.log_dir = unsafe;
+        engine::RimeRuntime rejected;
+        check(rejected.Start(bad) == engine::RuntimeStartStatus::kInvalidOptions,
+              "unsafe DLL/shared/user/log path rejected");
+        check(rejected.Info().initialize_calls == 0 && count(0) == 0,
+              "rejected path never enters engine initialize");
+      }
+    }
+  }
   const bool poison = mode >= 2;
   {
     engine::RimeRuntime runtime;

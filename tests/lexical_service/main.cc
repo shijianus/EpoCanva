@@ -1,6 +1,7 @@
 #include "lexical_service.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -29,6 +30,10 @@ void Check(bool condition, const char* label) {
     ++failures;
     std::cerr << "ASSERT FAIL " << label << '\n';
   }
+}
+
+void Near(double actual, double expected, const char* label) {
+  Check(std::isfinite(actual) && std::abs(actual - expected) < 1e-10, label);
 }
 
 using Row = std::tuple<std::string, std::string, std::uint64_t>;
@@ -91,6 +96,7 @@ void CheckRaw(const lx::QueryResult& result, std::string_view raw) {
   Check(candidate.type == lx::CandidateType::kOriginal, "raw is explicitly original");
   Check(candidate.text_utf8 == raw, "raw bytes preserved exactly");
   Check(candidate.lexeme_ids.empty(), "raw never has a learnable ID");
+  Near(candidate.match_log_score, 0.0, "raw has no model or count terms in match score");
   Check(candidate.input_utf8_byte_spans.size() == 1 &&
         candidate.input_utf8_byte_spans.front().begin_utf8_byte == 0 &&
         candidate.input_utf8_byte_spans.front().end_utf8_byte == raw.size(),
@@ -104,7 +110,8 @@ void CheckKnown(const lx::LexicalService& service, const lx::QueryResult& result
     Check(!candidate.lexeme_ids.empty(), "non-original has known ID vector");
     for (const auto id : candidate.lexeme_ids) Check(id != 0 && service.HasLexeme(id), "every ID is admitted");
     Check(lx::ValidateUtf8(candidate.text_utf8) == lx::TextStatus::kOk, "candidate output is valid UTF8");
-    Check(std::isfinite(candidate.score), "candidate score finite");
+    Check(std::isfinite(candidate.score) && std::isfinite(candidate.match_log_score),
+          "combined and independent match scores are finite");
     for (const auto span : candidate.input_utf8_byte_spans) {
       Check(span.begin_utf8_byte <= span.end_utf8_byte && span.end_utf8_byte <= raw.size() &&
             lx::IsUtf8ByteBoundary(raw, span.begin_utf8_byte) &&
@@ -233,9 +240,10 @@ void English() {
   const auto morph = service->Suggest("en", "walk", options);
   for (const auto word : {"walks", "walked", "walking", "walk's"}) {
     const auto* candidate = Find(morph, word, lx::CandidateType::kMorphology);
-    Check(candidate && candidate->lexeme_ids == std::vector<lx::LexemeId>{Id("en", "walk")},
-          "existing English forms map admitted lemma to shared ID");
-    if (candidate) Check(candidate->lexeme_ids.front() != epocanva::en::StableLexemeId("walk"),
+    const auto identity = std::string_view(word) == "walk's" ? "walk" : word;
+    Check(candidate && candidate->lexeme_ids == std::vector<lx::LexemeId>{Id("en", identity)},
+          "English forms use surface ID; absent possessive keeps admitted lemma");
+    if (candidate) Check(candidate->lexeme_ids.front() != epocanva::en::StableLexemeId(identity),
                          "legacy IDs never leaked to backend catalog");
   }
   const auto irregular = service->Suggest("en", "child", options);
@@ -300,6 +308,201 @@ void English() {
   Check(Find(normalized, u8"CAFÉTÉRIA", lx::CandidateType::kCompletion) != nullptr,
         "Unicode English completion native case/NFC");
   CheckKnown(*unicode, normalized, u8"CAFE\u0301");
+}
+
+void KeyboardLayouts() {
+  using Layout = epocanva::keyboard::Layout;
+  Check(lx::QueryOptions{}.keyboard_layout == Layout::kUsQwerty,
+        "lexical default preserves historical QWERTY scorer");
+  const std::array<Layout, 6> layouts{Layout::kUsQwerty, Layout::kFrenchAzerty,
+      Layout::kGermanQwertz, Layout::kDvorak, Layout::kUnknown, static_cast<Layout>(999)};
+  struct Example {
+    const char* raw;
+    const char* surface;
+    std::array<unsigned, 6> costs;
+  };
+  // Literal neighbours differ by layout; these all spell ENGLISH, so no query
+  // language may override the explicitly selected physical keyboard profile.
+  const Example examples[] = {
+      {"rxxx", "txxx", {{60, 60, 60, 60, 100, 100}}},
+      {"exxx", "zxxx", {{100, 60, 100, 100, 100, 100}}},
+      {"txxx", "zxxx", {{100, 100, 60, 100, 100, 100}}},
+      {"oxxx", "axxx", {{100, 100, 100, 60, 100, 100}}},
+      {"exxx", "pxxx", {{100, 100, 100, 60, 100, 100}}},
+      {"lxxx", "mxxx", {{100, 60, 100, 100, 100, 100}}}};
+  for (const auto& example : examples) {
+    auto service = Service({{"en", example.surface, 10}});
+    auto options = OnlyPrefix();
+    options.enable_spelling = true;
+    for (std::size_t layout_ordinal = 0; layout_ordinal < layouts.size(); ++layout_ordinal) {
+      options.keyboard_layout = layouts[layout_ordinal];
+      const auto result = service->Suggest("en", example.raw, options);
+      CheckRaw(result, example.raw);
+      const auto* candidate = Find(result, example.surface, lx::CandidateType::kSpelling);
+      Check(candidate && candidate->edit_distance == 1 &&
+            candidate->lexeme_ids == std::vector<lx::LexemeId>{Id("en", example.surface)},
+            "layout routes through lexical options without changing spelling identity");
+      if (!candidate) continue;
+      const auto penalty = -4.0 - 0.005 * example.costs[layout_ordinal];
+      Near(candidate->match_log_score, penalty, "lexical layout match penalty literal oracle");
+      Near(candidate->score, std::log(11.0) + penalty,
+           "legacy lexical score still adds frequency exactly once");
+      CheckKnown(*service, result, example.raw);
+    }
+  }
+  auto service = Service({{"en", "test", 10}, {"en", "tess", 10}});
+  auto options = OnlyPrefix();
+  options.max_candidates = 2;
+  options.enable_spelling = true;
+  const auto legacy = service->Suggest("en", "tesr", options);
+  Check(legacy.candidates.size() == 2 && legacy.candidates[1].text_utf8 == "test",
+        "legacy QWERTY neighbour wins bounded lexical menu");
+  options.keyboard_layout = Layout::kNeutral;
+  const auto neutral = service->Suggest("en", "tesr", options);
+  Check(neutral.candidates.size() == 2 && neutral.candidates[1].text_utf8 == "tess",
+        "neutral menu has no invented QWERTY neighbour advantage");
+  options.keyboard_layout = Layout::kUsQwerty;
+  const auto again = service->Suggest("en", "tesr", options);
+  Check(again.candidates.size() == 2 && again.candidates[1].text_utf8 == "test",
+        "layout selection is per query, never retained by immutable service");
+}
+
+void MorphologyIdentity() {
+  auto service = Service({{"en", "walk", 20000}, {"en", "walked", 0},
+      {"en", "walking", 5}, {"en", "walk's", 7}, {"en", "child", 10000},
+      {"en", "children", 3}, {"en", "go", 40000}, {"en", "went", 2},
+      {"en", "before", 10}});
+  std::vector<lx::LearnedCount> learned{{Id("en", "walk"), 900000},
+      {Id("en", "walked"), 7}, {Id("en", "children"), 31}};
+  std::vector<lx::ContextCount> context{{Id("en", "before"), Id("en", "walk"), 900000},
+      {Id("en", "before"), Id("en", "walked"), 20},
+      {Id("en", "before"), Id("en", "went"), 40}};
+  lx::RankingInputs ranking;
+  ranking.allow_learning = true;
+  ranking.previous_id = Id("en", "before");
+  ranking.learned = &learned;
+  ranking.context = &context;
+  auto options = OnlyPrefix();
+  options.prefix_entry_budget = 0;
+  options.enable_morphology = true;
+  struct Example {
+    const char* raw;
+    const char* text;
+    const char* identity;
+    std::uint64_t count;
+    std::uint64_t learned;
+    std::uint64_t context;
+    double match;
+  };
+  const Example examples[] = {
+      {"walk", "walked", "walked", 0, 7, 20, 0.75},
+      {"Walk", "Walked", "walked", 0, 7, 20, 0.75},
+      {"wal", "walked", "walked", 0, 7, 20, -0.25},
+      {"walk", "walking", "walking", 5, 0, 0, 0.75},
+      {"walk", "walk's", "walk's", 7, 0, 0, 0.75},
+      {"child", "children", "children", 3, 31, 0, 0.75},
+      {"child", "children's", "child", 10000, 0, 0, 0.75},
+      {"go", "went", "went", 2, 0, 40, 0.75}};
+  for (const auto& example : examples) {
+    const auto result = service->Suggest("en", example.raw, options, ranking);
+    const auto* candidate = Find(result, example.text, lx::CandidateType::kMorphology);
+    Check(candidate != nullptr, "attested morphology survives lexical admission");
+    if (!candidate) continue;
+    Check(candidate->lexeme_ids == std::vector<lx::LexemeId>{Id("en", example.identity)},
+          "model/context ID is surface, with only documented possessive fallback");
+    Near(candidate->match_log_score, example.match, "morphology independent input feature");
+    Near(candidate->score, std::log1p(static_cast<double>(example.count)) +
+         0.75 * std::log1p(static_cast<double>(example.learned)) +
+         1.25 * std::log1p(static_cast<double>(example.context)) + example.match,
+         "surface ranking never substitutes large lemma counts or bigrams");
+    CheckKnown(*service, result, example.raw);
+  }
+}
+
+void MatchScores() {
+  std::vector<Row> rows{{"en", "hello", 100}, {"en", "world", 50},
+      {"en", "walk", 20}, {"en", "walked", 3}, {"en", "child", 88},
+      {"en", "children", 40}, {"en", "cat", 99}, {"en", "test", 10},
+      {"en", "by", 5}, {"en", "the", 6}, {"en", "way", 7},
+      {"en", "please", 8}, {"en", "don't", 5}, {"en", "before", 17},
+      {"fr", "cheval", 9}, {"fr", "chevaux", 4}};
+  if (lx::HasNativeUnicodeSupport()) rows.emplace_back("fr", u8"école", 10);
+  auto service = Service(rows);
+  std::vector<lx::LearnedCount> learned;
+  std::vector<lx::ContextCount> context;
+  for (const auto& row : rows) {
+    const auto id = Id(std::get<0>(row), std::get<1>(row));
+    learned.push_back({id, 31});
+    context.push_back({Id("en", "before"), id, 63});
+  }
+  context.push_back({Id("en", "hello"), Id("en", "world"), 127});
+  context.push_back({Id("en", "world"), Id("en", "hello"), 255});
+  context.push_back({Id("en", "by"), Id("en", "the"), 511});
+  context.push_back({Id("en", "the"), Id("en", "way"), 1023});
+  lx::RankingInputs ranking;
+  ranking.allow_learning = true;
+  ranking.previous_id = Id("en", "before");
+  ranking.learned = &learned;
+  ranking.context = &context;
+  // A second catalog has different per-word counts, plus unrelated mass that
+  // changes the segmentation normalizer. No count-dependent term may leak into
+  // match_log_score even though legacy combined scores legitimately change.
+  for (auto& row : rows) std::get<2>(row) = std::get<2>(row) * 100 + 1;
+  rows.emplace_back("en", "unrelated", 1000000);
+  auto changed = Service(rows);
+  struct Example {
+    const char* language;
+    const char* raw;
+    const char* text;
+    lx::CandidateType type;
+    double match;
+  };
+  std::vector<Example> examples{
+      {"en", "hel", "hello", lx::CandidateType::kCompletion, 0.0},
+      {"en", "hello", "hello", lx::CandidateType::kExact, 0.0},
+      {"en", "tesr", "test", lx::CandidateType::kSpelling, -4.3},
+      {"en", "walk", "walked", lx::CandidateType::kMorphology, 0.75},
+      {"en", "wal", "walked", lx::CandidateType::kMorphology, -0.25},
+      {"en", "child", "children", lx::CandidateType::kMorphology, 0.75},
+      {"en", "cat", "cat's", lx::CandidateType::kMorphology, 0.75},
+      {"en", "helloworld", "hello world", lx::CandidateType::kSegmentation, -0.75},
+      {"en", "helloworldhello", "hello world hello", lx::CandidateType::kSegmentation, -1.5},
+      {"en", "btw", "by the way", lx::CandidateType::kAbbreviation, 0.0},
+      {"en", "pls", "please", lx::CandidateType::kAbbreviation, 0.0},
+      {"en", "dont", "don't", lx::CandidateType::kContraction, 0.0},
+      {"fr", "cheval", "chevaux", lx::CandidateType::kMorphology, -0.25}};
+  if (lx::HasNativeUnicodeSupport()) {
+    examples.push_back({"fr", "ecole", u8"école", lx::CandidateType::kAccent, -0.5});
+  }
+  for (const auto& example : examples) {
+    auto options = OnlyPrefix();
+    options.prefix_entry_budget = example.type == lx::CandidateType::kCompletion ? 512 : 0;
+    options.enable_morphology = example.type == lx::CandidateType::kMorphology;
+    options.enable_spelling = example.type == lx::CandidateType::kSpelling;
+    options.enable_segmentation = example.type == lx::CandidateType::kSegmentation;
+    options.enable_abbreviation = example.type == lx::CandidateType::kAbbreviation ||
+                                  example.type == lx::CandidateType::kContraction;
+    options.enable_accents = example.type == lx::CandidateType::kAccent;
+    const auto base = service->Suggest(example.language, example.raw, options);
+    const auto personal = service->Suggest(example.language, example.raw, options, ranking);
+    const auto changed_counts = changed->Suggest(example.language, example.raw, options, ranking);
+    const auto* plain = Find(base, example.text, example.type);
+    const auto* learned_candidate = Find(personal, example.text, example.type);
+    const auto* changed_candidate = Find(changed_counts, example.text, example.type);
+    Check(plain && learned_candidate && changed_candidate,
+          "all candidate channels exercised with base and personal frequencies");
+    if (!plain || !learned_candidate || !changed_candidate) continue;
+    Near(plain->match_log_score, example.match, "base candidate match penalty literal oracle");
+    Near(learned_candidate->match_log_score, example.match,
+         "learned and contextual counts excluded from independent match channel");
+    Near(changed_candidate->match_log_score, example.match,
+         "corpus unigram counts and normalizer excluded from independent match channel");
+    Check(learned_candidate->score > plain->score &&
+          std::abs(changed_candidate->score - learned_candidate->score) > 1e-6,
+          "legacy combined scores still respond to actual count changes");
+    CheckRaw(base, example.raw);
+    CheckKnown(*service, personal, example.raw);
+  }
 }
 
 void French() {
@@ -557,6 +760,9 @@ int main(int argc, char** argv) {
     if (mode == "--text") Text();
     else if (mode == "--aliases") Aliases();
     else if (mode == "--english") English();
+    else if (mode == "--keyboard-layouts") KeyboardLayouts();
+    else if (mode == "--morphology-identity") MorphologyIdentity();
+    else if (mode == "--match-scores") MatchScores();
     else if (mode == "--french") French();
     else if (mode == "--korean") Korean();
     else if (mode == "--ranking") Ranking();

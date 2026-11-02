@@ -20,6 +20,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -54,6 +55,9 @@ struct EngineCommand {
   input::KeyEventSnapshot event;
   input::KeyText text;
   std::size_t candidate_index = 0;
+  std::uint32_t profile_id = 0;
+  BackendAccess access;
+  BackendWork backend_work;
 };
 
 CommandPayload DefaultPayload(const EngineCommand& command) {
@@ -73,6 +77,10 @@ CommandPayload DefaultPayload(const EngineCommand& command) {
       return RefreshOutcome{};
     case CommandKind::kCloseClient:
       return CloseClientOutcome{};
+    case CommandKind::kCreateProfileClient:
+      return ProfileClientOutcome{};
+    case CommandKind::kBackendWork:
+      return BackendWorkOutcome{};
   }
   return CreateClientOutcome{};
 }
@@ -361,6 +369,7 @@ void EngineExecutor::Impl::WorkerMain() {
       result = FaultResult(command, CommandStatus::kInternalFault,
                            "command threw an exception");
       if (command.kind == CommandKind::kCreateClient ||
+          command.kind == CommandKind::kCreateProfileClient ||
           command.kind == CommandKind::kCloseClient) {
         SetClientStatus(command.client, ClientLifecycle::kFailed);
       }
@@ -484,7 +493,10 @@ SubmitStatus EngineExecutor::Impl::Submit(EngineCommand command, bool create,
     return SubmitStatus::kInvalidRequest;
   }
   if (create) {
-    if (client == nullptr || command.schema_id.empty()) {
+    if (client == nullptr || (command.kind == CommandKind::kCreateClient &&
+                              command.schema_id.empty()) ||
+        (command.kind == CommandKind::kCreateProfileClient &&
+         (command.profile_id == 0 || !command.access.allowed()))) {
       return SubmitStatus::kInvalidRequest;
     }
   } else if (command.client == 0) {
@@ -825,6 +837,27 @@ CommandResult EngineExecutor::Impl::Execute(const EngineCommand& command) {
         }
         return result;
       }
+      case CommandKind::kCreateProfileClient: {
+        auto outcome = backend_->CreateProfileClient(command.client, command.profile_id,
+                                                      command.access);
+        outcome.client = ClientId{command.client};
+        result.status = outcome.backend_status == EPOCANVA_OK
+            ? CommandStatus::kOk : CommandStatus::kSessionCreateFailed;
+        if (result.ok()) {
+          NoteClientCreated();
+          SetClientStatus(command.client, ClientLifecycle::kOpen);
+        } else {
+          SetClientStatus(command.client, ClientLifecycle::kFailed);
+        }
+        result.payload = std::move(outcome);
+        return result;
+      }
+      case CommandKind::kBackendWork: {
+        auto outcome = backend_->RunBackendWork(command.client, command.backend_work);
+        result.status = CommandStatus::kOk;
+        result.payload = std::move(outcome);
+        return result;
+      }
       case CommandKind::kCloseClient: {
         const BackendCloseResult call = backend_->CloseClient(command.client);
         CloseClientOutcome outcome;
@@ -852,6 +885,7 @@ CommandResult EngineExecutor::Impl::Execute(const EngineCommand& command) {
     result.payload = DefaultPayload(command);
     result.diagnostic = "command threw an exception";
     if (command.kind == CommandKind::kCreateClient ||
+          command.kind == CommandKind::kCreateProfileClient ||
         command.kind == CommandKind::kCloseClient) {
       SetClientStatus(command.client, ClientLifecycle::kFailed);
     }
@@ -878,7 +912,15 @@ void EngineExecutor::Impl::NoteClientCreated() {
 }
 
 EngineExecutor::EngineExecutor(ExecutorOptions options)
-    : EngineExecutor(std::move(options), MakeRealEngineBackend()) {}
+    : EngineExecutor(options,
+#ifdef EPOCANVA_HAS_UNIFIED_BACKEND
+          options.backend.enabled ? MakeUnifiedEngineBackend(options.backend) :
+#endif
+          MakeRealEngineBackend()) {
+#ifndef EPOCANVA_HAS_UNIFIED_BACKEND
+  if (options.backend.enabled) throw std::invalid_argument("unified backend is not linked");
+#endif
+}
 
 EngineExecutor::EngineExecutor(ExecutorOptions options,
                                std::unique_ptr<EngineBackend> backend)
@@ -953,6 +995,37 @@ SubmitStatus EngineExecutor::TryCloseClient(ClientId client, RequestId* request)
   command.kind = CommandKind::kCloseClient;
   command.client = client.value;
   return impl_->Submit(std::move(command), false, request, nullptr);
+}
+
+SubmitStatus EngineExecutor::TryCreateProfileClient(std::uint32_t profile_id,
+    const BackendAccess& access, RequestId* request, ClientId* client) {
+  EngineCommand command;
+  command.kind = CommandKind::kCreateProfileClient;
+  command.profile_id = profile_id;
+  command.access = access;
+  return impl_->Submit(std::move(command), true, request, client);
+}
+
+SubmitStatus EngineExecutor::TryBackendWork(ClientId client, const BackendWork& work,
+                                            RequestId* request) {
+  if (work.text_utf8.size() > 4096 || work.preceding_utf8.size() > 4096 ||
+      (!work.access.allowed() && work.operation != BackendOperation::kAcknowledgeCommit))
+    return SubmitStatus::kInvalidRequest;
+  EngineCommand command;
+  command.kind = CommandKind::kBackendWork;
+  command.client = client.value;
+  command.backend_work = work;
+  return impl_->Submit(std::move(command), false, request, nullptr);
+}
+
+bool EngineExecutor::unified_backend() const { return impl_->options_.backend.enabled; }
+std::uint32_t EngineExecutor::active_profile_id() const {
+  return impl_->options_.backend.active_profile_id;
+}
+BackendProfileConfig EngineExecutor::active_profile() const {
+  for (const auto& resource : impl_->options_.backend.profiles)
+    if (resource.profile.profile_id == active_profile_id()) return resource.profile;
+  BackendProfileConfig missing; missing.profile_id = 0; return missing;
 }
 
 WaitStatus EngineExecutor::WaitForResult(RequestId request,
@@ -1064,6 +1137,10 @@ const char* DescribeCommandKind(CommandKind kind) {
       return "refresh-state";
     case CommandKind::kCloseClient:
       return "close-client";
+    case CommandKind::kCreateProfileClient:
+      return "create-profile-client";
+    case CommandKind::kBackendWork:
+      return "backend-work";
   }
   return "unknown-command";
 }

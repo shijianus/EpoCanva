@@ -263,6 +263,25 @@ Status Session::Reset(const Access& current) {
   impl_->learning_previous_id = 0;
   return Status::kOk;
 }
+Status Session::SetContext(std::vector<LexemeId> ids, const Access& current,
+                           bool append, bool clear_input) {
+  const auto status = Check(current);
+  if (status != Status::kOk) return status;
+  if (impl_->commit.token) return Status::kBusy;
+  if (ids.size() > 2 || !std::all_of(ids.begin(), ids.end(),
+      [&](LexemeId id) { return id && impl_->store->Admits(id); })) return Status::kInvalid;
+  const auto token = Token();
+  if (!token) return Status::kTokenExhausted;
+  auto context = append && !ids.empty() ? impl_->context : std::vector<LexemeId>{};
+  context.insert(context.end(), ids.begin(), ids.end());
+  if (context.size() > 2) context.erase(context.begin(), context.end() - 2);
+  impl_->context = std::move(context);
+  impl_->learning_previous_id = 0;
+  if (clear_input) impl_->snapshot = {};
+  impl_->snapshot.token = token;
+  impl_->snapshot.candidates.clear();
+  return Status::kOk;
+}
 std::vector<LexemeId> Session::Context(const Access& current) const {
   return Check(current) == Status::kOk ? impl_->context : std::vector<LexemeId>{};
 }

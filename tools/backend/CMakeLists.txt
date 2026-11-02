@@ -19,6 +19,7 @@ target_compile_options(epocanva_backend_cli PRIVATE /utf-8 /permissive- /W4 /EHs
 add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/backend" backend-tests)
 add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/backend_session" backend-session-tests)
 add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/prediction_core" prediction-tests)
+add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/prediction_abbreviation" abbreviation-tests)
 add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/lexical_service" lexical-tests)
 add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/japanese_decoder" japanese-tests)
 if(EPOCANVA_BACKEND_WITH_FRENCH_DICTIONARY)

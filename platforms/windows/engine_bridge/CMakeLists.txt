@@ -154,6 +154,9 @@ target_link_libraries(epocanva_engine_keyboard_adapters
 set(EPOCANVA_RIME_DLL
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/librime-english/rime/install/lib/rime.dll"
     CACHE FILEPATH "Absolute path of the ENGLISH rime.dll the tests must load")
+# Normalize build-owned path expressions before passing them to the strict runtime
+# boundary. Runtime callers themselves may not submit dot/parent components.
+get_filename_component(EPOCANVA_RIME_DLL "${EPOCANVA_RIME_DLL}" ABSOLUTE)
 if(NOT EXISTS "${EPOCANVA_RIME_DLL}")
   message(FATAL_ERROR
     "EPOCANVA_RIME_DLL does not exist: ${EPOCANVA_RIME_DLL}\n"
@@ -165,6 +168,9 @@ set(EPOCANVA_BASELINE_RIME_DLL
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/librime-baseline/rime/install/lib/rime.dll"
     CACHE FILEPATH
   "Optional unmodified rime.dll used to prove the missing-module failure; empty/absent skips")
+if(NOT EPOCANVA_BASELINE_RIME_DLL STREQUAL "")
+  get_filename_component(EPOCANVA_BASELINE_RIME_DLL "${EPOCANVA_BASELINE_RIME_DLL}" ABSOLUTE)
+endif()
 if(EXISTS "${EPOCANVA_BASELINE_RIME_DLL}")
   set(_bridge_baseline_dll "${EPOCANVA_BASELINE_RIME_DLL}")
   message(STATUS "  baseline rime.dll    : ${_bridge_baseline_dll}")

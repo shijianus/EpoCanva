@@ -47,6 +47,8 @@
 #include <optional>
 #include <vector>
 
+#include "../engine_executor/backend_config.h"
+
 namespace epocanva {
 namespace windows {
 namespace engine {
@@ -102,6 +104,7 @@ struct EngineHostConfig {
   std::filesystem::path user_data_dir;
   std::filesystem::path log_dir;
   std::size_t capacity = 32;
+  ::epocanva::windows::engine::UnifiedBackendConfig backend;
   std::optional<EngineHostDeployment> deployment;
 
   // Absolute, non-empty paths and a bounded non-zero capacity. This is structural

@@ -148,8 +148,11 @@ struct PredictOptions {
   // 1..4 emitted lexical tokens; terminal punctuation consumes one slot.
   std::size_t max_words = 1;
   std::size_t beam_width = 16;  // 1..64 active paths; finite beam is explicit
-  // Ranked index entries visited ACROSS the whole query, including filtered
-  // or duplicate IDs. 0 means exhaustive/exact next-token search, not no work.
+  // Ranked index entries consumed ACROSS the whole query, including duplicate
+  // IDs and any post-filtered outcomes. Nonempty prefixes use immutable lexical
+  // ranges, so unrelated prefix/language rows are not visited. Logarithmic range
+  // metadata lookups and threshold peeks are not ranked-entry consumption.
+  // 0 means exhaustive/exact next-token search, not no work.
   std::size_t max_index_entries = 0;
   std::string language_id;  // empty = all languages; otherwise exact ID filter
 };
@@ -203,6 +206,8 @@ class Model {
                     const PersonalCounts* personal = nullptr) const;
   // Empty/nullopt prefix = next token. Prefix is strict UTF-8, normalized once
   // with the same ASCII-only rule, then matched at UTF-8 byte boundaries.
+  // Nonempty prefixes enumerate only matching lexical ranges through immutable
+  // per-distribution rank indexes; probabilities/denominators remain unfiltered.
   // No files/network/logging/persistence or shared mutable query state.
   PredictResult Predict(std::optional<std::string_view> prefix_utf8,
                         const Context& context,

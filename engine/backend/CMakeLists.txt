@@ -34,7 +34,13 @@ if(NOT TARGET epocanva_windows_learning_repository)
   target_compile_definitions(epocanva_windows_learning_repository PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
   target_compile_features(epocanva_windows_learning_repository PUBLIC cxx_std_17)
 endif()
-add_library(epocanva_backend STATIC backend_api.cc
+add_library(epocanva_prediction_abbreviation STATIC
+  "${EPOCANVA_BACKEND_ROOT}/engine/prediction/abbreviation.cc")
+target_include_directories(epocanva_prediction_abbreviation PUBLIC "${EPOCANVA_BACKEND_ROOT}/engine/prediction")
+target_compile_features(epocanva_prediction_abbreviation PUBLIC cxx_std_17)
+target_compile_options(epocanva_prediction_abbreviation PRIVATE /utf-8 /permissive- /W4 /EHsc)
+target_link_libraries(epocanva_prediction_abbreviation PUBLIC epocanva_prediction_core)
+add_library(epocanva_backend STATIC backend_api.cc profile_api.inc context_text.h
   "${EPOCANVA_BACKEND_ROOT}/platforms/windows/product/product_io.cc")
 target_include_directories(epocanva_backend PUBLIC "${EPOCANVA_BACKEND_ROOT}/engine/include"
   PRIVATE "${EPOCANVA_BACKEND_ROOT}" "${EPOCANVA_BACKEND_ROOT}/platforms/windows/product")
@@ -43,7 +49,7 @@ target_compile_definitions(epocanva_backend PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
 target_compile_options(epocanva_backend PRIVATE /utf-8 /permissive- /W4 /EHsc)
 set_target_properties(epocanva_backend PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(epocanva_backend PUBLIC epocanva_engine_api PRIVATE epocanva_backend_session
-  epocanva_prediction_core epocanva_lexical_service epocanva_windows_learning_repository
+  epocanva_prediction_core epocanva_prediction_abbreviation epocanva_lexical_service epocanva_windows_learning_repository
   epocanva_ja_composition_core epocanva_ko_composition_core bcrypt)
 add_subdirectory("${EPOCANVA_BACKEND_ROOT}/engine/japanese_decoder" japanese-decoder)
 target_link_libraries(epocanva_backend PRIVATE epocanva_japanese_decoder)

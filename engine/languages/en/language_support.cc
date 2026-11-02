@@ -165,30 +165,6 @@ LanguageSupportOutcome GateOutcome(QueryDecision decision) {
   return LanguageSupportOutcome::kUnsupportedByte;
 }
 
-// Explicit US-QWERTY geometry in quarter-key units. Adjacent rows have offsets
-// 0, 1, 3; neighbours differ by <=1 row and <=5 quarter-key units horizontally.
-// This is a ranking model, not a claim about the user's hardware/layout.
-std::pair<int, int> KeyboardPoint(char c) {
-  constexpr std::string_view rows[] = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
-  constexpr int offsets[] = {0, 1, 3};
-  for (int row = 0; row < 3; ++row) {
-    const auto column = rows[row].find(c);  // ASCII letter ordinal
-    if (column != std::string_view::npos) {
-      return {static_cast<int>(column) * 4 + offsets[row], row};
-    }
-  }
-  return {-100, -100};
-}
-unsigned SubstitutionCost(char a, char b) {
-  if (a == b) {
-    return 0;
-  }
-  const auto pa = KeyboardPoint(a);
-  const auto pb = KeyboardPoint(b);
-  return std::abs(pa.first - pb.first) <= 5 &&
-                 std::abs(pa.second - pb.second) <= 1
-             ? 60u : 100u;
-}
 struct EditCost {
   unsigned edits = 0;
   unsigned cost = 0;
@@ -317,17 +293,23 @@ struct LanguageSupport::Impl {
       Candidate candidate;
       candidate.type = CandidateType::kMorphology;
       candidate.text = ApplyCaseStyle(form.text, style);
-      candidate.lexeme_ids.push_back(words[form.lemma_row].id);
+      // Context/learning identify the committed surface, not its source lemma.
+      // The standalone legacy core also offers unattested generated forms, so
+      // those retain an admitted lemma fallback instead of minting an OOV ID.
+      const auto surface_row = Find(form.text);
+      const auto score_row = surface_row == kNoRow ? form.lemma_row : surface_row;
+      candidate.lexeme_ids.push_back(words[score_row].id);
       candidate.morphology_forms = form.forms;
-      candidate.score = Score(candidate.lexeme_ids[0], snapshot.previous_id,
-                              snapshot).total - 0.25;
+      candidate.match_log_score = -0.25;
       // A complete typed lemma is stronger morphological evidence than merely
       // sharing a prefix. With no frequency data, walk's/walked/walking/walks
       // must not be displaced by walkaway/walker forms in a small menu. This
       // remains a ranking feature; independent frequency/context can outweigh it.
       if (words[form.lemma_row].text == key) {
-        candidate.score += 1.0;
+        candidate.match_log_score += 1.0;
       }
+      candidate.score = Score(candidate.lexeme_ids[0], snapshot.previous_id,
+                              snapshot).total + candidate.match_log_score;
       candidate.segments_utf8_byte.push_back({0, key.size()});
       output->Add(std::move(candidate));
       found_candidate = true;
@@ -486,6 +468,8 @@ struct LanguageSupport::Impl {
         candidate.type = CandidateType::kSegmentation;
         candidate.text = ApplyCaseStyle(path.text, style);
         candidate.score = path.score;
+        candidate.match_log_score =
+            -kBoundaryPenalty * static_cast<double>(path.ids.size() - 1);
         candidate.segments_utf8_byte = path.segments;
         candidate.lexeme_ids = path.ids;
         segmented.Add(std::move(candidate));
@@ -537,7 +521,8 @@ struct LanguageSupport::Impl {
         ++result->spelling_cells;
         const bool same = letter == key[input_utf8_byte - 1];
         EditCost best = Plus(previous[input_utf8_byte - 1], same ? 0u : 1u,
-                             SubstitutionCost(letter, key[input_utf8_byte - 1]));
+                             keyboard::SubstitutionCost(options.keyboard_layout,
+                                                        letter, key[input_utf8_byte - 1]));
         best = Minimum(best, Plus(previous[input_utf8_byte], 1, 100));
         best = Minimum(best, Plus(current[input_utf8_byte - 1], 1, 100));
         if (previous_previous && input_utf8_byte >= 2 &&
@@ -556,8 +541,10 @@ struct LanguageSupport::Impl {
         candidate.lexeme_ids.push_back(word.id);
         candidate.edit_distance = current.back().edits;
         candidate.keyboard_cost = current.back().cost;
-        candidate.score = Score(word.id, snapshot.previous_id, snapshot).total -
-                          4.0 * candidate.edit_distance - 0.005 * candidate.keyboard_cost;
+        candidate.match_log_score =
+            -4.0 * candidate.edit_distance - 0.005 * candidate.keyboard_cost;
+        candidate.score = Score(word.id, snapshot.previous_id, snapshot).total +
+                          candidate.match_log_score;
         candidate.segments_utf8_byte.push_back({0, key.size()});
         output->Add(std::move(candidate));
         found = true;

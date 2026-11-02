@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <string>
 
+#include "engine_executor.h"
 #include "engine_update.h"
 #include "input_controller.h"
 #include "key_event.h"
@@ -103,6 +104,21 @@ class EngineBackend {
   virtual BackendCandidateResult AcceptCandidate(std::uint64_t client_id,
                                                  std::size_t candidate_index) = 0;
   virtual BackendRefreshResult Refresh(std::uint64_t client_id) = 0;
+  // Explicitly unavailable on the legacy schema adapter/test seam.
+  virtual ProfileClientOutcome CreateProfileClient(std::uint64_t client_id,
+      std::uint32_t profile_id, const BackendAccess& access) {
+    (void)client_id; (void)profile_id; (void)access;
+    ProfileClientOutcome result;
+    result.backend_status = EPOCANVA_BACKEND_UNAVAILABLE;
+    return result;
+  }
+  virtual BackendWorkOutcome RunBackendWork(std::uint64_t client_id,
+                                            const BackendWork& work) {
+    (void)client_id; (void)work;
+    BackendWorkOutcome result;
+    result.backend_status = EPOCANVA_BACKEND_UNAVAILABLE;
+    return result;
+  }
   virtual BackendCloseResult CloseClient(std::uint64_t client_id) = 0;
 
   // Called once on the worker during Stop, after every accepted command has executed. Must

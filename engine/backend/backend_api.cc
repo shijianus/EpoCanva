@@ -17,6 +17,9 @@
 #include "engine/backend_session/session.h"
 #include "engine/lexical_service/lexical_service.h"
 #include "engine/prediction/model.h"
+#include "engine/prediction/abbreviation.h"
+#include "context_text.h"
+#include <fstream>
 #include "engine/languages/ja/romaji_composer.h"
 #include "engine/languages/ko/two_set_composer.h"
 #include "engine/japanese_decoder/japanese_decoder.h"
@@ -43,10 +46,10 @@ const char* Language(std::uint32_t language) {
     default: return nullptr;
   }
 }
-template<class T> epocanva_status Structure(const T* value) {
+template<class T> epocanva_status Structure(const T* value, std::uint32_t version = EPOCANVA_BACKEND_ABI_VERSION) {
   if (!value) return EPOCANVA_INVALID_ARGUMENT;
   if (value->struct_size_bytes < sizeof(T)) return EPOCANVA_STRUCT_TOO_SMALL;
-  return value->abi_version == EPOCANVA_BACKEND_ABI_VERSION ? EPOCANVA_OK : EPOCANVA_ABI_VERSION_MISMATCH;
+  return value->abi_version == version ? EPOCANVA_OK : EPOCANVA_ABI_VERSION_MISMATCH;
 }
 template<class T> epocanva_status Output(T* value) {
   auto status = Structure(value);
@@ -102,6 +105,7 @@ struct Resource {
   std::shared_ptr<const pred::Model> model;
   std::unique_ptr<lex::LexicalService> lexical;
   std::string model_sha256;
+  std::string identity;
   std::filesystem::path conversion_path;
   std::unique_ptr<epocanva::japanese_decoder::Decoder> japanese;
 #ifdef EPOCANVA_BACKEND_FRENCH
@@ -109,10 +113,24 @@ struct Resource {
 #endif
   learn::Catalog catalog;
 };
+struct Profile {
+  std::uint32_t id = 0;
+  std::uint32_t language = 0;
+  std::uint32_t input_mode = 0;
+  std::uint32_t output_mode = 0;
+  std::uint32_t keyboard_layout = EPOCANVA_BACKEND_KEYBOARD_US_QWERTY;
+  std::string variant;
+  std::string abbreviation_path;
+  std::string abbreviation_sha256;
+  std::shared_ptr<const pred::abbreviation::Decoder> abbreviations;
+};
 struct Backend {
   ~Backend() { if (rime) (void)epocanva_engine_close(rime); }
   std::thread::id owner = std::this_thread::get_id();
   std::map<std::uint32_t, Resource> resources;
+  std::map<std::uint32_t, std::shared_ptr<Resource>> profile_resources;
+  std::map<std::uint32_t, Profile> profiles;
+  bool profiles_only = false;
   std::unique_ptr<learn::WindowsLearningRepository> repository;
   epocanva_engine_handle rime = 0;
   std::uint64_t sessions = 0;
@@ -125,6 +143,9 @@ struct Session {
   epocanva_context identity{};
   std::uint32_t language = 0;
   std::uint32_t mode = 0;
+  Profile profile;
+  std::uint64_t confirmed_event_token = 0;
+  std::vector<pred::LexemeId> selected_context_ids;
   std::string raw;
   std::string preedit;
   epocanva::ja::RomajiComposer japanese;
@@ -196,12 +217,46 @@ epocanva_status RimeReset(Session& session) {
   if (status == EPOCANVA_OK) session.rime_context.generation = result.generation;
   return status;
 }
+std::string KanaScript(std::string_view text, bool katakana) {
+  std::string result;
+  for (std::size_t begin_utf8_byte = 0; begin_utf8_byte < text.size();) {
+    auto end_utf8_byte = begin_utf8_byte + 1;
+    while (end_utf8_byte < text.size() && (static_cast<unsigned char>(text[end_utf8_byte]) & 0xc0) == 0x80) ++end_utf8_byte;
+    if (end_utf8_byte - begin_utf8_byte == 3) {
+      const auto scalar = ((static_cast<unsigned char>(text[begin_utf8_byte]) & 15u) << 12) |
+          ((static_cast<unsigned char>(text[begin_utf8_byte + 1]) & 63u) << 6) |
+          (static_cast<unsigned char>(text[begin_utf8_byte + 2]) & 63u);
+      const auto mapped = katakana && scalar >= 0x3041 && scalar <= 0x3096 ? scalar + 0x60 :
+          !katakana && scalar >= 0x30a1 && scalar <= 0x30f6 ? scalar - 0x60 : scalar;
+      result.push_back(static_cast<char>(0xe0u | (mapped >> 12)));
+      result.push_back(static_cast<char>(0x80u | ((mapped >> 6) & 63u)));
+      result.push_back(static_cast<char>(0x80u | (mapped & 63u)));
+    } else result.append(text.substr(begin_utf8_byte, end_utf8_byte - begin_utf8_byte));
+    begin_utf8_byte = end_utf8_byte;
+  }
+  return result;
+}
+std::string JapaneseReading(Session& session) {
+  auto composer = session.japanese;
+  return KanaScript(session.mode == EPOCANVA_BACKEND_KANA ? session.raw : composer.CommitUtf8(), false);
+}
 epocanva_status Compose(Session& session, const std::string& raw, const learn::Access& access) {
   flow::Commit pending;
   if (session.flow->ReadCommit(access, &pending) == flow::Status::kOk) return EPOCANVA_BUSY;
   std::string preedit = raw;
-  if (session.language == EPOCANVA_BACKEND_JA) {
-    auto composer = epocanva::ja::RomajiComposer(session.mode == EPOCANVA_BACKEND_KATAKANA ?
+  if (session.language == EPOCANVA_BACKEND_JA && session.mode == EPOCANVA_BACKEND_KANA) {
+    for (std::size_t byte = 0; byte < raw.size();) {
+      if (raw[byte] == ' ') { ++byte; continue; }
+      if (byte + 3 > raw.size() || static_cast<unsigned char>(raw[byte]) != 0xe3) return EPOCANVA_INVALID_ARGUMENT;
+      const auto scalar = ((static_cast<unsigned char>(raw[byte]) & 15u) << 12) |
+          ((static_cast<unsigned char>(raw[byte + 1]) & 63u) << 6) | (static_cast<unsigned char>(raw[byte + 2]) & 63u);
+      if (scalar < 0x3041 || scalar > 0x30ff) return EPOCANVA_INVALID_ARGUMENT;
+      byte += 3;
+    }
+    preedit = KanaScript(raw, session.profile.output_mode == EPOCANVA_BACKEND_OUTPUT_KATAKANA);
+  } else if (session.language == EPOCANVA_BACKEND_JA) {
+    auto composer = epocanva::ja::RomajiComposer((!session.profile.id && session.mode == EPOCANVA_BACKEND_KATAKANA) ||
+        session.profile.output_mode == EPOCANVA_BACKEND_OUTPUT_KATAKANA ?
         epocanva::ja::KanaMode::kKatakana : epocanva::ja::KanaMode::kHiragana);
     for (char byte : raw) if (composer.PushAscii(byte) != epocanva::ja::InputResult::kAccepted) return EPOCANVA_INVALID_ARGUMENT;
     preedit = composer.GetPreedit().text_utf8;
@@ -254,6 +309,31 @@ std::uint32_t Kind(lex::CandidateType type) {
     default: return EPOCANVA_BACKEND_WORD;
   }
 }
+double CandidateModelScore(Session& session, const std::vector<pred::LexemeId>& ids,
+                           pred::Context previous, const pred::PersonalCounts* counts) {
+  if (ids.empty()) return std::log(1.0 / (static_cast<double>(session.resource->model->metadata().unigram_total) +
+      static_cast<double>(session.resource->model->metadata().lexeme_count) + 1.0));
+  double score = 0;
+  for (const auto id : ids) {
+    const auto scored = session.resource->model->Score(previous, id, counts);
+    if (scored.status != pred::Status::kOk) return -1.0e100;
+    score += scored.log_probability;
+    previous.push_back(id); if (previous.size() > 2) previous.erase(previous.begin());
+  }
+  return score;
+}
+void MergeCandidate(std::vector<flow::Candidate>* candidates, flow::Candidate candidate) {
+  const auto same = std::find_if(candidates->begin(), candidates->end(), [&](const auto& value) {
+    return value.kind != EPOCANVA_BACKEND_RAW && value.text_utf8 == candidate.text_utf8;
+  });
+  if (same == candidates->end()) candidates->push_back(std::move(candidate));
+  else {
+    const bool exact = same->exact_expansion || candidate.exact_expansion;
+    if (candidate.score > same->score || (candidate.score == same->score && candidate.lexeme_ids < same->lexeme_ids))
+      *same = std::move(candidate);
+    same->exact_expansion = exact;
+  }
+}
 void Personal(Session& session, const learn::Access& access, pred::PersonalCounts* counts,
               lex::RankingInputs* ranking, std::vector<lex::LearnedCount>* words,
               std::vector<lex::ContextCount>* pairs) {
@@ -269,6 +349,148 @@ void Personal(Session& session, const learn::Access& access, pred::PersonalCount
   ranking->allow_learning = true; ranking->learned = words; ranking->context = pairs;
   const auto context = session.flow->Context(access);
   ranking->previous_id = context.empty() ? 0 : context.back();
+}
+std::string ResourceIdentity(const epocanva_backend_resource& value) {
+  std::string identity = std::to_string(value.language);
+  for (const auto view : {value.model_path, value.model_sha256, value.conversion_path,
+                         value.conversion_sha256, value.auxiliary_path, value.auxiliary_sha256}) {
+    const auto text = Text(view, 30000);
+    identity += ":" + std::to_string(text.size()) + ":" + text;
+  }
+  return identity;
+}
+epocanva_status LoadResource(const epocanva_backend_resource& input, bool fixtures, Resource* output) {
+  const auto status = Structure(&input);
+  if (status != EPOCANVA_OK) return status;
+  if (!Language(input.language) || input.reserved) return EPOCANVA_INVALID_ARGUMENT;
+  Resource resource;
+  resource.identity = ResourceIdentity(input);
+  auto path = std::filesystem::u8path(Text(input.model_path, 30000));
+  epocanva::backend::LocalResource held;
+  if (!held.Open(path)) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+  resource.model_sha256 = Text(input.model_sha256, 64);
+  if (!Digest(held.path(), resource.model_sha256)) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+  pred::LoadOptions loading; loading.allow_test_fixture = fixtures;
+  resource.model = pred::Model::Load(held.path(), loading);
+  if (!resource.model || !resource.model->available()) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+  resource.catalog.name_space = std::string("backend.") + Language(input.language) + ".v1";
+  resource.catalog.sha256 = resource.model_sha256;
+  for (const auto& row : resource.model->lexemes())
+    if (row.language_id == Language(input.language)) resource.catalog.admitted_ids.push_back(row.id);
+  if (resource.catalog.admitted_ids.empty()) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+  if (input.language == EPOCANVA_BACKEND_EN || input.language == EPOCANVA_BACKEND_FR || input.language == EPOCANVA_BACKEND_KO) {
+    resource.lexical = lex::LexicalService::Create(*resource.model);
+    if (!resource.lexical) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+  }
+  if (input.conversion_path.utf8_byte_count) {
+    if (input.language != EPOCANVA_BACKEND_JA && input.language != EPOCANVA_BACKEND_FR)
+      return EPOCANVA_INVALID_ARGUMENT;
+    resource.conversion_path = std::filesystem::u8path(Text(input.conversion_path, 30000));
+  }
+  if (input.language == EPOCANVA_BACKEND_JA && !resource.conversion_path.empty()) {
+    resource.japanese = std::make_unique<epocanva::japanese_decoder::Decoder>();
+    epocanva::japanese_decoder::LoadOptions options;
+    options.expected_sha256 = Text(input.conversion_sha256, 64);
+    if (resource.japanese->Load(resource.conversion_path.u8string(), options) != epocanva::japanese_decoder::Status::kOk)
+      return EPOCANVA_BACKEND_INVALID_RESOURCE;
+  }
+  if (input.language == EPOCANVA_BACKEND_FR && !resource.conversion_path.empty()) {
+#ifdef EPOCANVA_BACKEND_FRENCH
+    epocanva::french_dictionary::ExpectedHashes expected;
+    expected.aff_sha256 = Text(input.conversion_sha256, 64);
+    expected.dic_sha256 = Text(input.auxiliary_sha256, 64);
+    resource.french = epocanva::french_dictionary::Dictionary::Load(resource.conversion_path,
+        std::filesystem::u8path(Text(input.auxiliary_path, 30000)), expected);
+    if (!resource.french) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+#else
+    return EPOCANVA_BACKEND_UNAVAILABLE;
+#endif
+  }
+  *output = std::move(resource);
+  return EPOCANVA_OK;
+}
+bool ModeValid(std::uint32_t language, std::uint32_t mode) {
+  return ((language == EPOCANVA_BACKEND_EN || language == EPOCANVA_BACKEND_FR) && mode == EPOCANVA_BACKEND_LATIN) ||
+      (language == EPOCANVA_BACKEND_ZH && (mode == EPOCANVA_BACKEND_PINYIN || mode == EPOCANVA_BACKEND_ZHUYIN)) ||
+      (language == EPOCANVA_BACKEND_JA && (mode == EPOCANVA_BACKEND_ROMAJI || mode == EPOCANVA_BACKEND_KATAKANA || mode == EPOCANVA_BACKEND_KANA)) ||
+      (language == EPOCANVA_BACKEND_KO && (mode == EPOCANVA_BACKEND_LATIN || mode == EPOCANVA_BACKEND_TWO_SET));
+}
+epocanva_status ReadProfile(const epocanva_backend_profile* value, Profile* out) {
+  const auto status = Structure(value, EPOCANVA_BACKEND_PROFILE_ABI_VERSION);
+  if (status != EPOCANVA_OK) return status;
+  if (!value->profile_id || value->reserved || !ModeValid(value->language, value->input_mode) ||
+      value->keyboard_layout > EPOCANVA_BACKEND_KEYBOARD_DVORAK) return EPOCANVA_BACKEND_INVALID_PROFILE;
+  const auto variant = Text(value->variant_id, 64);
+  const auto language = value->language;
+  const auto output = value->output_mode;
+  bool admitted = false;
+  if (language == EPOCANVA_BACKEND_EN)
+    admitted = (variant == "en" || variant == "en-US" || variant == "en-GB") && output == EPOCANVA_BACKEND_OUTPUT_LATIN;
+  if (language == EPOCANVA_BACKEND_FR)
+    admitted = (variant == "fr" || variant == "fr-FR") && output == EPOCANVA_BACKEND_OUTPUT_LATIN;
+  if (language == EPOCANVA_BACKEND_ZH)
+    admitted = (variant == "zh" || (variant == "zh-pinyin" && value->input_mode == EPOCANVA_BACKEND_PINYIN) ||
+        (variant == "zh-zhuyin" && value->input_mode == EPOCANVA_BACKEND_ZHUYIN)) && output == EPOCANVA_BACKEND_OUTPUT_HANZI;
+  if (language == EPOCANVA_BACKEND_JA)
+    admitted = (variant == "ja" || variant == "ja-JP") && output >= EPOCANVA_BACKEND_OUTPUT_HIRAGANA && output <= EPOCANVA_BACKEND_OUTPUT_KANJI;
+  if (language == EPOCANVA_BACKEND_KO)
+    admitted = (variant == "ko" || variant == "ko-KR") && output == EPOCANVA_BACKEND_OUTPUT_HANGUL;
+  if (!admitted) return EPOCANVA_BACKEND_UNAVAILABLE;
+  out->id = value->profile_id; out->language = language; out->input_mode = value->input_mode;
+  out->output_mode = output; out->keyboard_layout = value->keyboard_layout; out->variant = variant;
+  out->abbreviation_path = Text(value->abbreviation_path, 30000);
+  out->abbreviation_sha256 = Text(value->abbreviation_sha256, 64);
+  if (out->abbreviation_path.empty() != out->abbreviation_sha256.empty()) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+  return EPOCANVA_OK;
+}
+bool SameProfile(const Profile& a, const Profile& b) {
+  return a.id == b.id && a.language == b.language && a.input_mode == b.input_mode &&
+      a.output_mode == b.output_mode && a.keyboard_layout == b.keyboard_layout && a.variant == b.variant &&
+      a.abbreviation_path == b.abbreviation_path && a.abbreviation_sha256 == b.abbreviation_sha256;
+}
+epocanva_status PrepareProfile(Profile* profile, const Resource& resource) {
+  std::string source;
+  if (!profile->abbreviation_path.empty()) {
+    epocanva::backend::LocalResource held;
+    if (!held.Open(std::filesystem::u8path(profile->abbreviation_path)) ||
+        !Digest(held.path(), profile->abbreviation_sha256)) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+    const auto bytes = std::filesystem::file_size(held.path());
+    if (bytes > pred::abbreviation::kMaxSourceUtf8Bytes) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+    source.resize(static_cast<std::size_t>(bytes));
+    std::ifstream file(held.path(), std::ios::binary);
+    if (!file.read(source.data(), static_cast<std::streamsize>(bytes))) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+  }
+  profile->abbreviations = pred::abbreviation::Decoder::Build(resource.model, source);
+  return profile->abbreviations ? EPOCANVA_OK : EPOCANVA_BACKEND_INVALID_RESOURCE;
+}
+epocanva_status RegisterSession(Backend& backend, Resource& resource, Profile profile,
+                                const epocanva_backend_session_options& options,
+                                epocanva_backend_session_handle* out) {
+  if (options.context.privacy_class != EPOCANVA_PRIVACY_NORMAL) return EPOCANVA_PRIVACY_DENIED;
+  if (options.reserved || options.context.reserved || options.learning_enabled > 1 ||
+      !options.context.context_target || !options.context.generation) return EPOCANVA_INVALID_ARGUMENT;
+  if (!ModeValid(options.language, options.input_mode)) return EPOCANVA_INVALID_ARGUMENT;
+  if (backend.owner != std::this_thread::get_id()) return EPOCANVA_WRONG_THREAD;
+  if (options.language == EPOCANVA_BACKEND_ZH && !backend.rime) return EPOCANVA_BACKEND_UNAVAILABLE;
+  if (profile.id && profile.language == EPOCANVA_BACKEND_JA &&
+      profile.output_mode == EPOCANVA_BACKEND_OUTPUT_KANJI && !resource.japanese) return EPOCANVA_BACKEND_UNAVAILABLE;
+  auto session = std::make_unique<Session>();
+  session->backend = &backend; session->resource = &resource; session->profile = std::move(profile);
+  session->language = options.language; session->mode = options.input_mode; session->identity = options.context;
+  session->flow = flow::Session::Create(resource.catalog, resource.model_sha256, Access(options.context, options.learning_enabled));
+  if (!session->flow) return EPOCANVA_BACKEND_INVALID_RESOURCE;
+  if (options.language == EPOCANVA_BACKEND_ZH) {
+    auto request = Init<epocanva_session_options>(); request.context = options.context;
+    const std::string schema = options.input_mode == EPOCANVA_BACKEND_ZHUYIN ? "epocanva_backend_zhuyin" : "epocanva_backend_pinyin";
+    request.schema_id = {schema.data(), schema.size()};
+    const auto status = epocanva_session_open(backend.rime, &request, &session->rime);
+    if (status != EPOCANVA_OK) return status;
+    session->rime_context = request.context;
+  }
+  const auto token = State().Token();
+  if (!token) return EPOCANVA_OUT_OF_RANGE;
+  State().sessions.emplace(token, std::move(session)); ++backend.sessions; *out = token;
+  return EPOCANVA_OK;
 }
 epocanva_status Copy(std::initializer_list<std::string_view> fields, char* buffer, std::uint64_t capacity) {
   if (!buffer && capacity) return EPOCANVA_INVALID_ARGUMENT;
@@ -296,49 +518,8 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_open(
       if (status != EPOCANVA_OK) return status;
       if (!Language(input.language) || input.reserved || backend->resources.count(input.language)) return EPOCANVA_INVALID_ARGUMENT;
       Resource resource;
-      auto model_path = std::filesystem::u8path(Text(input.model_path, 30000));
-      epocanva::backend::LocalResource held_model;
-      if (!held_model.Open(model_path)) return EPOCANVA_BACKEND_INVALID_RESOURCE;
-      model_path = held_model.path();
-      resource.model_sha256 = Text(input.model_sha256, 64);
-      if (!Digest(model_path, resource.model_sha256)) return EPOCANVA_BACKEND_INVALID_RESOURCE;
-      pred::LoadOptions load; load.allow_test_fixture = options->allow_test_fixture != 0;
-      resource.model = pred::Model::Load(model_path, load);
-      if (!resource.model || !resource.model->available()) return EPOCANVA_BACKEND_INVALID_RESOURCE;
-      resource.catalog.name_space = std::string("backend.") + Language(input.language) + ".v1";
-      resource.catalog.sha256 = resource.model_sha256;
-      for (const auto& row : resource.model->lexemes()) if (row.language_id == Language(input.language)) resource.catalog.admitted_ids.push_back(row.id);
-      if (resource.catalog.admitted_ids.empty()) return EPOCANVA_BACKEND_INVALID_RESOURCE;
-      if (input.language == EPOCANVA_BACKEND_EN || input.language == EPOCANVA_BACKEND_FR || input.language == EPOCANVA_BACKEND_KO) {
-        resource.lexical = lex::LexicalService::Create(*resource.model);
-        if (!resource.lexical) return EPOCANVA_BACKEND_INVALID_RESOURCE;
-      }
-      if (input.conversion_path.utf8_byte_count) {
-        if (input.language != EPOCANVA_BACKEND_JA && input.language != EPOCANVA_BACKEND_FR)
-          return EPOCANVA_INVALID_ARGUMENT;
-        resource.conversion_path = std::filesystem::u8path(Text(input.conversion_path, 30000));
-        // Each actual converter owns paired local-path pinning and hash checks;
-        // never pre-open arbitrary resource paths with a generic file helper.
-      }
-      if (input.language == EPOCANVA_BACKEND_JA && input.conversion_path.utf8_byte_count) {
-        resource.japanese = std::make_unique<epocanva::japanese_decoder::Decoder>();
-        epocanva::japanese_decoder::LoadOptions loading;
-        loading.expected_sha256 = Text(input.conversion_sha256, 64);
-        if (resource.japanese->Load(resource.conversion_path.u8string(), loading) != epocanva::japanese_decoder::Status::kOk)
-          return EPOCANVA_BACKEND_INVALID_RESOURCE;
-      }
-      if (input.language == EPOCANVA_BACKEND_FR && input.conversion_path.utf8_byte_count) {
-#ifdef EPOCANVA_BACKEND_FRENCH
-        const auto dictionary_path = std::filesystem::u8path(Text(input.auxiliary_path, 30000));
-        epocanva::french_dictionary::ExpectedHashes expected;
-        expected.aff_sha256 = Text(input.conversion_sha256, 64);
-        expected.dic_sha256 = Text(input.auxiliary_sha256, 64);
-        resource.french = epocanva::french_dictionary::Dictionary::Load(resource.conversion_path, dictionary_path, expected);
-        if (!resource.french) return EPOCANVA_BACKEND_INVALID_RESOURCE;
-#else
-        return EPOCANVA_BACKEND_UNAVAILABLE;
-#endif
-      }
+      status = LoadResource(input, options->allow_test_fixture != 0, &resource);
+      if (status != EPOCANVA_OK) return status;
       backend->resources.emplace(input.language, std::move(resource));
     }
     const auto learning_root = Text(options->learning_root, 30000);
@@ -354,6 +535,8 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_open(
     return EPOCANVA_OK;
   });
 }
+#include "profile_api.inc"
+
 extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_close(epocanva_backend_handle handle) noexcept {
   return Guard([&]() -> epocanva_status {
     auto& registry = State(); std::lock_guard<std::mutex> lock(registry.mutex);
@@ -370,38 +553,15 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_session_open(
   return Guard([&]() -> epocanva_status {
     if (!out) return EPOCANVA_INVALID_ARGUMENT;
     *out = 0; auto status = Structure(options); if (status != EPOCANVA_OK) return status;
-    if (options->context.privacy_class != EPOCANVA_PRIVACY_NORMAL) return EPOCANVA_PRIVACY_DENIED;
-    if (options->reserved || options->context.reserved || options->learning_enabled > 1 ||
-        !options->context.context_target || !options->context.generation) return EPOCANVA_INVALID_ARGUMENT;
-    const bool mode_ok = ((options->language == EPOCANVA_BACKEND_EN || options->language == EPOCANVA_BACKEND_FR) && options->input_mode == EPOCANVA_BACKEND_LATIN) ||
-        (options->language == EPOCANVA_BACKEND_ZH && (options->input_mode == EPOCANVA_BACKEND_PINYIN || options->input_mode == EPOCANVA_BACKEND_ZHUYIN)) ||
-        (options->language == EPOCANVA_BACKEND_JA && (options->input_mode == EPOCANVA_BACKEND_ROMAJI || options->input_mode == EPOCANVA_BACKEND_KATAKANA)) ||
-        (options->language == EPOCANVA_BACKEND_KO && (options->input_mode == EPOCANVA_BACKEND_LATIN || options->input_mode == EPOCANVA_BACKEND_TWO_SET));
-    if (!mode_ok) return EPOCANVA_INVALID_ARGUMENT;
     auto& registry = State(); std::lock_guard<std::mutex> lock(registry.mutex);
     auto found = registry.backends.find(handle); if (found == registry.backends.end()) return EPOCANVA_INVALID_HANDLE;
     auto& backend = *found->second;
-    if (backend.owner != std::this_thread::get_id()) return EPOCANVA_WRONG_THREAD;
+    if (backend.profiles_only) return EPOCANVA_BACKEND_INVALID_PROFILE;
     auto resource = backend.resources.find(options->language);
     if (resource == backend.resources.end()) return EPOCANVA_BACKEND_UNAVAILABLE;
-    if (options->language == EPOCANVA_BACKEND_ZH && !backend.rime) return EPOCANVA_BACKEND_UNAVAILABLE;
-    auto session = std::make_unique<Session>();
-    session->backend = &backend; session->resource = &resource->second;
-    session->language = options->language; session->mode = options->input_mode; session->identity = options->context;
-    session->flow = flow::Session::Create(resource->second.catalog, resource->second.model_sha256, Access(options->context, options->learning_enabled));
-    if (!session->flow) return EPOCANVA_BACKEND_INVALID_RESOURCE;
-    if (options->language == EPOCANVA_BACKEND_ZH) {
-      auto request = Init<epocanva_session_options>(); request.context = options->context;
-      const std::string schema = options->input_mode == EPOCANVA_BACKEND_ZHUYIN ? "epocanva_backend_zhuyin" : "epocanva_backend_pinyin";
-      request.schema_id = {schema.data(), schema.size()};
-      status = epocanva_session_open(backend.rime, &request, &session->rime);
-      if (status != EPOCANVA_OK) return status;
-      session->rime_context = request.context;
-    }
-    const auto token = registry.Token();
-    if (!token) return EPOCANVA_OUT_OF_RANGE;
-    registry.sessions.emplace(token, std::move(session)); ++backend.sessions; *out = token;
-    return EPOCANVA_OK;
+    Profile profile;
+    profile.language = options->language; profile.input_mode = options->input_mode;
+    return RegisterSession(backend, resource->second, std::move(profile), *options, out);
   });
 }
 extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_session_close(epocanva_backend_session_handle handle) noexcept {
@@ -454,7 +614,7 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
   return Guard([&]() -> epocanva_status {
     auto status = Structure(query); if (status != EPOCANVA_OK) return status;
     if (!query->max_candidates || query->max_candidates > 64 ||
-        query->query_kind < EPOCANVA_BACKEND_COMPLETION || query->query_kind > EPOCANVA_BACKEND_CONTINUATION ||
+        query->query_kind < EPOCANVA_BACKEND_COMPLETION || query->query_kind > EPOCANVA_BACKEND_NEXT_UNIT ||
         !query->max_continuation_words || query->max_continuation_words > 4 || query->search_budget > 10000000)
       return EPOCANVA_INVALID_ARGUMENT;
     auto request = Init<epocanva_backend_request>(); request.context = query->context; request.learning_enabled = query->learning_enabled;
@@ -469,9 +629,12 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
       bool complete = true;
       session.rime_ordinals.clear();
       if (query->query_kind != EPOCANVA_BACKEND_COMPLETION) {
+        if (!session.raw.empty()) return EPOCANVA_INVALID_ARGUMENT;
+        if (session.profile.id && session.language == EPOCANVA_BACKEND_JA &&
+            session.profile.output_mode != EPOCANVA_BACKEND_OUTPUT_KANJI) return EPOCANVA_BACKEND_UNAVAILABLE;
         pred::PredictOptions options;
         options.language_id = Language(session.language); options.max_suggestions = query->max_candidates;
-        options.max_words = query->query_kind == EPOCANVA_BACKEND_NEXT_WORD ? 1 : query->max_continuation_words;
+        options.max_words = query->query_kind == EPOCANVA_BACKEND_CONTINUATION ? query->max_continuation_words : 1;
         options.max_index_entries = static_cast<std::size_t>(query->search_budget);
         const auto predicted = session.resource->model->Predict(std::nullopt, context, options, counts);
         if (predicted.status != pred::Status::kOk && predicted.status != pred::Status::kBudgetExhausted &&
@@ -502,26 +665,45 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
           status = epocanva_session_read_candidate(session.rime, &wanted, &result, buffer.data(), buffer.size());
           if (status != EPOCANVA_OK) return status;
           flow::Candidate candidate; candidate.text_utf8 = Slice(buffer, result.text);
-          candidate.kind = EPOCANVA_BACKEND_CONVERSION; candidate.score = -static_cast<double>(ordinal);
+          candidate.kind = EPOCANVA_BACKEND_CONVERSION;
+          std::vector<pred::LexemeId> context_ids; bool all_known = false;
+          (void)epocanva::backend::ResolveContext(*session.resource->model, "zh", candidate.text_utf8,
+              {}, &context_ids, &all_known);
+          const double context_score = all_known ? CandidateModelScore(session, context_ids, context, counts) :
+              CandidateModelScore(session, {}, context, counts);
+          candidate.score = -0.05 * static_cast<double>(ordinal) + context_score;
           candidate.input_end_utf8_byte = session.raw.size();
-          // Rime's text-only public menu cannot prove lexical identity for learning.
+          // Rime menu text can inform transient ranking, not learning identity.
           candidates.push_back(std::move(candidate)); session.rime_ordinals.push_back(ordinal);
+        }
+        if (candidates.size() > 1) {
+          std::vector<std::size_t> order;
+          const auto first = !session.raw.empty() ? 1u : 0u;
+          for (std::size_t index = first; index < candidates.size(); ++index) order.push_back(index);
+          std::stable_sort(order.begin(), order.end(), [&](auto a, auto b) { return candidates[a].score > candidates[b].score; });
+          std::vector<flow::Candidate> sorted;
+          std::vector<std::uint32_t> ordinals;
+          if (first) { sorted.push_back(std::move(candidates.front())); ordinals.push_back(UINT32_MAX); }
+          for (const auto index : order) { sorted.push_back(std::move(candidates[index])); ordinals.push_back(session.rime_ordinals[index]); }
+          candidates = std::move(sorted); session.rime_ordinals = std::move(ordinals);
         }
         complete = snapshot.is_last_page && snapshot.candidate_count_on_page + (!session.raw.empty()) <= query->max_candidates;
       } else if (session.language == EPOCANVA_BACKEND_JA) {
         if (!session.raw.empty()) {
           flow::Candidate original; original.text_utf8=session.raw; original.input_end_utf8_byte=session.raw.size();
           candidates.push_back(std::move(original));
-          auto composer = session.japanese;
-          flow::Candidate kana; kana.kind=EPOCANVA_BACKEND_CONVERSION; kana.text_utf8=composer.CommitUtf8();
+          flow::Candidate kana; kana.kind=EPOCANVA_BACKEND_CONVERSION;
+          kana.text_utf8=KanaScript(JapaneseReading(session), session.profile.output_mode == EPOCANVA_BACKEND_OUTPUT_KATAKANA ||
+              (!session.profile.id && session.mode == EPOCANVA_BACKEND_KATAKANA));
           kana.input_end_utf8_byte=session.raw.size();
+          kana.score = CandidateModelScore(session, {}, context, counts) - 1.0;
           if (kana.text_utf8 != session.raw && candidates.size()<query->max_candidates) candidates.push_back(std::move(kana));
         }
         complete = false;
-        if(session.resource->japanese && !session.preedit.empty()) {
+        if(session.resource->japanese && !session.preedit.empty() &&
+            (session.profile.output_mode == 0 || session.profile.output_mode == EPOCANVA_BACKEND_OUTPUT_KANJI)) {
           std::vector<epocanva::japanese_decoder::Candidate> converted;
-          auto compose=session.japanese;
-          const auto converted_status=session.resource->japanese->Convert(compose.CommitUtf8(),query->max_candidates,&converted);
+          const auto converted_status=session.resource->japanese->Convert(JapaneseReading(session),query->max_candidates,&converted);
           complete=converted_status==epocanva::japanese_decoder::Status::kOk;
           for(const auto& row:converted){
             if(candidates.size()>=query->max_candidates)break;
@@ -534,11 +716,17 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
               if(segment.unknown||!entry){known=false;break;}candidate.lexeme_ids.push_back(entry->id);
             }
             if(!known||candidate.lexeme_ids.size()>8)candidate.lexeme_ids.clear();
+            candidate.score = -static_cast<double>(row.cost) / 1000.0 +
+                CandidateModelScore(session, candidate.lexeme_ids, context, counts);
             complete=complete&&row.complete;candidates.push_back(std::move(candidate));
           }
+          const auto first = session.raw.empty() ? candidates.begin() : candidates.begin() + 1;
+          std::stable_sort(first, candidates.end(), [](const auto& a, const auto& b) { return a.score > b.score; });
         }
       } else {
-        lex::QueryOptions options; options.max_candidates = query->max_candidates;
+        lex::QueryOptions options; options.max_candidates = 64;
+        options.keyboard_layout = static_cast<epocanva::keyboard::Layout>(session.profile.keyboard_layout);
+        if (session.profile.abbreviations) options.enable_abbreviation = false;
         auto lexical = session.resource->lexical->Suggest(Language(session.language), session.preedit, options, ranking);
         if (lexical.status == lex::QueryStatus::kDictionaryUnavailable) return EPOCANVA_BACKEND_UNAVAILABLE;
         complete = !(lexical.prefix_budget_exhausted || lexical.accent_budget_exhausted || lexical.morphology_budget_exhausted ||
@@ -546,27 +734,22 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
         for (const auto& row : lexical.candidates) {
           flow::Candidate candidate;
           candidate.kind=Kind(row.type); candidate.text_utf8=row.text_utf8;
-          candidate.lexeme_ids=row.lexeme_ids; candidate.score=row.score;
+          candidate.lexeme_ids=row.lexeme_ids; candidate.score=row.match_log_score;
           candidate.input_end_utf8_byte=session.raw.size();
           if (candidate.lexeme_ids.size()>8 || std::any_of(candidate.lexeme_ids.begin(),candidate.lexeme_ids.end(),
                 [&](auto id){return !id || !session.resource->model->Find(id);})) candidate.lexeme_ids.clear();
-          if (!candidate.lexeme_ids.empty()) {
-            auto previous = context;
-            double score = 0;
-            for (auto id : candidate.lexeme_ids) {
-              const auto scored = session.resource->model->Score(previous,id,counts);
-              if (scored.status == pred::Status::kOk) score += scored.log_probability;
-              previous.push_back(id); if(previous.size()>2) previous.erase(previous.begin());
-            }
-            candidate.score += score / static_cast<double>(candidate.lexeme_ids.size());
-          }
+          if (!candidate.lexeme_ids.empty())
+            candidate.score += CandidateModelScore(session, candidate.lexeme_ids, context, counts);
           candidates.push_back(std::move(candidate));
         }
         if ((lexical.status == lex::QueryStatus::kOk || lexical.status == lex::QueryStatus::kEmptyInput) &&
             !session.preedit.empty()) {
           pred::PredictOptions predicted_options;predicted_options.language_id=Language(session.language);
           predicted_options.max_suggestions=query->max_candidates;predicted_options.max_index_entries=static_cast<std::size_t>(query->search_budget);
-          const auto predicted=session.resource->model->Predict(session.preedit,context,predicted_options,counts);
+            const auto predicted_prefix = lex::FoldUtf8(session.preedit);
+            const auto predicted=session.resource->model->Predict(
+                predicted_prefix.status == lex::TextStatus::kOk ? predicted_prefix.text_utf8 : session.preedit,
+                context,predicted_options,counts);
           complete = complete && predicted.complete;
           const auto analysis=lex::AnalyzeWordUtf8(session.preedit,true);
           for(const auto& row:predicted.suggestions){
@@ -575,27 +758,63 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
             if(!entry || entry->kind!=pred::TokenKind::kWord)continue;
             const auto cased=lex::ApplyCaseStyleUtf8(row.tokens_utf8.front(),analysis.case_style);
             const auto text=cased.status==lex::TextStatus::kOk?cased.text_utf8:row.tokens_utf8.front();
-            if(std::any_of(candidates.begin(),candidates.end(),[&](const auto& candidate){return candidate.kind!=EPOCANVA_BACKEND_RAW&&candidate.text_utf8==text;}))continue;
             flow::Candidate candidate;candidate.text_utf8=text;candidate.kind=EPOCANVA_BACKEND_WORD;
             candidate.lexeme_ids=row.lexeme_ids;candidate.score=row.log_probability;candidate.input_end_utf8_byte=session.raw.size();
-            candidates.push_back(std::move(candidate));
+            MergeCandidate(&candidates, std::move(candidate));
+          }
+        }
+        if (session.profile.abbreviations && !session.preedit.empty() &&
+            (lexical.status == lex::QueryStatus::kOk ||
+             (session.preedit.find(' ') != std::string::npos && lexical.status == lex::QueryStatus::kInvalidWord))) {
+          pred::abbreviation::Options expansion_options;
+          expansion_options.max_suggestions = std::min<std::size_t>(query->max_candidates, pred::abbreviation::kMaxResults);
+          if (query->search_budget) expansion_options.max_index_entries =
+              std::min<std::size_t>(query->search_budget, pred::abbreviation::kMaxIndexEntries);
+          const auto explicit_options = [&] {
+            auto value = expansion_options; value.enable_initialism = false; return value;
+          }();
+          const auto explicit_result = session.profile.abbreviations->Decode(session.preedit, context,
+              Language(session.language), explicit_options, counts);
+          auto expanded = session.profile.abbreviations->Decode(session.preedit, context,
+              Language(session.language), expansion_options, counts);
+          for (const auto& row : explicit_result.suggestions)
+            if (row.exact_key) expanded.suggestions.push_back(row);
+          if (expanded.status == pred::Status::kOk || expanded.status == pred::Status::kBudgetExhausted || expanded.status == pred::Status::kBeamPruned) {
+            complete = complete && expanded.complete;
+            for (const auto& row : expanded.suggestions) {
+              flow::Candidate candidate; candidate.kind = EPOCANVA_BACKEND_EXPANSION;
+              candidate.text_utf8 = row.text_utf8; candidate.lexeme_ids = row.lexeme_ids;
+              const auto analysis = lex::AnalyzeWordUtf8(session.preedit, true);
+              const auto display = lex::ApplyCaseStyleUtf8(candidate.text_utf8, analysis.case_style);
+              if (analysis.status == lex::TextStatus::kOk && display.status == lex::TextStatus::kOk) candidate.text_utf8 = display.text_utf8;
+              candidate.score = row.log_probability + row.match_log_score;
+              candidate.exact_expansion = row.exact_key;
+              candidate.input_end_utf8_byte = session.raw.size();
+              MergeCandidate(&candidates, std::move(candidate));
+            }
           }
         }
 #ifdef EPOCANVA_BACKEND_FRENCH
         if (session.resource->french && !session.preedit.empty()) {
           const auto corrected = session.resource->french->Suggest(session.preedit, query->max_candidates);
           for (const auto& text : corrected.values_utf8) {
-            if (std::any_of(candidates.begin(),candidates.end(),[&](const auto& row){return row.text_utf8==text;})) continue;
             flow::Candidate candidate; candidate.kind=EPOCANVA_BACKEND_SPELLING; candidate.text_utf8=text;
-            candidate.input_end_utf8_byte=session.raw.size(); candidate.score=-4;
-            auto id=session.resource->lexical->FindExact("fr",text);
-            if(id) {candidate.lexeme_ids.push_back(id);candidate.score=session.resource->model->Score(context,id,counts).log_probability;}
-            candidates.push_back(std::move(candidate));
+            candidate.input_end_utf8_byte=session.raw.size();
+            const auto id=session.resource->lexical->FindExact("fr",text);
+            if(id) candidate.lexeme_ids.push_back(id);
+            // A dictionary-only word has one smoothed unseen-token probability;
+            // it must not outrank attested words merely by lacking a model score.
+            candidate.score = -4.0 + CandidateModelScore(session, candidate.lexeme_ids, context, counts);
+            MergeCandidate(&candidates, std::move(candidate));
           }
         }
 #endif
         const auto begin = candidates.empty() ? candidates.end() : candidates.begin()+1;
-        std::stable_sort(begin,candidates.end(),[](const auto& lhs,const auto& rhs){return lhs.score>rhs.score;});
+        std::stable_sort(begin,candidates.end(),[](const auto& lhs,const auto& rhs) {
+          if (lhs.exact_expansion != rhs.exact_expansion) return lhs.exact_expansion;
+          if (lhs.score != rhs.score) return lhs.score > rhs.score;
+          return lhs.lexeme_ids < rhs.lexeme_ids;
+        });
         if(candidates.size()>query->max_candidates)candidates.resize(query->max_candidates);
       }
       return Result(session.flow->Publish(std::move(candidates),complete,access));
@@ -707,8 +926,18 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_ack_commit(
     if(session.backend->repository)persist=[&session](const learn::Selection& selected,const flow::PrivacyCallback& permission){
       return session.backend->repository->Record(session.flow->catalog(),selected,permission);
     };
+    const auto prior_context = session.flow->Context(access);
+    flow::Commit committed;
+    const bool has_commit = session.flow->ReadCommit(access, &committed) == flow::Status::kOk && committed.token == token;
     const auto result=session.flow->Acknowledge(token,applied!=0,[access]{return access;},persist);
     out->consumed=result.consumed;out->learned=result.learned;out->context_advanced=result.context_advanced;
+    if (has_commit && result.status == flow::Status::kOk && result.consumed && applied &&
+        !result.context_advanced && committed.lexeme_ids.empty()) {
+      auto ids = epocanva::backend::ResolveContext(*session.resource->model, Language(session.language),
+          committed.text_utf8, prior_context);
+      if (!ids.empty())
+        out->context_advanced = session.flow->SetContext(std::move(ids), access) == flow::Status::kOk;
+    }
     out->persistence_status=static_cast<std::uint32_t>(result.persistence_status);
     if(result.consumed){
       flow::Snapshot after;

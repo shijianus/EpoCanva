@@ -50,7 +50,7 @@ file(GENERATE OUTPUT "${_lexical_fixture_root}/version.tsv" CONTENT "${_lexical_
 file(GENERATE OUTPUT "${_lexical_fixture_root}/binary.dat" CONTENT "EPOCANVA_PREDICTION_BINARY\t1\n" NEWLINE_STYLE UNIX)
 
 set(_lexical_assert "${EPOCANVA_LEXICAL_TEST_REPO}/tests/infrastructure/assert_probe.cmake")
-foreach(_case text aliases english french korean ranking budgets loaders concurrent)
+foreach(_case text aliases english keyboard-layouts morphology-identity match-scores french korean ranking budgets loaders concurrent)
   add_test(NAME lexical.service.${_case}
     COMMAND "${CMAKE_COMMAND}"
       "-DPROBE=$<TARGET_FILE:epocanva_lexical_service_tests>"

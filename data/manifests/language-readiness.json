@@ -6,31 +6,31 @@
       "id": "en",
       "status": "blocked",
       "data_status": "incomplete",
-      "reason": "Legacy completion data is packaged. Independent corpus frequencies, integrated learning, full English acceptance and current installed-host evidence remain incomplete."
+      "reason": "Real corpus models, contextual abbreviation and prefix completion are available; unified TSF suggestion replacement is being verified. Product personal learning, full English acceptance and current installed-host evidence remain incomplete."
     },
     {
       "id": "zh",
       "status": "blocked",
       "data_status": "absent",
-      "reason": "No selected and approved Pinyin/Zhuyin Hanzi and phrase dataset is packaged. Phonetic algorithm tests do not establish product input support."
+      "reason": "Pinned real Pinyin/Zhuyin data and transient context ranking exist in the local verification bundle, not in an accepted formal distribution. Word/phrase prediction quality, script variants, inline TSF composition, trusted learning metadata and installed-host acceptance remain incomplete."
     },
     {
       "id": "fr",
       "status": "blocked",
       "data_status": "absent",
-      "reason": "No selected and approved French lexicon and morphology dataset is packaged. Accent composition alone does not meet language acceptance."
+      "reason": "Real Hunspell resources, corpus prediction and contextual abbreviations are locally staged with provenance; full morphology, physical-layout and installed-host acceptance plus formal packaging are incomplete."
     },
     {
       "id": "ja",
       "status": "blocked",
       "data_status": "absent",
-      "reason": "No selected and approved Kana-to-Kanji lexicon and conversion model is packaged. Romaji-to-Kana composition alone does not meet language acceptance."
+      "reason": "Real Mozc lexical/POS data and Romaji/native-Kana output profiles are locally staged. Partial confirmation, native-quality segmentation, Kana-only next-word resources, inline TSF composition and installed-host/formal-package acceptance remain incomplete."
     },
     {
       "id": "ko",
       "status": "blocked",
       "data_status": "absent",
-      "reason": "Hangul composition and lexicon integration have not passed engine, TSF and installed-host acceptance. No dictionary candidates are packaged."
+      "reason": "Two-set/native-Hangul profiles and corpus candidates exist in the local verification bundle. Native-quality endings/spacing, inline TSF composition, installed-host keyboard acceptance and formal packaging remain incomplete."
     }
   ]
 }

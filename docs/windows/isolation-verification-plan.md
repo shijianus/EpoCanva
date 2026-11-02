@@ -257,3 +257,23 @@ manager 或修改窗口尺寸参数不能冒充真实多显示器/DPI 结果；W
 | `tip_profile_helper.cc` | 正式 CLSID/profile 的 register/unregister/activate/deactivate/status | 已构建；仅运行只读 `status` |
 | `run_layer_c.ps1` | 矩阵模板：身份、`--diagnose`、矩阵打印 | 未运行 |
 | `build/w3a-c-local/trigger.ps1` 等 | 本机单轮 session/截止时间编排、普通权限 agent、DWIN trace 监听；gitignored | 已补齐 session 握手并解析检查；待授权后运行一次 |
+
+## 9. 2026-11-02 C 层六轮会话新增事实（详见 `docs/reports/W3-B-c-layer-sessions.md`）
+
+后续任何 C 层轮次必须计入以下实测事实：
+
+1. **正式输入轮次此前从未到达过打字阶段**：W3-A §11.11 记录的失败根因是
+   `c_layer_agent.ps1` 内嵌 C# 重复定义 `CloseHandle`（CS0111），`Add-Type` 在
+   `$ErrorActionPreference='Continue'` 下被静默吞掉；2026-11-02 已修复并实测编译通过。
+2. **`[Environment]::TickCount64` 在 Windows PowerShell 5.1 不存在**（.NET Framework
+   4.8 无此属性，静默求值为 `$null`），时钟跳变检测曾因此必然误报；已改用 kernel32
+   `GetTickCount64` P/Invoke（`trigger.ps1` 与 `c_layer_agent.ps1`）。
+3. **前台锁需要操作员配合**：UAC 安全桌面往返后，最后输入事件所属窗口持有前台权；
+   隐藏 agent 的 16 次 `SwitchToThisWindow`/`AttachThreadInput` 自动尝试不可靠。
+   可靠路径是操作员点击测试窗口一次；agent 已扩展 16 次自动尝试 + 最长 180 秒的
+   操作员点击等待轮询，判定契约不变（前台不是测试窗口就拒绝打字）。
+4. **引擎冷启动与打字节奏**：第 6 轮实测引擎会话建立/schema 选择完成于第一个键前
+   约 1 秒，全速打字使全部键落在就绪转换之前而 literal 直通（W2-C 设计行为）。
+   agent 打字已节奏化（键间 400ms），候选轮询延长到 25 秒。
+5. **Windows 11 记事本会话标签恢复**：新窗口会恢复此前轮次的 `w3a-*` 标签页；
+   唯一窗口身份校验不受影响，但解读截图与窗口枚举时必须计入。

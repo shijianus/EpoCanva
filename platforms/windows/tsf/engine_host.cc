@@ -176,6 +176,7 @@ bool operator==(const EngineHostConfig& left, const EngineHostConfig& right) {
          left.shared_data_dir == right.shared_data_dir &&
          left.user_data_dir == right.user_data_dir &&
          left.log_dir == right.log_dir && left.capacity == right.capacity &&
+         left.backend == right.backend &&
          DeploymentEqual(left.deployment, right.deployment);
 }
 
@@ -306,6 +307,7 @@ EngineLeaseStatus EngineHostBroker::Acquire(const EngineHostConfig& config,
             options.runtime.deployment = std::move(deployment);
           }
           options.capacity = config.capacity;
+          options.backend = config.backend;
           s.executor.reset(new engine::EngineExecutor(std::move(options)));
         } catch (...) {
           // No worker exists; the attempt is a clean failure. There cannot be a waiter yet

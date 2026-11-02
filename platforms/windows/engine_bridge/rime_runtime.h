@@ -19,8 +19,17 @@
 // LoadModules() calls their initialize() slots (src/rime/setup.cc:33-40). This code never
 // calls rime::Registry from outside the DLL and never adds or replaces a component.
 //
-// DIRECTORIES. shared_data_dir, user_data_dir and log_dir are absolute and supplied by the
-// caller. Nothing here reads %APPDATA%, the current directory or an existing Rime installation,
+// LOCAL PATHS. All caller paths must be drive-absolute physical-disk paths, without
+// device aliases, UNC/mapped network drives or name-surrogate reparse traversal.
+// Every existing ancestor and root is opened without following reparses and pinned
+// without write/delete sharing through finalize/unload. Data I/O uses the resolved
+// volume, not a remappable DOS drive letter. LoadLibraryEx requires a DOS spelling
+// for the pinned DLL on supported builds; its mapping is checked at load, but a
+// concurrent DOS-device remap is not excluded. Non-surrogate cloud directories are permitted;
+// offline/recall files are not. This does not sandbox an external sync provider or
+// arbitrary descendant paths opened by librime; deployment data must be trusted.
+// DIRECTORIES. shared_data_dir, user_data_dir and log_dir are existing directories
+// supplied by the caller. Nothing here reads %APPDATA%, the current directory or an existing Rime installation,
 // and nothing downloads, scans for language packs or deploys data implicitly. RimeTraits
 // carries UTF-8 strings and librime converts them with std::filesystem::u8path on Windows
 // (third_party/librime/src/rime/common.h:84-96), so this bridge converts each native wide path

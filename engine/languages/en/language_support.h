@@ -27,6 +27,7 @@
 #include <string_view>
 #include <vector>
 
+#include "../../keyboard/keyboard_model.h"
 #include "english_case.h"
 #include "english_lexicon.h"
 #include "english_token.h"
@@ -66,13 +67,20 @@ struct Candidate {
   std::string text;  // selected display/commit text, in the input's ASCII case
   double score = 0.0;  // larger first; deterministic text/type tie breakers
   std::vector<SegmentUtf8Byte> segments_utf8_byte;
-  // Morphology: dictionary lemma ID. Segmentation: one ID per input segment.
-  // Spelling: corrected dictionary row ID. Expansion: one ID per output word,
-  // with 0 for an expansion word absent from the dictionary. Never learn 0.
+  // Morphology: attested surface ID when present; otherwise admitted lemma ID
+  // for legacy generated forms (including unattested possessive surfaces).
+  // Segmentation: one ID per input segment. Spelling: corrected dictionary row
+  // ID. Expansion: one ID per output word, with 0 for a word absent from the
+  // dictionary. Never learn 0 or mistake a lemma fallback for surface identity.
   std::vector<LexemeId> lexeme_ids;
   std::uint32_t morphology_forms = 0;  // MorphologyForm bit mask, see its header
   unsigned edit_distance = 0;  // spelling only: optimal-string-alignment edits
   unsigned keyboard_cost = 0;  // spelling only: hundredths of an edit cost
+  // Additive input/type feature in natural-log score units, NOT a calibrated
+  // probability. Independent of base/learned/context counts and corpus totals.
+  // Kept separate so a consumer can add its own language-model log probability
+  // exactly once instead of adding it to the legacy combined score above.
+  double match_log_score = 0.0;
 };
 
 enum class FrequencySource {
@@ -165,6 +173,9 @@ struct LanguageSupportOptions {
   std::size_t segmentation_transition_budget = 20000;
   std::size_t max_segmentation_words = kMaxSegmentationWords;
   std::size_t prediction_entry_budget = 4096;  // known frequency-covered rows
+  // Historical default is explicit; callers with no supported active-layout
+  // mapping must select kUnknown/kNeutral, never infer QWERTY from language.
+  keyboard::Layout keyboard_layout = keyboard::Layout::kUsQwerty;
 };
 
 enum class LanguageSupportOutcome {
@@ -220,13 +231,17 @@ class LanguageSupport {
   // Does not call or suppress CompletePrefix/SuggestSpelling; can run alongside
   // both. Original text is excluded. Known words/forms are not spell-corrected
   // or segmented. Spelling accepts 4..32 ASCII-letter UTF-8 bytes and <=2 OSA
-  // edits. Morphology score = lemma ranking total - 0.25, plus 1.0 when the
-  // complete query is that lemma (exact-lemma forms precede mere prefix-derived
-  // forms when no independent frequency/context evidence separates them).
+  // edits. Morphology score = surface ranking total (lemma fallback if absent)
+  // - 0.25, plus 1.0 when the complete query is that lemma (exact-lemma forms
+  // precede mere prefix-derived forms when no frequency/context separates them).
   // Spelling score = ranking total - 4*edit_distance - 0.005*keyboard_cost.
-  // Keyboard costs: normal edit 100, adjacent QWERTY substitution 60,
-  // adjacent transposition 80; minimum edit count wins before cost within each
+  // Keyboard costs: normal edit 100, selected-layout neighbour substitution 60,
+  // adjacent input-byte transposition 80; neutral/unknown/invalid layouts give
+  // no neighbour discount. Minimum edit count wins before cost within each
   // word's alignment. Overall candidate ordering still incorporates frequency.
+  // match_log_score retains only the above morphology/spelling input terms;
+  // segmentation uses -0.75 per inserted space, without any corpus normalizer.
+  // Expansion and prediction match_log_score are zero.
   //
   // Segmentation is top-k DP with (input byte boundary, last lexeme ID, word
   // count) state, so learned bigrams do not invalidate optimal substructure.

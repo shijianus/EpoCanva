@@ -20,6 +20,9 @@
 #include "product_manifest.h"
 #include "product_paths.h"
 #include "product_settings.h"
+#include "../../local_path/local_path.h"
+#include <winioctl.h>
+#include <cstring>
 
 namespace {
 
@@ -565,6 +568,33 @@ void TestVersionAndIcon(const std::filesystem::path& exe,
   }
 }
 
+bool MakePathJunction(const std::filesystem::path& link, const std::filesystem::path& target) {
+  struct Buffer {
+    ULONG tag;
+    USHORT data_bytes, reserved, substitute_offset_utf16_bytes, substitute_utf16_bytes;
+    USHORT print_offset_utf16_bytes, print_utf16_bytes;
+    WCHAR path[1];
+  };
+  if (!std::filesystem::create_directory(link)) return false;
+  const std::wstring substitute = L"\\??\\" + target.native();
+  const std::size_t name_bytes = substitute.size() * sizeof(wchar_t);
+  std::vector<BYTE> bytes(offsetof(Buffer, path) + name_bytes + 2 * sizeof(wchar_t), 0);
+  auto* buffer = reinterpret_cast<Buffer*>(bytes.data());
+  buffer->tag = IO_REPARSE_TAG_MOUNT_POINT;
+  buffer->data_bytes = static_cast<USHORT>(bytes.size() - 8);
+  buffer->substitute_utf16_bytes = static_cast<USHORT>(name_bytes);
+  buffer->print_offset_utf16_bytes = static_cast<USHORT>(name_bytes + sizeof(wchar_t));
+  std::memcpy(buffer->path, substitute.data(), name_bytes);
+  const HANDLE handle = ::CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) return false;
+  DWORD returned_bytes = 0;
+  const BOOL ok = ::DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, bytes.data(),
+      static_cast<DWORD>(bytes.size()), nullptr, 0, &returned_bytes, nullptr);
+  ::CloseHandle(handle);
+  return ok != FALSE;
+}
+
 void TestPaths(const std::filesystem::path& root) {
   const std::filesystem::path user_root = root / L"用户 数据";
   epocanva::product::SetUserRootOverrideForProcess(user_root);
@@ -596,6 +626,70 @@ void TestPaths(const std::filesystem::path& root) {
         "relative environment override is rejected");
   ::SetEnvironmentVariableW(L"EPOCANVA_USER_DATA_ROOT", nullptr);
 
+  namespace local = epocanva::windows::local_path;
+  for (const auto& unsafe : std::vector<std::filesystem::path>{
+      L"\\\\not-a-server.invalid\\share", L"\\\\?\\C:\\unsafe", L"\\\\.\\pipe\\unsafe",
+      L"C:relative", L"C:\\NUL.txt", L"C:\\safe\\file:stream", L"C:\\CONIN$",
+      L"C:\\COM\u00b9.log", L"C:\\safe.\\child", root / L".." / L"escape",
+      std::filesystem::path(std::wstring(L"C:\\bad") + wchar_t(0) + L"suffix"),
+      std::filesystem::path(std::wstring(L"C:\\bad") + wchar_t(0xd800))}) {
+    local::PreparedPath prepared;
+    Check(!local::Prepare(unsafe, &prepared), "unsafe local path syntax rejected before filesystem work");
+    epocanva::product::SetUserRootOverrideForProcess(unsafe);
+    Check(!epocanva::product::ResolveProductPaths(nullptr, &rejected, &why),
+          "unsafe process root override rejected");
+    epocanva::product::SetUserRootOverrideForProcess({});
+    if (unsafe.native().find(L'\0') == std::wstring::npos) {
+      ::SetEnvironmentVariableW(L"EPOCANVA_USER_DATA_ROOT", unsafe.c_str());
+      Check(!epocanva::product::ResolveProductPaths(nullptr, &rejected, &why),
+            "unsafe environment root override rejected");
+      ::SetEnvironmentVariableW(L"EPOCANVA_USER_DATA_ROOT", nullptr);
+    }
+  }
+  Check(!local::PhysicalDiskDevice(L"\\Device\\Mup\\server\\share") &&
+        !local::PhysicalDiskDevice(L"\\Device\\LanmanRedirector\\;Z:1\\server\\share") &&
+        !local::PhysicalDiskDevice(L"\\??\\C:\\local-subst") &&
+        local::PhysicalDiskDevice(L"\\Device\\HarddiskVolume12"),
+        "remote and SUBST device mappings rejected without configuring any drive");
+  Check(local::AllowedAttributes(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+                                IO_REPARSE_TAG_CLOUD_A, true),
+        "actual OneDrive directory tag is not rejected as a redirect");
+  Check(!local::AllowedAttributes(FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_OFFLINE,
+                                 IO_REPARSE_TAG_CLOUD, false),
+        "offline cloud files cannot be hydrated by admission");
+  {
+    local::PinnedPath pin;
+    Check(pin.Open(user_root, true), "ordinary Unicode local directory pins");
+    const auto moved = root / L"moved-user";
+    Check(!::MoveFileExW(user_root.c_str(), moved.c_str(), 0),
+          "pinned root cannot be renamed while a consumer holds it");
+    const HANDLE writer = ::CreateFileW(user_root.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    Check(writer == INVALID_HANDLE_VALUE, "pinned directory denies reparse mutation handle");
+    if (writer != INVALID_HANDLE_VALUE) ::CloseHandle(writer);
+  }
+  const auto target = root / L"junction-target";
+  std::filesystem::create_directory(target);
+  const auto junction = root / L"junction";
+  Check(MakePathJunction(junction, target), "unprivileged junction fixture created");
+  epocanva::product::SetUserRootOverrideForProcess(junction / L"missing");
+  Check(!epocanva::product::ResolveProductPaths(nullptr, &rejected, &why),
+        "missing override below a junction rejected before creation");
+  epocanva::product::SetUserRootOverrideForProcess({});
+  auto redirected = paths;
+  redirected.user_root = junction / L"missing";
+  redirected.engine_user_dir = redirected.user_root / L"engine";
+  redirected.log_dir = redirected.user_root / L"logs";
+  Check(!epocanva::product::EnsureUserDirectories(redirected, &why) &&
+        !epocanva::product::ProbeUserDataWritable(redirected, &why),
+        "creation and probe cannot traverse a junction");
+  Check(!std::filesystem::exists(target / L"missing"), "rejected target remains untouched");
+  Check(::RemoveDirectoryW(junction.c_str()) != FALSE, "junction fixture removed, not target");
+  auto inconsistent = paths;
+  inconsistent.log_dir = root / L"outside";
+  Check(!epocanva::product::EnsureUserDirectories(inconsistent, &why),
+        "manually supplied child outside the user root rejected");
+
   Check(epocanva::product::WideToUtf8(L"中文路径 / café") ==
             "\xE4\xB8\xAD\xE6\x96\x87\xE8\xB7\xAF\xE5\xBE\x84 / caf\xC3\xA9",
         "wide to UTF-8 round-trips non-ASCII text");
@@ -610,6 +704,8 @@ int main(int argc, char** argv) {
   std::filesystem::path exe;
   std::filesystem::path product_dll;
   std::filesystem::path version_file;
+  bool paths_only = false;
+  bool force_path_failure = false;
   for (int index = 1; index < argc; ++index) {
     const std::string argument = argv[index];
     if (argument == "--run-root" && index + 1 < argc) {
@@ -620,10 +716,15 @@ int main(int argc, char** argv) {
       product_dll = std::filesystem::path(argv[++index]);
     } else if (argument == "--version-file" && index + 1 < argc) {
       version_file = std::filesystem::path(argv[++index]);
+    } else if (argument == "--paths-only") {
+      paths_only = true;
+    } else if (argument == "--paths-can-fail") {
+      paths_only = true;
+      force_path_failure = true;
     }
   }
-  if (run_root.empty() || !run_root.is_absolute() || exe.empty() ||
-      product_dll.empty() || version_file.empty()) {
+  if (run_root.empty() || !run_root.is_absolute() ||
+      (!paths_only && (exe.empty() || product_dll.empty() || version_file.empty()))) {
     std::cout << "FAIL: --run-root, --exe, --product-dll and --version-file are "
                  "required\n";
     return 2;
@@ -634,6 +735,17 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  if (paths_only) {
+    TestPaths(root / "paths");
+    if (force_path_failure) {
+      epocanva::windows::local_path::PreparedPath path;
+      Check(epocanva::windows::local_path::Prepare(L"\\\\invalid.example\\share", &path),
+            "deliberately false claim that UNC is admitted");
+    }
+    if (g_failures != 0) return 14;
+    std::cout << "RESULT PASS local paths\n";
+    return 0;
+  }
   TestDigest();
   TestSettingsRoundTrip(root / "settings");
   {

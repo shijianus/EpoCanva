@@ -54,6 +54,10 @@ class ObservedEngineClients {
  public:
   virtual ~ObservedEngineClients() {}
   virtual engine::ClientId NextClient() = 0;
+  virtual engine::ClientId NextClientForTarget(const context::ObservedTarget& target) {
+    (void)target; return NextClient();
+  }
+  virtual engine::BackendAccess CurrentBackendAccess() const { return {}; }
 };
 
 class ObservedBindingController final : public context::ContextObserverSink {

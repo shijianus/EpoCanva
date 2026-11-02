@@ -78,6 +78,8 @@ class SettingsWindow {
   HWND version_ = nullptr;
   HWND summary_ = nullptr;
   HWND status_edit_ = nullptr;
+  HWND profile_choice_ = nullptr;
+  std::vector<std::uint32_t> profile_ids_;
   HWND completion_enabled_ = nullptr;
   HWND completion_count_ = nullptr;
   HWND spelling_enabled_ = nullptr;

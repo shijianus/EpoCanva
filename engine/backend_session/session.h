@@ -28,6 +28,7 @@ struct Candidate {
   double score = 0;
   std::size_t input_begin_utf8_byte = 0;
   std::size_t input_end_utf8_byte = 0;
+  bool exact_expansion = false;
 };
 struct Snapshot {
   std::uint64_t token = 0;
@@ -78,6 +79,10 @@ class Session {
   // Explicit discard accepts Sensitive/Unknown so callers can clear transient
   // text without pretending the field is Normal. Target/generation must match.
   Status Reset(const Access& current);
+  // Imported host context is transient and breaks the personal-learning chain.
+  // IDs must already belong to this catalog. No text or statistics are stored.
+  Status SetContext(std::vector<LexemeId> ids, const Access& current,
+                    bool append = false, bool clear_input = false);
   std::vector<LexemeId> Context(const Access& current) const;
   learning::Status ReadLearning(const Access& current, learning::Snapshot* out) const;
   learning::Status ImportLearning(const learning::Snapshot& snapshot, const Access& current);

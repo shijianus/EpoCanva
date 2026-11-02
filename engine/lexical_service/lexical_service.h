@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "../keyboard/keyboard_model.h"
 #include "text.h"
 
 namespace epocanva::prediction { class Model; struct LoadOptions; }
@@ -40,9 +41,18 @@ struct Candidate {
   // Half-open spans in ORIGINAL raw input UTF-8 code units (bytes), not in the
   // normalized key or output. Segmentation has one span per input word.
   std::vector<InputUtf8ByteSpan> input_utf8_byte_spans;
-  double score = 0.0;  // lexical feature score, NOT a probability/model score
+  double score = 0.0;  // legacy combined lexical/count ranking; NOT a probability
   std::uint32_t morphology_forms = 0;  // existing en::MorphologyForm bits
   unsigned edit_distance = 0;  // existing ASCII English OSA edit count
+  // Provider-independent additive input/type feature in natural-log score
+  // units, NOT a calibrated probability. Contains no unigram, learned, context
+  // or corpus-normalization term. Combine this with a language-model log
+  // probability ONCE; do not add the legacy score above to that probability.
+  // Original/exact/completion/abbreviation/contraction: 0. Accent: -0.5.
+  // Morphology: -0.25, plus 1 for an exact English source lemma. Spelling:
+  // -4*OSA edits -0.005*keyboard cost (hundredths of an edit). Segmentation:
+  // -0.75 per inserted space. Attestation gates are identical for both scores.
+  double match_log_score = 0.0;
 };
 
 // The caller supplies an admitted ID-only snapshot, never raw text/history.
@@ -75,6 +85,9 @@ struct QueryOptions {
   bool enable_segmentation = true;
   bool enable_abbreviation = true;
   bool enable_accents = true;
+  // Preserve legacy US-QWERTY ranking for existing callers. A backend with an
+  // unknown/unmapped active layout must explicitly use kUnknown/kNeutral.
+  keyboard::Layout keyboard_layout = keyboard::Layout::kUsQwerty;
 };
 enum class QueryStatus {
   kOk = 0, kEmptyInput, kInputTooLong, kInvalidUtf8, kUnsupportedLanguage,
@@ -145,10 +158,11 @@ class LexicalService {
   // texts are deduplicated. Invalid UTF-8/oversized inputs produce no candidates.
   // Non-ASCII en/fr get normalized lexical completion/accent support without
   // pretending the existing ASCII English morphology/spelling accepts Unicode.
-  // English generated forms require an admitted surface word; core-marked
-  // possessives require an admitted actual base. Their IDs still identify the
-  // admitted lemma as defined by en::LanguageSupport. Unattested possible forms
-  // are never offered just because a source lemma is known.
+  // English generated forms require an admitted surface word and carry that
+  // SURFACE ID for model/context scoring, not the source lemma. Core-marked
+  // possessives may instead retain an admitted lemma ID when their actual base
+  // is admitted but the possessive surface is absent. Unattested nonpossessive
+  // forms are never offered just because a source lemma is known.
   // Korean completion requires real dictionary rows; composition is elsewhere.
   QueryResult Suggest(std::string_view language, std::string_view raw_utf8,
                       const QueryOptions& options = {},

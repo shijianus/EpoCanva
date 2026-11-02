@@ -118,6 +118,12 @@ bool StageProduct(const std::filesystem::path& stage, const std::filesystem::pat
       !CopyFileTo(lexicon, stage / L"data" / L"lexicon" / L"epocanva_en_alpha.tsv", why)) {
     return false;
   }
+#ifdef EPOCANVA_PRODUCT_BACKEND_ROOT
+  const std::filesystem::path backend_root = std::filesystem::u8path(EPOCANVA_PRODUCT_BACKEND_ROOT);
+  std::filesystem::copy(backend_root / L"data", stage / L"data",
+      std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
+  if (ec) { if (why) *why = L"cannot stage the explicitly configured backend resources"; return false; }
+#endif
   return true;
 }
 

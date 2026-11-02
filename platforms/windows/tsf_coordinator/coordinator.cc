@@ -160,8 +160,11 @@ const char* DescribeCandidateKind(CandidateKind kind) {
       return "literal";
     case CandidateKind::kCompletion:
       return "completion";
-    case CandidateKind::kSpelling:
-      return "spelling";
+    case CandidateKind::kSpelling: return "spelling";
+    case CandidateKind::kMorphology: return "morphology";
+    case CandidateKind::kExpansion: return "expansion";
+    case CandidateKind::kConversion: return "conversion";
+    case CandidateKind::kPrediction: return "prediction";
   }
   return "unknown";
 }
@@ -187,6 +190,7 @@ const char* DescribeWorkKind(WorkKind kind) {
       return "Raw";
     case WorkKind::kSuggestionReplace:
       return "SuggestionReplace";
+    case WorkKind::kBackendWork: return "BackendWork";
   }
   return "UnknownWorkKind";
 }
@@ -201,6 +205,8 @@ const char* DescribeWorkPhase(WorkPhase phase) {
       return "EnginePending";
     case WorkPhase::kEditPending:
       return "EditPending";
+    case WorkPhase::kBackendAckPending:
+      return "BackendAckPending";
   }
   return "UnknownWorkPhase";
 }
@@ -629,6 +635,10 @@ bool ContextCoordinator::RetirementPausesInput() const {
 }
 
 void ContextCoordinator::RetireCurrentBinding() {
+  RevokeBackendAccess();
+  backend_commit_token_ = 0;
+  backend_ack_in_flight_ = false;
+  backend_expected_utf16_.clear();
   RetiringBinding record;
   record.identity = identity_;
   record.client = engine_client_;
@@ -1218,6 +1228,7 @@ bool ContextCoordinator::PermissionVerdictAllows(bool* identity_current) {
 
 void ContextCoordinator::CachePermission(context::PermissionState state) {
   permission_ = MapPermission(state);
+  if (state != context::PermissionState::kAllowed) RevokeBackendAccess();
   if (session_ != nullptr) {
     // Defense in depth: the P3.7 session refuses its own writes under a non-Allowed
     // permission even if a pending callback is already queued.
@@ -1529,7 +1540,10 @@ SubmitStatus ContextCoordinator::SubmitRawCommit(std::u16string_view raw_utf16,
 void ContextCoordinator::DispatchPendingWork(const PendingPermissionWork& work) {
   engine::RequestId request;
   engine::SubmitStatus submitted = engine::SubmitStatus::kInvalidRequest;
-  if (work.kind == WorkKind::kKey) {
+  if (work.kind == WorkKind::kBackendWork) {
+    backend_work_ = work.backend_work;
+    submitted = executor_.TryBackendWork(engine_client_, work.backend_work, &request);
+  } else if (work.kind == WorkKind::kKey) {
     submitted = executor_.TryDispatch(engine_client_, work.event, work.text, &request);
   } else if (work.kind == WorkKind::kCandidate) {
     submitted = executor_.TryAcceptCandidate(engine_client_, work.candidate_index,
@@ -1636,6 +1650,7 @@ void ContextCoordinator::Pump() {
   // here, outside every TSF notification, and their cleanup edit sessions are submitted
   // here too. This is independent of the current binding's work item.
   PumpRetirements();
+  if (phase_ == WorkPhase::kBackendAckPending) { PumpBackendAck(); return; }
 
   if (phase_ == WorkPhase::kPermissionPending) {
     AdvancePermissionStage();
@@ -1789,7 +1804,7 @@ SubmitStatus ContextCoordinator::SubmitSuggestionReplacement(
       identity_.context_id != request.context_id ||
       identity_.generation != request.generation ||
       request.page_index >= candidate_snapshot_.items.size() ||
-      candidate_snapshot_.input_utf16_code_units.empty() ||
+      (candidate_snapshot_.input_utf16_code_units.empty() && !candidate_snapshot_.next_word) ||
       request.caret_utf16 <
           static_cast<LONG>(candidate_snapshot_.input_utf16_code_units.size())) {
     // The request must carry a plausible token position. The controller supplies the live
@@ -1798,6 +1813,19 @@ SubmitStatus ContextCoordinator::SubmitSuggestionReplacement(
     // before SetText. The snapshot version and identity still bind the request to the menu.
     ++candidate_stale_refusals_;
     return RecordSubmit(SubmitStatus::kCandidateStale);
+  }
+  if (unified_backend()) {
+    engine::BackendWork work;
+    work.operation = engine::BackendOperation::kSelect;
+    work.snapshot_token = candidate_snapshot_.backend_snapshot_token;
+    work.candidate_token = candidate_snapshot_.items[request.page_index].backend_candidate_token;
+    auto expected = candidate_snapshot_.input_utf16_code_units;
+    const auto accepted = SubmitBackendWork(std::move(work), id);
+    if (accepted == SubmitStatus::kAccepted) {
+      backend_expected_utf16_ = std::move(expected);
+      backend_caret_utf16_ = request.caret_utf16;
+    }
+    return accepted;
   }
   std::u16string expected = candidate_snapshot_.input_utf16_code_units;
   const LONG expected_caret_utf16 = request.caret_utf16;
@@ -1882,6 +1910,11 @@ void ContextCoordinator::ResolveEngineResult(const engine::CommandResult& result
         EnterNeedsResync("engine-command-failed", RejectCause::kNone);
         return;
     }
+  }
+
+  if (result.kind == engine::CommandKind::kBackendWork) {
+    ResolveBackendResult(std::get<engine::BackendWorkOutcome>(result.payload));
+    return;
   }
 
   EngineObservation observation;
@@ -2016,9 +2049,11 @@ void ContextCoordinator::SubmitSuggestionPlan(std::u16string expected_text,
     EndWork(WorkOutcome::kRejected, RejectCause::kEditRefused);
     return;
   }
-  EditPlanBuildResult built = EditPlan::BuildReplaceToken(
-      identity_, expected_utf8.utf8_bytes, replacement_utf8.utf8_bytes,
-      expected_caret_utf16);
+  EditPlanBuildResult built = expected_text.empty() && unified_backend()
+      ? EditPlan::BuildCommit(identity_, replacement_utf8.utf8_bytes,
+                              expected_caret_utf16, expected_caret_utf16)
+      : EditPlan::BuildReplaceToken(identity_, expected_utf8.utf8_bytes,
+                                    replacement_utf8.utf8_bytes, expected_caret_utf16);
   if (!built.ok()) {
     EndWork(WorkOutcome::kRejected, RejectCause::kEditRefused);
     return;
@@ -2268,6 +2303,11 @@ void ContextCoordinator::ApplyViewUpdate(const EditPlan& plan) {
 // --- terminal helpers --------------------------------------------------------------------
 
 void ContextCoordinator::EndWork(WorkOutcome outcome, RejectCause cause) {
+  if (backend_commit_token_ != 0 && !backend_ack_in_flight_ && bound_ &&
+      outcome != WorkOutcome::kAbandonedStale) {
+    QueueBackendAck(outcome, cause);
+    return;
+  }
   NoteRawTerminal(outcome == WorkOutcome::kApplied);
   outcome_ = outcome;
   cause_ = cause;
@@ -2288,6 +2328,7 @@ void ContextCoordinator::EndWork(WorkOutcome outcome, RejectCause cause) {
 }
 
 void ContextCoordinator::EnterNeedsResync(const char* why, RejectCause cause) {
+  RevokeBackendAccess();
   (void)why;
   InvalidateCandidateSnapshot();
   NoteRawTerminal(false);
@@ -2299,6 +2340,7 @@ void ContextCoordinator::EnterNeedsResync(const char* why, RejectCause cause) {
 }
 
 void ContextCoordinator::EnterUncertainLockdown() {
+  RevokeBackendAccess();
   InvalidateCandidateSnapshot();
   NoteRawTerminal(false);
   uncertain_blocked_context_id_ = identity_.context_id;

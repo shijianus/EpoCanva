@@ -57,16 +57,22 @@ struct ProductPaths {
 
 // `module` is nullptr for the executable or the DLL's HINSTANCE for the text service.
 // The optional user root is the documented EPOCANVA_USER_DATA_ROOT override (absolute);
-// when empty, %LOCALAPPDATA%\EpoCanva is used. Nothing is created here.
+// when empty, %LOCALAPPDATA%\EpoCanva is used. Nothing is created here. Existing
+// ancestors are checked with no-follow handles; UNC, device aliases, nonphysical
+// drive mappings and redirecting reparses are refused. ProductPaths itself remains
+// a layout, not a retained handle capability: consumers must pin again before I/O.
 bool ResolveProductPaths(HMODULE module, ProductPaths* paths, std::wstring* why);
 
 void SetUserRootOverrideForProcess(const std::filesystem::path& root);
 std::filesystem::path UserRootOverrideForProcess();
 
-// Creates only directories below user_root.
+// Creates only the admitted user_root/engine/logs hierarchy, one component at a
+// time with pinned parents and re-validation after creation. Pins end on return;
+// this does not guard a later unrelated pathname operation or concurrent leaf swap.
 bool EnsureUserDirectories(const ProductPaths& paths, std::wstring* why);
 
-// A bounded, read-only probe: create a file below user_root, write one byte, delete it.
+// A bounded write probe: pins directories, exclusively creates a new file below
+// user_root, writes one byte and deletes that same handle on close.
 bool ProbeUserDataWritable(const ProductPaths& paths, std::wstring* why);
 
 std::wstring ProductVersion();

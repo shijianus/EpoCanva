@@ -1,0 +1,38 @@
+EPOCANVA_ABBREVIATION_DEFINITIONS_TSV	1
+language	key	expansion	evidence
+en	afaik	as far as i know	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	asap	as soon as possible	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	brb	be right back	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	btw	by the way	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	fyi	for your information	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	idk	i do not know	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	imo	in my opinion	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	imho	in my humble opinion	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	lmk	let me know	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	np	no problem	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	omw	on my way	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	pls	please	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	thx	thanks	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	ty	thank you	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	tbh	to be honest	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	wip	work in progress	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	dont	don't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	doesnt	doesn't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	didnt	didn't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	cant	can't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	couldnt	couldn't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	wouldnt	wouldn't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	shouldnt	shouldn't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	wont	won't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	isnt	isn't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	arent	aren't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	wasnt	wasn't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	werent	weren't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	hasnt	hasn't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	havent	haven't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	hadnt	hadn't	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	im	i'm	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	ive	i've	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	ill	i'll	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	youre	you're	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions
+en	theyre	they're	en-expansion-v1:engine/languages/en/language_support.cc:kExpansions

@@ -90,7 +90,7 @@ void ObservedBindingController::OnTargetBound(ITfContext* context,
     return;
   }
 
-  const engine::ClientId client = clients_.NextClient();
+  const engine::ClientId client = clients_.NextClientForTarget(target);
   ++diagnostics_.engine_clients_requested;
   if (!client.valid()) {
     ++diagnostics_.binds_refused;
@@ -115,6 +115,7 @@ void ObservedBindingController::OnTargetBound(ITfContext* context,
   diagnostics_.last_bind_status = status;
   switch (status) {
     case BindStatus::kOk:
+      coordinator_.SetBackendAccess(clients_.CurrentBackendAccess());
       ++diagnostics_.binds_ok;
       rebind_pending_ = false;
       return;

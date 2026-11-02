@@ -10,13 +10,15 @@
 #include <vector>
 
 #include "ui_ids.h"
+#include "product_backend_resources.h"
+#include "product_io.h"
 
 namespace epocanva {
 namespace product {
 namespace {
 
 constexpr int kClientWidth = 900;
-constexpr int kClientHeight = 664;
+constexpr int kClientHeight = 736;
 
 UINT WindowDpi(HWND window) {
   const UINT dpi = ::GetDpiForWindow(window);
@@ -288,14 +290,18 @@ bool SettingsWindow::OnCreate() {
   CreateControl(L"BUTTON", L"Open &user data", BS_PUSHBUTTON | WS_TABSTOP,
                 ui::kOpenUser, right_x + 204, 468, 180, 28);
 
-  save_status_ = CreateControl(L"STATIC", L"", SS_LEFT, ui::kSaveStatus, margin, 606,
+  CreateControl(L"STATIC", L"Language / input profile (next engine start):", SS_LEFT,
+                0, margin, 608, 400, 20);
+  profile_choice_ = CreateControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
+      ui::kProfileChoice, margin, 632, 860, 240);
+  save_status_ = CreateControl(L"STATIC", L"", SS_LEFT, ui::kSaveStatus, margin, 678,
                                860, 20);
   CreateControl(L"BUTTON", L"&About / licences", BS_PUSHBUTTON | WS_TABSTOP,
-                ui::kAbout, margin, 628, 180, 30);
+                ui::kAbout, margin, 700, 180, 30);
   CreateControl(L"BUTTON", L"&Save", BS_DEFPUSHBUTTON | WS_TABSTOP, ui::kSave, 660,
-                628, 100, 30);
+                700, 100, 30);
   CreateControl(L"BUTTON", L"&Close", BS_PUSHBUTTON | WS_TABSTOP, ui::kClose, 770,
-                628, 110, 30);
+                700, 110, 30);
 
   // Group boxes are siblings of their contents; without this they end up above the
   // controls and paint their background over the checkboxes, edits and status text.
@@ -404,10 +410,39 @@ void SettingsWindow::LoadState() {
     status_.items.push_back(StatusItem{L"Product paths", why, StatusLevel::kError});
   }
   settings_ = status_.settings.settings;
+  windows::engine::UnifiedBackendConfig resources;
+  std::wstring resource_why;
+  profile_ids_.clear();
+  ::SendMessageW(profile_choice_, CB_RESETCONTENT, 0, 0);
+  if (LoadBackendResources(paths_, &resources, &resource_why)) {
+    for (const auto& row : resources.profiles) {
+      const auto& p = row.profile;
+      std::wstring label = Utf8ToWide(p.variant_id);
+      const wchar_t* input = p.input_mode == EPOCANVA_BACKEND_PINYIN ? L"Pinyin" :
+          p.input_mode == EPOCANVA_BACKEND_ZHUYIN ? L"Zhuyin" :
+          p.input_mode == EPOCANVA_BACKEND_TWO_SET ? L"Two-set" :
+          p.input_mode == EPOCANVA_BACKEND_KANA ? L"Kana" :
+          p.input_mode == EPOCANVA_BACKEND_ROMAJI ? L"Romaji" : L"Native text";
+      label += L" / "; label += input;
+      if (p.language == EPOCANVA_BACKEND_JA) label += p.output_mode == EPOCANVA_BACKEND_OUTPUT_HIRAGANA
+          ? L" / Hiragana" : p.output_mode == EPOCANVA_BACKEND_OUTPUT_KATAKANA ? L" / Katakana" : L" / Kanji";
+      label += L" / #" + std::to_wstring(p.profile_id);
+      ::SendMessageW(profile_choice_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+      profile_ids_.push_back(p.profile_id);
+    }
+  }
+  if (profile_ids_.empty()) {
+    const std::wstring label = L"Resource profiles unavailable (saved #" + std::to_wstring(settings_.profile_id) + L")";
+    ::SendMessageW(profile_choice_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+    profile_ids_.push_back(static_cast<std::uint32_t>(settings_.profile_id));
+  }
 }
 
 void SettingsWindow::RefreshControlsFromSettings() {
   loading_ = true;
+  for (std::size_t ordinal = 0; ordinal < profile_ids_.size(); ++ordinal)
+    if (profile_ids_[ordinal] == static_cast<std::uint32_t>(settings_.profile_id))
+      ::SendMessageW(profile_choice_, CB_SETCURSEL, ordinal, 0);
   ::SendMessageW(completion_enabled_, BM_SETCHECK,
                  settings_.completion_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
   ::SendMessageW(spelling_enabled_, BM_SETCHECK,
@@ -491,6 +526,10 @@ bool SettingsWindow::Save() {
     return false;
   }
   ProductSettings next;
+  next.profile_id = settings_.profile_id;
+  const auto profile_ordinal = ::SendMessageW(profile_choice_, CB_GETCURSEL, 0, 0);
+  if (profile_ordinal >= 0 && static_cast<std::size_t>(profile_ordinal) < profile_ids_.size())
+    next.profile_id = static_cast<int>(profile_ids_[static_cast<std::size_t>(profile_ordinal)]);
   next.completion_enabled =
       ::SendMessageW(completion_enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
   next.spelling_enabled =
@@ -575,6 +614,7 @@ void SettingsWindow::OnCommand(int id, int notification, HWND control) {
         SetDirty(true);
       }
       return;
+    case ui::kProfileChoice:
     case ui::kCompletionCount:
     case ui::kSpellingCount:
       if (notification == CBN_SELCHANGE) {

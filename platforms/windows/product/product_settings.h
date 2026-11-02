@@ -26,6 +26,7 @@ enum class CandidateDisplay {
 };
 
 struct ProductSettings {
+  int profile_id = 1;  // exact resource-manifest profile, applies on next engine start
   bool completion_enabled = true;
   int completion_candidates = 7;  // 1..7
   bool spelling_enabled = false;

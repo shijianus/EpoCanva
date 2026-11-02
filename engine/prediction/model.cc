@@ -10,6 +10,7 @@
 #include <set>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -67,10 +68,102 @@ bool IsFingerprint(std::string_view value) {
   return true;
 }
 
+// These ordinals count lexicon/ranked RECORDS, never text offsets. A compact
+// uint32 index is sufficient for the bounded on-disk model; FromRecords checks
+// the same upper bound before constructing the indexes.
+using RecordOrdinal = std::uint32_t;
+constexpr RecordOrdinal kNoRecord = (std::numeric_limits<RecordOrdinal>::max)();
+using PrefixOrdinals = std::unordered_map<LexemeId, RecordOrdinal>;
 struct RankedCount { LexemeId id; Count count; };
+
+struct PrefixRow {
+  RecordOrdinal lexicon_ordinal;  // lexical byte order (or language/lexical order)
+  RecordOrdinal ranked_ordinal;  // lower ordinal = greater count, then lower ID
+};
+struct PrefixIndex {
+  std::vector<PrefixRow> rows;
+  // Iterative range-min tree: payload is the rows[] ordinal whose ranked_ordinal
+  // is smallest. A lexical prefix is a half-open interval, so one range maximum
+  // plus split intervals enumerates its counts without unrelated lexical scans.
+  std::vector<RecordOrdinal> minimum;
+
+  RecordOrdinal Better(RecordOrdinal left, RecordOrdinal right) const {
+    if (left == kNoRecord) return right;
+    if (right == kNoRecord) return left;
+    return rows[left].ranked_ordinal < rows[right].ranked_ordinal ? left : right;
+  }
+  void Build(const PrefixOrdinals& ordinals, const std::vector<RankedCount>& ranked);
+  std::size_t Lower(RecordOrdinal lexicon_ordinal) const {
+    return static_cast<std::size_t>(std::lower_bound(rows.begin(), rows.end(), lexicon_ordinal,
+        [](const PrefixRow& row, RecordOrdinal key) { return row.lexicon_ordinal < key; }) - rows.begin());
+  }
+  RecordOrdinal Best(std::size_t begin_record, std::size_t end_record) const {
+    RecordOrdinal best = kNoRecord;
+    for (begin_record += rows.size(), end_record += rows.size(); begin_record < end_record;
+         begin_record /= 2, end_record /= 2) {
+      if (begin_record % 2 != 0) best = Better(best, minimum[begin_record++]);
+      if (end_record % 2 != 0) best = Better(best, minimum[--end_record]);
+    }
+    return best;
+  }
+};
+void PrefixIndex::Build(const PrefixOrdinals& ordinals, const std::vector<RankedCount>& ranked) {
+  rows.reserve(ranked.size());
+  for (std::size_t ranked_record = 0; ranked_record < ranked.size(); ++ranked_record) {
+    if (ranked[ranked_record].id == kEosId) continue;  // Prefixes never emit EOS.
+    rows.push_back({ordinals.at(ranked[ranked_record].id),
+                    static_cast<RecordOrdinal>(ranked_record)});
+  }
+  std::sort(rows.begin(), rows.end(), [](const PrefixRow& left, const PrefixRow& right) {
+    return left.lexicon_ordinal < right.lexicon_ordinal;
+  });
+  minimum.assign(rows.size() * 2, kNoRecord);
+  for (std::size_t record = 0; record < rows.size(); ++record)
+    minimum[rows.size() + record] = static_cast<RecordOrdinal>(record);
+  for (std::size_t node = rows.size(); node > 1;) {
+    --node;
+    minimum[node] = Better(minimum[node * 2], minimum[node * 2 + 1]);
+  }
+}
+struct PrefixCursor {
+  struct Span {
+    std::size_t begin_record;
+    std::size_t end_record;
+    RecordOrdinal best_record;
+    RecordOrdinal ranked_record;
+  };
+  const PrefixIndex* index;
+  std::vector<Span> heap;
+  static bool Worse(const Span& left, const Span& right) {
+    return left.ranked_record > right.ranked_record;
+  }
+  PrefixCursor(const PrefixIndex& prefix, RecordOrdinal begin_lexicon_record,
+               RecordOrdinal end_lexicon_record) : index(&prefix) {
+    Add(prefix.Lower(begin_lexicon_record), prefix.Lower(end_lexicon_record));
+  }
+  void Add(std::size_t begin_record, std::size_t end_record) {
+    if (begin_record == end_record) return;
+    const auto best = index->Best(begin_record, end_record);
+    heap.push_back({begin_record, end_record, best, index->rows[best].ranked_ordinal});
+    std::push_heap(heap.begin(), heap.end(), Worse);
+  }
+  bool empty() const { return heap.empty(); }
+  RecordOrdinal Front() const { return heap.front().ranked_record; }
+  void Pop() {
+    std::pop_heap(heap.begin(), heap.end(), Worse);
+    const auto span = heap.back();
+    heap.pop_back();
+    Add(span.begin_record, span.best_record);
+    Add(static_cast<std::size_t>(span.best_record) + 1, span.end_record);
+  }
+};
+
 struct Distribution {
   std::map<LexemeId, Count> counts;
   std::vector<RankedCount> ranked;
+  std::unique_ptr<const PrefixIndex> prefix_global;
+  // Omitted on monolingual models; global lexical ordering is identical there.
+  std::unique_ptr<const PrefixIndex> prefix_language;
   Count total = 0;
   Count Get(LexemeId id) const {
     const auto found = counts.find(id);
@@ -83,6 +176,20 @@ struct Distribution {
     std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
       return a.count != b.count ? a.count > b.count : a.id < b.id;
     });
+  }
+  void IndexPrefixes(const PrefixOrdinals& global, const PrefixOrdinals* language) {
+    if (ranked.empty()) return;
+    auto global_index = std::make_unique<PrefixIndex>();
+    global_index->Build(global, ranked);
+    prefix_global = std::move(global_index);
+    if (language) {
+      auto language_index = std::make_unique<PrefixIndex>();
+      language_index->Build(*language, ranked);
+      prefix_language = std::move(language_index);
+    }
+  }
+  const PrefixIndex& Prefix(bool language_filtered) const {
+    return language_filtered && prefix_language ? *prefix_language : *prefix_global;
   }
 };
 struct CountIndexes {
@@ -107,6 +214,11 @@ struct CountIndexes {
     unigram.Rank();
     for (auto& item : bigram) item.second.Rank();
     for (auto& item : trigram) item.second.Rank();
+  }
+  void IndexPrefixes(const PrefixOrdinals& global, const PrefixOrdinals* language) {
+    unigram.IndexPrefixes(global, language);
+    for (auto& item : bigram) item.second.IndexPrefixes(global, language);
+    for (auto& item : trigram) item.second.IndexPrefixes(global, language);
   }
 };
 
@@ -388,6 +500,72 @@ struct Model::Impl {
   std::vector<LexemeRecord> lexicon;
   std::set<LexemeId> ids;
   CountIndexes counts;
+  std::vector<const LexemeRecord*> prefix_lexicon;
+  std::vector<const LexemeRecord*> prefix_lexicon_by_language;
+  PrefixOrdinals prefix_ordinals;
+  PrefixOrdinals prefix_ordinals_by_language;
+
+  void IndexPrefixes() {
+    prefix_lexicon.reserve(lexicon.size());
+    for (const auto& row : lexicon) prefix_lexicon.push_back(&row);
+    std::sort(prefix_lexicon.begin(), prefix_lexicon.end(), [](const auto* left, const auto* right) {
+      if (left->normalized_utf8 != right->normalized_utf8)
+        return left->normalized_utf8 < right->normalized_utf8;
+      return left->id < right->id;
+    });
+    prefix_ordinals.reserve(lexicon.size());
+    for (std::size_t record = 0; record < prefix_lexicon.size(); ++record)
+      prefix_ordinals.emplace(prefix_lexicon[record]->id, static_cast<RecordOrdinal>(record));
+    const bool multilingual = std::any_of(lexicon.begin(), lexicon.end(), [&](const auto& row) {
+      return row.language_id != lexicon.front().language_id;
+    });
+    if (multilingual) {
+      prefix_lexicon_by_language = prefix_lexicon;
+      std::sort(prefix_lexicon_by_language.begin(), prefix_lexicon_by_language.end(),
+          [](const auto* left, const auto* right) {
+            return std::tie(left->language_id, left->normalized_utf8, left->id) <
+                   std::tie(right->language_id, right->normalized_utf8, right->id);
+          });
+      prefix_ordinals_by_language.reserve(lexicon.size());
+      for (std::size_t record = 0; record < prefix_lexicon_by_language.size(); ++record)
+        prefix_ordinals_by_language.emplace(prefix_lexicon_by_language[record]->id,
+                                            static_cast<RecordOrdinal>(record));
+    }
+    counts.IndexPrefixes(prefix_ordinals, multilingual ? &prefix_ordinals_by_language : nullptr);
+  }
+  struct PrefixRange {
+    RecordOrdinal begin_record = 0;
+    RecordOrdinal end_record = 0;
+    bool language_filtered = false;
+  };
+  PrefixRange ResolvePrefix(std::string_view prefix, std::string_view language) const {
+    const bool language_filtered = !language.empty();
+    const auto& ordered = language_filtered && !prefix_lexicon_by_language.empty() ?
+        prefix_lexicon_by_language : prefix_lexicon;
+    auto begin = ordered.begin(), end = ordered.end();
+    if (language_filtered) {
+      if (prefix_lexicon_by_language.empty()) {
+        if (lexicon.front().language_id != language) return {0, 0, true};
+      } else {
+        begin = std::lower_bound(begin, end, language, [](const auto* row, std::string_view key) {
+          return row->language_id < key;
+        });
+        end = std::upper_bound(begin, end, language, [](std::string_view key, const auto* row) {
+          return key < row->language_id;
+        });
+      }
+    }
+    // Compare whole valid UTF-8 prefixes; no fabricated byte-successor string or
+    // truncated scalar. Both interval bounds take logarithmic lexical lookups.
+    begin = std::lower_bound(begin, end, prefix, [](const auto* row, std::string_view key) {
+      return row->normalized_utf8.compare(0, key.size(), key) < 0;
+    });
+    end = std::upper_bound(begin, end, prefix, [](std::string_view key, const auto* row) {
+      return row->normalized_utf8.compare(0, key.size(), key) > 0;
+    });
+    return {static_cast<RecordOrdinal>(begin - ordered.begin()),
+            static_cast<RecordOrdinal>(end - ordered.begin()), language_filtered};
+  }
 
   const LexemeRecord* Find(LexemeId id) const {
     const auto found = std::lower_bound(lexicon.begin(), lexicon.end(), id,
@@ -424,7 +602,8 @@ struct Model::Impl {
       score.Interpolate(personal->Trigram(context[0], context[1]), kPersonalPrior);
     return score;
   }
-  Status PreparePersonal(const PersonalCounts* personal, CountIndexes* out) const {
+  Status PreparePersonal(const PersonalCounts* personal, CountIndexes* out,
+                         bool index_prefixes = false) const {
     if (!personal) return Status::kOk;
     std::size_t records = 0;
     for (const auto count : {personal->unigrams.size(), personal->bigrams.size(),
@@ -435,6 +614,9 @@ struct Model::Impl {
     if (BuildCounts(ids, personal->unigrams, personal->bigrams, personal->trigrams, out)
         != Status::kOk) return Status::kInvalidPersonalCounts;
     out->Rank();
+    if (index_prefixes)
+      out->IndexPrefixes(prefix_ordinals,
+          prefix_ordinals_by_language.empty() ? nullptr : &prefix_ordinals_by_language);
     return Status::kOk;
   }
 
@@ -447,21 +629,39 @@ struct Model::Impl {
                             std::size_t wanted, bool allow_eos, PredictResult* result) const {
     const auto score = WithPersonal(StaticScore(context), context, personal);
     std::vector<std::size_t> cursors(score.terms.size(), 0);  // ranked record ordinals
+    std::vector<PrefixCursor> prefix_cursors;
+    if (!prefix.empty()) {
+      const auto interval = ResolvePrefix(prefix, options.language_id);
+      if (interval.begin_record == interval.end_record) return {};
+      prefix_cursors.reserve(score.terms.size());
+      for (const auto& term : score.terms)
+        prefix_cursors.emplace_back(term.distribution->Prefix(interval.language_filtered),
+                                    interval.begin_record, interval.end_record);
+    }
+    const auto exhausted = [&](std::size_t list) {
+      return prefix.empty() ? cursors[list] == score.terms[list].distribution->ranked.size() :
+                              prefix_cursors[list].empty();
+    };
+    const auto front = [&](std::size_t list) -> const RankedCount& {
+      const auto record = prefix.empty() ? cursors[list] : prefix_cursors[list].Front();
+      return score.terms[list].distribution->ranked[record];
+    };
     std::unordered_set<LexemeId> seen;
     std::vector<Next> best;
     best.reserve(wanted);
     for (;;) {
-      // The first list contains EVERY lexical ID plus EOS, including zero counts.
-      // Once consumed there cannot be an unseen outcome in any successor list.
-      if (cursors.front() == score.terms.front().distribution->ranked.size()) break;
+      // The first list contains EVERY admitted outcome (all lexical IDs plus
+      // EOS unfiltered, or all matching lexical IDs for a prefix), even unseen
+      // count-zero words. Exhausting it proves no unscored outcome can remain.
+      if (exhausted(0)) break;
       long double bound = score.constant;
       long double largest_contribution = -1.0L;
       std::size_t selected_list = score.terms.size();
       for (std::size_t list = 0; list < score.terms.size(); ++list) {
         const auto& term = score.terms[list];
-        if (cursors[list] == term.distribution->ranked.size()) continue;
+        if (exhausted(list)) continue;
         const long double contribution = term.coefficient *
-            static_cast<long double>(term.distribution->ranked[cursors[list]].count);
+            static_cast<long double>(front(list).count);
         bound += contribution;
         if (contribution > largest_contribution) {
           largest_contribution = contribution;
@@ -479,7 +679,9 @@ struct Model::Impl {
         break;
       }
       if (selected_list == score.terms.size()) break;
-      const auto id = score.terms[selected_list].distribution->ranked[cursors[selected_list]++].id;
+      const auto id = front(selected_list).id;
+      if (prefix.empty()) ++cursors[selected_list];
+      else prefix_cursors[selected_list].Pop();
       ++result->index_entries_visited;
       if (!seen.insert(id).second) continue;
       if (id == 0) { if (!allow_eos || !prefix.empty()) continue; }
@@ -527,6 +729,8 @@ std::shared_ptr<const Model> Model::FromRecords(const ModelRecords& records, Bui
     if (meta.source != SourceKind::kTestFixture && meta.source != SourceKind::kProductionCorpus)
       return fail(Status::kInvalidFormat);
     if (!IsFingerprint(meta.source_fingerprint)) return fail(Status::kInvalidFormat);
+    if (records.lexicon.size() >= static_cast<std::size_t>(kNoRecord))
+      return fail(Status::kLimitExceeded);
     if (records.lexicon.empty() || records.lexicon.size() != meta.lexeme_count ||
         meta.unigram_total == 0) return fail(Status::kInconsistentTotals);
     auto impl = std::make_unique<Impl>();
@@ -553,6 +757,7 @@ std::shared_ptr<const Model> Model::FromRecords(const ModelRecords& records, Bui
     impl->counts.unigram.counts.emplace(0, 0);
     for (const auto id : impl->ids) impl->counts.unigram.counts.emplace(id, 0);
     impl->counts.Rank();
+    impl->IndexPrefixes();
     return std::shared_ptr<const Model>(new Model(std::move(impl)));
   } catch (const std::bad_alloc&) { return fail(Status::kLimitExceeded); }
     catch (const std::length_error&) { return fail(Status::kLimitExceeded); }
@@ -721,7 +926,8 @@ PredictResult Model::Predict(std::optional<std::string_view> prefix_utf8,
   }
   CountIndexes prepared;
   result.personal_preparations = personal ? 1 : 0;
-  result.status = impl_->PreparePersonal(personal, &prepared);
+  result.status = impl_->PreparePersonal(personal, &prepared,
+      !prefix.empty() && options.max_suggestions != 0);
   if (result.status != Status::kOk) return result;
   const auto known_context = impl_->PrepareContext(context, &result.context_backed_off);
   if (options.max_suggestions == 0) { result.complete = true; return result; }

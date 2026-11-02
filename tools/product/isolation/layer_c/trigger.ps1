@@ -45,9 +45,21 @@ if (-not $StageDir -or -not (Test-Path -LiteralPath $StageDir -PathType Containe
 }
 
 $sessionId = [guid]::NewGuid().ToString('N')
+# [Environment]::TickCount64 does not exist on Windows PowerShell 5.1 (.NET Framework)
+# and silently evaluates to $null there, which turned the sleep/wake detector into a
+# guaranteed false positive after 30 wall seconds. Call kernel32 directly instead.
+if (-not ('EpoLayerCTick' -as [type])) {
+  Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class EpoLayerCTick {
+  [DllImport("kernel32.dll")] public static extern ulong GetTickCount64();
+}
+'@
+}
 $startUtc = (Get-Date).ToUniversalTime()
 $deadlineUtc = $startUtc.AddMinutes(8)
-$startTick = [Environment]::TickCount64
+$startTick = [EpoLayerCTick]::GetTickCount64()
 $evidence = Join-Path $repo ('build\w3a-c-local\evidence-' + $sessionId)
 New-Item -ItemType Directory -Path $evidence -Force | Out-Null
 $testRoot = Join-Path $repo 'build\w3a-c-local\test-documents'
@@ -91,7 +103,7 @@ function Test-Flag([string]$path) {
 }
 function Test-ClockJump {
   $wall = ((Get-Date).ToUniversalTime() - $startUtc).TotalSeconds
-  $mono = ([Environment]::TickCount64 - $startTick) / 1000.0
+  $mono = ([EpoLayerCTick]::GetTickCount64() - $startTick) / 1000.0
   return (($wall - $mono) -gt 30.0)
 }
 function Stop-ProcessIfRunning($proc) {
