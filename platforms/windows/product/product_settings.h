@@ -30,6 +30,9 @@ struct ProductSettings {
   int completion_candidates = 7;  // 1..7
   bool spelling_enabled = false;
   int spelling_candidates = 3;  // 1..3
+  bool morphology_enabled = false;
+  bool abbreviation_enabled = false;
+  bool two_edit_spelling_enabled = false;
   CandidateDisplay candidate_display = CandidateDisplay::kHost;
 
   static ProductSettings Defaults() { return ProductSettings{}; }

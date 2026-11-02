@@ -53,7 +53,7 @@ English > Chinese > French > Japanese > Korean > generic i18n
   phase report then had to open by declaring a conflict with it.
 - Permanent, phase-independent constraints: the language priority of §1, the privacy and
   offline rules of §2, honesty in §3, unit discipline in §5, verify-against-real-sources in
-  §6, byte-clean third parties in §7, undecided licensing in §8, git safety in §9, build
+  §6, byte-clean third parties in §7, licensing in §8, git safety in §9, build
   hygiene in §10. These bind in every phase.
 - Anything beyond the assigned phase goes into "open questions" in the phase report, not
   into code. If a task brief asks for work that a permanent rule forbids, the brief wins
@@ -88,8 +88,13 @@ English > Chinese > French > Japanese > Korean > generic i18n
 
 ## 8. Licensing
 
-- The EpoCanva licence is **undecided**. Do not add licence headers, LICENSE files,
-  SPDX identifiers, or contributor licence text on your own initiative.
+- Project-owned EpoCanva code is licensed under **AGPL-3.0-only**, as explicitly
+  selected by the project owner. Preserve the complete root `LICENSE` and the
+  project licensing decision record when distributing project code.
+- Third-party code, dictionaries, corpora and generated data retain their own
+  licences and notices. The project licence does not grant rights to those works.
+- Do not add contributor licence terms or change the selected licence on your own
+  initiative.
 
 ## 9. Git and workspace safety
 

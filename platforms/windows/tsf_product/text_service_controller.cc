@@ -10,6 +10,7 @@
 #include "module_lifetime.h"
 #include "module_state.h"
 #include "product_display_preference.h"
+#include "product_io.h"
 #include "product_paths.h"
 #include "product_settings.h"
 
@@ -191,7 +192,8 @@ bool ProductTextController::Start(const Options& options, std::wstring* why) {
   // transaction, so it would never publish the value. In that one case read it here, once
   // per activation. A fresh engine start stays free of synchronous settings I/O on the STA;
   // that timing is what the direct-sink regression tests exercise.
-  if (ProductEngineBootstrap::Instance().state() == EngineBootstrapState::kReady) {
+  if (ProductEngineBootstrap::Instance().state() ==
+      ::epocanva::product::EngineBootstrapState::kReady) {
     ::epocanva::product::ProductPaths display_paths;
     std::wstring display_why;
     if (::epocanva::product::ResolveProductPaths(ModuleInstance(), &display_paths,
@@ -276,7 +278,7 @@ void ProductTextController::TryAttachEngine() {
     std::wstring acquire_why;
     if (!ProductEngineBootstrap::Instance().AcquireRunning(&attachment, &acquire_why)) {
       TraceStage("attach_acquire_failed", 1);
-      engine_failure_ = std::string(acquire_why.begin(), acquire_why.end());
+      engine_failure_ = ::epocanva::product::WideToUtf8(acquire_why);
       attaching_ = false;
       return;
     }
@@ -301,7 +303,7 @@ void ProductTextController::TryAttachEngine() {
   if (!BuildEnginePipeline(&build_why)) {
     TraceStage("attach_pipeline_failed", 1);
     ++engine_attach_failures_;
-    engine_failure_ = std::string(build_why.begin(), build_why.end());
+    engine_failure_ = ::epocanva::product::WideToUtf8(build_why);
     ResetObjects();
     std::shared_ptr<ProductEngineAttachment> failed = std::move(engine_);
     attaching_ = false;
@@ -346,7 +348,7 @@ bool ProductTextController::BuildEnginePipeline(std::wstring* why) {
   std::string subscribe_error;
   if (!observer_->Subscribe(thread_manager_, this, &subscribe_error)) {
     if (why != nullptr) {
-      *why = std::wstring(subscribe_error.begin(), subscribe_error.end());
+      *why = ::epocanva::product::Utf8ToWide(subscribe_error);
     }
     return false;
   }
@@ -1640,7 +1642,7 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   const std::wstring bootstrap_failure = ProductEngineBootstrap::Instance().failure();
   diagnostics.engine_failure =
       engine_failure_.empty()
-          ? std::string(bootstrap_failure.begin(), bootstrap_failure.end())
+          ? ::epocanva::product::WideToUtf8(bootstrap_failure)
           : engine_failure_;
   diagnostics.literal_key_downs = literal_key_downs_;
   diagnostics.engine_attach_attempts = engine_attach_attempts_;

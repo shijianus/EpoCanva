@@ -1,0 +1,20 @@
+# Exact exit and marker checks: a crash or missing executable cannot pass.
+foreach(required PROBE MODE EXPECTED_EXIT EXPECTED_MARKER)
+  if(NOT DEFINED ${required})
+    message(FATAL_ERROR "Missing ${required}")
+  endif()
+endforeach()
+execute_process(COMMAND "${PROBE}" "${MODE}"
+  RESULT_VARIABLE actual_exit OUTPUT_VARIABLE output ERROR_VARIABLE error
+  TIMEOUT 20)
+if(NOT "${actual_exit}" STREQUAL "${EXPECTED_EXIT}")
+  message(FATAL_ERROR "Unexpected exit: ${actual_exit}; expected ${EXPECTED_EXIT}. ${output} ${error}")
+endif()
+string(FIND "${output}" "${EXPECTED_MARKER}" marker_utf8_byte)
+if(marker_utf8_byte EQUAL -1)
+  message(FATAL_ERROR "Required result marker missing. ${output} ${error}")
+endif()
+if(NOT EXPECTED_EXIT EQUAL 0 AND output MATCHES "RESULT PASS")
+  message(FATAL_ERROR "Failing mode emitted a success marker.")
+endif()
+message(STATUS "${MODE}: exit ${actual_exit}; ${EXPECTED_MARKER}")

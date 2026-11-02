@@ -2156,9 +2156,9 @@ bool RunEngineMissingCase(const std::filesystem::path& stage,
   const bool activated =
       ActivateProduct(&product, host->thread_manager_for_test(), stage, &why);
   LocalCheck(activated,
-             "missing rime.dll: activation succeeds immediately in literal mode");
+             "unusable rime.dll: activation succeeds immediately in literal mode");
   ProductSeam seam = LoadSeam(product);
-  LocalCheck(seam.startup_usable(), "missing rime.dll: startup seam available");
+  LocalCheck(seam.startup_usable(), "unusable rime.dll: startup seam available");
   int state = -1;
   const ULONGLONG deadline = ::GetTickCount64() + 15000;
   for (;;) {
@@ -2172,27 +2172,27 @@ bool RunEngineMissingCase(const std::filesystem::path& stage,
     PumpSlice(*host, 20);
   }
   LocalCheck(state == 3,
-             "missing rime.dll: the asynchronous start reports failure, not success");
+             "unusable rime.dll: the asynchronous start reports failure, not success");
   InputRoute route{host.get(), document, product.sink, document->context()};
   SeamCounters counters;
   (void)seam.query(&counters);
   LocalCheck(counters.engine_ready == 0,
-             "missing rime.dll: no engine pipeline is claimed");
+             "unusable rime.dll: no engine pipeline is claimed");
   LocalCheck(SendText(&route, L"abc", false, &error),
-             "missing rime.dll: every key stays with the host: " + error);
+             "unusable rime.dll: every key stays with the host: " + error);
   LocalCheck(document->text_utf16() == L"abc",
-             "missing rime.dll: the literal path delivers the host's own text exactly");
+             "unusable rime.dll: the literal path delivers the host's own text exactly");
   (void)seam.query(&counters);
   LocalCheck(counters.literal_key_downs >= 3,
-             "missing rime.dll: the literal path is counted");
+             "unusable rime.dll: the literal path is counted");
   LocalCheck(std::filesystem::is_regular_file(marker),
-             "missing rime.dll: the marker is kept for a retry");
+             "unusable rime.dll: the marker is kept for a retry");
   LocalCheck(!std::filesystem::is_regular_file(compiled),
-             "missing rime.dll: no compiled schema is claimed");
+             "unusable rime.dll: no compiled schema is claimed");
   const ULONGLONG stop_start = ::GetTickCount64();
   (void)product.tip->Deactivate();
   LocalCheck(::GetTickCount64() - stop_start < 1000,
-             "missing rime.dll: deactivation does not wait for the failed start");
+             "unusable rime.dll: deactivation does not wait for the failed start");
   ReleaseProduct(&product, false);
   host.reset();
   (void)FreeProductModule(&product, 10000, "engine-missing");
@@ -3904,6 +3904,33 @@ bool RunLeaseLockCase(const std::filesystem::path& stage,
              "lease: the product engine is running");
   PumpSlice(*test_case.host, 300);
 
+  using LeaseCountFn = unsigned long long (*)();
+  const auto lease_count = reinterpret_cast<LeaseCountFn>(
+      ::GetProcAddress(test_case.product.module, "EpoCanvaTestEngineHostLeaseCount"));
+  auto wait_leases = [lease_count](unsigned long long expected) {
+    const ULONGLONG deadline = ::GetTickCount64() + 10000;
+    while (lease_count != nullptr && lease_count() != expected &&
+           ::GetTickCount64() < deadline) {
+      ::Sleep(10);
+    }
+    return lease_count != nullptr && lease_count() == expected;
+  };
+  HANDLE ready_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  HANDLE release_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  LocalCheck(ready_event != nullptr && release_event != nullptr,
+             "lease: second-attachment ordering events exist");
+  if (ready_event == nullptr || release_event == nullptr) {
+    if (ready_event != nullptr) ::CloseHandle(ready_event);
+    if (release_event != nullptr) ::CloseHandle(release_event);
+    EndCase(&test_case);
+    return false;
+  }
+  HoldSessionResult second;
+  std::thread waiter(HoldSessionWorker, stage, ready_event, release_event, &second);
+  const bool ready = ::WaitForSingleObject(ready_event, 25000) == WAIT_OBJECT_0;
+  LocalCheck(ready && second.ok.load() && wait_leases(2),
+             "lease: two real attachments share the running engine");
+
   const std::filesystem::path marker = user_root / L"engine" / L"deploy-required";
   const std::filesystem::path compiled =
       user_root / L"engine" / L"build" / L"epocanva_english.schema.yaml";
@@ -3943,7 +3970,32 @@ bool RunLeaseLockCase(const std::filesystem::path& stage,
   const std::string during = ReadNarrow(state);
   LocalCheck(during.find(deferred.fingerprint) == std::string::npos,
              "lease: no new fingerprint was recorded during the deferral");
-  EndCase(&test_case);
+
+  // The first attachment originally owned the only file handle. Retire it first,
+  // and observe its asynchronous lease release before asking another process to deploy.
+  ReleaseProduct(&test_case.product, true);
+  delete test_case.host;
+  test_case.host = nullptr;
+  test_case.doc = nullptr;
+  LocalCheck(wait_leases(1), "lease: first attachment released while second stays live");
+  std::filesystem::remove(result, ec);
+  const DeployChildOutcome one_remaining =
+      RunDeployChild(deployment_exe, user_root, compiled, result);
+  LocalCheck(one_remaining.launched && one_remaining.exited && one_remaining.code == 0 &&
+                 one_remaining.completed && !one_remaining.requested,
+             "lease: second attachment alone still prevents cross-process deployment");
+  LocalCheck(std::filesystem::is_regular_file(compiled) &&
+                 std::filesystem::is_regular_file(marker) && ReadNarrow(state) == during,
+             "lease: surviving attachment keeps compiled output and deferred marker intact");
+
+  ::SetEvent(release_event);
+  waiter.join();
+  ::CloseHandle(release_event);
+  ::CloseHandle(ready_event);
+  LocalCheck(wait_leases(0), "lease: final attachment released its engine lease");
+  DeferProductModule(&test_case.product);
+  LocalCheck(FreeDeferredProductModules(10000, "lease-final"),
+             "lease: the engine stopped before both module references were released");
 
   std::filesystem::remove(result, ec);
   const DeployChildOutcome applied =
@@ -3990,7 +4042,8 @@ bool RunColdTokenCase(const std::filesystem::path& stage,
   reference.HostInsert(L"a");
   // The field becomes readable. The host insertion above already updated the caret; the
   // rebind now resolves Allowed and the suggestion path is available.
-  test_case.doc->SetScopeAnswer(epocanva::tsf::edit::test::TestScopeAnswer::kNone, {});
+  test_case.doc->SetScopeAnswer(epocanva::tsf::edit::test::TestScopeAnswer::kScopes,
+                               {IS_DEFAULT});
   PumpSlice(*test_case.host, 1000);
   std::vector<bool> eaten;
   LocalCheck(SendTextAdaptive(&route, L"bc", &eaten, &error),
@@ -4178,7 +4231,7 @@ int main(int argc, char** argv) {
       lexicon.empty() || run_root.empty() || !run_root.is_absolute()) {
     std::cout
         << "usage error: --product-dll --rime-dll --data-dir --lexicon "
-           "--run-root <absolute> [--mode input|engine-missing|candidate|"
+           "--run-root <absolute> [--mode input|engine-missing|engine-mismatch|candidate|"
            "replacement-faults|suggestion-resync|continuous|capacity|capacity-continue|"
            "unload-contract|degraded-keys|startup|startup-lifecycle] "
            "[--watchdog-ms N]\n";
@@ -4359,13 +4412,20 @@ int main(int argc, char** argv) {
     LocalCheck(PrepareUserRoot(user_root, settings, &why),
                "startup-lifecycle: settings and marker written");
     RunStartupLifecycleCase(stage, user_root);
-  } else if (mode == "engine-missing") {
+  } else if (mode == "engine-missing" || mode == "engine-mismatch") {
     std::wstring why;
+    const bool mismatch = mode == "engine-mismatch";
     const bool staged = StageProduct(stage, product_dll, rime_dll, data_dir, lexicon,
-                                     false, &why);
-    LocalCheck(staged, "missing engine: product staged without rime.dll");
+                                     mismatch, &why);
+    LocalCheck(staged, "unusable engine: product staged");
+    if (mismatch) {
+      std::ofstream changed(stage / L"rime.dll", std::ios::binary | std::ios::app);
+      changed.put('\0');
+      changed.close();
+      LocalCheck(changed.good(), "engine mismatch: appended one byte to the copied DLL");
+    }
     LocalCheck(PrepareUserRoot(user_root, settings, &why),
-               "missing engine: settings and marker written");
+               "unusable engine: settings and marker written");
     RunEngineMissingCase(stage, user_root, marker, compiled);
   } else {
     std::wstring why;

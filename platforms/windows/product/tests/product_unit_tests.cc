@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "product_diagnostics.h"
 #include "product_io.h"
 #include "product_manifest.h"
 #include "product_paths.h"
@@ -255,7 +257,7 @@ void TestManifest(const std::filesystem::path& root) {
 
   auto manifest_text = [&]() {
     return std::string("epocanva-package-manifest 1\nversion=0.1.0-w1\ncommit=abc1234\n"
-                       "file\tEpoCanva.exe\t") + exe_hash + "\t" +
+                       "internal-only=0\nfile\tEpoCanva.exe\t") + exe_hash + "\t" +
            std::to_string(exe_size) + "\nfile\tdata/x.txt\t" + data_hash + "\t" +
            std::to_string(data_size) + "\n";
   };
@@ -306,6 +308,193 @@ void TestManifest(const std::filesystem::path& root) {
   expect_load_failure("epocanva-package-manifest 1\nfile\tEpoCanva.exe\t" + exe_hash +
                           "\tnot-a-number\n",
                       "bad byte count");
+  expect_load_failure(manifest_text() + "version=other\n", "duplicate version key");
+  expect_load_failure(manifest_text() + "commit=other\n", "duplicate commit key");
+  expect_load_failure(manifest_text() + "internal-only=1\n", "duplicate policy key");
+  expect_load_failure(manifest_text() + "file\tepocanva.EXE\t" + exe_hash + "\t1\n",
+                      "case-insensitive duplicate path");
+  std::string missing_policy = manifest_text();
+  missing_policy.erase(missing_policy.find("internal-only=0\n"), std::string("internal-only=0\n").size());
+  expect_load_failure(missing_policy, "missing explicit internal-only policy");
+  Check(!epocanva::product::ValidateProductAcceptancePolicy(manifest, &why),
+        "format 1 loads for diagnosis but cannot be ready");
+
+  const std::string rows = "file\tEpoCanva.exe\t" + exe_hash + "\t" +
+      std::to_string(exe_size) + "\nfile\tdata/x.txt\t" + data_hash + "\t" +
+      std::to_string(data_size) + "\n";
+  const std::string metadata = "epocanva-package-manifest 2\nversion=0.1.0-w1\ncommit=abc1234\n";
+  const std::string policies = "acceptance-profile=internal-unsigned\n"
+      "distribution-policy=internal-only\npath-exception=none\n";
+  const std::string format2 = metadata + policies + rows;
+  Check(epocanva::product::WriteTextAtomically(manifest_path, format2, &why), "write format 2 manifest");
+  Check(epocanva::product::LoadProductManifest(manifest_path, &manifest, &why), "format 2 loads");
+  Check(manifest.format == 2 && manifest.acceptance_profile == "internal-unsigned" &&
+        manifest.distribution_policy == "internal-only" && manifest.path_exception == "none" &&
+        epocanva::product::ValidateProductAcceptancePolicy(manifest, &why),
+        "internal unsigned and strict paths are independent of public distribution");
+  for (const std::string key : {"acceptance-profile=internal-unsigned\n",
+                               "distribution-policy=internal-only\n", "path-exception=none\n"}) {
+    expect_load_failure(format2 + key, "duplicate format 2 policy");
+    std::string missing = format2;
+    missing.erase(missing.find(key), key.size());  // UTF-8 code-unit (byte) offsets
+    expect_load_failure(missing, "missing format 2 policy");
+  }
+  expect_load_failure(metadata + "acceptance-profile=true\ndistribution-policy=internal-only\npath-exception=none\n" + rows,
+                      "boolean is not an acceptance profile");
+  expect_load_failure(format2 + "internal-only=0\n", "mixed legacy and new metadata");
+  expect_load_failure(manifest_text() + policies, "new policy on legacy header");
+  manifest.path_exception = "embedded-build-paths";
+  Check(!epocanva::product::ValidateProductAcceptancePolicy(manifest, &why),
+        "internal unsigned cannot waive embedded build paths");
+  manifest.path_exception = "none";
+  manifest.acceptance_profile = "public-signed";
+  Check(!epocanva::product::ValidateProductAcceptancePolicy(manifest, &why),
+        "public acceptance requires public candidate metadata");
+  manifest.distribution_policy = "public-candidate";
+  Check(epocanva::product::ValidateProductAcceptancePolicy(manifest, &why),
+        "public candidate policy parses without claiming authorization or signatures");
+}
+
+void TestProductPayloadPolicy(const std::filesystem::path& root,
+                              const std::filesystem::path& version_file) {
+  using namespace epocanva::product;
+  // The VERSION argument is already supplied by the existing CTest registration.
+  const auto repo = version_file.parent_path().parent_path().parent_path().parent_path();
+  const auto package = root / "package";
+  const auto user = root / "user";  // outside the package, as in a real installation
+  ProductManifest manifest;
+  manifest.format = 2;
+  manifest.version = WideToUtf8(ProductVersion());
+  manifest.commit = WideToUtf8(ProductCommit());
+  manifest.acceptance_profile = "internal-unsigned";
+  manifest.distribution_policy = "internal-only";
+  manifest.path_exception = "none";
+  std::wstring why;
+  for (const auto& required : RequiredProductFiles()) {
+    const auto destination = package / std::filesystem::u8path(required.relative_path);
+    const std::string text = required.source[0] == '\0'
+        ? std::string("test payload for ") + required.relative_path + "\n"
+        : ReadText(repo / std::filesystem::u8path(required.source));
+    Check(!text.empty(), std::string("required fixture source exists: ") + required.relative_path);
+    Check(WriteTextAtomically(destination, text, &why), "copy required fixture payload");
+    ManifestEntry entry;
+    entry.relative_path = required.relative_path;
+    Check(Sha256File(destination, &entry.sha256, &entry.bytes, &why), "hash fixture payload");
+    manifest.files.push_back(entry);
+  }
+  auto write_manifest = [&]() {
+    std::string text = "epocanva-package-manifest " + std::to_string(manifest.format) +
+        "\nversion=" + manifest.version + "\ncommit=" + manifest.commit + "\n";
+    if (manifest.format == 1) {
+      text += std::string("internal-only=") + (manifest.internal_only ? "1\n" : "0\n");
+    } else {
+      text += "acceptance-profile=" + manifest.acceptance_profile +
+          "\ndistribution-policy=" + manifest.distribution_policy +
+          "\npath-exception=" + manifest.path_exception + "\n";
+    }
+    for (const auto& entry : manifest.files) {
+      text += "file\t" + entry.relative_path + "\t" + entry.sha256 + "\t" +
+              std::to_string(entry.bytes) + "\n";
+    }
+    Check(WriteTextAtomically(package / "package.manifest", text, &why), "write product fixture manifest");
+  };
+  auto collect = [&]() {
+    SetUserRootOverrideForProcess(user);
+    ProductPaths paths;
+    Check(ResolveProductPaths(nullptr, &paths, &why), "resolve isolated status paths");
+    SetUserRootOverrideForProcess({});
+    paths.product_root = package;
+    paths.licenses_dir = package / "licenses";
+    paths.manifest_file = package / "package.manifest";
+    ProductStatus status;
+    Check(CollectProductStatusForPaths(paths, &status, &why), "collect isolated package status");
+    return status;
+  };
+  write_manifest();
+  Check(ValidateProductPayloadPolicy(manifest, &why), "exact product payload policy accepts fixture");
+  Check(VerifyProductFileSet(package, manifest, &why), "exact on-disk product file set accepted");
+  Check(collect().package_ready, "complete package reports ready");
+  Check(WriteTextAtomically(user / "engine" / "deploy-only.bin", "user deployment\n", &why),
+        "create user deployment file outside package");
+  Check(collect().package_ready, "user deployment files do not pollute package verification");
+
+  const ProductManifest complete = manifest;
+  for (std::size_t entry_index = 0; entry_index < complete.files.size(); ++entry_index) {
+    manifest = complete;
+    const auto entry = manifest.files[entry_index];
+    const auto file = package / std::filesystem::u8path(entry.relative_path);
+    const std::string original = ReadText(file);
+    std::error_code ec;
+    std::filesystem::remove(file, ec);
+    Check(!collect().package_ready, "missing required file rejected: " + entry.relative_path);
+    manifest.files.erase(manifest.files.begin() + entry_index);
+    write_manifest();
+    Check(!ValidateProductPayloadPolicy(manifest, &why),
+          "deleted manifest row rejected: " + entry.relative_path);
+    Check(!collect().package_ready, "removing both file and manifest row cannot hide omission");
+    Check(WriteTextAtomically(file, original, &why), "restore required file");
+    manifest = complete;
+    write_manifest();
+  }
+
+  // Alter every fixed-content file while also updating its manifest digest. Checking
+  // only the mutable manifest would accept each of these packages.
+  for (const auto& required : RequiredProductFiles()) {
+    if (required.sha256[0] == '\0') { continue; }
+    manifest = complete;
+    const auto file = package / std::filesystem::u8path(required.relative_path);
+    const std::string original = ReadText(file);
+    std::string changed = original;
+    changed[0] = changed[0] == 'X' ? 'Y' : 'X';
+    Check(WriteTextAtomically(file, changed, &why), "change fixed payload without changing byte count");
+    auto found = std::find_if(manifest.files.begin(), manifest.files.end(),
+        [&required](const ManifestEntry& entry) { return entry.relative_path == required.relative_path; });
+    Check(Sha256File(file, &found->sha256, &found->bytes, &why), "rehash altered fixed payload");
+    write_manifest();
+    Check(!collect().package_ready,
+          std::string("rewriting manifest cannot bless changed fixed content: ") + required.relative_path);
+    Check(WriteTextAtomically(file, original, &why), "restore fixed payload");
+  }
+  manifest = complete;
+  write_manifest();
+  const auto extra = package / "unlisted.dll";
+  Check(WriteTextAtomically(extra, "unlisted\n", &why), "inject extra package file");
+  Check(!collect().package_ready, "unlisted file is rejected");
+  ManifestEntry extra_entry;
+  extra_entry.relative_path = "unlisted.dll";
+  Check(Sha256File(extra, &extra_entry.sha256, &extra_entry.bytes, &why), "hash extra file");
+  manifest.files.push_back(extra_entry);
+  write_manifest();
+  Check(!collect().package_ready, "listing an extra file still violates exact policy");
+  std::error_code ec;
+  std::filesystem::remove(extra, ec);
+  manifest = complete;
+  manifest.commit += "-wrong";
+  write_manifest();
+  Check(!collect().package_ready, "commit mismatch is an error, not a warning");
+  manifest = complete;
+  manifest.path_exception = "embedded-build-paths";
+  write_manifest();
+  const auto internal = collect();
+  Check(!internal.package_ready && internal.internal_only,
+        "path exception cannot report ready even for internal acceptance");
+  manifest = complete;
+  manifest.format = 1;
+  manifest.internal_only = false;
+  write_manifest();
+  const auto legacy = collect();
+  Check(legacy.manifest_ok && !legacy.package_ready && legacy.manifest_format == 1,
+        "legacy strict-path manifest remains diagnostic-only");
+  manifest = complete;
+  write_manifest();
+  const auto restored = collect();
+  Check(restored.package_ready && restored.internal_only, "strict internal format 2 reports local integrity ready");
+  const auto report = FormatProductReport(restored);
+  Check(report.find("acceptance_profile=internal-unsigned\n") != std::string::npos &&
+        report.find("distribution_policy=internal-only\n") != std::string::npos &&
+        report.find("path_exception=none\n") != std::string::npos &&
+        report.find("readiness_scope=local-package-integrity-only\n") != std::string::npos,
+        "diagnosis distinguishes local integrity from release acceptance");
 }
 
 void TestVersionAndIcon(const std::filesystem::path& exe,
@@ -453,6 +642,7 @@ int main(int argc, char** argv) {
   }
   TestAtomicWrite(root / "atomic");
   TestManifest(root / "manifest");
+  TestProductPayloadPolicy(root / "payload-policy", version_file);
   TestPaths(root / "paths");
   TestVersionAndIcon(exe, product_dll, version_file);
 

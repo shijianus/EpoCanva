@@ -321,6 +321,12 @@ extern "C" int EpoCanvaTestEngineHostState() {
   return static_cast<int>(diagnostics.state);
 }
 
+extern "C" unsigned long long EpoCanvaTestEngineHostLeaseCount() {
+  epocanva::tsf::EngineHostDiagnostics diagnostics;
+  epocanva::tsf::EngineHostBroker::Instance().Snapshot(&diagnostics);
+  return diagnostics.lease_count;
+}
+
 extern "C" int EpoCanvaTestModuleState(long long* live_objects, long long* server_locks,
                                        long long* host_active, long long* host_failed,
                                        long long* guarded_objects) {

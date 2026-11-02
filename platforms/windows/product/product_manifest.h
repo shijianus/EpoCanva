@@ -1,8 +1,8 @@
 // EpoCanva W1 -- package manifest.
 //
-// A fixed, line-oriented format, not JSON or YAML: one header, two key=value lines and
-// one tab-separated row per payload file. The EXE verifies every row with BCrypt SHA-256
-// before it reports a ready package. The manifest is an integrity index, not a signature.
+// A fixed, line-oriented format: one header, unique identity/policy keys and one
+// tab-separated row per payload file. RequiredProductFiles is compiled in from the
+// shared staging policy. SHA-256 verifies bytes, not publisher identity or legal clearance.
 #ifndef EPOCANVA_PRODUCT_MANIFEST_H_
 #define EPOCANVA_PRODUCT_MANIFEST_H_
 
@@ -24,8 +24,30 @@ struct ProductManifest {
   int format = 0;
   std::string version;
   std::string commit;
+  bool internal_only = true;  // format 1 legacy field; never authorizes acceptance
+  std::string acceptance_profile;   // internal-unsigned | public-signed (format 2)
+  std::string distribution_policy;  // internal-only | public-candidate (not approval)
+  std::string path_exception;       // none | embedded-build-paths
   std::vector<ManifestEntry> files;
 };
+
+struct RequiredProductFile {
+  const char* relative_path;
+  const char* source;         // repository-relative; empty for receipt/generated files
+  const char* sha256;         // fixed exact-byte digest, or empty for receipt/generated
+  std::uint64_t bytes;        // byte count, zero only for receipt/generated files
+};
+
+const std::vector<RequiredProductFile>& RequiredProductFiles();
+// Format 1 is readable for diagnosis only. Format 2 policy values are independent;
+// a path exception always prevents package readiness, even for internal acceptance.
+bool ValidateProductAcceptancePolicy(const ProductManifest& manifest, std::wstring* why);
+// Exact required path set and fixed-content identities, independent of on-disk bytes.
+bool ValidateProductPayloadPolicy(const ProductManifest& manifest, std::wstring* why);
+// Rejects unlisted files/reparse points inside the package root only. User data is
+// deliberately not scanned: it lives outside the package root.
+bool VerifyProductFileSet(const std::filesystem::path& root,
+                          const ProductManifest& manifest, std::wstring* why);
 
 struct FileVerification {
   ManifestEntry entry;

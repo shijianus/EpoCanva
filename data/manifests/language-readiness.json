@@ -1,0 +1,36 @@
+{
+  "format": 1,
+  "required_languages": ["en", "zh", "fr", "ja", "ko"],
+  "languages": [
+    {
+      "id": "en",
+      "status": "blocked",
+      "data_status": "incomplete",
+      "reason": "Legacy completion data is packaged. Independent corpus frequencies, integrated learning, full English acceptance and current installed-host evidence remain incomplete."
+    },
+    {
+      "id": "zh",
+      "status": "blocked",
+      "data_status": "absent",
+      "reason": "No selected and approved Pinyin/Zhuyin Hanzi and phrase dataset is packaged. Phonetic algorithm tests do not establish product input support."
+    },
+    {
+      "id": "fr",
+      "status": "blocked",
+      "data_status": "absent",
+      "reason": "No selected and approved French lexicon and morphology dataset is packaged. Accent composition alone does not meet language acceptance."
+    },
+    {
+      "id": "ja",
+      "status": "blocked",
+      "data_status": "absent",
+      "reason": "No selected and approved Kana-to-Kanji lexicon and conversion model is packaged. Romaji-to-Kana composition alone does not meet language acceptance."
+    },
+    {
+      "id": "ko",
+      "status": "blocked",
+      "data_status": "absent",
+      "reason": "Hangul composition and lexicon integration have not passed engine, TSF and installed-host acceptance. No dictionary candidates are packaged."
+    }
+  ]
+}

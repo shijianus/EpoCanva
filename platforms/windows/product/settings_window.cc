@@ -52,11 +52,12 @@ std::wstring AboutContent() {
   std::wstring text = L"EpoCanva English Alpha\nVersion ";
   text += ProductVersionLine();
   text += L"\n\n";
-  text += L"Project licence: undecided. This is an internal alpha build; it is not "
-          L"cleared for public redistribution.\n\n";
+  text += L"Project licence: GNU AGPL-3.0-only. This internal unsigned build has "
+          L"not passed aggregate acceptance or public distribution approval. See "
+          L"LICENSE, NOTICE.txt and license-decision.json.\n\n";
   text += L"Engine: librime 1.17.0 (BSD-3-Clause), yaml-cpp (MIT), leveldb "
           L"(BSD-3-Clause), marisa-trie (BSD-2-Clause), OpenCC (Apache-2.0), "
-          L"Boost 1.89.0 (BSL-1.0), utfcpp (MIT), darts-clone (BSD-3-Clause).\n\n";
+          L"Boost 1.89.0 (BSL-1.0), utfcpp (BSL-1.0), darts-clone (BSD-3-Clause).\n\n";
   text += L"Word list: Alt12Dicts 2of12full (public domain; acknowledgment requested), "
           L"converted from the pinned source recorded in the lexicon provenance file. "
           L"Redistribution beyond this internal alpha needs owner and legal sign-off.";
@@ -194,14 +195,14 @@ bool SettingsWindow::OnCreate() {
                             SS_LEFT, 0, margin, 56, 860, 20);
   version_ = CreateControl(L"STATIC", L"", SS_LEFT, 0, margin, 78, 860, 20);
 
-  CreateControl(L"BUTTON", L"Status", BS_GROUPBOX, 0, right_x, 108, right_width, 300);
+  CreateControl(L"BUTTON", L"Status", BS_GROUPBOX, 0, right_x, 108, right_width, 226);
   summary_ = CreateControl(L"STATIC", L"", SS_LEFT, ui::kSummary, right_x + 14, 132,
                            right_width - 28, 22);
   status_edit_ = CreateControl(
       L"EDIT", L"",
       ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER |
           WS_TABSTOP,
-      ui::kStatusEdit, right_x + 14, 158, right_width - 28, 236);
+      ui::kStatusEdit, right_x + 14, 158, right_width - 28, 160);
 
   CreateControl(L"BUTTON", L"English completion", BS_GROUPBOX, 0, margin, 108,
                 left_width, 104);
@@ -243,6 +244,20 @@ bool SettingsWindow::OnCreate() {
                 L"engine start.",
                 SS_LEFT, 0, margin + 14, 404, left_width - 28, 50);
 
+  CreateControl(L"BUTTON", L"Word and phrase suggestions", BS_GROUPBOX, 0, right_x,
+                518, right_width, 84);
+  morphology_enabled_ = CreateControl(
+      L"BUTTON", L"Offer word &forms", BS_AUTOCHECKBOX | WS_TABSTOP,
+      ui::kMorphologyEnabled, right_x + 14, 540, right_width - 28, 20);
+  abbreviation_enabled_ = CreateControl(
+      L"BUTTON", L"Offer &abbreviation and contraction expansions",
+      BS_AUTOCHECKBOX | WS_TABSTOP, ui::kAbbreviationEnabled, right_x + 14, 560,
+      right_width - 28, 20);
+  two_edit_spelling_enabled_ = CreateControl(
+      L"BUTTON", L"Offer spelling suggestions with up to &two edits",
+      BS_AUTOCHECKBOX | WS_TABSTOP, ui::kTwoEditSpellingEnabled, right_x + 14, 580,
+      right_width - 28, 20);
+
   CreateControl(L"BUTTON", L"Offline and privacy", BS_GROUPBOX, 0, margin, 470,
                 left_width, 132);
   CreateControl(L"STATIC",
@@ -253,15 +268,15 @@ bool SettingsWindow::OnCreate() {
                 L"logging.",
                 SS_LEFT, 0, margin + 14, 494, left_width - 28, 100);
 
-  CreateControl(L"BUTTON", L"Data locations", BS_GROUPBOX, 0, right_x, 418,
-                right_width, 170);
+  CreateControl(L"BUTTON", L"Data locations", BS_GROUPBOX, 0, right_x, 344,
+                right_width, 164);
   const wchar_t* labels[4] = {L"Install folder:", L"User data:", L"Settings file:",
                               L"Engine data:"};
   HWND* fields[4] = {&path_install_, &path_user_, &path_settings_, &path_engine_};
   const int field_ids[4] = {ui::kPathInstall, ui::kPathUser, ui::kPathSettings,
                             ui::kPathEngine};
   for (int index = 0; index < 4; ++index) {
-    const int y = 442 + index * 24;
+    const int y = 368 + index * 24;
     CreateControl(L"STATIC", labels[index], SS_LEFT, 0, right_x + 14, y, 80, 20);
     *fields[index] = CreateControl(L"EDIT", L"",
                                    ES_AUTOHSCROLL | ES_READONLY | WS_BORDER |
@@ -269,9 +284,9 @@ bool SettingsWindow::OnCreate() {
                                    field_ids[index], right_x + 98, y - 2, 308, 22);
   }
   CreateControl(L"BUTTON", L"&Open install", BS_PUSHBUTTON | WS_TABSTOP,
-                ui::kOpenInstall, right_x + 14, 542, 180, 28);
+                ui::kOpenInstall, right_x + 14, 468, 180, 28);
   CreateControl(L"BUTTON", L"Open &user data", BS_PUSHBUTTON | WS_TABSTOP,
-                ui::kOpenUser, right_x + 204, 542, 180, 28);
+                ui::kOpenUser, right_x + 204, 468, 180, 28);
 
   save_status_ = CreateControl(L"STATIC", L"", SS_LEFT, ui::kSaveStatus, margin, 606,
                                860, 20);
@@ -397,6 +412,12 @@ void SettingsWindow::RefreshControlsFromSettings() {
                  settings_.completion_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
   ::SendMessageW(spelling_enabled_, BM_SETCHECK,
                  settings_.spelling_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  ::SendMessageW(morphology_enabled_, BM_SETCHECK,
+                 settings_.morphology_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  ::SendMessageW(abbreviation_enabled_, BM_SETCHECK,
+                 settings_.abbreviation_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  ::SendMessageW(two_edit_spelling_enabled_, BM_SETCHECK,
+                 settings_.two_edit_spelling_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
   if (::SendMessageW(completion_count_, CB_GETCOUNT, 0, 0) == 0) {
     for (int count = 1; count <= 7; ++count) {
       const std::wstring label = std::to_wstring(count);
@@ -474,6 +495,12 @@ bool SettingsWindow::Save() {
       ::SendMessageW(completion_enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
   next.spelling_enabled =
       ::SendMessageW(spelling_enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  next.morphology_enabled =
+      ::SendMessageW(morphology_enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  next.abbreviation_enabled =
+      ::SendMessageW(abbreviation_enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  next.two_edit_spelling_enabled =
+      ::SendMessageW(two_edit_spelling_enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
   const LRESULT completion_index =
       ::SendMessageW(completion_count_, CB_GETCURSEL, 0, 0);
   const LRESULT spelling_index =
@@ -554,6 +581,9 @@ void SettingsWindow::OnCommand(int id, int notification, HWND control) {
         SetDirty(true);
       }
       return;
+    case ui::kMorphologyEnabled:
+    case ui::kAbbreviationEnabled:
+    case ui::kTwoEditSpellingEnabled:
     case ui::kCandidateDisplayHost:
     case ui::kCandidateDisplayAlwaysSelf:
       if (notification == BN_CLICKED) {

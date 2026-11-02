@@ -1,0 +1,6 @@
+# Hand-authored actual-engine TEST fixture only. Not product/distribution data.
+config_version: "epocanva-english-extended-fixture-v1"
+schema_list:
+  - schema: epocanva_extended_english
+menu:
+  page_size: 8

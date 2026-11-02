@@ -42,7 +42,11 @@ enum class EngineBootstrapState : std::uint8_t {
 
 const char* DescribeEngineBootstrapState(EngineBootstrapState state);
 
-// One real engine lease plus the shared user lock that keeps its compiled output alive.
+struct ProductEngineLeaseLock;
+
+// One real engine lease plus shared ownership of the process runtime's user lock.
+// Every attachment keeps that lock through its own lease release/stop. Failed
+// cleanup retains the file handle until process exit.
 // Release may block on the engine's stop/join, so callers never do it on the STA; the
 // bootstrap's ReleaseAttachmentAsync helper detaches that work.
 class ProductEngineAttachment {
@@ -63,7 +67,7 @@ class ProductEngineAttachment {
  private:
   friend class ProductEngineBootstrap;
   tsf::EngineLease lease_;
-  void* lease_lock_ = nullptr;
+  std::shared_ptr<ProductEngineLeaseLock> lease_lock_;
 };
 
 // Detaches a lease release onto its own thread. The thread holds a module reference until

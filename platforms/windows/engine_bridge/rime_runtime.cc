@@ -3,6 +3,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "../../../engine/language_packages/module_requirements.h"
 #include "english_diagnostics.h"
 #include "rime_api.h"
 #include "rime_runtime_internal.h"
@@ -157,6 +159,27 @@ bool ValidateOptions(const RuntimeOptions& options, std::string* why) {
       !ValidateDirectory(options.log_dir, "log_dir", why)) {
     return false;
   }
+  const language_packages::ModuleRequirementsStatus module_status =
+      language_packages::ValidateModuleRequirements(options.required_modules);
+  if (module_status != language_packages::ModuleRequirementsStatus::kOk) {
+    switch (module_status) {
+      case language_packages::ModuleRequirementsStatus::kEmpty:
+        *why = "required_modules must not be empty";
+        break;
+      case language_packages::ModuleRequirementsStatus::kUnsafeName:
+        *why = "required_modules contains an unsafe module identifier";
+        break;
+      case language_packages::ModuleRequirementsStatus::kUnapprovedName:
+        *why = "required_modules contains an unapproved built-in module";
+        break;
+      case language_packages::ModuleRequirementsStatus::kDuplicate:
+        *why = "required_modules contains a duplicate module identifier";
+        break;
+      case language_packages::ModuleRequirementsStatus::kOk:
+        break;
+    }
+    return false;
+  }
   if (!options.deployment.has_value()) {
     return true;
   }
@@ -266,6 +289,20 @@ RuntimeStartStatus CheckBaseModules(RuntimeCore& core, std::string* why) {
   return RuntimeStartStatus::kOk;
 }
 
+RuntimeStartStatus CheckRequestedModules(RuntimeCore& core,
+                                         const std::vector<std::string>& requested,
+                                         std::string* why) {
+  for (const std::string& name : requested) {
+    if (core.api->find_module(name.c_str()) == nullptr) {
+      *why = std::string("required module is not registered: ") + name;
+      return name == EPOCANVA_ENGLISH_MODULE_NAME
+                 ? RuntimeStartStatus::kEnglishModuleMissing
+                 : RuntimeStartStatus::kBaseModuleMissing;
+    }
+  }
+  return RuntimeStartStatus::kOk;
+}
+
 RuntimeStartStatus CheckEnglishModule(RuntimeCore& core, std::string* why) {
   RimeModule* module = core.api->find_module(EPOCANVA_ENGLISH_MODULE_NAME);
   if (module == nullptr) {
@@ -326,6 +363,9 @@ struct RimeRuntime::Impl {
   bool start_attempted = false;
   bool initialize_entered = false;
   bool shutdown_done = false;
+  // A partially finalized/unloaded service cannot be retried or shared with a new
+  // runtime. Preserve the terminal failure for executor/broker cleanup reporting.
+  RuntimeShutdownStatus shutdown_failure = RuntimeShutdownStatus::kOk;
   std::string last_start_diagnostic;
   std::string last_shutdown_diagnostic;
 };
@@ -380,23 +420,27 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
 
   auto fail = [&](RuntimeStartStatus status, std::string diagnostic) {
     if (impl.initialize_entered) {
-      bool finalized = false;
+      // A throw may leave only part of librime finalized. Never enter it twice.
+      impl.initialize_entered = false;
+      core.finalize_calls += 1;
       try {
         core.api->finalize();
-        core.finalize_calls += 1;
-        finalized = true;
       } catch (...) {
-        diagnostic += "; finalize() threw, the DLL was left loaded";
+        impl.shutdown_failure = RuntimeShutdownStatus::kFinalizeFailed;
+        impl.last_shutdown_diagnostic = "finalize() threw during failed Start cleanup";
+        diagnostic += "; finalize() threw, the DLL and runtime slot remain held";
       }
-      core.initialized = false;
-      core.english_module_loaded = false;
-      if (finalized && core.module != nullptr) {
-        ::FreeLibrary(core.module);
+    }
+    core.initialized = false;
+    core.english_module_loaded = false;
+    if (impl.shutdown_failure == RuntimeShutdownStatus::kOk && core.module != nullptr) {
+      if (::FreeLibrary(core.module) != FALSE) {
         core.module = nullptr;
+      } else {
+        impl.shutdown_failure = RuntimeShutdownStatus::kUnloadFailed;
+        impl.last_shutdown_diagnostic = LastErrorText("FreeLibrary", ::GetLastError());
+        diagnostic += "; FreeLibrary failed, the DLL and runtime slot remain held";
       }
-    } else if (core.module != nullptr) {
-      ::FreeLibrary(core.module);
-      core.module = nullptr;
     }
     core.api = nullptr;
     core.started = false;
@@ -404,7 +448,9 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
     core.librime_version.clear();
     impl.last_start_diagnostic = std::move(diagnostic);
     impl.shutdown_done = true;
-    g_runtime_slot_held.store(false);
+    if (impl.shutdown_failure == RuntimeShutdownStatus::kOk) {
+      g_runtime_slot_held.store(false);
+    }
     return status;
   };
 
@@ -497,10 +543,21 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
   core.traits.min_log_level = 3;
   core.modules.clear();
   core.modules.push_back("default");
+  for (const std::string& required_module : options.required_modules) {
+    const char* approved = language_packages::ApprovedModuleName(required_module);
+    if (approved == nullptr) {
+      return fail(RuntimeStartStatus::kBaseModuleMissing,
+                  "required module was not admitted by the runtime contract");
+    }
+    const bool already_requested = std::any_of(core.modules.begin(), core.modules.end(),
+        [&required_module](const char* name) { return required_module == name; });
+    if (!already_requested) {
+      core.modules.push_back(approved);
+    }
+  }
   if (options.deployment.has_value()) {
     core.modules.push_back("levers");
   }
-  core.modules.push_back(EPOCANVA_ENGLISH_MODULE_NAME);
   core.modules.push_back(nullptr);
   core.traits.modules = core.modules.data();
 
@@ -528,9 +585,16 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
   if (module_status != RuntimeStartStatus::kOk) {
     return fail(module_status, why);
   }
-  module_status = CheckEnglishModule(core, &why);
+  module_status = CheckRequestedModules(core, options.required_modules, &why);
   if (module_status != RuntimeStartStatus::kOk) {
     return fail(module_status, why);
+  }
+  if (std::find(options.required_modules.begin(), options.required_modules.end(),
+                std::string(EPOCANVA_ENGLISH_MODULE_NAME)) != options.required_modules.end()) {
+    module_status = CheckEnglishModule(core, &why);
+    if (module_status != RuntimeStartStatus::kOk) {
+      return fail(module_status, why);
+    }
   }
 
   if (options.deployment.has_value()) {
@@ -567,6 +631,9 @@ RuntimeShutdownStatus RimeRuntime::Shutdown() {
   if (!impl.start_attempted) {
     return RuntimeShutdownStatus::kNotStarted;
   }
+  if (impl.shutdown_failure != RuntimeShutdownStatus::kOk) {
+    return impl.shutdown_failure;
+  }
   if (impl.shutdown_done) {
     return RuntimeShutdownStatus::kAlreadyShutdown;
   }
@@ -582,18 +649,19 @@ RuntimeShutdownStatus RimeRuntime::Shutdown() {
   }
 
   if (impl.initialize_entered) {
+    impl.initialize_entered = false;
+    core.initialized = false;
+    core.english_module_loaded = false;
+    core.finalize_calls += 1;
     try {
       core.api->finalize();
-      core.finalize_calls += 1;
-    } catch (const std::exception& ex) {
-      core.initialized = false;
-      impl.last_shutdown_diagnostic =
-          std::string("RimeApi::finalize threw: ") + ex.what();
-      return RuntimeShutdownStatus::kFinalizeFailed;
     } catch (...) {
-      core.initialized = false;
-      impl.last_shutdown_diagnostic = "RimeApi::finalize threw";
-      return RuntimeShutdownStatus::kFinalizeFailed;
+      // Keep the DLL mapped and the slot reserved for the rest of the process.
+      // Mark terminal before recording text so even allocation failure cannot retry.
+      impl.shutdown_failure = RuntimeShutdownStatus::kFinalizeFailed;
+      impl.shutdown_done = true;
+      impl.last_shutdown_diagnostic = "RimeApi::finalize threw; runtime quarantined";
+      return impl.shutdown_failure;
     }
   }
   core.initialized = false;
@@ -601,15 +669,15 @@ RuntimeShutdownStatus RimeRuntime::Shutdown() {
 
   if (core.module != nullptr) {
     if (::FreeLibrary(core.module) == FALSE) {
-      impl.last_shutdown_diagnostic =
-          LastErrorText("FreeLibrary", ::GetLastError());
-      core.module = nullptr;
+      impl.shutdown_failure = RuntimeShutdownStatus::kUnloadFailed;
+      impl.shutdown_done = true;
+      impl.last_shutdown_diagnostic = LastErrorText("FreeLibrary", ::GetLastError());
+      // The loader still owns this reference. Retain the handle and slot rather
+      // than making another runtime reuse a DLL whose unload failed.
       core.api = nullptr;
       core.started = false;
       core.owner_thread = std::thread::id();
-      impl.shutdown_done = true;
-      g_runtime_slot_held.store(false);
-      return RuntimeShutdownStatus::kUnloadFailed;
+      return impl.shutdown_failure;
     }
     core.module = nullptr;
   }

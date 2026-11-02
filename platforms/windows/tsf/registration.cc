@@ -108,8 +108,8 @@ const char* ScopeName(RegistrationScope scope) {
   return scope == RegistrationScope::kMachine ? "machine" : "user";
 }
 
-// DllCanUnloadNow must answer S_FALSE for the whole registry sequence, including a call
-// made directly through the API (the install helper does not go through regsvr32).
+// DllCanUnloadNow must answer S_FALSE for the whole registry sequence, including calls
+// made directly through this API rather than through regsvr32.
 class RegistrationGuard {
  public:
   RegistrationGuard() { ModuleBeginRegistration(); }
@@ -274,6 +274,13 @@ void Rollback(RegistrationScope scope, RegistryOps* ops, const ScopeSnapshot& sn
     } else {
       record_outcome(L"rollback", KeyboardCategoryKey(), L"", false);
     }
+  }
+  // RegDeleteKeyExW is not recursive. Remove this call's category container after
+  // its children, but never remove a container that was present in the snapshot.
+  if (!snapshot.category_root_existed) {
+    bool removed = false;
+    const bool ok = ops->DeleteKey(scope, CategoryRootKey(), &removed, &ignored);
+    record_outcome(L"rollback", CategoryRootKey(), L"", ok);
   }
   auto restore = [&](const std::wstring& path, const std::wstring& name,
                      const ValueSnapshot& previous) {
@@ -809,10 +816,25 @@ RegistrationResult UnregisterTextService(RegistryOps* ops) {
       result.error = why;
       break;
     }
-    if (!ops->DeleteKey(scope, CategoryRootKey(), &removed, &why)) {
+    std::vector<std::wstring> values;
+    std::vector<std::wstring> subkeys;
+    if (!ops->ListValues(scope, CategoryRootKey(), &values, &why) ||
+        !ops->ListSubkeys(scope, CategoryRootKey(), &subkeys, &why)) {
       result.ok = false;
       result.error = why;
       break;
+    }
+    // The category container may also hold another component's values or categories.
+    // A non-recursive delete rejects children but would silently remove its values.
+    if (values.empty() && subkeys.empty()) {
+      if (!ops->DeleteKey(scope, CategoryRootKey(), &removed, &why)) {
+        result.ok = false;
+        result.error = why;
+        break;
+      }
+    } else {
+      Record(&result, "keep-key", CategoryRootKey(), L"",
+             "other values or subkeys remain");
     }
     if (!ops->DeleteValue(scope, BaseKey(), kMarkerName, &removed, &why)) {
       result.ok = false;
@@ -826,8 +848,6 @@ RegistrationResult UnregisterTextService(RegistryOps* ops) {
       result.error = why;
       break;
     }
-    std::vector<std::wstring> values;
-    std::vector<std::wstring> subkeys;
     if (!ops->ListValues(scope, BaseKey(), &values, &why) ||
         !ops->ListSubkeys(scope, BaseKey(), &subkeys, &why)) {
       result.ok = false;
@@ -882,11 +902,10 @@ RegistrationResult UnregisterTextService(RegistryOps* ops) {
 // The two COM self-registration entry points. The .def file exports exactly these names
 // (plus DllGetClassObject/DllCanUnloadNow); no __declspec(dllexport) exists in the sources.
 //
-// A structured, human-readable result is available from the registration API above and is
-// written as JSON by the install/uninstall helper. These exports return the standard COM
-// failure codes so regsvr32 and an installer can react: E_ACCESSDENIED means the CLSID is
-// owned by another product or the registry denied the write, E_INVALIDARG means the module
-// path could not be used. Callers that need the detailed reason use the API, not regsvr32.
+// The registration API above provides a structured result and optional JSON serialization;
+// these exports return HRESULT only. A foreign CLSID returns E_ACCESSDENIED; ordinary
+// failures return E_FAIL, and allocation failure returns E_OUTOFMEMORY. Callers needing
+// details use the API directly.
 extern "C" HRESULT STDAPICALLTYPE DllRegisterServer(void) {
   try {
     epocanva::tsf::RegistrationResult result;

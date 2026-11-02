@@ -164,7 +164,29 @@ librime 1.17.0（`33e78140…`）检出在 `third_party/librime/`（被 `.gitign
 | `tools/cmake/epocanva_rime_compiled_in_components.cmake` | `CMAKE_PROJECT_rime_INCLUDE` | `-Mode component-probe`、`-Mode english-completion` | 上游插件机制不接受树外源码路径：`plugins/CMakeLists.txt:29-30` 会把 `ENV{RIME_PLUGINS}` 的目录前缀剥掉并把空格变成分号，`:33-39` 只 glob `plugins/*`，官方样例 `sample/CMakeLists.txt:36` 写的是"link or copy the directory to `plugins/`"。该适配用 `add_subdirectory` + `cmake_language(DEFER CALL …)` 在 `add_subdirectory(src)` 之后把自有 objects 交给 `rime` 目标，不新建上游目录、不放开外部 DLL 加载。P2.1 起名字来自 `EPOCANVA_RIME_COMPONENT_NAMES`，每个组件必须导出 `epocanva_rime_<name>_object_targets`，没导出就 FATAL_ERROR；ATTACHED 行带 mode 专属 label，于是一套模式的日志不可能为另一套模式作证 |
 | `tools/build_librime_baseline.ps1` | — | 三种模式 | 选项集合、依赖顺序与全部后置断言；`-Mode` 默认 `baseline`，因此默认构建不会悄悄混入自有组件；自 P2.1 起脚本还会主动断言 baseline 的 rime CMakeCache 里没有任何 `^EPOCANVA_`/`CMAKE_PROJECT_rime_INCLUDE` 条目 |
 
-## 6. 故障排查
+## 6. 发行准备构建
+
+`tools/cmake/epocanva_release_paths.cmake` 通过 `CMAKE_PROJECT_INCLUDE` 注入每个独立依赖工程与
+librime。MSVC 19.44 的本机探针确认 `/pathmap` 需要同时启用 `/experimental:deterministic`；
+映射目标为稳定的 `EpoCanva` 相对根，PE 中的 PDB 引用采用固定文件名。PDB 不进入产品包。
+这属于项目侧构建输入，上游检出保持不变，不通过替换二进制字符串清理路径。
+OpenCC 的 `PKGDATADIR` 原先展开为开发机安装前缀，`/pathmap` 无法改变普通宏字符串；
+现有 OpenCC hook 在配置结束时移除 `PKGDATADIR`/`LOCALEDIR` 定义。固定源码
+`src/Common.hpp` 在宏缺省时使用空 package fallback，`src/Config.cpp` 仍接受显式数据路径；
+依赖数据生成工具由构建规则给定路径。产品英文 schema 不使用 OpenCC 转换数据。
+
+依赖构建成功后扫描最终 DLL 的窄字符串与 UTF-16 字符串，拒绝个人源码路径。English 模式在
+开始时作废旧 `engine-build-receipt.json`，成功后比较源码输入指纹并记录 DLL SHA-256；产品
+构建和暂存必须同时核对引擎、产品收据。历史编号日志移动至各构建根的 `log-history/`，
+不静默覆盖旧证据。
+
+产品入口每次用 `cmake --fresh` 重建缓存，拒绝编译器环境覆盖，固定 trace OFF；
+`-SkipTests` 只生成 `build_only` 状态，不能打包。正式构建比较实际 CTest 注册名集合和
+JUnit 的执行名集合，将已声明的跳过项单独记录。内部候选可保留跳过事实；公开发行检查
+要求必要测试实际执行。源身份、cache、测试清单、测试结果与三份二进制哈希均写入收据。
+公开发行条件见 `docs/product/release-gate.md`，包完整性与许可批准是分开的判据。
+
+## 7. 故障排查
 
 | 症状 | 原因 | 处理 |
 | --- | --- | --- |

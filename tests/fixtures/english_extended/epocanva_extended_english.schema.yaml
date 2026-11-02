@@ -1,0 +1,36 @@
+# Hand-authored actual-engine TEST fixture only. Not a production schema.
+# The harness derives independent ON/OFF twins from this exact OFF schema,
+# requiring one anchored replacement per switch and deployed C-API readback.
+# Frequency is a separate declared source, never the lexicon's test weights.
+schema:
+  schema_id: epocanva_extended_english
+  name: EpoCanva extended English test fixture
+  version: "epocanva-english-extended-fixture-v1"
+menu:
+  page_size: 8
+engine:
+  processors:
+    - epocanva_english_space
+    - speller
+    - fluid_editor
+  segmentors:
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - epocanva_english_translator@english
+speller:
+  alphabet: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'@._:/\\?&=#%+-"
+  delimiter: ""
+editor:
+  char_handler: noop
+  bindings:
+    space: noop
+english:
+  lexicon_path: "lexicon/epocanva_extended_lexicon.tsv"
+  max_completions: 7
+  enable_suggestions: false
+  max_suggestions: 3
+  enable_morphology: false
+  enable_abbreviation: false
+  enable_two_edit_spelling: false
+  enable_segmentation: false

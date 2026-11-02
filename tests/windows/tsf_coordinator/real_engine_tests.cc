@@ -659,7 +659,8 @@ int RunRealPermissionFlip(const Options& options) {
 
     // Restoring Allowed must not unblock the old binding or surface the engine's queued
     // preedit.
-    real.document->SetScopeAnswer(epocanva::tsf::edit::test::TestScopeAnswer::kNone, {});
+    real.document->SetScopeAnswer(epocanva::tsf::edit::test::TestScopeAnswer::kScopes,
+                                  {0L});
     WorkId second;
     const SubmitStatus blocked = real.coordinator->SubmitKey(h.event, h.text, &second);
     Check(blocked == SubmitStatus::kBlockedNeedsResync,

@@ -220,6 +220,30 @@ function Test-BinaryContainsAscii {
     return ($text.IndexOf($Needle, [System.StringComparison]::Ordinal) -ge 0)
 }
 
+function Assert-NoEmbeddedBuildPaths {
+    <#
+      Byte-level release-path rule applied before an engine is consumed by the
+      product. PDB files are not distribution inputs; binaries are never edited.
+    #>
+    param([Parameter(Mandatory)][string[]]$Artifacts,
+          [Parameter(Mandatory)][string]$Stage)
+    $needles = @($RepoRoot, $RepoRoot.Replace('/', '\'), $RepoRoot.Replace('\', '/'),
+                 'D:\Users\', 'C:\Users\', 'OneDrive') | Sort-Object -Unique
+    if ($env:USERNAME) { $needles += $env:USERNAME }
+    foreach ($artifact in $Artifacts) {
+        $bytes = [System.IO.File]::ReadAllBytes($artifact)
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+        $wide = [System.Text.Encoding]::Unicode.GetString($bytes)
+        foreach ($needle in ($needles | Where-Object { $_ })) {
+            if ($text.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $wide.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw ("{0}: embedded build path found in {1}; path normalization did not cover this input" -f $Stage, $artifact)
+            }
+        }
+    }
+    Write-Host ("  path hygiene ok : {0} compiled artefact(s) contain no local build path" -f $Artifacts.Count)
+}
+
 # Where a library actually came from, rather than merely that something was found.
 function Assert-CacheUnder {
     param([Parameter(Mandatory)][string]$BuildDir,
@@ -293,7 +317,8 @@ if ($Mode -eq 'component-probe') {
                            'english_space_processor.obj',
                            'english_lexicon.obj', 'english_case.obj',
                            'english_token.obj', 'english_space_policy.obj',
-                           'spelling_suggester.obj', 'prefix_completer.obj')
+                           'spelling_suggester.obj', 'prefix_completer.obj',
+                           'morphology_rules.obj', 'language_support.obj')
     # 'epocanva_english' alone is also a substring of 'epocanva_english_translator',
     # so these two needles together prove BOTH the module name and the component
     # name were emitted into the image. The third is the P2.5 Processor's
@@ -313,6 +338,31 @@ $RimeBuild = Join-Path $Baseline 'rime'
 $RimeInst  = Join-Path $RimeBuild 'install'
 $Logs      = Join-Path $Baseline 'logs'
 $LockFile  = Join-Path $RepoRoot 'third_party\sources.lock.json'
+$EngineReceiptPath = Join-Path $Baseline 'engine-build-receipt.json'
+$EngineIdentityStart = $null
+
+function Write-EngineReceipt {
+    param(
+        [Parameter(Mandatory)][ValidateSet('in_progress', 'built')][string]$Status,
+        [AllowNull()][string]$SourceSha256,
+        [AllowNull()][string]$RimeSha256
+    )
+    $receipt = [ordered]@{
+        format        = 1
+        status        = $Status
+        source_sha256 = $SourceSha256
+        rime_sha256   = $RimeSha256
+        flags         = [ordered]@{
+            logging          = $false
+            external_plugins = $false
+            tests            = $false
+        }
+    }
+    $json = $receipt | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText(
+        $EngineReceiptPath, $json + [Environment]::NewLine,
+        [System.Text.UTF8Encoding]::new($false))
+}
 
 # A component build does not rebuild the dependency chain: rebuilding it with a
 # second set of flags is exactly how two engines drift apart. It reuses the
@@ -332,8 +382,10 @@ if (-not $BoostRoot) {
 # in. One root for every component, plus the language core the English component
 # calls into.
 $ComponentHook = Join-Path $RepoRoot 'tools\cmake\epocanva_rime_compiled_in_components.cmake'
+$ReleasePathsHook = Join-Path $RepoRoot 'tools\cmake\epocanva_release_paths.cmake'
 $ComponentRoot = Join-Path $RepoRoot 'engine\rime_components'
 $EnCoreDir     = Join-Path $RepoRoot 'engine\languages\en'
+Test-PathOrThrow $ReleasePathsHook 'MSVC release-path CMake hook'
 
 foreach ($d in @($Baseline, $RimeBuild, $Logs)) {
     if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d | Out-Null }
@@ -345,10 +397,29 @@ if ($Mode -eq 'baseline') {
 }
 $script:LogDir = $Logs
 
-# Step numbers restart every run, so last run's numbered logs would collide with
-# this run's and make it impossible to tell which file belongs to which attempt.
-Get-ChildItem -LiteralPath $Logs -Filter '*.log' -File -ErrorAction SilentlyContinue |
-    Remove-Item -Force
+# A product engine receipt is invalidated before any English build work starts.
+# The identity helper hashes the actual project-side engine inputs and the pinned,
+# clean upstream checkouts; the receipt itself is intentionally not an input.
+if ($Mode -eq 'english-completion') {
+    $identityHelper = Join-Path $RepoRoot 'tools\product\build_identity.ps1'
+    Test-PathOrThrow $identityHelper 'product engine identity helper'
+    . $identityHelper
+    $EngineIdentityStart = Get-ProductEngineIdentity -RepoRoot $RepoRoot
+    Write-EngineReceipt -Status 'in_progress' `
+        -SourceSha256 $EngineIdentityStart.source_sha256 -RimeSha256 $null
+    Write-Host ("  engine receipt : status=in_progress source_sha256={0}" -f
+        $EngineIdentityStart.source_sha256)
+}
+
+# Preserve previous command evidence before reusing numbered log names.
+$previousLogs = @(Get-ChildItem -LiteralPath $Logs -Filter '*.log' -File -ErrorAction SilentlyContinue)
+if ($previousLogs.Count -gt 0) {
+    $archive = Join-Path $Baseline ('log-history\' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ'))
+    New-Item -ItemType Directory -Path $archive | Out-Null
+    foreach ($previousLog in $previousLogs) {
+        Move-Item -LiteralPath $previousLog.FullName -Destination $archive
+    }
+}
 
 # cl.exe, MSBuild and CMake write messages in the console output code page. If
 # PowerShell decodes them as UTF-8 the logs become mojibake, so decode with the
@@ -551,10 +622,12 @@ $FlagOverrides = Join-Path $RimeSrc 'cmake'
 $CommonArgs = @(
     '-G', $Generator
     '-A', 'x64'
+    ('-DCMAKE_GENERATOR_INSTANCE:PATH=' + $VsRoot)
     '-DCMAKE_CONFIGURATION_TYPES:STRING=Release'
     '-DCMAKE_BUILD_TYPE:STRING=Release'
     ('-DCMAKE_USER_MAKE_RULES_OVERRIDE:PATH=' + (Join-Path $FlagOverrides 'c_flag_overrides.cmake'))
     ('-DCMAKE_USER_MAKE_RULES_OVERRIDE_CXX:PATH=' + (Join-Path $FlagOverrides 'cxx_flag_overrides.cmake'))
+    ('-DCMAKE_PROJECT_INCLUDE:PATH=' + $ReleasePathsHook)
     '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
     ('-DCMAKE_INSTALL_PREFIX:PATH=' + $Prefix)
     '-DBUILD_SHARED_LIBS:BOOL=OFF'
@@ -799,8 +872,10 @@ if (-not (Test-Skipped 'rime')) {
     $rimeArgs = @(
         '-S', $RimeSrc, '-B', $RimeBuild,
         '-G', $Generator, '-A', 'x64'
+        ('-DCMAKE_GENERATOR_INSTANCE:PATH=' + $VsRoot)
         '-DCMAKE_CONFIGURATION_TYPES:STRING=Release'
         '-DCMAKE_BUILD_TYPE:STRING=Release'
+        ('-DCMAKE_PROJECT_INCLUDE:PATH=' + $ReleasePathsHook)
         '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
         ('-DCMAKE_PREFIX_PATH:PATH=' + $Prefix)
         ('-DBOOST_ROOT:PATH=' + $BoostRoot)
@@ -1210,6 +1285,17 @@ if ($copiedData.Count -ne 0) {
         Write-Host ("  {0}" -f $_.FullName.Replace($Baseline, $BuildRel))
     }
     Write-Host '  data/minimal word lists are NOT licence-cleared; do not publish this tree.'
+}
+
+Assert-NoEmbeddedBuildPaths -Artifacts @($RimeDll) -Stage 'installed-rime'
+if ($Mode -eq 'english-completion') {
+    $identityEnd = Get-ProductEngineIdentity -RepoRoot $RepoRoot
+    if ($EngineIdentityStart.source_sha256 -ne $identityEnd.source_sha256) {
+        throw 'English source inputs changed during the build; no successful receipt issued.'
+    }
+    $receiptHash = (Get-FileHash -LiteralPath $RimeDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-EngineReceipt -Status 'built' -SourceSha256 $identityEnd.source_sha256 -RimeSha256 $receiptHash
+    Write-Host "verified English engine receipt: $EngineReceiptPath"
 }
 
 Write-Host ''

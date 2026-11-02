@@ -112,10 +112,10 @@ drives `1`, `2`, `0x40000000` and `LONG_MIN` through the real `SetValue` path; a
 | compartment `S_OK` + non-`VT_I4` | `Unknown` | uninterpretable, never “false” |
 | compartment failure (including `E_UNEXPECTED`) | `Unknown` | not evidence of zero |
 | `GetAppProperty` `S_FALSE` / `E_NOTIMPL` | scope absent → does not block | documented “does not support / does not implement” |
-| property `VT_EMPTY` / `VT_NULL` | scope absent | no value |
+| property `S_FALSE`, or a successful `VT_EMPTY` / `VT_NULL` | scope absent | documented no coverage or a successful read with no value |
 | property non-`VT_UNKNOWN` / no `ITfInputScope` | `Unknown` | malformed metadata |
 | `GetSelection` failure inside the read session | `Unknown` (scope axis query failure) | the range read could not run |
-| other `GetValue` failure | `Unknown` | not a no-value answer |
+| any failed property `GetValue`, including `E_FAIL` | `Unknown` | a failure cannot establish absence, even if the returned VARIANT is empty |
 
 A cleared compartment is recreated by the next `GetCompartment` call on this build, so a
 fresh query sees `S_FALSE`/`VT_EMPTY` and resolves Allowed; the reader still maps
@@ -282,11 +282,21 @@ early “NoEdit” branch. The coordinator’s `BeginApplyAfterEngine` then deci
 before starting the apply-time permission query, so a permission answer cannot mask an
 unreadable engine result either.
 
-## 7. Evidence from the real tests
+## 7. Test coverage and historical evidence
 
-All cases use `CreateRealPermissionSource` against the P3.7 host; none hands the
-coordinator an Allowed value. The engine is the controlled scheduling backend, so
-`engine_calls` and `mutations` are direct host counters.
+The permission tests use `CreateRealPermissionSource` against the P3.7 host; none hands
+an Allowed value to the coordinator. Ordinary test documents now explicitly publish
+`IS_DEFAULT` through the real attribute path. The `kNone`, `kEmptyValue`, and `kFail`
+cases remain separate; `permission_tests.cc` reads the raw property `GetValue` HRESULT
+and VARIANT inside a real granted read lock, then verifies both the query source and
+`ReadPermissionFactsWithCookie`. `E_FAIL` must yield `Unknown` and preserve stage 2 plus
+the HRESULT in diagnostics. The coordinator case verifies zero engine calls and zero
+text mutations after that failure. Successful empty values still permit ordinary input.
+
+The table and transcript below record the original P3.9 runs, before the stricter
+`E_FAIL` policy. They are historical evidence, not a passing result for the revised code.
+In particular, the former `scope-owner-failure` admission is superseded by refusal;
+new verification results must name the build and actual commands run.
 
 | # | Scenario | Case | Observed |
 | --- | --- | --- | --- |
@@ -399,6 +409,44 @@ a failure, not hidden.
 context, begun while the abandoned query's deferred grant is still queued, keeps its own
 identity/generation and is not rewritten by the late callback.
 
+### 8.4 Failure-policy regression verification (2026-11-02)
+
+An isolated x64 Release tree at `build/release-runtime-check` compiled only the runtime,
+permission and coordinator test targets with the existing MSVC/static-CRT settings.
+The commands actually run after the final fixes were:
+
+```text
+cmake -S platforms/windows/engine_bridge -B build/release-runtime-check -G "Visual Studio 17 2022" -A x64
+cmake --build build/release-runtime-check --config Release --target engine_runtime_fault_tests tsf_context_tests tsf_coordinator_tests engine_bridge_tests --parallel 2
+ctest --test-dir build/release-runtime-check -C Release --no-tests=error --output-on-failure -R "^windows\.(engine\.runtime_fault_|tsf_context\.)"
+ctest --test-dir build/release-runtime-check -C Release --no-tests=error --output-on-failure -R "^windows\.tsf_coordinator\.permission_real_"
+ctest --test-dir build/release-runtime-check -C Release --no-tests=error --output-on-failure -R "^windows\.(engine\.runtime_lifecycle|tsf_coordinator\.permission_real_engine_ran_refused)$"
+```
+
+Configure, the final targeted build, and all three CTest invocations returned exit 0.
+The first CTest group passed 19/19 (five injected runtime lifecycle cases and 14 context
+cases), the coordinator group passed 9/9, and the final normal-runtime/callback group
+passed 2/2. The callback case appears in both latter groups: 29 different tests passed.
+An earlier target build returned exit 1 while the new fixture export and callback helper
+were incomplete; it was corrected before these results. An initial `/m:2` argument was
+also rejected by MSBuild after Git Bash removed its slash; `--parallel 2` was used.
+
+The direct `tsf_context_tests --case scope-absent-wrongtype-fail` run returned exit 0
+with 44 checks and these actual property observations:
+
+```text
+absent:      GetValue=0x80004005 vt=0 state=Unknown
+empty-value: GetValue=0x00000000 vt=0 state=Allowed
+scope-fail:  GetValue=0x80004005 vt=0 state=Unknown
+```
+
+`permission_real_engine_ran_refused` covers both a newly published password scope and
+an owner attribute failure during the deferred edit. The callback refuses both before
+any text mutation; restoring `IS_DEFAULT` does not bypass `NeedsResync`. Full product
+build, installed-host acceptance and package verification are separate work and are
+not claimed by this local run. Logs are `runtime-permission-ctest.log`,
+`coordinator-permission-ctest.log`, and `runtime-callback-final-ctest.log` in that tree.
+
 ## 9. Known limits and compatibility
 
 1. **InputScope is not a security boundary.** An application may omit or lie about its
@@ -406,11 +454,18 @@ identity/generation and is not rewritten by the late callback.
 2. **No one-time-code scope exists in this SDK revision.** `IS_ONE_TIME_CODE` is absent
    from `um/inputscope.h` 10.0.26100.0; EpoCanva neither invents it nor guesses OTP fields
    from text.
-3. **Owner attribute failures are indistinguishable from absence on this build.** A
-   store whose `RetrieveRequestedAttrs` returns `E_FAIL` surfaces the same `E_FAIL` from
-   `GetAppProperty(...)->GetValue` as an attribute-free owner. The suite pins both as
-   absent (`scope-owner-failure` prints the gap). A future msctf build that propagates a
-   different HRESULT would classify it as `Unknown` automatically.
+3. **Ambiguous owner attribute failures now close the gate.** On the previously
+   observed msctf build, an attribute-free owner and an owner whose
+   `RetrieveRequestedAttrs` fails both surface `E_FAIL` from the property's `GetValue`.
+   The old compatibility policy classified both as absent and had explicit tests for
+   that risk. The current reader classifies every failed `GetValue` as `Unknown`, so a
+   broken owner cannot obtain engine permission through that ambiguity. Ordinary TSF
+   hosts that publish no InputScope and receive `E_FAIL` can therefore lose suggestions;
+   literal input remains with the host. An official unsupported-property answer
+   (`GetAppProperty` `S_FALSE`/`E_NOTIMPL`), `GetValue` `S_FALSE`, or successful empty
+   value still means absence. An application's omission or false metadata is still
+   outside this check's knowledge; unknown fields are not declared safe, and OTP fields
+   are never inferred from typed text.
 4. **`E_UNEXPECTED` from a cleared compartment** is mapped to `Unknown` by the reader, but
    a fresh `GetCompartment` recreates the compartment and reads the official no-value
    answer; the test pins the recreated path.

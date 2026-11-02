@@ -309,6 +309,8 @@ void CheckInitialWindow(HWND window) {
 
   for (int id : {ui::kSave, ui::kClose, ui::kAbout, ui::kCompletionEnabled,
                  ui::kSpellingEnabled, ui::kCompletionCount, ui::kSpellingCount,
+                 ui::kMorphologyEnabled, ui::kAbbreviationEnabled,
+                 ui::kTwoEditSpellingEnabled,
                  ui::kPathInstall, ui::kPathUser,
                  ui::kPathSettings, ui::kPathEngine, ui::kStatusEdit}) {
     HWND control = ::GetDlgItem(window, id);
@@ -455,6 +457,13 @@ int main(int argc, char** argv) {
 
   Check(::SendMessageW(candidate_host, BM_GETCHECK, 0, 0) == BST_CHECKED,
         "the default candidate display follows the host");
+  for (int id : {ui::kMorphologyEnabled, ui::kAbbreviationEnabled,
+                 ui::kTwoEditSpellingEnabled}) {
+    HWND feature = ::GetDlgItem(window, id);
+    Check(feature != nullptr && ::SendMessageW(feature, BM_GETCHECK, 0, 0) == BST_UNCHECKED,
+          "extended English features start disabled");
+    EnsureCheck(feature, true);
+  }
   EnsureCheck(completion, false);
   EnsureCheck(spelling, true);
   ::SendMessageW(completion_count, CB_SETCURSEL, 2, 0);  // 3
@@ -486,6 +495,10 @@ int main(int argc, char** argv) {
         "saved INI has 2 suggestions");
   Check(Contains(settings_text, "candidate_display=always_self"),
         "saved INI records the always_self candidate display");
+  Check(Contains(settings_text, "morphology_enabled=1") &&
+            Contains(settings_text, "abbreviation_enabled=1") &&
+            Contains(settings_text, "two_edit_spelling_enabled=1"),
+        "saved INI records the three extended feature switches");
   const std::string patch_text = ReadText(patch_file);
   Check(Contains(patch_text, "english/max_completions\": 0"),
         "saved patch disables completions");
@@ -493,6 +506,10 @@ int main(int argc, char** argv) {
         "saved patch enables spelling");
   Check(Contains(patch_text, "english/max_suggestions\": 2"),
         "saved patch sets two suggestions");
+  Check(Contains(patch_text, "english/enable_morphology\": true") &&
+            Contains(patch_text, "english/enable_abbreviation\": true") &&
+            Contains(patch_text, "english/enable_two_edit_spelling\": true"),
+        "saved patch projects the extended English switches");
   std::string marker;
   Check(epocanva::product::ReadDeployMarkerToken(marker_file, &marker),
         "saved deployment marker exists");
@@ -535,6 +552,11 @@ int main(int argc, char** argv) {
         "relaunch reads completion disabled");
   Check(::SendMessageW(spelling, BM_GETCHECK, 0, 0) == BST_CHECKED,
         "relaunch reads spelling enabled");
+  for (int id : {ui::kMorphologyEnabled, ui::kAbbreviationEnabled,
+                 ui::kTwoEditSpellingEnabled}) {
+    Check(::SendMessageW(::GetDlgItem(window, id), BM_GETCHECK, 0, 0) == BST_CHECKED,
+          "relaunch reads extended English enabled");
+  }
   Check(::SendMessageW(candidate_always, BM_GETCHECK, 0, 0) == BST_CHECKED &&
             ::SendMessageW(candidate_host, BM_GETCHECK, 0, 0) == BST_UNCHECKED,
         "relaunch reads the always_self candidate display");

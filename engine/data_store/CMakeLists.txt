@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.25)
+
+add_library(epocanva_learning_core STATIC learning_store.cc)
+target_include_directories(epocanva_learning_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(epocanva_learning_core PUBLIC cxx_std_17)
+set_target_properties(epocanva_learning_core PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+  target_compile_options(epocanva_learning_core PRIVATE /utf-8 /permissive- /W4 /EHsc)
+else()
+  target_compile_options(epocanva_learning_core PRIVATE -Wall -Wextra -Wpedantic)
+endif()

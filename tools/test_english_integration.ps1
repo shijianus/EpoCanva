@@ -389,12 +389,16 @@ function Get-CtestNames {
 # --- 3. configure --------------------------------------------------------------------------
 $script:Stage = 'configure'
 $configure_args = @('-S', $SourceDir, '-B', $BuildDir, '-G', $Generator, '-A', $Platform,
+    ('-DCMAKE_GENERATOR_INSTANCE:PATH=' + $Vs),
     '-DCMAKE_CONFIGURATION_TYPES:STRING=Release',
     ('-DRime_Install_Prefix:PATH=' + $EnginePrefix),
     ('-DBaseline_Rime_Prefix:PATH=' + $BaselinePrefix))
 if ($PilotLexicon -ne '') {
     $configure_args += ('-DEPOCANVA_ENGLISH_PILOT_LEXICON:FILEPATH=' + $PilotLexicon)
     $configure_args += ('-DEPOCANVA_ENGLISH_PILOT_OUTPUT_DIR:PATH=' + $PilotOutputDir)
+} else {
+    $configure_args += '-DEPOCANVA_ENGLISH_PILOT_LEXICON:FILEPATH='
+    $configure_args += '-DEPOCANVA_ENGLISH_PILOT_OUTPUT_DIR:PATH='
 }
 Write-Host ''
 Write-Host 'configure'
@@ -509,7 +513,9 @@ if ($Filter -ne '') {
 # --- 6. CTest ------------------------------------------------------------------------------
 Write-Host ''
 Write-Host 'ctest'
-$run_args = @('--test-dir', $BuildDir, '-C', 'Release', '--output-on-failure', '--no-tests=error')
+$junit = Join-Path $LogDir "ctest-$LogTag.xml"
+if (Test-Path -LiteralPath $junit) { Stop-Run 'logs' "refusing to overwrite existing JUnit: $junit" }
+$run_args = @('--test-dir', $BuildDir, '-C', 'Release', '--output-on-failure', '--no-tests=error', '--output-junit', $junit)
 if ($Filter -ne '') { $run_args += @('-R', $Filter) }
 $run = Invoke-Stage $CTest $run_args
 $run_log = Write-RunLog ('ctest' + $(if ($Filter -ne '') { '-filtered' } else { '-all' })) $run.Lines $run.Code
@@ -542,6 +548,22 @@ if ($run.Code -ne 0) {
 }
 if ($failed_count -ne 0) {
     Stop-Run 'nocases' "CTest reported $failed_count failed case(s) while exiting 0."
+}
+$xmlSettings = [Xml.XmlReaderSettings]::new()
+$xmlSettings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+$xmlSettings.XmlResolver = $null
+$reader = [Xml.XmlReader]::Create($junit, $xmlSettings)
+try {
+    $xml = [Xml.XmlDocument]::new()
+    $xml.XmlResolver = $null
+    $xml.Load($reader)
+} finally { $reader.Dispose() }
+$executed = @($xml.SelectNodes('//testcase') | ForEach-Object { $_.GetAttribute('name') })
+if ($executed.Count -ne $selection.Count -or
+    @($executed | Sort-Object -Unique).Count -ne $executed.Count -or
+    @(Compare-Object ($executed | Sort-Object) ($selection | Sort-Object)).Count -ne 0 -or
+    $xml.SelectNodes('//failure | //error | //skipped').Count -ne 0) {
+    Stop-Run 'nocases' 'JUnit does not contain exactly the selected, executed, passing tests.'
 }
 Write-Host ''
 Write-Host "RESULT PASS  $total_count case(s) selected, 0 failed, ctest exit 0"

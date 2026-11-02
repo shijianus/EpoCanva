@@ -1,0 +1,49 @@
+{
+  "format": 1,
+  "scope": "Windows product payload: EpoCanva.exe, epocanva_tsf.dll and rime.dll; acceptance profile and distribution policy are separate package metadata",
+  "project_license": "AGPL-3.0-only",
+  "project_license_source": "LICENSE",
+  "license_decision": "data/manifests/license-decision.json",
+  "payload_policy": "data/manifests/product-package-files.inc",
+  "policy_semantics": "All listed payload paths are required. Nonempty source rows fix the exact SHA-256 and byte count. Empty source rows identify receipt-bound binaries or generated VERSION.txt. No unlisted package file is admitted except package.manifest itself.",
+  "runtime_libraries": [
+    {"name":"librime","commit":"33e78140250125871856cdc5b42ddc6a5fcd3cd4","delivery":"shared rime.dll","licence":"BSD-3-Clause","licence_source":"third_party/librime/LICENSE"},
+    {"name":"yaml-cpp","commit":"2f86d13775d119edbb69af52e5f566fd65c6953b","delivery":"static library linked into rime.dll","licence":"MIT","licence_source":"third_party/librime/deps/yaml-cpp/LICENSE"},
+    {"name":"leveldb","commit":"99b3c03b3284f5886f9ef9a4ef703d57373e61be","delivery":"static library linked into rime.dll","licence":"BSD-3-Clause","licence_source":"third_party/librime/deps/leveldb/LICENSE"},
+    {"name":"marisa-trie","commit":"3e87d53b78e15f2f43783d5e376561a8c9722051","delivery":"static library linked into rime.dll and used by OpenCC","licence":"BSD-2-Clause","selected_branch":"BSD-2-Clause from BSD-2-Clause OR LGPL-2.1-or-later","licence_source":"third_party/librime/deps/marisa-trie/COPYING.md"},
+    {"name":"OpenCC","commit":"556ed22496d650bd0b13b6c163be9814637970ae","delivery":"static library linked into rime.dll","licence":"Apache-2.0","licence_source":"third_party/librime/deps/opencc/LICENSE","upstream_notice":"No NOTICE file in this pinned checkout"},
+    {"name":"RapidJSON","version":"OpenCC-vendored 1.1.0 with upstream OpenCC edits","delivery":"headers compiled into OpenCC Config.cpp, then linked into rime.dll","licence":"MIT","licence_source":"data/product/licenses/rapidjson-1.1.0-license.txt","licence_repository":"https://github.com/Tencent/rapidjson","licence_commit":"f54b0e47a08782a6131cc3d60f94d038fa6e0a51","licence_url":"https://raw.githubusercontent.com/Tencent/rapidjson/f54b0e47a08782a6131cc3d60f94d038fa6e0a51/license.txt","licence_sha256":"a140e5d46fe734a1c78f1a3c3ef207871dd75648be71fdda8e309b23ab8b1f32","licence_bytes":5152,"scope_notes":"The full upstream composite licence is retained. JSON-licensed bin/jsonchecker code is absent from the vendored headers and is not built. msinttypes is selected only for _MSC_VER < 1800 (rapidjson.h:162-167), so it is not built by the current VS2022 recipe. Vendored document.h and rapidjson.h differ from the upstream release; their identity is the pinned OpenCC tree, not a claim of byte equality with upstream v1.1.0."},
+    {"name":"Boost","version":"1.89.0","delivery":"headers compiled into rime.dll","licence":"BSL-1.0","licence_source":"build/librime-baseline/dependencies/boost/boost_1_89_0/LICENSE_1_0.txt"},
+    {"name":"utfcpp","delivery":"librime include/utf8.h and include/utf8 headers compiled into rime.dll","licence":"BSL-1.0","licence_source":"third_party/librime/include/utf8.h","correction":"The actual permission statement is Boost Software License 1.0, including its machine-executable-object-code exception. Historical MIT classification is incorrect."},
+    {"name":"darts-clone","delivery":"librime include/darts.h and OpenCC deps/darts-clone-0.32/darts.h compiled into rime.dll","licence":"BSD-3-Clause","licence_source":"third_party/librime/include/COPYING.darts-clone","scope_notes":"Retain the upstream ORGANIZATION placeholder verbatim. The OpenCC header copy has no separate licence file; the same project's notice is provided by the librime checkout."},
+    {"name":"X11 keysym headers","delivery":"keysym.h includes keysymdef.h; header constants used by rime.dll","licence":"X11 notices from The Open Group and Digital Equipment Corporation","licence_sources":["third_party/librime/include/X11/keysym.h","third_party/librime/include/X11/keysymdef.h"],"scope_notes":"Both complete headers are carried as notice files; keysymdef.h adds the 1994 copyright year. No X11 runtime library is linked."}
+  ],
+  "linkage_evidence": [
+    "third_party/librime/src/CMakeLists.txt:25-35,45-57,71-84 includes dict/gears sources and their dependencies in the merged shared rime target",
+    "third_party/librime/deps/opencc/src/CMakeLists.txt:8-13,47-67,113-117 includes RapidJSON headers and Config.cpp in libopencc",
+    "third_party/librime/deps/opencc/src/Config.cpp:23 includes rapidjson/document.h",
+    "Existing build/librime-english/rime/src/rime.dir/Release/rime.tlog/link.command.1.tlog names yaml-cpp.lib, leveldb.lib, marisa.lib and opencc.lib",
+    "Existing OpenCC libopencc CL.read.1.tlog contains RapidJSON and darts headers and no TCLAP header"
+  ],
+  "excluded_from_payload": [
+    {"name":"TCLAP 1.2.5","reason":"Only src/CmdLineOutput.hpp and the three src/tools translation units use it. Those translation units are not LIBOPENCC_SOURCES. OpenCC tools are built locally but absent from the staging whitelist; their unresolved COPYING acquisition is a tools-distribution issue."},
+    {"name":"OpenCC bundled marisa-0.2.6","reason":"USE_SYSTEM_MARISA=ON selects the pinned marisa-trie 0.3.1 instead"},
+    {"name":"glog, gflags, googletest, OpenCC tests/benchmarks/Python bindings","reason":"The current recipe disables these optional targets"},
+    {"name":"librime data/minimal and OpenCC share/opencc dictionaries","reason":"The stage policy copies no upstream dictionary. Presence in a build tree is not inclusion in the package."}
+  ],
+  "historical_lock_interpretation": {
+    "source_lock":"third_party/sources.lock.json",
+    "current_identity_fields":"packages[].pinned_commit and required declared_submodules[].recorded_commit are checked by tools/build_librime_baseline.ps1",
+    "historical_fields":"P1_*/P2_* artefact_identity values are identities of the historical linked binaries; the lock explicitly says DLL digests are not reproducibility checksums. previous_sha256_superseded is historical by name.",
+    "adaptation_digest_drift":"The P2.5 build_librime_baseline.ps1 SHA-256 in epocanva_build_adaptation_inputs no longer matches the current entry point. This section is old recipe evidence, not a field read by current build assertions. Current source fingerprints and the verified build receipt must bind the current recipe; do not overwrite historical results.",
+    "data_lock":"data/manifests/english-pilot.sources.lock.json still fixes the actual Alt12Dicts source identity and converter input hashes. The product converter creates a separately named product artifact and provenance; the pilot output is not packaged."
+  },
+  "distribution_decisions": {
+    "epocanva_licence":"AGPL-3.0-only; explicit user decision recorded in data/manifests/license-decision.json",
+    "acceptance_profile":"internal-unsigned first; signing is not required for internal acceptance, all other technical gates remain mandatory",
+    "distribution_policy":"internal-only; public/external distribution not authorized by the license/profile decision",
+    "alt12dicts_jurisdictions":"owner/legal decision required before external redistribution",
+    "acknowledgment":"NOTICE.txt, the generated product provenance and both Alt12Dicts readmes are mandatory package files",
+    "public_redistribution":"not cleared by package integrity or by the presence of permissive dependency licences"
+  }
+}

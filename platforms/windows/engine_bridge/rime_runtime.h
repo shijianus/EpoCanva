@@ -106,6 +106,11 @@ struct RuntimeOptions {
   std::filesystem::path user_data_dir;   // absolute, existing directory
   std::filesystem::path log_dir;         // absolute, existing directory
   std::optional<DeploymentOptions> deployment;
+  // Explicit compiled-in requirements, never plugin paths or directory discovery.
+  // Exactly default/core/dict/gears/epocanva_english are approved. Empty, duplicate,
+  // unsafe and unknown names are invalid. default is always loaded; levers is
+  // added only for explicit deployment. Omitting this field preserves English.
+  std::vector<std::string> required_modules = {"epocanva_english"};
 };
 
 // API acquisition/release witnesses. Every `_acquired` counter moves only when a get_* call
@@ -149,7 +154,7 @@ struct RuntimeInfo {
   bool english_module_loaded = false;
   std::uint64_t english_module_initialized = 0;  // module lifecycle witness, not a session count
   std::uint64_t initialize_calls = 0;
-  std::uint64_t finalize_calls = 0;
+  std::uint64_t finalize_calls = 0;  // invocations, including one that throws
   std::uint64_t deploy_calls = 0;
   int live_session_count = 0;
   std::string last_start_diagnostic;     // text-free: API/stage/status only
@@ -172,6 +177,8 @@ class RimeRuntime {
   RimeRuntime& operator=(const RimeRuntime&) = delete;
 
   RuntimeStartStatus Start(const RuntimeOptions& options);
+  // finalize/unload failures are terminal: later calls return the same failure,
+  // never retry finalize, and retain the DLL plus process slot until process exit.
   RuntimeShutdownStatus Shutdown();
 
   bool IsInitialized() const;

@@ -182,6 +182,8 @@ __declspec(dllexport) int EpoCanvaTestResetBootstrap();
 __declspec(dllexport) int EpoCanvaTestBootstrapState();
 // EngineHostState value: 0 idle, 1 starting, 2 running, 3 stopping, 4 failed.
 __declspec(dllexport) int EpoCanvaTestEngineHostState();
+// Current lease count, used to order multi-attachment lifecycle assertions.
+__declspec(dllexport) unsigned long long EpoCanvaTestEngineHostLeaseCount();
 // Module lifetime facts behind DllCanUnloadNow, plus the number of live edit-layer COM
 // objects counted through module_lifetime.h. Any of the pointers may be null.
 __declspec(dllexport) int EpoCanvaTestModuleState(long long* live_objects,

@@ -123,6 +123,15 @@ enum class Mode {
   kSpellingToggleSelfCheckFail,
   kAcceptanceSemantics,
   kAcceptanceSelfCheckFail,
+  kExtendedDefaults,
+  kExtendedMorphology,
+  kExtendedAbbreviation,
+  kExtendedSpelling,
+  kExtendedFrequency,
+  kExtendedProtection,
+  kExtendedCommit,
+  kExtendedMalformedFrequency,
+  kExtendedSelfCheckFail,
 };
 
 // What RunHarness must stage before a mode runs. The two pilot refusal cases deliberately
@@ -138,6 +147,8 @@ enum class StagePlan {
   // It deliberately does not stage the broken pair, so the toggle run touches exactly the
   // two schemas it compares and nothing else.
   kSpellingToggleFixture,
+  // Independent test frequencies and opt-in schema twins; see extended_tests.cc.
+  kExtendedFixture,
   kNothing,
 };
 

@@ -108,8 +108,9 @@ English > Chinese > French > Japanese > Korean > 通用 i18n
   缩合）、连写自动分段、缩写展开、跨应用一致性、下一词预测。已有的是前缀补全、
   ASCII 大小写映射、有限词形（`don'`/`co-`）与受保护文本保真、空格分词、一次编辑拼写建议。
 - Windows TSF 组件已存在（W1–W3-B）：产品 DLL 接到真实 key sink、上下文观察、协调器、
-  UIElement 候选与 `DllRegisterServer`/`DllUnregisterServer`。但**尚未在本机执行系统注册**、
-  没有可用的安装器工具链、没有一次完成授权的 C 层闭环；不可描述为“系统输入已经可用”。
+  UIElement 候选与 `DllRegisterServer`/`DllUnregisterServer`。当前源码对应的正式包尚无完整的
+  真实宿主输入与安装/卸载验收；旧包的注册实验不等于该闭环已通过。
+  公开发行逐项条件与证据格式见 `docs/product/release-gate.md`。
 - 产品包已包含 42,356 行英文词表（`data/lexicon/epocanva_en_alpha.tsv`），但仅限内部 Alpha；
   跨法域再分发仍需负责人与法务确认。没有用户词组、学习存储或词频更新。
 - 无 Android IME 组件。

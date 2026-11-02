@@ -88,6 +88,14 @@ bool ComputeFingerprint(const ProductPaths& paths, const std::string& settings_t
   if (!HashPresentFile(paths.rime_dll, &rime, why)) {
     return false;
   }
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  if (rime != EPOCANVA_PRODUCT_RIME_SHA256) {
+    if (why != nullptr) {
+      *why = L"the engine binary does not match this product build";
+    }
+    return false;
+  }
+#endif
   std::string text = "format=1\n";
   text += "settings=" + (settings_token.empty() ? std::string("-") : settings_token) + "\n";
   text += "schema=" + schema + "\ndefault=" + default_config + "\ncustom=" + custom +
@@ -245,13 +253,30 @@ void CloseLockFile(void** file) {
   if (*file == nullptr) {
     return;
   }
-  OVERLAPPED overlapped = {};
-  (void)::UnlockFileEx(static_cast<HANDLE>(*file), 0, 1, 0, &overlapped);
-  ::CloseHandle(static_cast<HANDLE>(*file));
+  ReleaseEngineLeaseLock(*file);
   *file = nullptr;
 }
 
 }  // namespace
+
+void ReleaseEngineLeaseLock(void* lock) noexcept {
+  if (lock == nullptr) {
+    return;
+  }
+  try {
+    epocanva::tsf::EngineHostDiagnostics diagnostics;
+    epocanva::tsf::EngineHostBroker::Instance().Snapshot(&diagnostics);
+    if (diagnostics.cleanup_failed || diagnostics.abandoned ||
+        diagnostics.state == epocanva::tsf::EngineHostState::kFailed) {
+      // Deliberate process-lifetime retention: the engine may still use the files.
+      // The broker's failed/abandoned diagnostic explains why restart is refused.
+      return;
+    }
+  } catch (...) {
+    return;  // an unreadable cleanup state is not evidence that the lock is safe to drop
+  }
+  ::CloseHandle(static_cast<HANDLE>(lock));  // also releases this handle's file locks
+}
 
 bool ApplyProductEngineConfig(HMODULE module, std::wstring* why) {
   std::lock_guard<std::mutex> guard(g_mutex);
@@ -521,9 +546,8 @@ bool EngineStartTransaction::Complete(std::wstring* why) {
 
   ReleaseStartLock(&mutex_);
   prepared_ = false;
-  if (!deployment_ok) {
-    CloseLockFile(&lock_file_);
-  }
+  // On failure the caller must release its engine lease before Abort/destruction
+  // considers dropping the file lock. Cleanup may fail and require retaining it.
   return deployment_ok;
 }
 

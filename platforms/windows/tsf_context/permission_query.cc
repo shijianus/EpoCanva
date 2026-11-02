@@ -121,16 +121,11 @@ ScopeFact ReadScopeOverSelection(ITfContext* context, TfEditCookie edit_cookie,
   ::VariantInit(&value);
   const HRESULT value_hr = property->GetValue(edit_cookie, range, &value);
   range->Release();
-  if (value_hr == S_FALSE || value_hr == E_FAIL) {
-    // No published InputScope metadata over this range. S_FALSE is the officially
-    // documented no-coverage answer (VT_EMPTY). E_FAIL is the answer this machine's
-    // real msctf.dll returns for exactly the same state -- an attribute-free context
-    // owner (verified empirically: a store that publishes scopes answers S_OK with
-    // VT_UNKNOWN; a store that publishes nothing answers E_FAIL). Treating it as
-    // "absent" rather than "query failed" is a documented residual-risk decision: a
-    // context owner whose attribute machinery genuinely breaks internally is
-    // indistinguishable from one that publishes nothing, and absence is permissive.
-    // Every other failure HRESULT stays a query failure (Unknown).
+  if (value_hr == S_FALSE) {
+    // Only the documented no-coverage answer is absence. Some msctf builds return
+    // E_FAIL both for an attribute-free owner and for a broken attribute read; that
+    // ambiguity cannot grant permission. The common FAILED path below preserves it
+    // as Unknown, including during the granted-cookie recheck before a write.
     ::VariantClear(&value);  // defensive; normally VT_EMPTY
     fact.presence = FactPresence::kAbsent;
     return fact;

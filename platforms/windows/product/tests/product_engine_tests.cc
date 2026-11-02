@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <variant>
 
 #include "engine_executor/test_support.h"
@@ -245,7 +246,8 @@ bool RunScenario(const Arguments& arguments, const std::filesystem::path& base,
           label + ": completion on adds candidates");
     Check(completion_state.candidates.size() <= 8,
           label + ": the eight-candidate ceiling holds");
-  } else {
+  } else if (!settings.morphology_enabled && !settings.abbreviation_enabled &&
+             !settings.two_edit_spelling_enabled) {
     Check(completion_state.candidates.size() == 1,
           label + ": completion off leaves only the raw candidate");
   }
@@ -276,11 +278,63 @@ bool RunScenario(const Arguments& arguments, const std::filesystem::path& base,
               epocanva::tests::engine_executor::AsciiOf(
                   typo_state.candidates.front().text_utf16_code_units) == "hellp",
           label + ": candidate 0 is the typo itself");
-  } else {
+  } else if (!settings.two_edit_spelling_enabled && !settings.morphology_enabled &&
+             !settings.abbreviation_enabled) {
     Check(typo_state.candidates.size() == 1,
           label + ": spelling off leaves only the raw candidate");
+  } else {
+    Check(typo_state.candidates.size() <= 8, label + ": extended suggestions bounded");
   }
   close_client(typo_client, label + " typo client");
+
+  if (!settings.completion_enabled && !settings.spelling_enabled &&
+      !settings.morphology_enabled && !settings.abbreviation_enabled) {
+    epocanva::windows::engine::ClientId two_edit_client;
+    if (!create_client(&two_edit_client, label + " two-edit client")) {
+      executor.StopAndJoin();
+      return false;
+    }
+    EngineState two_edit_state;
+    if (!TypeText(executor, two_edit_client, "hxllp", layout, &two_edit_state,
+                  label + " two-edit")) {
+      executor.StopAndJoin();
+      return false;
+    }
+    Check(HasCandidate(two_edit_state, "hello") == settings.two_edit_spelling_enabled,
+          label + ": two substitutions correction follows product setting");
+    Check(!two_edit_state.candidates.empty() &&
+              epocanva::tests::engine_executor::AsciiOf(
+                  two_edit_state.candidates.front().text_utf16_code_units) == "hxllp",
+          label + ": two-edit path keeps the original candidate");
+    close_client(two_edit_client, label + " two-edit client");
+  }
+
+  for (const auto& sample : {std::pair<std::string, std::string>{"walk", "walking"},
+                             {"brb", "be right back"}}) {
+    epocanva::windows::engine::ClientId extended_client;
+    if (!create_client(&extended_client, label + " extended client")) {
+      executor.StopAndJoin();
+      return false;
+    }
+    EngineState extended_state;
+    if (!TypeText(executor, extended_client, sample.first, layout, &extended_state,
+                  label + " extended")) {
+      executor.StopAndJoin();
+      return false;
+    }
+    Check(!extended_state.candidates.empty() &&
+              epocanva::tests::engine_executor::AsciiOf(
+                  extended_state.candidates.front().text_utf16_code_units) == sample.first,
+          label + ": extended features keep the raw candidate");
+    const bool feature_enabled = sample.first == "walk" ? settings.morphology_enabled
+                                                        : settings.abbreviation_enabled;
+    if (!settings.completion_enabled) {
+      Check(HasCandidate(extended_state, sample.second) == feature_enabled,
+            label + ": product patch controls actual extended candidate");
+    }
+    Check(extended_state.candidates.size() <= 8, label + ": extended menu bounded");
+    close_client(extended_client, label + " extended client");
+  }
 
   const StopStatus stopped = executor.StopAndJoin();
   Check(stopped == StopStatus::kOk, label + ": executor stops cleanly");
@@ -353,6 +407,18 @@ int main(int argc, char** argv) {
   const bool disabled_ok = RunScenario(arguments, arguments.run_root / L"设置 关闭",
                                        disabled, false, false, "settings-off");
   Check(disabled_ok, "settings-off scenario completed");
+  auto extended = disabled;
+  extended.morphology_enabled = true;
+  extended.abbreviation_enabled = true;
+  extended.two_edit_spelling_enabled = true;
+  const bool extended_ok = RunScenario(arguments, arguments.run_root / L"extended",
+                                       extended, false, false, "extended-settings");
+  Check(extended_ok, "extended settings scenario completed");
+  auto two_edit = disabled;
+  two_edit.two_edit_spelling_enabled = true;
+  const bool two_edit_ok = RunScenario(arguments, arguments.run_root / L"two-edit",
+                                       two_edit, false, false, "two-edit-settings");
+  Check(two_edit_ok, "two-edit-only settings scenario completed");
 
   if (epocanva::tests::engine_executor::g_failed != 0) {
     std::cout << "FAILED: " << epocanva::tests::engine_executor::g_failed

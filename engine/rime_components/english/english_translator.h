@@ -5,13 +5,12 @@
 // on librime's private headers at the pinned commit and are not a front-end SDK
 // (docs/adr/0004-compiled-in-rime-components.md, 「限制」 1).
 //
-// What this class does: it turns the current segment's input into candidate 0 =
-// the original text, followed by up to 7 completions read from a word list
-// compiled into the same PE module's heap. Whether the input is a queryable English
-// token at all -- letters, at most one internal apostrophe or hyphen, no technical
-// mark -- is decided in engine/languages/en/english_token.h, not here; this class
-// only counts the answer it got. Everything linguistically interesting is
-// delegated to engine/languages/en/, which knows nothing about Rime.
+// What this class does: it keeps candidate 0 = original text and shares a total
+// budget of eight candidates across prefix completion, legacy one-edit spelling
+// and individually opted-in LanguageSupport suggestions. Independent frequency
+// data, when explicitly supplied and validated, ranks the complete prefix range
+// before truncation; dictionary attestation weights are never corpus frequency.
+// Token/case/protection decisions live in engine/languages/en/, not here.
 //
 // What this class deliberately does NOT do:
 //  - it does not derive from rime::Memory, so no dictionary, no user dictionary,
@@ -35,7 +34,12 @@
 
 #include "english_diagnostics.h"
 #include "english_lexicon.h"
+#include "language_support.h"
 #include "prefix_completer.h"
+
+namespace rime {
+class Config;
+}
 
 namespace epocanva {
 namespace english {
@@ -100,6 +104,20 @@ class EpoCanvaEnglishTranslator : public rime::Translator {
   // disabled state is a regression test rather than a hope.
   bool spelling_enabled_ = false;
   std::size_t max_suggestions_ = EPOCANVA_ENGLISH_MAX_SUGGESTIONS_DEFAULT;
+
+  // Construction-time immutable state only: no file I/O or index creation in
+  // Query, no learning/context snapshot imported, no commit notifier attached.
+  // A malformed declared frequency source disables ALL extensions, not legacy
+  // completion/one-edit spelling. Fixed status properties make that explicit.
+  std::unique_ptr<epocanva::en::LanguageSupport> support_;
+  bool require_attested_morphology_ = true;
+  epocanva::en::LanguageSupportOptions support_options_{false, false, false, false};
+  const char* support_status_ = "disabled";
+  const char* frequency_source_ = "unavailable";
+  const char* segmentation_status_ = "disabled";
+
+  void ConfigureExtended(rime::Config* config);
+  void PublishExtendedStatus() const;
 };
 
 // --- diagnostics storage, defined in english_translator.cc ---------------------

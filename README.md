@@ -8,9 +8,37 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 每个阶段的范围与验收标准在对应的任务书与 `docs/reports/` 阶段报告里，
 **不写在本文件**，因为阶段性的限制会过期。
 
+## 发行验证
+
+项目自有代码采用 **AGPL-3.0-only**；第三方代码及数据保留原许可。当前仍是内部 Alpha，
+不是已验收的五语言发行版。用户允许先做内部无签名验收，但不豁免功能、隐私、源码对应、安装与真实宿主测试。
+发行条件与证据格式见
+[`docs/product/release-gate.md`](docs/product/release-gate.md)。
+产品构建入口 `tools/product/build_product.ps1` 按配置、构建、CTest 的顺序运行，
+并记录完整源码身份、实际文件指纹、二进制 SHA-256、退出码及跳过项；
+`tools/product/stage_product.ps1` 只接受匹配当前源码的成功构建收据，默认拒绝个人构建路径。
+`tools/product/check_release.ps1` 分别检查 `internal-unsigned` 和 `public-signed`；
+无签名模式只省略签名要求，五语言聚合、干净源码、源码归档、安装及宿主门禁仍然必需。
+`technical_ready`、`distribution_authorized`、`signature_verified`、`release_ready` 分开报告。
+包内文件校验通过不代表已获得分发许可或已完成系统输入验证。
+
 ## 现在能做什么，不能做什么
 
-引擎底座已经跑通，**英文能力只有四项，范围都很小**；P2.4 增加的是**验证规模**，不是能力项。
+本轮已新增并测试语言无关纯 C ABI、英文形态/缩写/二编辑拼写及独立频率接口、
+有界隐私学习库、中文拼音/注音核心、法文重音核心、日文 Romaji/Kana 与韩文两套式组合核心。
+英文扩展已编译进真实 Rime DLL，pilot 关闭 39 项、开启 45 项引擎集成测试均通过；
+所有扩展默认关闭，始终保留原文候选。
+核心 Release 聚合为 56 项：55 通过、1 项符号链接能力测试明确跳过。
+正式产品 Release 聚合为 228 项：226 通过、2 项明确跳过、0 失败；当前源码收据已生成，
+但真实焦点/符号链接跳过项仍阻塞完整验收。
+
+**这不等于五语言产品已完成。** 生产词频尚未提供，学习库未连接候选 ID 与宿主写入确认链路；
+中文汉字/词组、法文词汇、日文 Kanji 数据未获选用与获取批准。其他语言当前只有独立核心，
+没有进入默认产品 schema。ABI 已有真实后端，但 TSF 尚未迁移到该 ABI；安装器及当前包跨宿主验收仍未完成。
+详细边界见 `docs/testing/english-completeness.md`、`docs/testing/learning-store.md`、
+`docs/testing/chinese-core.md`、`docs/testing/french-core.md`、`docs/testing/japanese-korean-core.md`。
+
+以下为既有英文与 Windows 路径的历史能力说明；P2.4 增加的是验证规模，而不是生产语料词频。
 
 - 已有：librime 固定提交的原版构建与两套自有构建、公开 C API 上的无界面按键回放、
   编译进引擎 DLL 的自有组件及其可达性验证，以及
@@ -42,22 +70,23 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
   （`helloworld` 仍整串保留）。实现形态是编译进 `rime.dll` 的最小英文 Processor
   （`engine/rime_components/english/english_space_processor.cc`），规则本身在
   `engine/languages/en/english_space_policy.h`，测试侧只拼接 API 真正返回过的 commit。
-- 没有：词频与上下文**学习**、
-  形态变化（复数、`-s/-ed/-ing`、所有格、缩合）、拼写**纠错**、连写**自动分段**、
-  缩写展开、跨应用一致性、下一词预测、候选编排与分页；
+- 尚未完成产品验收：生产词频与上下文**学习**、Unicode 英文完整性、
+  基于实际语料的连写分段、跨应用一致性和下一词预测。
+  新增形态、缩写、二编辑拼写是明确选择的建议，不自动纠正宿主文本；
+  形态默认要求词典收录或所有格基词已收录，不声称完整词性分析。
   大小写方面**只有** ASCII 映射——没有 Unicode case folding、没有句首自动大写、
   没有专名/品牌词大小写恢复（`iPhone`、`GitHub` 一类仍不补全）；
   词形方面**只有**"至多一个 ASCII 分隔符、不在首尾、不两种混用"这一条有限规则——
   没有多分隔符词形、没有 Unicode 弯撇号/破折号规范化、没有自动标点替换、
   没有 URL/邮箱/代码解析器；**没有已安装、已激活的系统 TSF 输入法**，没有 Android
-  前端，没有已执行的安装器（W3-B 只交付并测试了注册导出，未运行系统安装）；
+  前端，没有已执行的安装器；旧包的系统注册实验不能代替当前包的真实宿主验收；
   W1 只交付未注册的产品 TSF DLL 与设置壳；W2-A 已把产品 TSF DLL 接到真实
   `ITfKeyEventSink`、上下文观察、真实许可、协调器、固定 STA 唤醒与有界输入队列；
   W2-A-R 又补上高水位原样降级（文本不丢/不重/不乱序）、首 token 宿主归属与运行期共享锁；
   候选窗口已由 W2-B 实现；W2-B-R 修复了容量边界后的同会话恢复与 COM 回调/卸载生命周期，
   并补齐降级控制键与启动/停用端到端回归；W3-A 增加 UIElement 类别、宿主绘制决定遵从与
   token 锚点；W3-B 增加 `DllRegisterServer`/`DllUnregisterServer`、候选回退显示设置与
-  版本/图标资源，但安装与真实系统注册仍需一次显式授权的 C 层会话。
+  版本/图标资源；安装和真实系统输入仍需与具体包身份绑定的完整 C 层证据。
 - 词库事实：W1 起的内部产品包**已包含** `data/lexicon/epocanva_en_alpha.tsv`
   （42,356 行，由 `tools/data/build_product_lexicon.py` 从固定 ESDB 提交确定性生成并记录
   provenance），它随暂存包分发但**仅限内部 Alpha**——跨法域再分发仍需负责人与法务确认
@@ -71,7 +100,7 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 - W1 起另有一条**内部 Alpha 产品壳**：原生 Win32 的 `EpoCanva.exe`（设置、状态、离线/隐私说明、
   数据位置、许可入口）、产品 TSF DLL、`%LOCALAPPDATA%\EpoCanva` 用户数据、
   只读安装数据与白名单离线暂存包。W3-B 让 DLL 自带 `DllRegisterServer`/
-  `DllUnregisterServer` 与图标/版本资源，但**本机尚未执行系统注册**；
+  `DllUnregisterServer` 与图标/版本资源，但**当前源码对应的正式包尚未完成真实宿主闭环**；
   未注册时它不是系统输入法，候选窗口只在产品 DLL 自身的受控会话内出现。
   内部 Alpha 包不得公开分发。
 
@@ -99,7 +128,8 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 | W2-C | 输入保真 P0：普通原文归宿主、引擎建议有界可丢弃、显式候选替换的范围校验；删除 raw 容量路径并更正 177 的归属 | 已交付（内部运行包 `0.2.4-w2c`；未注册；C 层未验证） | `docs/reports/W2-C-input-fidelity.md` |
 | W3-A | 正式 TIP 注册/激活身份、UIElement 类别、宿主绘制决定遵从、token 锚点与隔离验证工具 | 已交付（内部运行包 `0.2.5-w3a`；C 层 trace 轮次完成，正式包闭环待复验） | `docs/reports/W3-A-isolation-registration.md` |
 | W3-B | `DllRegisterServer`/`DllUnregisterServer`（HKLM/HKCU、回读、回滚、外来 CLSID 拒绝）、候选回退显示设置、版本/图标资源、安装工具链只读探测 | 已实现并完成 B 层验证（内部 Alpha；未分发；系统注册/安装与 C 层闭环待一次显式 UAC 授权） | `docs/reports/W3-B-install-and-fallback.md` |
-| 之后 | 安装器（工具链缺失，W3-B 未执行）、C 层闭环、其余英文能力、Android | 未开始 | — |
+| 发行准备修复 | 构建身份/收据、权限失败拒绝、运行库绑定、生命周期/共享锁、注册回滚、精确载荷/许可、路径清理与发行检查 | 产品 161 项：160 通过、1 显式跳过；内测候选已重建；公开发行仍阻塞 | `docs/reports/release-readiness-hardening.md` |
+| 之后 | 安装器（工具链缺失）、当前包 C 层闭环、其余英文能力、Android | 尚未交付 | — |
 
 ## 目录结构
 
@@ -127,7 +157,7 @@ tools/
   rime_input_replay/        无界面按键回放（P1.3）
   rime_component_probe/     自有组件可达性测试（P1.4）
   test_english_integration.ps1  英文集成测试的正式入口：参数与工具检查 → 配置 → 构建 → 导出实际测试清单 → CTest → 真实退出码
-  rime_english_recovery/    英文集成测试（事故后的模块化重建：入口 + 公共框架 + 每组行为一个文件；pilot 关闭 27 条 CTest，开启 33 条）
+  rime_english_recovery/    英文集成测试（事故后的模块化重建：入口 + 公共框架 + 每组行为一个文件；pilot 关闭 39 条 CTest，开启 45 条）
   rime_english_completion/  已退役的旧入口，目录内只剩指向新正式入口的 README（原因与旧用例去向见该文件）
   data/build_english_pilot.py  真实词表的确定性离线转换器（P2.4，默认不联网）
   build_librime_baseline.ps1  唯一的 librime 原生构建入口，-Mode baseline|component-probe|english-completion

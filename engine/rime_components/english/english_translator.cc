@@ -12,10 +12,16 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include <rime/candidate.h>
 #include <rime/common.h>
@@ -23,13 +29,13 @@
 #include <rime/deployer.h>
 #include <rime/context.h>
 #include <rime/engine.h>
-#include <rime/context.h>
-#include <rime/engine.h>
 #include <rime/schema.h>
 #include <rime/service.h>
 #include <rime/translation.h>
 
+#include "english_extended_config.h"
 #include "english_space_processor.h"
+#include "morphology_rules.h"
 #include "spelling_suggester.h"
 
 namespace epocanva {
@@ -170,6 +176,185 @@ std::atomic<const char*> g_last_status_name{"never-attempted"};
 std::mutex g_cache_mutex;
 std::map<std::string, std::shared_ptr<const LexiconRecord>> g_cache;
 
+// Only configuration data is read here, once in the Translator constructor.
+// Query never opens a file. The format is deliberately not the word-list TSV:
+// its explicit source/provenance header must agree with the schema, and its IDs
+// are exact admitted dictionary IDs, not words inferred from a hash or a weight.
+bool ValidProvenance(std::string_view value) {
+  if (value.empty() || value.size() > extended::kMaxProvenanceUtf8Bytes ||
+      value.front() == ' ' || value.back() == ' ') {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](unsigned char byte) {
+    return byte >= 0x20 && byte <= 0x7e;
+  });
+}
+
+const char* ParsePositiveDecimal(std::string_view field, std::uint64_t* out) {
+  if (field.empty() || field.front() == '0') {
+    return "invalid-frequency-record";
+  }
+  std::uint64_t value = 0;
+  for (const unsigned char byte : field) {
+    if (byte < '0' || byte > '9') {
+      return "invalid-frequency-record";
+    }
+    const auto digit = static_cast<std::uint64_t>(byte - '0');
+    if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10) {
+      return "frequency-value-overflow";
+    }
+    value = value * 10 + digit;
+  }
+  *out = value;
+  return nullptr;
+}
+
+const char* LoadFrequencyFile(const std::filesystem::path& path,
+                              const std::string& source,
+                              const std::string& provenance,
+                              epocanva::en::FrequencyData* data) {
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec) || ec) {
+    return "frequency-file-not-found";
+  }
+  const auto file_utf8_bytes = std::filesystem::file_size(path, ec);
+  if (ec) {
+    return "frequency-file-unreadable";
+  }
+  if (file_utf8_bytes > extended::kMaxFrequencyFileUtf8Bytes) {
+    return "frequency-file-too-large";
+  }
+  if (file_utf8_bytes == 0) {
+    return "empty-frequency-data";
+  }
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return "frequency-file-unreadable";
+  }
+  std::string text(static_cast<std::size_t>(file_utf8_bytes), '\0');
+  in.read(text.data(), static_cast<std::streamsize>(text.size()));
+  if (in.gcount() != static_cast<std::streamsize>(text.size()) || in.bad() ||
+      in.peek() != std::char_traits<char>::eof() || in.bad()) {
+    return "frequency-file-unreadable";
+  }
+
+  std::size_t begin_utf8_byte = 0;
+  std::size_t line_count = 0;
+  while (begin_utf8_byte < text.size()) {
+    const std::size_t newline_utf8_byte = text.find('\n', begin_utf8_byte);
+    const bool terminated = newline_utf8_byte != std::string::npos;
+    const std::size_t end_utf8_byte = terminated ? newline_utf8_byte : text.size();
+    std::string_view line(text.data() + begin_utf8_byte,
+                          end_utf8_byte - begin_utf8_byte);
+    // A CR is a line ending ONLY as part of CRLF, never as a bare final byte.
+    if (terminated && !line.empty() && line.back() == '\r') {
+      line.remove_suffix(1);
+    }
+    ++line_count;
+    if (line_count == 1) {
+      const std::string expected = std::string(extended::kFrequencyFormat) + "\t" + source;
+      if (line != expected) {
+        return "frequency-source-or-format-mismatch";
+      }
+    } else if (line_count == 2) {
+      if (line != "provenance\t" + provenance) {
+        return "frequency-provenance-mismatch";
+      }
+    } else {
+      const std::size_t separator_utf8_byte = line.find('\t');
+      if (separator_utf8_byte == std::string_view::npos ||
+          line.find('\t', separator_utf8_byte + 1) != std::string_view::npos) {
+        return "invalid-frequency-record";
+      }
+      epocanva::en::FrequencyRecord row;
+      if (const char* status = ParsePositiveDecimal(
+              line.substr(0, separator_utf8_byte), &row.id)) {
+        return status;
+      }
+      if (const char* status = ParsePositiveDecimal(
+              line.substr(separator_utf8_byte + 1), &row.count)) {
+        return status;
+      }
+      data->entries.push_back(row);
+    }
+    begin_utf8_byte = terminated ? newline_utf8_byte + 1 : text.size();
+  }
+  if (line_count < 2) {
+    return "frequency-provenance-mismatch";
+  }
+  // Create validates every row atomically, including positive known IDs, unique
+  // IDs and aggregate uint64 overflow. No partly loaded index is ever returned.
+  return nullptr;
+}
+
+// Use the core's EXACT token/case gates and prefix bounds. The independent
+// frequency order is applied before the candidate cut, across the entire match
+// range, not merely to the old top seven (nor the old top 64). Additional ranking
+// storage is O(k), k <= 7; the core gate call still builds its legacy match pool.
+// Exact base counts avoid double-rounding ties at uint64 extremes;
+// no learned/context snapshot is imported and no lexicon weight breaks a tie.
+epocanva::en::CompletionResult CompleteWithFrequency(
+    const EnglishLexicon& lexicon, const epocanva::en::LanguageSupport& support,
+    std::string_view input, std::size_t limit) {
+  auto result = epocanva::en::CompletePrefix(lexicon, input, 0);
+  if (!result.lookup_performed || limit == 0 || result.match_count == 0) {
+    return result;
+  }
+  std::string key;
+  if (!epocanva::en::ToLookupKey(input, &key)) {
+    return result;
+  }
+  const auto& entries = lexicon.entries();
+  struct RankedEntry {
+    const epocanva::en::LexiconEntry* entry;
+    std::uint64_t count;
+  };
+  const auto before = [](const RankedEntry& a, const RankedEntry& b) {
+    return a.count != b.count ? a.count > b.count : a.entry->word < b.entry->word;
+  };
+  std::vector<RankedEntry> best;
+  limit = std::min(limit, extended::kMenuCandidateLimit - 1);
+  best.reserve(limit + 1);
+  epocanva::en::RankingInputs ranking;
+  ranking.allow_learning = false;
+  const std::size_t first_entry = epocanva::en::PrefixRangeStart(entries, key);
+  const std::size_t last_entry = epocanva::en::PrefixRangeEnd(entries, key);
+  for (std::size_t entry_index = first_entry; entry_index < last_entry; ++entry_index) {
+    const auto& entry = entries[entry_index];
+    if (entry.word == key) {
+      continue;  // this case-mapped row would duplicate raw candidate zero
+    }
+    const auto score = support.ScoreLexeme(epocanva::en::StableLexemeId(entry.word), ranking);
+    const RankedEntry ranked{&entry, score.base_count};
+    if (best.size() == limit && !before(ranked, best.back())) {
+      continue;
+    }
+    best.insert(std::lower_bound(best.begin(), best.end(), ranked, before), ranked);
+    if (best.size() > limit) {
+      best.pop_back();
+    }
+  }
+  for (const auto& ranked : best) {
+    result.completions.push_back({ranked.entry->word,
+        epocanva::en::ApplyCaseStyle(ranked.entry->word, result.case_style),
+        ranked.entry->weight});  // retained legacy metadata, never frequency
+  }
+  return result;
+}
+
+const char* ExtendedComment(epocanva::en::CandidateType type) {
+  using epocanva::en::CandidateType;
+  switch (type) {
+    case CandidateType::kMorphology: return extended::kMorphologyComment;
+    case CandidateType::kAbbreviation: return extended::kAbbreviationComment;
+    case CandidateType::kSegmentation: return extended::kSegmentationComment;
+    case CandidateType::kSpelling: return extended::kSpellingComment;
+    case CandidateType::kContraction: return extended::kContractionComment;
+    case CandidateType::kPrediction: return nullptr;  // not a next-word host
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 std::shared_ptr<const LexiconRecord> LexiconRecord::FromSuccessfulLoad(
@@ -260,6 +445,7 @@ EpoCanvaEnglishTranslator::EpoCanvaEnglishTranslator(
     // configuration error, and it must be countable: otherwise the engine looks
     // like it is completing and is only echoing.
     g_config_missing_path.fetch_add(1, std::memory_order_relaxed);
+    ConfigureExtended(config);
     return;
   }
   // Resolution base is the engine's shared data directory, which the front end
@@ -308,6 +494,114 @@ EpoCanvaEnglishTranslator::EpoCanvaEnglishTranslator(
                     static_cast<int>(
                         EPOCANVA_ENGLISH_MAX_SUGGESTIONS_DEFAULT))));
   }
+  ConfigureExtended(config);
+}
+
+void EpoCanvaEnglishTranslator::ConfigureExtended(rime::Config* config) {
+  const auto key = [this](const char* suffix) { return name_space() + "/" + suffix; };
+  const auto enabled = [&](const char* suffix) {
+    bool value = false;
+    return config->GetBool(key(suffix), &value) && value;
+  };
+  support_options_.enable_morphology = enabled(extended::kEnableMorphology);
+  bool attested = true;
+  if (config->GetBool(key(extended::kRequireAttestedMorphology), &attested)) {
+    require_attested_morphology_ = attested;
+  }
+  support_options_.enable_abbreviation = enabled(extended::kEnableAbbreviation);
+  support_options_.enable_spelling = enabled(extended::kEnableTwoEditSpelling);
+  support_options_.enable_segmentation = enabled(extended::kEnableSegmentation);
+  // Search stays core-bounded; the final merged menu still has only seven slots.
+  // Request enough candidates to deduplicate against legacy completions/spelling
+  // without allowing their duplicates to consume the entire extension budget.
+  support_options_.max_candidates = epocanva::en::kMaxLanguageCandidates;
+  const bool requested = support_options_.enable_morphology ||
+      support_options_.enable_abbreviation || support_options_.enable_spelling ||
+      support_options_.enable_segmentation;
+  const bool declared_frequency = config->GetItem(key(extended::kFrequencyPath)) ||
+      config->GetItem(key(extended::kFrequencySource)) ||
+      config->GetItem(key(extended::kFrequencyProvenance));
+  if (!requested && !declared_frequency) {
+    return;  // legacy schemas build no extended index and open no frequency file
+  }
+  if (support_options_.enable_segmentation) {
+    segmentation_status_ = "support-unavailable";
+  }
+  if (!record_ || !record_->lexicon) {
+    support_status_ = "lexicon-unavailable";
+    return;
+  }
+
+  epocanva::en::FrequencyData data;
+  std::string declared_source;
+  if (declared_frequency) {
+    std::string configured;
+    if (!config->GetString(key(extended::kFrequencyPath), &configured) ||
+        configured.empty() ||
+        !config->GetString(key(extended::kFrequencySource), &declared_source) ||
+        !config->GetString(key(extended::kFrequencyProvenance), &data.provenance)) {
+      support_status_ = "invalid-frequency-config";
+      return;
+    }
+    if (declared_source == extended::kTestFixtureSource) {
+      data.source = epocanva::en::FrequencySource::kTestFixture;
+    } else if (declared_source == extended::kProductionCorpusSource) {
+      data.source = epocanva::en::FrequencySource::kProductionCorpus;
+    } else {
+      support_status_ = "invalid-frequency-source";
+      return;
+    }
+    if (!ValidProvenance(data.provenance)) {
+      support_status_ = "invalid-frequency-provenance";
+      return;
+    }
+    rime::path path(configured);
+    if (!path.is_absolute()) {
+      path = rime::Service::instance().deployer().shared_data_dir / path;
+    }
+    if (const char* failure = LoadFrequencyFile(
+            std::filesystem::path(path.lexically_normal()), declared_source,
+            data.provenance, &data)) {
+      support_status_ = failure;
+      return;
+    }
+  }
+
+  epocanva::en::LanguageSupportBuildInfo info;
+  support_ = epocanva::en::LanguageSupport::Create(*record_->lexicon, data, &info);
+  if (!support_) {
+    support_status_ = epocanva::en::LanguageSupportBuildStatusName(info.status);
+    return;  // invalid data never falls back to an unvalidated extension index
+  }
+  support_status_ = "ready";
+  if (data.source == epocanva::en::FrequencySource::kTestFixture) {
+    frequency_source_ = extended::kTestFixtureSource;
+  } else if (data.source == epocanva::en::FrequencySource::kProductionCorpus) {
+    frequency_source_ = extended::kProductionCorpusSource;
+  }
+  if (support_options_.enable_segmentation) {
+    segmentation_status_ = data.source == epocanva::en::FrequencySource::kUnavailable
+        ? "frequency-unavailable" : "ready";
+  }
+}
+
+void EpoCanvaEnglishTranslator::PublishExtendedStatus() const {
+  rime::Context* context = engine_ ? engine_->context() : nullptr;
+  if (!context) {
+    return;
+  }
+  const auto publish = [context](const char* property, const char* value) {
+    if (context->get_property(property) != value) {
+      context->set_property(property, value);
+    }
+  };
+  // Config-only constants. Publish on a query rather than construction: the
+  // switcher's new Session is not fully installed while its components build.
+  // set_property notifies, but does not Compose (rime/engine.cc:143-151), so these
+  // messages neither recurse nor change any legacy query/candidate counters.
+  publish(extended::kSupportStatusProperty, support_status_);
+  publish(extended::kFrequencySourceProperty, frequency_source_);
+  publish(extended::kSegmentationStatusProperty, segmentation_status_);
 }
 
 EpoCanvaEnglishTranslator::~EpoCanvaEnglishTranslator() {
@@ -323,6 +617,7 @@ rime::an<rime::Translation> EpoCanvaEnglishTranslator::Query(
     // Nothing to translate; the engine skips a null translation.
     return nullptr;
   }
+  PublishExtendedStatus();
   g_queries.fetch_add(1, std::memory_order_relaxed);
   // Was this Query() about the whole composition, or about one segment of a longer
   // one? A protected token must arrive whole: if the engine had cut
@@ -358,6 +653,10 @@ rime::an<rime::Translation> EpoCanvaEnglishTranslator::Query(
   }
   translation->Append(original);
   g_original_candidates.fetch_add(1, std::memory_order_relaxed);
+  // Menu ordinals/counts, not UTF-8 offsets. Contains only this Query's outputs;
+  // never persisted, logged, or retained as a learning/commit history.
+  std::vector<std::string> appended{input};
+  appended.reserve(extended::kMenuCandidateLimit);
 
   const bool has_index = record_ && record_->lexicon;
   if (!has_index) {
@@ -382,8 +681,11 @@ rime::an<rime::Translation> EpoCanvaEnglishTranslator::Query(
   // The raw composing text is passed by value into the core and only ever read
   // there: it is never lowercased in place, so candidate 0 and the eventual
   // default commit keep the user's own keys.
-  const epocanva::en::CompletionResult result =
-      epocanva::en::CompletePrefix(*record_->lexicon, input, max_completions_);
+  const bool has_frequency = support_ &&
+      support_->frequency_source() != epocanva::en::FrequencySource::kUnavailable;
+  const epocanva::en::CompletionResult result = has_frequency
+      ? CompleteWithFrequency(*record_->lexicon, *support_, input, max_completions_)
+      : epocanva::en::CompletePrefix(*record_->lexicon, input, max_completions_);
   // One outcome per query, computed by the core from BOTH gates (token shape,
   // then casing). Counting result.outcome here rather than re-deriving it from
   // case_style is what keeps the engine side and the core side from growing
@@ -439,6 +741,9 @@ rime::an<rime::Translation> EpoCanvaEnglishTranslator::Query(
   // Every refusal above leaves result.completions empty by construction, so the
   // loop is a no-op for them and no early return is needed to protect it.
   for (const epocanva::en::Completion& completion : result.completions) {
+    if (appended.size() >= extended::kMenuCandidateLimit) {
+      break;
+    }
     // The DISPLAY text is what a selected candidate commits, and it is the row the
     // core already de-duplicated against the raw input, so "hello" mapped to
     // "Hello" for the input "Hello" cannot appear twice.
@@ -449,6 +754,7 @@ rime::an<rime::Translation> EpoCanvaEnglishTranslator::Query(
       break;
     }
     translation->Append(candidate);
+    appended.push_back(completion.display);
     g_completion_candidates.fetch_add(1, std::memory_order_relaxed);
     // A delimited completion is a different fact from a case-mapped one: the row
     // came out of the index as don't / co-operate, not as a plain letter word that
@@ -486,6 +792,9 @@ rime::an<rime::Translation> EpoCanvaEnglishTranslator::Query(
                                       /*enabled=*/true);
     CountSpellingOutcome(spelling);
     for (const epocanva::en::SpellingSuggestion& suggestion : spelling.suggestions) {
+      if (appended.size() >= extended::kMenuCandidateLimit) {
+        break;
+      }
       // A distinct candidate type, and the fixed comment a front end can actually see
       // through the C API (RimeCandidate carries text and comment only). The comment
       // is a constant label: it never carries the input, the edit or a distance.
@@ -496,6 +805,7 @@ rime::an<rime::Translation> EpoCanvaEnglishTranslator::Query(
         break;
       }
       translation->Append(candidate);
+      appended.push_back(suggestion.display);
       g_spelling_candidates_appended.fetch_add(1, std::memory_order_relaxed);
       switch (spelling.case_style) {
         case epocanva::en::CaseStyle::kLowercase:
@@ -510,6 +820,67 @@ rime::an<rime::Translation> EpoCanvaEnglishTranslator::Query(
         default:
           break;
       }
+    }
+  }
+
+  if (support_ && appended.size() < extended::kMenuCandidateLimit &&
+      (support_options_.enable_morphology || support_options_.enable_abbreviation ||
+       support_options_.enable_spelling || support_options_.enable_segmentation)) {
+    epocanva::en::RankingInputs ranking;
+    ranking.allow_learning = false;  // no data-store/context/commit import yet
+    const auto extra = support_->Suggest(input, ranking, support_options_);
+    for (const auto& suggestion : extra.candidates) {
+      if (appended.size() >= extended::kMenuCandidateLimit) {
+        break;
+      }
+      if (std::find(appended.begin(), appended.end(), suggestion.text) != appended.end()) {
+        continue;
+      }
+      if (require_attested_morphology_ &&
+          suggestion.type == epocanva::en::CandidateType::kMorphology) {
+        std::string canonical;
+        if (!epocanva::en::ToLookupKey(suggestion.text, &canonical)) {
+          continue;
+        }
+        const bool known_lemma = suggestion.lexeme_ids.size() == 1 &&
+            support_->HasLexeme(suggestion.lexeme_ids.front());
+        const bool marked_possessive = known_lemma &&
+            (suggestion.morphology_forms & (epocanva::en::kSingularPossessive |
+                                            epocanva::en::kPluralPossessive)) != 0;
+        std::string_view possessive_base(canonical);
+        if (possessive_base.size() > 2 &&
+            possessive_base.substr(possessive_base.size() - 2) == "'s") {
+          possessive_base.remove_suffix(2);  // ASCII suffix: two UTF-8 code units
+        } else if (!possessive_base.empty() && possessive_base.back() == '\'') {
+          possessive_base.remove_suffix(1);  // apostrophe: one UTF-8 code unit
+        } else {
+          possessive_base = {};
+        }
+        // Known source lemma alone cannot justify catses': without POS metadata
+        // a plural row can be reinflected. Require the actual possessive base to
+        // be an attested row too, while still allowing cat's and cats'.
+        const bool possessive = marked_possessive && !possessive_base.empty() &&
+            record_->lexicon->Find(possessive_base);
+        if (!record_->lexicon->Find(canonical) && !possessive) {
+          continue;
+        }
+      }
+      const char* comment = ExtendedComment(suggestion.type);
+      if (!comment) {
+        continue;  // Predict is deliberately not a segment translator feature
+      }
+      // segment.start/end are UTF-8 code-unit offsets in the ORIGINAL input,
+      // even when the chosen output contains spaces/apostrophes or more bytes.
+      auto candidate = rime::New<rime::SimpleCandidate>(
+          epocanva::en::CandidateTypeName(suggestion.type), segment.start,
+          segment.end, suggestion.text, comment);
+      if (!candidate) {
+        break;
+      }
+      translation->Append(candidate);
+      appended.push_back(suggestion.text);
+      // New candidates are not old completion/spelling events: preserving their
+      // diagnostic identities is essential for every pre-extension fixture.
     }
   }
   return translation;

@@ -8,6 +8,13 @@
 > P1.2 真实取源并编译了本轮依赖之后更新的行已就地标注 **P1.2**；
 > 新增的实测结论集中在 §5.4（Boost）与 §6 表格。
 > §1 保留了 P1.1 当时的原始声明，它是审计轨迹的一部分，不要当成当前状态读。
+>
+> **2026-11-02 发行准备补充**：当前产品许可与链接面以
+> `data/manifests/product-dependencies.json` 和 `product-package-files.inc` 为准。
+> RapidJSON 头实际进入 OpenCC runtime，完整固定上游许可已补入产品包；TCLAP 仅为未打包的
+> OpenCC 命令行工具依赖。utfcpp 在固定检出中的许可正文是 BSL-1.0，下面历史表的 MIT 标注错误。
+> X11 的 keysym.h 与 keysymdef.h 声明均随包保留。当前包规则校验实际 Windows 检出文件的精确字节，
+> 不把 CRLF 工作树哈希混称为原始 Git blob 哈希。以上技术核实不替代主项目许可或词表再分发批准。
 
 ## 1. 方法与边界
 

@@ -6,6 +6,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "product_io.h"
@@ -113,7 +114,9 @@ bool ReadSettingsMap(const std::filesystem::path& path,
     }
     const bool known = key == "format" || key == "completion_enabled" ||
                        key == "completion_candidates" || key == "spelling_enabled" ||
-                       key == "spelling_candidates" || key == "candidate_display";
+                       key == "spelling_candidates" || key == "candidate_display" ||
+                       key == "morphology_enabled" || key == "abbreviation_enabled" ||
+                       key == "two_edit_spelling_enabled";
     if (!known) {
       continue;
     }
@@ -223,6 +226,17 @@ SettingsLoadResult LoadProductSettings(const std::filesystem::path& path) {
     }
   }
 
+  const std::pair<const char*, bool*> optional_flags[] = {
+      {"morphology_enabled", &loaded.morphology_enabled},
+      {"abbreviation_enabled", &loaded.abbreviation_enabled},
+      {"two_edit_spelling_enabled", &loaded.two_edit_spelling_enabled}};
+  for (const auto& flag : optional_flags) {
+    const std::string* value = find(flag.first);
+    if (value != nullptr && !ParseBoolExact(*value, flag.second)) {
+      return Corrupt(L"an extended English setting is not 0 or 1");
+    }
+  }
+
   result.settings = loaded;
   result.status = SettingsLoadStatus::kLoaded;
   return result;
@@ -260,6 +274,12 @@ std::string BuildSettingsText(const ProductSettings& settings) {
   text += "\ncandidate_display=";
   text += settings.candidate_display == CandidateDisplay::kAlwaysSelf ? "always_self"
                                                                       : "host";
+  text += "\nmorphology_enabled=";
+  text += settings.morphology_enabled ? "1" : "0";
+  text += "\nabbreviation_enabled=";
+  text += settings.abbreviation_enabled ? "1" : "0";
+  text += "\ntwo_edit_spelling_enabled=";
+  text += settings.two_edit_spelling_enabled ? "1" : "0";
   text += "\n";
   return text;
 }
@@ -298,6 +318,12 @@ std::string BuildSchemaPatch(const ProductSettings& settings) {
   patch += "  \"english/enable_suggestions\": ";
   patch += settings.spelling_enabled ? "true" : "false";
   patch += "\n  \"english/max_suggestions\": " + std::to_string(suggestions) + "\n";
+  patch += "  \"english/enable_morphology\": ";
+  patch += settings.morphology_enabled ? "true\n" : "false\n";
+  patch += "  \"english/enable_abbreviation\": ";
+  patch += settings.abbreviation_enabled ? "true\n" : "false\n";
+  patch += "  \"english/enable_two_edit_spelling\": ";
+  patch += settings.two_edit_spelling_enabled ? "true\n" : "false\n";
   return patch;
 }
 

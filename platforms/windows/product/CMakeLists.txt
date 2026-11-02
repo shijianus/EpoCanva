@@ -17,15 +17,20 @@ if(EPOCANVA_PRODUCT_VERSION STREQUAL "")
   message(FATAL_ERROR "platforms/windows/product/VERSION is empty")
 endif()
 
-set(EPOCANVA_PRODUCT_COMMIT "")
-execute_process(
-  COMMAND git -C "${CMAKE_CURRENT_LIST_DIR}" rev-parse --short HEAD
-  OUTPUT_VARIABLE _product_commit
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  ERROR_QUIET
-  RESULT_VARIABLE _product_git_status)
-if(_product_git_status EQUAL 0)
-  set(EPOCANVA_PRODUCT_COMMIT "${_product_commit}")
+set(EPOCANVA_PRODUCT_BUILD_ID "" CACHE STRING "Verified source identity for this build")
+if(EPOCANVA_PRODUCT_BUILD_ID STREQUAL "")
+  execute_process(
+    COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+      -File "${CMAKE_CURRENT_LIST_DIR}/../../../tools/product/build_identity.ps1"
+      -IdentityRepoRoot "${CMAKE_CURRENT_LIST_DIR}/../../.." -PrintCommit
+    OUTPUT_VARIABLE EPOCANVA_PRODUCT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _product_identity_status)
+  if(NOT _product_identity_status EQUAL 0 OR EPOCANVA_PRODUCT_COMMIT STREQUAL "")
+    message(FATAL_ERROR "Cannot determine product source identity")
+  endif()
+else()
+  set(EPOCANVA_PRODUCT_COMMIT "${EPOCANVA_PRODUCT_BUILD_ID}")
 endif()
 
 set(EPOCANVA_PRODUCT_LEXICON
@@ -41,9 +46,12 @@ endif()
 set(_product_definitions
   _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 set(_product_options /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
+file(SHA256 "${EPOCANVA_RIME_DLL}" EPOCANVA_PRODUCT_RIME_SHA256)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${EPOCANVA_RIME_DLL}")
 set(_product_defines
   EPOCANVA_PRODUCT_VERSION="${EPOCANVA_PRODUCT_VERSION}"
-  EPOCANVA_PRODUCT_COMMIT="${EPOCANVA_PRODUCT_COMMIT}")
+  EPOCANVA_PRODUCT_COMMIT="${EPOCANVA_PRODUCT_COMMIT}"
+  EPOCANVA_PRODUCT_RIME_SHA256="${EPOCANVA_PRODUCT_RIME_SHA256}")
 
 set(_product_source_dir "${CMAKE_CURRENT_LIST_DIR}")
 set(_tsf_source_dir "${CMAKE_CURRENT_LIST_DIR}/../tsf")
@@ -269,6 +277,7 @@ target_link_libraries(epocanva_product_deployment_tests PRIVATE
   epocanva_engine_executor
   epocanva_product_state
   bcrypt shell32 ole32)
+add_dependencies(epocanva_product_deployment_tests engine_runtime_fault_api)
 set_target_properties(epocanva_product_deployment_tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${_deployment_test_dir}"
   RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_deployment_test_dir}"
@@ -349,6 +358,16 @@ target_include_directories(epocanva_registration_tests PRIVATE
   "${_tsf_source_dir}")
 target_link_libraries(epocanva_registration_tests PRIVATE advapi32 ole32)
 
+add_executable(epocanva_runtime_modules_tests tests/runtime_modules_tests.cc)
+target_compile_definitions(epocanva_runtime_modules_tests PRIVATE ${_product_definitions})
+target_compile_options(epocanva_runtime_modules_tests PRIVATE ${_product_options})
+target_link_libraries(epocanva_runtime_modules_tests PRIVATE epocanva_engine_bridge)
+
+add_executable(epocanva_extended_settings_tests tests/extended_settings_tests.cc)
+target_compile_definitions(epocanva_extended_settings_tests PRIVATE ${_product_definitions})
+target_compile_options(epocanva_extended_settings_tests PRIVATE ${_product_options})
+target_link_libraries(epocanva_extended_settings_tests PRIVATE epocanva_product_state)
+
 add_executable(epocanva_ui_tests
   tests/ui_tests.cc)
 target_compile_definitions(epocanva_ui_tests PRIVATE ${_product_definitions})
@@ -411,6 +430,7 @@ endif()
 
 set_target_properties(epocanva_product_unit_tests epocanva_product_engine_tests
                       epocanva_ui_tests epocanva_candidate_ui_tests
+                      epocanva_extended_settings_tests epocanva_runtime_modules_tests
                       epocanva_registration_tests
                       epocanva_sta_waker_tests
                       epocanva_key_admission_tests
@@ -426,6 +446,63 @@ enable_testing()
 set(_product_assert
   "${CMAKE_CURRENT_LIST_DIR}/../../../tests/english_completion/assert_exit.cmake")
 set(_product_run "${CMAKE_BINARY_DIR}/product/run")
+
+find_program(_product_powershell powershell.exe REQUIRED)
+foreach(_receipt_mode normal can_fail)
+  set(_receipt_args -NoProfile -ExecutionPolicy Bypass
+    -File "${CMAKE_CURRENT_LIST_DIR}/tests/build_receipt_tests.ps1"
+    -RunRoot "${_product_run}/receipt-${_receipt_mode}")
+  set(_receipt_exit 0)
+  set(_receipt_marker "RESULT PASS")
+  if(_receipt_mode STREQUAL "can_fail")
+    list(APPEND _receipt_args -ForceFailure)
+    set(_receipt_exit 14)
+    set(_receipt_marker "RESULT FAIL")
+  endif()
+  add_test(NAME product.build.receipt_${_receipt_mode}
+    COMMAND ${CMAKE_COMMAND} -DEXE=${_product_powershell}
+      -DCASE=product-build-receipt-${_receipt_mode}
+      -DEXPECTED_EXIT=${_receipt_exit} "-DMARKER=${_receipt_marker}"
+      -DMARKER_POLICY=require "-DPASS_ARGS=${_receipt_args}"
+      -DTIMEOUT_SECONDS=120 -P ${_product_assert})
+  set_tests_properties(product.build.receipt_${_receipt_mode}
+    PROPERTIES TIMEOUT 150 LABELS "windows;product;build;identity;tampering")
+endforeach()
+
+add_test(NAME product.unit.extended_settings
+  COMMAND epocanva_extended_settings_tests "${_product_run}/extended-settings")
+add_test(NAME product.integration.runtime_modules
+  COMMAND epocanva_runtime_modules_tests "${EPOCANVA_RIME_DLL}"
+    "${EPOCANVA_BASELINE_RIME_DLL}" "${_product_run}/runtime-modules")
+
+string(SHA256 _policy_build_hash "${CMAKE_BINARY_DIR}")
+string(SUBSTRING "${_policy_build_hash}" 0 12 _policy_build_tag)
+get_filename_component(_policy_repo_root "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+foreach(_policy_suite release_gate source_producer)
+  if(_policy_suite STREQUAL "release_gate")
+    set(_policy_script "${CMAKE_CURRENT_LIST_DIR}/tests/release_gate_tests.ps1")
+  else()
+    set(_policy_script "${CMAKE_CURRENT_LIST_DIR}/../../../tests/product_source/source_producer_tests.ps1")
+  endif()
+  foreach(_policy_mode normal can_fail)
+    set(_policy_args -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${_policy_script}"
+      -RunRoot "${_policy_repo_root}/build/policy-${_policy_build_tag}-${_policy_suite}-${_policy_mode}")
+    set(_policy_exit 0)
+    set(_policy_marker "RESULT PASS")
+    if(_policy_mode STREQUAL "can_fail")
+      list(APPEND _policy_args -ForceFailure)
+      set(_policy_exit 14)
+      set(_policy_marker "RESULT FAIL")
+    endif()
+    add_test(NAME product.policy.${_policy_suite}_${_policy_mode}
+      COMMAND "${CMAKE_COMMAND}" "-DEXE=${_product_powershell}"
+        "-DCASE=${_policy_suite}_${_policy_mode}" "-DEXPECTED_EXIT=${_policy_exit}"
+        "-DMARKER=${_policy_marker}" -DMARKER_POLICY=require "-DPASS_ARGS=${_policy_args}"
+        -DTIMEOUT_SECONDS=600 -P "${_product_assert}")
+    set_tests_properties(product.policy.${_policy_suite}_${_policy_mode}
+      PROPERTIES TIMEOUT 660 LABELS "product;policy;source;negative")
+  endforeach()
+endforeach()
 
 add_test(
   NAME product.unit.settings_manifest_paths
@@ -470,6 +547,20 @@ add_test(
 set_tests_properties(product.integration.deployment_snapshot
   PROPERTIES TIMEOUT 240
              LABELS "windows;product;deployment;cross-process;marker")
+
+add_test(
+  NAME product.unit.deployment_cleanup_lock
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_deployment_tests>
+    -DCASE=product-deployment-cleanup-lock
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--run-root;${_product_run}/cleanup-lock;--mode;cleanup-lock;--fault-dll;$<TARGET_FILE:engine_runtime_fault_api>"
+    -DTIMEOUT_SECONDS=120
+    -P ${_product_assert})
+set_tests_properties(product.unit.deployment_cleanup_lock
+  PROPERTIES TIMEOUT 180 LABELS "windows;product;deployment;lifetime;failure;cross-process")
 
 add_test(
   NAME product.unit.sta_waker
@@ -528,6 +619,20 @@ add_test(
 set_tests_properties(product.integration.sink_engine_missing
   PROPERTIES TIMEOUT 240
              LABELS "windows;product;sink;engine-failure;literal;no-registration")
+
+add_test(
+  NAME product.integration.sink_engine_identity
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-engine-identity
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-identity;--mode;engine-mismatch"
+    -DTIMEOUT_SECONDS=180
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_engine_identity
+  PROPERTIES TIMEOUT 240 LABELS "windows;product;engine;identity;tampering;literal")
 
 add_test(
   NAME product.integration.sink_multi
