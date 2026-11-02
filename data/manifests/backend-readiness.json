@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "artifact_scope": "windows-x64-headless-backend",
+  "required_languages": ["en", "zh", "fr", "ja", "ko"],
+  "languages": [
+    {"id": "en", "status": "partial", "blockers": ["Full Unicode morphology/correction and sentence/punctuation acceptance are incomplete."]},
+    {"id": "zh", "status": "partial", "blockers": ["Prediction quality currently measures characters, not a complete word/phrase model.", "Simplified/traditional output and broad conversion acceptance are incomplete.", "Text-only Rime conversion metadata is not learnable; full Chinese confirmed learning is not connected."]},
+    {"id": "fr", "status": "partial", "blockers": ["The selected French dictionary does not provide grammatical generation tags; broad inflection/continuation acceptance is incomplete."]},
+    {"id": "ja", "status": "partial", "blockers": ["A bounded lexical Viterbi decoder is implemented, not full Mozc rewrite/segment acceptance.", "Broad conversion and partial-confirmation quality gates are incomplete."]},
+    {"id": "ko", "status": "partial", "blockers": ["Two-set composition and corpus word completion/prediction are implemented; full spacing and morphological-ending acceptance is incomplete."]}
+  ],
+  "limits": {
+    "aggregate_ngram_bytes": 67108864,
+    "prediction_extra_rss_bytes": 134217728,
+    "synchronous_p95_ms": 8,
+    "synchronous_p99_ms": 16,
+    "neural_default_admitted": false,
+    "neural_max_worker_bytes": 1610612736,
+    "neural_p95_ms": 150,
+    "neural_result_expiry_ms": 200
+  },
+  "release_blockers": [
+    "Data/model public redistribution and all required notices/attribution packaging are not fully verified.",
+    "Clean-source offline reconstruction and independent backend release package have not been verified.",
+    "End-to-end peak memory and synchronous tail-latency admission remain unverified."
+  ]
+}

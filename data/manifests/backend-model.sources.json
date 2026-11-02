@@ -1,0 +1,128 @@
+{
+  "schema": "epocanva.backend-model.sources.v1",
+  "purpose": "Optional offline CPU lexical reranker resource provenance; not product admission or efficacy approval.",
+  "source_policy": {
+    "runtime_network_io": false,
+    "user_content_sent": false,
+    "remote_code_execution": false,
+    "source_tree_edits": false,
+    "acquisition_root": "build/backend-model-acquire",
+    "build_root": "build/backend-neural",
+    "download_cap_bytes": 1500000000,
+    "conversion_dependency_cap_bytes": 2000000000
+  },
+  "model": {
+    "repository": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+    "source_license": "Apache-2.0",
+    "architecture": "Qwen2ForCausalLM",
+    "model_type": "qwen2",
+    "source_dtype": "bfloat16",
+    "parameters": 494032768,
+    "layers": 24,
+    "attention_heads": 14,
+    "key_value_heads": 2,
+    "hidden_size": 896,
+    "vocabulary_tokens": 151936,
+    "training_context_tokens": 32768,
+    "tokenizer": {
+      "class": "Qwen2Tokenizer",
+      "model": "BPE",
+      "normalizer": "NFC",
+      "pretokenizer": "Split + ByteLevel",
+      "vocab_entries": 151643,
+      "merge_entries": 151387,
+      "added_tokens": 22,
+      "trust_remote_code": false
+    },
+    "files": {
+      "model.safetensors": {"bytes": 988097824, "sha256": "88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342", "verification": "Hugging Face LFS sha256"},
+      "LICENSE": {"bytes": 11343, "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e"},
+      "config.json": {"bytes": 681, "sha256": "479dcf0c5286339e41ad3992cd08ae88a467c4187587936248e2b7c96283484b"},
+      "generation_config.json": {"bytes": 138, "sha256": "8c970692323e3ea0e9b8b0a4dca79388d31226e41f83c9fd6014804280ebf6e8"},
+      "merges.txt": {"bytes": 1671839, "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"},
+      "tokenizer.json": {"bytes": 7031645, "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"},
+      "tokenizer_config.json": {"bytes": 7228, "sha256": "c91efca15ceff6e9ee9424db58a6f59cd41294e550a86cbd07e3c1fb500b34f9"},
+      "vocab.json": {"bytes": 2776833, "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"},
+      "README.md": {"bytes": 3850, "sha256": "3c93cbc9f60417337fcbf093da872007586b9d886b0f0187f21aec35b869616a"},
+      ".gitattributes": {"bytes": 1519, "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361"}
+    },
+    "converted_gguf": {
+      "file": "build/backend-neural/models/qwen2.5-0.5b-base-q8_0.gguf",
+      "outtype": "q8_0",
+      "bytes": 531067776,
+      "sha256": "4b965ca8e4a95be38f3223bbb512cc73112efaef00c0313b7e618f0835c504c0",
+      "converter": "llama.cpp convert_hf_to_gguf.py",
+      "converter_revision": "ec7f3ac9ab33e46b136eb5ab6a76c4d81f57c7f1",
+      "conversion_mode": "isolated Python 3.11 venv; offline wheelhouse; no remote code"
+    }
+  },
+  "llama_cpp": {
+    "tag": "b4514",
+    "commit": "ec7f3ac9ab33e46b136eb5ab6a76c4d81f57c7f1",
+    "license": "MIT",
+    "archive_sha256": "21e88c79dbbec249a91b093b56f375a3248a9bbe80c5fb19d42c0849f148aa66",
+    "tree_entries": 1284,
+    "ordinary_git_blobs_verified": 1104,
+    "archive_symlinks_materialized": 7,
+    "kompute_submodule": "4565194ed7c32d1d2efa32ceab4d3c6cae006306 (not initialized; CPU build does not use it)",
+    "additional_notices": [
+      {"path": "gguf-py/LICENSE", "license": "MIT", "copyright": "2023 Georgi Gerganov"},
+      {"path": "examples/run/linenoise.cpp/LICENSE", "license": "BSD-2-Clause-style", "copyright": "Salvatore Sanfilippo, Pieter Noordhuis, Eric Curtin"},
+      {"path": "ggml/src/ggml-cpu/llamafile/sgemm.cpp", "license": "MIT", "copyright": "Mozilla Foundation"}
+    ]
+  },
+  "conversion_wheels": {
+    "python": "3.11-win_amd64",
+    "total_bytes": 241197424,
+    "source": "PyPI pinned metadata plus official PyTorch CPU index",
+    "torch": {"version": "2.2.2+cpu", "sha256": "88e63c916e3275fa30a220ee736423a95573b96072ded85e5c0171fd8f37a755", "bytes": 200798025},
+    "required_runtime_set": ["numpy 1.26.4", "sentencepiece 0.2.0", "transformers 4.47.1", "tokenizers 0.21.0", "safetensors 0.5.3", "protobuf 4.25.6", "gguf code from pinned llama.cpp"],
+    "installation": "pip --isolated --no-index --require-hashes --find-links build/backend-neural/wheelhouse",
+    "network_during_conversion": false,
+    "license_note": "Wheel licenses/notices remain in owned wheelhouse metadata; they are build-only and are not copied into runtime package by this phase."
+  },
+  "build": {
+    "recipe": "tools/backend/prepare_neural.ps1",
+    "source_cmake": "engine/neural/CMakeLists.txt",
+    "library": "standalone experiment only: static epocanva_neural + static pinned llama/ggml CPU backend",
+    "crt_integration_blocker": "Standalone /MD experiment; not link-integrated with current /MT product/backend. Rebuild and explicit CRT boundary required before integration.",
+    "cxx": "C++17, extensions OFF, MSVC /permissive- /EHsc",
+    "enabled": ["GGML_CPU"],
+    "disabled": ["BUILD_SHARED_LIBS", "LLAMA_BUILD_COMMON", "LLAMA_BUILD_EXAMPLES", "LLAMA_BUILD_SERVER", "LLAMA_BUILD_TESTS", "LLAMA_CURL", "GGML_BACKEND_DL", "GGML_BLAS", "GGML_CUDA", "GGML_HIP", "GGML_KOMPUTE", "GGML_LLAMAFILE", "GGML_METAL", "GGML_MUSA", "GGML_NATIVE", "GGML_OPENCL", "GGML_OPENMP", "GGML_RPC", "GGML_SYCL", "GGML_VULKAN"],
+    "imports_observed": ["bcrypt.dll", "KERNEL32.dll", "ADVAPI32.dll", "MSVCP140.dll", "VCRUNTIME140.dll"],
+    "network_or_gpu_imports_observed": false,
+    "runtime_dll_search": "not used by optional module; no external ggml backend loader is called",
+    "model_resource_size_limit_bytes": 536870912,
+    "default_admission": false,
+    "latency_gate_met": false,
+    "final_receipt": "build/backend-neural/neural-build-receipt.json"
+  },
+  "tests": {
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/backend/prepare_neural.ps1",
+    "observed_exit_codes": {"resource_verify": 0, "configure": 0, "build": 0, "imports": 0, "ctest": 0},
+    "ctest": {"tests": 2, "passed": 2, "failed": 0, "real_model_seconds": 2.69, "intentional_failure_control": true},
+    "real_model": {
+      "model_load_microseconds": 1039647,
+      "peak_working_set_bytes": 596127744,
+      "capital_fixture_order": [1, 2, 0],
+      "capital_fixture_log_probability": [-0.556706, -5.93801, -18.8177],
+      "repeat_deterministic": true,
+      "utf8_and_candidate_permutation": true,
+      "privacy_denied_before_read": true,
+      "cancellation_stale_deadline": true,
+      "default_200ms_result": "deadline_exceeded; empty ranking; fallback required",
+      "measured_scoring_microseconds": [225178, 221537, 220040, 221123, 225617],
+      "default_deadline_elapsed_microseconds": 201496,
+      "negative_assertion_control": "Check(false) emitted FAIL forced_assertion_failure; exact exit 1 and marker presence required by existing assert_exit.cmake",
+      "efficacy_claim": false
+    }
+  },
+  "open_gates": [
+    "Optional module is not integrated into the product root or C ABI.",
+    "Default admission remains disabled because measured scoring misses the 200 ms cutoff and the requested p95<=150 ms target is not met.",
+    "No performance optimization or AVX2 claim is made in this phase.",
+    "Runtime distribution still requires a separate legal notice decision for Qwen Apache-2.0 model and llama.cpp MIT/embedded notices.",
+    "Windows architectural offline claim is no OS sandbox guarantee: the code and dependencies make no socket calls; a normal TSF DLL remains in its host process."
+  ]
+}

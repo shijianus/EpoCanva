@@ -1,0 +1,171 @@
+{
+  "format": 1,
+  "kind": "backend-data-acquisition-source-record",
+  "scope": "development-stage acquisition evidence only; not a product or distribution manifest",
+  "offline_runtime_policy": "No runtime network access or data synchronization is authorized by this record.",
+  "acquisition_root": "build/backend-data-acquire/zh-fr",
+  "api_evidence_directory": "build/backend-data-acquire/zh-fr/metadata/sources",
+  "build_evidence_only": true,
+  "product_packaging_authorized": false,
+  "no_nested_git": true,
+  "source_verification": {
+    "method": "GitHub official HTTPS commit and recursive tree API responses; source files fetched from raw.githubusercontent.com at the pinned full commit.",
+    "signature_verification": "Not performed. Full commit IDs and downloaded bytes provide identity/integrity anchors, not commit-author authentication.",
+    "api_evidence": [
+      {"path":"metadata/sources/luna-commit-api.json","sha256":"1fd8add210164161d033d27ea5ac00b445b30962b293f93d29845360e459abf6","bytes":10431,"sha256_is_local_evidence_hash":true},
+      {"path":"metadata/sources/luna-tree-api.json","sha256":"4d6bef9168047a36e09d1d1c3a52a89dfd1392a0ce3617a4cddc72e399ea7059","bytes":3101,"sha256_is_local_evidence_hash":true},
+      {"path":"metadata/sources/terra-commit-api.json","sha256":"93c0a323472ac78368c8d5454b1fc0afa0706897cadb060ec5c48891bea72d17","bytes":4814,"sha256_is_local_evidence_hash":true},
+      {"path":"metadata/sources/terra-tree-api.json","sha256":"bb99563a50a5bb78b99e68506badc28f3af5c1a786d0685839216de6e246d186","bytes":1942,"sha256_is_local_evidence_hash":true},
+      {"path":"metadata/sources/bopomofo-commit-api.json","sha256":"e9ba1fa8e110610966d0290f056a44eba9041a5a76685a00ad03b5e5668d9495","bytes":5690,"sha256_is_local_evidence_hash":true},
+      {"path":"metadata/sources/bopomofo-tree-api.json","sha256":"4109a90c994d10f6d40bbeaf9fe0000a22d665ff348f8bf8a76387934aefb175","bytes":2470,"sha256_is_local_evidence_hash":true},
+      {"path":"metadata/sources/libreoffice-commit-api.json","sha256":"3e05b62b689c006b43da192fdc436e05c46f96b0b82fcde2d460a6edc344a854","bytes":5073,"sha256_is_local_evidence_hash":true},
+      {"path":"metadata/sources/libreoffice-tree-api.json","sha256":"174dfefe220dd7adf4bf75e3973f0f5bb2563dabfbfac970a75a8f11d0d6e259","bytes":310861,"sha256_is_local_evidence_hash":true}
+    ]
+  },
+  "upstreams": [
+    {
+      "id":"rime-luna-pinyin",
+      "official_repository":"https://github.com/rime/rime-luna-pinyin",
+      "pinned_commit":"56b934b099dfbeab842320f13aa8b461a6ab3e42",
+      "commit_api_url":"https://api.github.com/repos/rime/rime-luna-pinyin/commits/56b934b099dfbeab842320f13aa8b461a6ab3e42",
+      "tree_sha":"c0a87ac7e0e6408c9441ba7b6533f3e376c1c627",
+      "tree_api_url":"https://api.github.com/repos/rime/rime-luna-pinyin/git/trees/c0a87ac7e0e6408c9441ba7b6533f3e376c1c627?recursive=1",
+      "commit_api_verified":true,
+      "tree_api_verified":true,
+      "tree_truncated":false,
+      "recipe_license":{"license_family":"GNU Lesser General Public License","version":"3","version_qualifier":"not inferred from license text alone","evidence_file":"upstream/chinese/luna/LICENSE","evidence_sha256":"da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768","evidence_bytes":7651,"full_text_acquired":true},
+      "dictionary_data_rights":{"status":"unresolved_for_redistribution","declared_header_sources":["CC-CEDICT","Android PinyinIME","Chewing","三拼簡繁詞庫 0.9","OpenCC","萌典"],"reason":"The pinned dictionary header lists multiple upstream works but provides no per-source license grants. The repository LICENSE is recipe/code license evidence and is not treated as blanket dictionary-data clearance."},
+      "role_in_current_backend":"Acquired and audited candidate source; current main-owned backend schema selects the Terra-derived dictionary instead.",
+      "files":[
+        {"path":"upstream/chinese/luna/LICENSE","url":"https://raw.githubusercontent.com/rime/rime-luna-pinyin/56b934b099dfbeab842320f13aa8b461a6ab3e42/LICENSE","bytes":7651,"sha256":"da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768","kind":"complete recipe license"},
+        {"path":"upstream/chinese/luna/README.md","url":"https://raw.githubusercontent.com/rime/rime-luna-pinyin/56b934b099dfbeab842320f13aa8b461a6ab3e42/README.md","bytes":460,"sha256":"536daa306647bd9b4ef736d264fc36c9d77e30a123cebe56469a0ab5f27d9597","kind":"upstream README"},
+        {"path":"upstream/chinese/luna/luna_pinyin.schema.yaml","url":"https://raw.githubusercontent.com/rime/rime-luna-pinyin/56b934b099dfbeab842320f13aa8b461a6ab3e42/luna_pinyin.schema.yaml","bytes":2809,"sha256":"668b4d4957e4cc8f9cea32ed3f08f0ecf4a7be8cdba058700507487bd96dd5c7","kind":"source schema"},
+        {"path":"upstream/chinese/luna/luna_pinyin.dict.yaml","url":"https://raw.githubusercontent.com/rime/rime-luna-pinyin/56b934b099dfbeab842320f13aa8b461a6ab3e42/luna_pinyin.dict.yaml","bytes":889896,"sha256":"75bcf6eb3ff62b129882ed89cc22b2d80a5347aa72bcfa2ccc839bac298e7314","kind":"genuine Hanzi/phrase dictionary","parsed_data_rows":70732},
+        {"path":"upstream/chinese/luna/pinyin.yaml","url":"https://raw.githubusercontent.com/rime/rime-luna-pinyin/56b934b099dfbeab842320f13aa8b461a6ab3e42/pinyin.yaml","bytes":4895,"sha256":"caa220b05172bf35775db07fed6ead7719c742e6139232d9797040dbe65f746c","kind":"optional spelling algebra source"}
+      ],
+      "upstream_schema_dependency_closure":["stroke schema","stroke dictionary","reverse_lookup_translator","reverse_lookup_filter","OpenCC simplifier resources","grammar patch","luna_pinyin.custom patch","pinyin.yaml for optional correction/abbreviation algebra","custom_phrase table translator/user dictionary"],
+      "reduced_recipe_boundary":"A reduced Pinyin recipe can retain script_translator and this dictionary while omitting reverse lookup/stroke, OpenCC, grammar and custom phrase resources; only spell algebra actually inlined by the selected project schema is needed."
+    },
+    {
+      "id":"rime-terra-pinyin",
+      "official_repository":"https://github.com/rime/rime-terra-pinyin",
+      "pinned_commit":"723e51bc266cf9464530c1ddedb856aa18e3da34",
+      "commit_api_url":"https://api.github.com/repos/rime/rime-terra-pinyin/commits/723e51bc266cf9464530c1ddedb856aa18e3da34",
+      "tree_sha":"ab9bd63a5b3663f21b378ea23572fe938ae0f121",
+      "tree_api_url":"https://api.github.com/repos/rime/rime-terra-pinyin/git/trees/ab9bd63a5b3663f21b378ea23572fe938ae0f121?recursive=1",
+      "commit_api_verified":true,
+      "tree_api_verified":true,
+      "tree_truncated":false,
+      "recipe_license":{"license_family":"GNU Lesser General Public License","version":"3","version_qualifier":"not inferred from license text alone","evidence_file":"upstream/chinese/terra/LICENSE","evidence_sha256":"da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768","evidence_bytes":7651,"full_text_acquired":true},
+      "dictionary_data_rights":{"status":"source_declared_license_review_required","declared":"CC-BY-SA-3.0","evidence_file":"upstream/chinese/terra/terra_pinyin.dict.yaml","evidence_sha256":"2f881a239e09a61e5993e79257655f98f81c3789dc8aeea5f33477f710345b27","header_text":"creative commons attribution-share alike 3.0","review":"The dictionary header is direct source evidence for its stated data terms; attribution and share-alike compatibility still require legal review before product distribution."},
+      "role_in_current_backend":"Selected dictionary source for both main-owned Pinyin and Zhuyin backend schemas.",
+      "files":[
+        {"path":"upstream/chinese/terra/LICENSE","url":"https://raw.githubusercontent.com/rime/rime-terra-pinyin/723e51bc266cf9464530c1ddedb856aa18e3da34/LICENSE","bytes":7651,"sha256":"da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768","kind":"complete recipe license"},
+        {"path":"upstream/chinese/terra/README.md","url":"https://raw.githubusercontent.com/rime/rime-terra-pinyin/723e51bc266cf9464530c1ddedb856aa18e3da34/README.md","bytes":1057,"sha256":"39f23b80d580f094701f218080a176c3038f221121cee9207829d01d21f6b090","kind":"upstream README"},
+        {"path":"upstream/chinese/terra/terra_pinyin.schema.yaml","url":"https://raw.githubusercontent.com/rime/rime-terra-pinyin/723e51bc266cf9464530c1ddedb856aa18e3da34/terra_pinyin.schema.yaml","bytes":5056,"sha256":"d3b5628abfabac615589e8cc7bf6bf2bf63c60d499136592495a21d992b5cc6d","kind":"source schema"},
+        {"path":"upstream/chinese/terra/terra_pinyin.dict.yaml","url":"https://raw.githubusercontent.com/rime/rime-terra-pinyin/723e51bc266cf9464530c1ddedb856aa18e3da34/terra_pinyin.dict.yaml","bytes":1799483,"sha256":"2f881a239e09a61e5993e79257655f98f81c3789dc8aeea5f33477f710345b27","kind":"genuine toned Pinyin Hanzi/phrase dictionary","parsed_data_rows":99329}
+      ],
+      "upstream_schema_dependency_closure":["stroke schema","stroke dictionary","reverse_lookup_translator","OpenCC simplifier resources","grammar patch","terra_pinyin.custom patch","custom_phrase table translator/user dictionary","Rime default/dict/gears modules"],
+      "data_file_dependencies":["terra_pinyin.dict.yaml","optional preset vocabulary essay.txt when use_preset_vocabulary=true or vocabulary is configured","optional import_tables only if declared in dictionary front matter"],
+      "current_main_importer_behavior_observed":"Renames dictionary resource to epocanva_backend_terra, sets use_preset_vocabulary=false, verifies no import_tables field, and retains source rows. This removes the essay.txt preset vocabulary dependency."
+    },
+    {
+      "id":"rime-bopomofo",
+      "official_repository":"https://github.com/rime/rime-bopomofo",
+      "pinned_commit":"6085c9a38a4a728047862b33d67eee18aa86f3b9",
+      "commit_api_url":"https://api.github.com/repos/rime/rime-bopomofo/commits/6085c9a38a4a728047862b33d67eee18aa86f3b9",
+      "tree_sha":"7c372ce307b3db4f9cd6f4b4e7b2921c077ab5a1",
+      "tree_api_url":"https://api.github.com/repos/rime/rime-bopomofo/git/trees/7c372ce307b3db4f9cd6f4b4e7b2921c077ab5a1?recursive=1",
+      "commit_api_verified":true,
+      "tree_api_verified":true,
+      "tree_truncated":false,
+      "recipe_license":{"license_family":"GNU Lesser General Public License","version":"3","version_qualifier":"not inferred from license text alone","evidence_file":"upstream/chinese/bopomofo/LICENSE","evidence_sha256":"da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768","evidence_bytes":7651,"full_text_acquired":true},
+      "dictionary_data_rights":{"status":"inherited_from_terra_dictionary","notes":"This repository supplies Zhuyin scheme and spelling algebra; its README declares a dependency on Terra Pinyin, so the Hanzi dictionary retains Terra's CC-BY-SA-3.0 header declaration."},
+      "files":[
+        {"path":"upstream/chinese/bopomofo/LICENSE","url":"https://raw.githubusercontent.com/rime/rime-bopomofo/6085c9a38a4a728047862b33d67eee18aa86f3b9/LICENSE","bytes":7651,"sha256":"da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768","kind":"complete recipe license"},
+        {"path":"upstream/chinese/bopomofo/README.md","url":"https://raw.githubusercontent.com/rime/rime-bopomofo/6085c9a38a4a728047862b33d67eee18aa86f3b9/README.md","bytes":4808,"sha256":"01dd016974d1af6777085f945a8bc38a0193902ae9c333ec4552e7adb6b24b14","kind":"upstream dependency and license pointer"},
+        {"path":"upstream/chinese/bopomofo/bopomofo.schema.yaml","url":"https://raw.githubusercontent.com/rime/rime-bopomofo/6085c9a38a4a728047862b33d67eee18aa86f3b9/bopomofo.schema.yaml","bytes":6190,"sha256":"21301f17f799c4779516d69bb9d80a343c1cc36f06cdcb8607860c80394bb8cc","kind":"source schema"},
+        {"path":"upstream/chinese/bopomofo/zhuyin.yaml","url":"https://raw.githubusercontent.com/rime/rime-bopomofo/6085c9a38a4a728047862b33d67eee18aa86f3b9/zhuyin.yaml","bytes":1132,"sha256":"77931ab77952fdb2535f8addebc0918453e0220a50ca176380971203f14c48be","kind":"Zhuyin spelling algebra source"}
+      ],
+      "zhuyin_yaml_exact_nodes":{
+        "pinyin_to_zhuyin":["xform /^m(\\d)$/mu$1/","xform /^r5$/er5/","xform iu/iou/","xform ui/uei/","xform ong/ung/","xform ^yi?/i/","xform ^wu?/u/","xform iu/v/","xform ^([jqx])u/$1v/","xform ([iuv])n/$1en/","xform ^zhi?/Z/","xform ^chi?/C/","xform ^shi?/S/","xform ^([zcsr])i/$1/","xform ai/A/","xform ei/I/","xform ao/O/","xform ou/U/","xform ang/K/","xform eng/G/","xform an/M/","xform en/N/","xform er/R/","xform eh/E/","xform ([iv])e/$1E/"],
+        "free_order":["derive/([bpmfdtnlgkhjqxZCSrzcs])([iuv])/$2$1/","derive/([iuv])([aoeEAIOUMNKGR])/$2$1/","derive/([bpmfdtnlgkhjqxZCSrzcs])([aoeEAIOUMNKGR])/$2$1/","derive/([bpmfdtnlgkhjqxZCSrzcs])([iuv])/$2$1/"],
+        "abbreviation":["abbrev/^([bpmfdtnlgkhjqxZCSrzcs]).+$/$1/","abbrev/^([A-Za-z]+)\\d$/$1/","abbrev/^([bpmfdtnlgkhjqxZCSrzcs]).+(\\d)$/$1$2/"],
+        "keymap_bopomofo":"xlit|bpmfdtnlgkhjqxZCSrzcsiuvaoeEAIOUMNKGR12345|1qaz2wsxedcrfv5tgbyhnujm8ik,9ol.0p;/- 6347|"
+      },
+      "upstream_schema_dependency_closure":["terra-pinyin scheme/data","terra_pinyin dictionary","schema-specific bopomofo prism generated from this schema's speller algebra","stroke schema and dictionary for reverse lookup","reverse_lookup_translator","OpenCC simplifier resources","grammar patch","bopomofo.custom patch","custom_phrase table translator/user dictionary","librime 1.16+ per source schema description"],
+      "reduced_recipe_boundary":"Keep official Zhuyin spelling algebra, Terra dictionary and a schema-specific Zhuyin prism. Remove stroke/reverse lookup, OpenCC, grammar, custom patch, and custom phrase/user dictionary unless separately approved."
+    },
+    {
+      "id":"libreoffice-dictionaries-french",
+      "official_repository":"https://github.com/LibreOffice/dictionaries",
+      "pinned_commit":"4f1df64b2e8e14751aa7c2205d170ca016071315",
+      "commit_api_url":"https://api.github.com/repos/LibreOffice/dictionaries/commits/4f1df64b2e8e14751aa7c2205d170ca016071315",
+      "tree_sha":"b5a3d4398ad2f2c33a00b36fc0d28b376c65fb3e",
+      "tree_api_url":"https://api.github.com/repos/LibreOffice/dictionaries/git/trees/b5a3d4398ad2f2c33a00b36fc0d28b376c65fb3e?recursive=1",
+      "commit_api_verified":true,
+      "tree_api_verified":true,
+      "tree_truncated":false,
+      "dictionary_release":"French orthographic dictionaries 7.7 (per README_dict_fr.txt)",
+      "license_evidence":{
+        "data_license":"MPL-2.0, stated in pinned fr_FR/dictionaries/README_dict_fr.txt lines 8-14 and fr.aff header lines 1-6",
+        "notice_path":"upstream/french/fr_FR/README_dict_fr.txt",
+        "notice_sha256":"4a25abf740ad6ba5e8d0cfc0d2ffadc3c13c303f8fe389f323b061a389350f83",
+        "notice_bytes":2758,
+        "official_full_license_path":"upstream/french/MPL-2.0.txt",
+        "official_full_license_url":"https://www.mozilla.org/media/MPL/2.0/index.815ca599c9df.txt",
+        "official_full_license_sha256":"fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
+        "official_full_license_bytes":16726,
+        "official_full_license_acquired":true,
+        "repo_root_license":"absent at this pinned revision; not used as evidence"
+      },
+      "files":[
+        {"path":"upstream/french/MPL-2.0.txt","url":"https://www.mozilla.org/media/MPL/2.0/index.815ca599c9df.txt","bytes":16726,"sha256":"fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85","kind":"complete official MPL-2.0 text"},
+        {"path":"upstream/french/README","url":"https://raw.githubusercontent.com/LibreOffice/dictionaries/4f1df64b2e8e14751aa7c2205d170ca016071315/README","bytes":134,"sha256":"5a0abd78452c8299138ab02a031dade82c2db348c1c4cb5bd64861faa644a8b9","kind":"repository README"},
+        {"path":"upstream/french/fr_FR/README_dict_fr.txt","url":"https://raw.githubusercontent.com/LibreOffice/dictionaries/4f1df64b2e8e14751aa7c2205d170ca016071315/fr_FR/dictionaries/README_dict_fr.txt","bytes":2758,"sha256":"4a25abf740ad6ba5e8d0cfc0d2ffadc3c13c303f8fe389f323b061a389350f83","kind":"dictionary version and license evidence"},
+        {"path":"upstream/french/fr_FR/fr.aff","url":"https://raw.githubusercontent.com/LibreOffice/dictionaries/4f1df64b2e8e14751aa7c2205d170ca016071315/fr_FR/dictionaries/fr.aff","bytes":199870,"sha256":"c176610cd5dc4846806a65ddd029f422d87978bf58f224aa44222662a16a2de5","kind":"raw Hunspell affix rules"},
+        {"path":"upstream/french/fr_FR/fr.dic","url":"https://raw.githubusercontent.com/LibreOffice/dictionaries/4f1df64b2e8e14751aa7c2205d170ca016071315/fr_FR/dictionaries/fr.dic","bytes":1236490,"sha256":"b78a868e31dd6e373b6c3217969afb898a9acde828a5e7ef97308da42218c88c","kind":"raw Hunspell dictionary"}
+      ],
+      "affix_closure":{
+        "encoding":"UTF-8",
+        "flag_mode":"long (two Unicode characters per flag)",
+        "prefix_groups":18,
+        "prefix_rules":197,
+        "suffix_groups":159,
+        "suffix_rules":5184,
+        "cross_product_headers":true,
+        "non_cross_product_prefix_groups":["U."],
+        "special_directives":["FULLSTRIP","NEEDAFFIX ()","FORBIDDENWORD {}","CIRCUMFIX **","KEEPCASE ||","NOSUGGEST --","WORDCHARS","TRY","MAP (25 groups)","REP (110 replacements)","ICONV (42 conversions)","OCONV (1 conversion)","BREAK (7 patterns)","KEY"],
+        "absent_directives":["AF","AM","COMPOUND*","COMPOUNDFLAG","COMPOUNDMIN"],
+        "dictionary_count_header":84782,
+        "dictionary_physical_lines":84750,
+        "dictionary_nonblank_rows_after_header":84749,
+        "dictionary_literal_dash_rows":1,
+        "dictionary_header_discrepancy_rows":33,
+        "count_mismatch_action":"Preserve and hand the original .dic file directly to a verified Hunspell wrapper. Do not reject by comparing the header count to physical rows, and do not normalize/expand entries in this acquisition stage."
+      },
+      "provider_handoff":"The direct-wrapper agent should consume the exact fr.aff/fr.dic pair from these build paths; the importer does not implement or claim a Hunspell parser."
+    }
+  ],
+  "actual_main_owned_chinese_recipe_observed":{
+    "schema_ids":["epocanva_backend_pinyin","epocanva_backend_zhuyin"],
+    "dictionary_resource":"epocanva_backend_terra (derived from pinned Terra source, source dictionary rows retained)",
+    "translator_options":{"enable_user_dict":false,"enable_sentence":true,"contextual_suggestions":false,"enable_completion":true},
+    "zhuyin_speller_algebra_imports":["zhuyin:/pinyin_to_zhuyin","zhuyin:/free_order","zhuyin:/abbreviation","zhuyin:/keymap_bopomofo"],
+    "zhuyin_prism":"epocanva_backend_zhuyin",
+    "note":"Observed from main-owned schemas and importer during handoff. The importer disables Terra preset vocabulary to avoid adding unreviewed essay.txt; verify its resulting build-only staging receipt separately."
+  },
+  "dictionary_row_counts":{
+    "luna_pinyin_data_rows_after_front_matter":70732,
+    "terra_pinyin_data_rows_after_front_matter":99329,
+    "row_counts_are_corpus_frequency":false,
+    "sentence_corpus_provided":false
+  },
+  "rights_and_distribution":{
+    "public_distribution_authorized":false,
+    "product_manifest_added":false,
+    "Chinese_data_rights_cleared":false,
+    "French_hunspell_provider_implemented_here":false,
+    "note":"Recipe-code license, dictionary-data terms, and project AGPL-3.0-only are separate. No data is cleared for public redistribution by this record."
+  }
+}

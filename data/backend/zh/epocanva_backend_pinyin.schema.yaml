@@ -1,0 +1,32 @@
+schema:
+  schema_id: epocanva_backend_pinyin
+  name: EpoCanva Pinyin backend
+  version: "0.3.0-dev"
+menu:
+  page_size: 16
+engine:
+  processors:
+    - speller
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - script_translator
+  filters:
+    - uniquifier
+speller:
+  alphabet: abcdefghijklmnopqrstuvwxyz12345
+  delimiter: " '"
+  algebra:
+    - derive/^([a-z]+)[0-5]$/$1/
+translator:
+  dictionary: epocanva_backend_terra
+  prism: epocanva_backend_pinyin
+  enable_user_dict: false
+  enable_sentence: true
+  enable_completion: true
+  contextual_suggestions: false
+  max_sentence_candidates: 16

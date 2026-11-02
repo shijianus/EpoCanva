@@ -1,0 +1,41 @@
+schema:
+  schema_id: epocanva_backend_zhuyin
+  name: EpoCanva Zhuyin backend
+  version: "0.3.0-dev"
+menu:
+  page_size: 16
+engine:
+  processors:
+    - speller
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - script_translator
+  filters:
+    - uniquifier
+speller:
+  alphabet: '1qaz2wsxedcrfv5tgbyhnujm8ik,9ol.0p;/- 6347'
+  initials: '1qaz2wsxedcrfv5tgbyhnujm8ik,9ol.0p;/-'
+  finals: ' 6347'
+  delimiter: "'"
+  use_space: true
+  algebra:
+    __patch:
+      - zhuyin:/pinyin_to_zhuyin
+      - zhuyin:/free_order
+      - zhuyin:/abbreviation
+      - zhuyin:/keymap_bopomofo
+translator:
+  dictionary: epocanva_backend_terra
+  prism: epocanva_backend_zhuyin
+  enable_user_dict: false
+  enable_sentence: true
+  enable_completion: true
+  contextual_suggestions: false
+  max_sentence_candidates: 16
+  preedit_format:
+    - "xlit|1qaz2wsxedcrfv5tgbyhnujm8ik,9ol.0p;/- 6347'|ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦˉˊˇˋ˙ |"
