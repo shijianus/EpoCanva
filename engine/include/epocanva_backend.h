@@ -29,6 +29,8 @@ enum {
 };
 enum {
   EPOCANVA_BACKEND_COMPLETION = 1,
+  /* Word prediction for an empty current token. Terminal punctuation is excluded;
+   * use NEXT_UNIT when a punctuation token is also an acceptable result. */
   EPOCANVA_BACKEND_NEXT_WORD = 2,
   EPOCANVA_BACKEND_CONTINUATION = 3
 };
@@ -232,7 +234,8 @@ enum {
 };
 enum {
   EPOCANVA_BACKEND_KANA = 7,
-  /* One model lexical token, NOT one byte, Unicode scalar or grapheme cluster. */
+  /* One model lexical token, NOT one byte, Unicode scalar or grapheme cluster.
+   * Unlike NEXT_WORD this admits terminal punctuation because it is a lexical unit. */
   EPOCANVA_BACKEND_NEXT_UNIT = 4,
   EPOCANVA_BACKEND_UNIT_LEXICAL_TOKEN = 1,
   EPOCANVA_BACKEND_INVALID_PROFILE = -105

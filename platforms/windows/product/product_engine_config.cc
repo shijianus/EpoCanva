@@ -433,6 +433,19 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
   base.backend.spelling_enabled = display_settings.settings.spelling_enabled;
   base.backend.morphology_enabled = display_settings.settings.morphology_enabled;
   base.backend.abbreviation_enabled = display_settings.settings.abbreviation_enabled;
+  {
+    // The unified backend exposes one ranked candidate list. Reserve room for each enabled
+    // kind so a per-kind user limit is not silently reduced to the other kind's budget. One
+    // extra record is the original raw text, which completion queries put at index 0.
+    std::uint32_t wanted = 1;
+    if (display_settings.settings.completion_enabled)
+      wanted += static_cast<std::uint32_t>(display_settings.settings.completion_candidates);
+    if (display_settings.settings.spelling_enabled)
+      wanted += static_cast<std::uint32_t>(display_settings.settings.spelling_candidates);
+    if (display_settings.settings.morphology_enabled) wanted += 7;
+    if (display_settings.settings.abbreviation_enabled) wanted += 8;
+    base.backend.max_candidates = wanted > 64 ? 64 : wanted;
+  }
   bool profile_found = false;
   for (const auto& resource : base.backend.profiles)
     profile_found = profile_found || resource.profile.profile_id == base.backend.active_profile_id;

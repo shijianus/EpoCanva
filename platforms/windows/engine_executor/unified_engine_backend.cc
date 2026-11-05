@@ -49,6 +49,89 @@ struct UnifiedClient {
   bool faulted = false;
 };
 
+// Decodes one scalar at `offset`; returns false on malformed input. The caller only uses
+// this on bounded host text already validated as UTF-8 by the read layer.
+bool ScalarAt(const std::string& text, std::size_t offset, std::uint32_t* scalar,
+              std::size_t* width) {
+  const auto lead = static_cast<unsigned char>(text[offset]);
+  if (lead < 0x80) { *scalar = lead; *width = 1; return true; }
+  std::size_t count = 0;
+  std::uint32_t value = 0;
+  if ((lead & 0xe0) == 0xc0) { count = 2; value = lead & 0x1f; }
+  else if ((lead & 0xf0) == 0xe0) { count = 3; value = lead & 0x0f; }
+  else if ((lead & 0xf8) == 0xf0) { count = 4; value = lead & 0x07; }
+  else return false;
+  if (offset + count > text.size()) return false;
+  for (std::size_t index = 1; index < count; ++index) {
+    const auto continuation = static_cast<unsigned char>(text[offset + index]);
+    if ((continuation & 0xc0) != 0x80) return false;
+    value = (value << 6) | (continuation & 0x3f);
+  }
+  *scalar = value; *width = count; return true;
+}
+
+bool KanaComposingUnit(std::uint32_t scalar) {
+  return (scalar >= 0x3041 && scalar <= 0x30ff) || (scalar >= 0x31f0 && scalar <= 0x31ff) ||
+         (scalar >= 0x1b000 && scalar <= 0x1b16f) || (scalar >= 0xff66 && scalar <= 0xff9d);
+}
+
+bool HangulComposingUnit(std::uint32_t scalar) {
+  return (scalar >= 0x1100 && scalar <= 0x11ff) || (scalar >= 0x3130 && scalar <= 0x318f) ||
+         (scalar >= 0xac00 && scalar <= 0xd7af);
+}
+
+bool CjkComposingUnit(std::uint32_t scalar) {
+  return KanaComposingUnit(scalar) || HangulComposingUnit(scalar) ||
+         (scalar >= 0x3400 && scalar <= 0x4dbf) ||
+         (scalar >= 0x4e00 && scalar <= 0x9fff) ||
+         (scalar >= 0xf900 && scalar <= 0xfaff) ||
+         (scalar >= 0x20000 && scalar <= 0x3ffff);
+}
+
+// Latin profiles compose the host's own letters, including accented Latin-1/Extended
+// letters a French AZERTY keyboard produces. Treating those as CJK context would split
+// "françai" into the context "franç" plus the token "ai" and replace the wrong span.
+bool LatinComposingUnit(std::uint32_t scalar) {
+  if (scalar < 0x20 || scalar == 0x7f) return false;
+  if (scalar >= 0x80 && scalar <= 0x9f) return false;  // C1 controls
+  return !CjkComposingUnit(scalar);
+}
+
+bool ComposingUnit(std::uint32_t language, std::uint32_t input_mode,
+                   std::uint32_t scalar) {
+  if (input_mode == EPOCANVA_BACKEND_KANA) return KanaComposingUnit(scalar);
+  // The Korean native-Hangul profile declares LATIN because it consumes host text
+  // directly; its input is already Hangul, not a romanization.
+  if (language == EPOCANVA_BACKEND_KO && input_mode == EPOCANVA_BACKEND_LATIN)
+    return HangulComposingUnit(scalar);
+  if (language == EPOCANVA_BACKEND_EN || language == EPOCANVA_BACKEND_FR)
+    return LatinComposingUnit(scalar);
+  return scalar >= 0x20 && scalar < 0x7f;
+}
+
+// The host keeps committed text in the document. Only a suffix the active profile can
+// actually compose may be sent as the current token: ASCII for latin/pinyin/zhuyin/romaji/
+// two-set, kana for the kana profile, and Hangul on the Korean native-text profile.
+// Everything before that suffix is context. Without this split, selecting a Han word leaves
+// "你好" as a latin-mode token, which the Chinese backend correctly refuses, and the
+// coordinator latches NeedsResync forever.
+void SplitComposingSuffix(const std::string& token, std::uint32_t language,
+                          std::uint32_t input_mode, std::string* prefix,
+                          std::string* suffix) {
+  std::size_t begin = token.size();
+  while (begin > 0) {
+    std::size_t unit_begin = begin - 1;
+    while (unit_begin > 0 && (static_cast<unsigned char>(token[unit_begin]) & 0xc0) == 0x80)
+      --unit_begin;
+    std::uint32_t scalar = 0; std::size_t width = 0;
+    if (!ScalarAt(token, unit_begin, &scalar, &width) || unit_begin + width != begin ||
+        !ComposingUnit(language, input_mode, scalar)) break;
+    begin = unit_begin;
+  }
+  prefix->assign(token, 0, begin);
+  suffix->assign(token, begin, std::string::npos);
+}
+
 class UnifiedEngineBackend final : public EngineBackend {
  public:
   explicit UnifiedEngineBackend(UnifiedBackendConfig config) : config_(std::move(config)) {}
@@ -131,6 +214,9 @@ class UnifiedEngineBackend final : public EngineBackend {
       if (status != EPOCANVA_OK) { result.backend_status = status; return result; }
     }
     epocanva_status status = EPOCANVA_OK;
+    // kObserveHostText may reclassify part of the host token as context; the effective
+    // query kind must follow the token that is actually composing.
+    std::uint32_t effective_query_kind = work.query_kind;
     switch (work.operation) {
       case BackendOperation::kPushUtf8:
         status = epocanva_backend_push_utf8(client.session, &request, View(work.text_utf8)); break;
@@ -152,16 +238,28 @@ class UnifiedEngineBackend final : public EngineBackend {
       case BackendOperation::kObserveHostText: {
         // Both strings were read from a bounded, permission-checked host range. Confirmation
         // is transient; it does not infer provenance for learning from displayed text.
+        std::string preceding = work.preceding_utf8;
+        std::string token = work.text_utf8;
+        const auto* profile = FindProfile(client.profile_id);
+        if (profile != nullptr && !token.empty()) {
+          std::string prefix, suffix;
+          SplitComposingSuffix(token, profile->profile.language,
+                               profile->profile.input_mode, &prefix, &suffix);
+          preceding += prefix;
+          token = std::move(suffix);
+        }
         auto confirmation = Header<epocanva_backend_text_confirmation>(EPOCANVA_BACKEND_PROFILE_ABI_VERSION);
         confirmation.request = request; confirmation.event_token = work.event_token;
-        confirmation.text = View(work.preceding_utf8);
+        confirmation.text = View(preceding);
         auto ack = Header<epocanva_backend_ack_result>();
         status = epocanva_backend_confirm_text(client.session, &confirmation, &ack);
         result.acknowledgement = {status, ack.consumed, ack.learned, ack.context_advanced, ack.persistence_status};
-        if (status == EPOCANVA_OK) status = epocanva_backend_set_context(client.session, &request, View(work.preceding_utf8));
+        if (status == EPOCANVA_OK) status = epocanva_backend_set_context(client.session, &request, View(preceding));
         if (status == EPOCANVA_OK) status = epocanva_backend_set_input(client.session, &request, {nullptr, 0});
-        if (status == EPOCANVA_OK && !work.text_utf8.empty())
-          status = epocanva_backend_push_utf8(client.session, &request, View(work.text_utf8));
+        if (status == EPOCANVA_OK && !token.empty())
+          status = epocanva_backend_push_utf8(client.session, &request, View(token));
+        effective_query_kind = token.empty() ? EPOCANVA_BACKEND_NEXT_WORD
+                                             : EPOCANVA_BACKEND_COMPLETION;
         break;
       }
       case BackendOperation::kSelect:
@@ -182,12 +280,16 @@ class UnifiedEngineBackend final : public EngineBackend {
     }
     if (status == EPOCANVA_OK && work.operation != BackendOperation::kClearInput) {
       auto query = Header<epocanva_backend_query>(); query.context = request.context;
-      query.query_kind = work.query_kind; query.max_candidates = config_.max_candidates;
+      query.query_kind = effective_query_kind;
+      // Disabled candidate kinds are still counted by the backend's own cap, so fetch a
+      // larger page and stop at the configured visible budget after kind filtering.
+      const std::uint32_t wanted = config_.max_candidates > 16 ? 64 : config_.max_candidates * 4;
+      query.max_candidates = wanted > 64 ? 64 : wanted;
       query.max_continuation_words = 1; query.search_budget = 100000;
       status = epocanva_backend_query_candidates(client.session, &query);
       if (status == EPOCANVA_BACKEND_UNAVAILABLE &&
-          (work.query_kind == EPOCANVA_BACKEND_NEXT_WORD ||
-           work.query_kind == EPOCANVA_BACKEND_NEXT_UNIT)) {
+          (effective_query_kind == EPOCANVA_BACKEND_NEXT_WORD ||
+           effective_query_kind == EPOCANVA_BACKEND_NEXT_UNIT)) {
         // A profile may explicitly lack a promised next-word/script mode. This is a
         // capability result, not a corrupt session; publish an empty memory-only menu.
         result.snapshot = BackendSnapshotOutcome{};
@@ -255,7 +357,10 @@ class UnifiedEngineBackend final : public EngineBackend {
     out->output_mode = snapshot.output_mode; out->keyboard_layout = snapshot.keyboard_layout;
     out->unit_kind = snapshot.unit_kind; out->search_complete = base.search_complete;
     out->language = base.language; out->input_mode = base.input_mode;
-    for (std::uint32_t ordinal = 0; ordinal < base.candidate_count; ++ordinal) {
+    for (std::uint32_t ordinal = 0;
+         ordinal < base.candidate_count &&
+         out->candidate_text_utf8.size() < config_.max_candidates;
+         ++ordinal) {
       auto candidate = Header<epocanva_backend_candidate>();
       status = epocanva_backend_read_candidate(client.session, &request, base.snapshot_token, ordinal, &candidate, nullptr, 0);
       if (status != EPOCANVA_BUFFER_TOO_SMALL || candidate.required_utf8_bytes > 4096) return EPOCANVA_BACKEND_ERROR;

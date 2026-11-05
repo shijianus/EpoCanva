@@ -471,6 +471,30 @@ void TestProductPayloadPolicy(const std::filesystem::path& root,
   Check(!collect().package_ready, "listing an extra file still violates exact policy");
   std::error_code ec;
   std::filesystem::remove(extra, ec);
+  // An internal diagnostics package may add the reviewed backend runtime payload;
+  // the same extras must never be accepted by a public candidate.
+  manifest = complete;
+  const auto backend_resources = package / "data" / "backend" / "resources.tsv";
+  std::filesystem::create_directories(backend_resources.parent_path(), ec);
+  Check(WriteTextAtomically(backend_resources, "test backend index\n", &why),
+        "create internal backend payload");
+  ManifestEntry backend_entry;
+  backend_entry.relative_path = "data/backend/resources.tsv";
+  Check(Sha256File(backend_resources, &backend_entry.sha256, &backend_entry.bytes, &why),
+        "hash internal backend payload");
+  manifest.files.push_back(backend_entry);
+  write_manifest();
+  Check(collect().package_ready, "internal-only package accepts a backend runtime payload");
+  Check(ValidateProductPayloadPolicy(manifest, &why),
+        "internal backend payload passes payload policy");
+  manifest.distribution_policy = "public-candidate";
+  write_manifest();
+  Check(!ValidateProductPayloadPolicy(manifest, &why),
+        "public candidate cannot add an unreviewed backend payload");
+  manifest.distribution_policy = "internal-only";
+  manifest.files.pop_back();
+  write_manifest();
+  std::filesystem::remove(backend_resources, ec);
   manifest = complete;
   manifest.commit += "-wrong";
   write_manifest();

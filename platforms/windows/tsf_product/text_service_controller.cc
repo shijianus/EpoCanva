@@ -1141,7 +1141,7 @@ bool ProductTextController::FinalizeCandidateSelection(
                    : 0);
     TraceStage("finalize_caret_match",
                selection.caret_utf16 == snapshot.caret_utf16 ? 1 : 0);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     if (snapshot.valid && snapshot.version == selection.snapshot_version) {
       // The request names the current version but its identity/caret does not match it.
       // Close that menu. A request from an older version must not dismiss the current one.
@@ -1162,14 +1162,14 @@ bool ProductTextController::FinalizeCandidateSelection(
     TraceStage("finalize_units",
                static_cast<long long>(snapshot.input_utf16_code_units.size()));
     TraceStage("finalize_host_units", static_cast<long long>(host_token_units_));
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     DismissCandidateMenu();
     return false;
   }
   if (!CandidatesOpen()) {
     TraceStage("finalize_refuse", 6);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     DismissCandidateMenu();
     return false;
@@ -1177,7 +1177,7 @@ bool ProductTextController::FinalizeCandidateSelection(
   std::int32_t expected_caret = -1;
   if (!ExpectedCandidateCaretUtf16(&expected_caret)) {
     TraceStage("finalize_refuse", 4);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     DismissCandidateMenu();
     return false;
@@ -1202,7 +1202,7 @@ bool ProductTextController::FinalizeCandidateSelection(
       // A live read that cannot be verified is refused the same way. Never retarget the
       // menu or submit at the current cursor.
       TraceStage("finalize_refuse", 5);
-      ++candidate_stale_selections_;
+      ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
       candidate_dismissed_version_ = snapshot.version;
       DismissCandidateMenu();
       return false;
@@ -1215,7 +1215,7 @@ bool ProductTextController::FinalizeCandidateSelection(
     }
   } else if (anchor_caret != expected_caret) {
     TraceStage("finalize_refuse", 7);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     DismissCandidateMenu();
     return false;
@@ -1227,7 +1227,7 @@ bool ProductTextController::FinalizeCandidateSelection(
   anchored.caret_utf16 = anchor_caret;
   if (!SubmitReplacement(anchored)) {
     TraceStage("finalize_refuse", 8);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     return false;
   }
@@ -1280,8 +1280,10 @@ void ProductTextController::UpdateCandidateUi() {
   TraceStage("candidate_snapshot_valid", snapshot.valid ? 1 : 0);
   TraceStage("candidate_items", static_cast<long long>(snapshot.items.size()));
   if (!snapshot.valid || suggestion_stale_ || token_abandoned_ || replacement_pending_ ||
-      suggestion_in_flight_ || !suggestion_queue_.empty() || host_context_work_in_flight_ || host_context_read_owed_) {
+      suggestion_in_flight_ || !suggestion_queue_.empty() || host_context_work_in_flight_ ||
+      host_context_read_owed_ || host_text_changed_) {
     if (!snapshot.valid) TraceStage("candidate_invalid", 1);
+    if (host_text_changed_) TraceStage("candidate_host_text_changed", 1);
     if (suggestion_stale_) TraceStage("candidate_stale", 1);
     if (token_abandoned_) TraceStage("candidate_abandoned", 1);
     if (replacement_pending_) TraceStage("candidate_replacement_pending", 1);
@@ -1514,6 +1516,7 @@ void ProductTextController::OnTargetLost(ctx::ContextDropReason reason) {
   // here; nothing is retracted, replayed or attributed to the user.
   host_context_read_owed_ = false;
   host_context_work_in_flight_ = false;
+  host_text_changed_ = false;
   suggestion_queue_.clear();
   suggestion_in_flight_ = false;
   suggestion_engaged_ = false;
@@ -1562,12 +1565,19 @@ void ProductTextController::OnTargetBound(ITfContext* context,
   // host's text is unaffected and is never re-read or replayed.
   host_context_read_owed_ = false;
   host_context_work_in_flight_ = false;
+  host_text_changed_ = false;
   suggestion_queue_.clear();
   suggestion_in_flight_ = false;
   suggestion_engaged_ = false;
   suggestion_work_id_ = 0;
   suggestion_stale_ = false;
   stream_reset_owed_ = false;
+  // A replacement waiting for the old binding cannot apply to the new one. It was an
+  // attempted enhancement that ended without a write, so report it as refused instead of
+  // letting the pending flag disappear with the old binding.
+  if (replacement_pending_) {
+    ++replacement_refused_;
+  }
   replacement_pending_ = false;
   replacement_work_id_ = 0;
   host_token_units_ = 0;
@@ -1585,9 +1595,11 @@ void ProductTextController::OnTargetBound(ITfContext* context,
   if (coordinator_->unified_backend()) {
     host_context_caret_utf16_ = target.caret_utf16;
     host_context_read_owed_ = true;
+    host_text_changed_ = false;
     ++host_context_read_revision_;
   }
   waker_.SetPacing(true);
+  waker_.Notify();
 }
 
 void ProductTextController::OnHostEditCompleted(
@@ -1602,6 +1614,9 @@ void ProductTextController::OnHostEditCompleted(
       host_context_read_owed_ = true;
       ++host_context_read_revision_;
       ++host_edits_matched_;
+      // A scheduling wake must not depend on the paced watcher: if that timer is between
+      // waits, the only owed read would otherwise wait for an unrelated event.
+      waker_.Notify();
     } else {
       host_context_read_owed_ = false;
       coordinator_->RevokeBackendAccess();
@@ -1782,7 +1797,23 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   if (binding_) {
     diagnostics.binding = binding_->Snapshot();
   }
-  diagnostics.pacing = waker_.Snapshot().paced;
+  const StaWakerDiagnostics waker = waker_.Snapshot();
+  diagnostics.pacing = waker.paced;
+  diagnostics.waker_wakes_posted = waker.wakes_posted;
+  diagnostics.waker_wakes_received = waker.wakes_received;
+  diagnostics.waker_stale_wakes = waker.stale_wakes_ignored;
+  diagnostics.waker_post_failures = waker.wake_post_failures;
+  diagnostics.waker_stops = waker.stops;
+  diagnostics.waker_loop_ticks = waker.loop_ticks;
+  diagnostics.waker_window_thread = waker.window_thread_id;
+  diagnostics.waker_window_messages = waker.window_messages;
+  diagnostics.controller_thread = ::GetCurrentThreadId();
+  diagnostics.waker_started = waker.started;
+  diagnostics.host_context_read_owed = host_context_read_owed_;
+  diagnostics.host_context_work_in_flight = host_context_work_in_flight_;
+  diagnostics.host_context_caret_utf16 = host_context_caret_utf16_;
+  diagnostics.host_context_read_revision = host_context_read_revision_;
+  diagnostics.host_context_submitted_revision = host_context_submitted_revision_;
   return diagnostics;
 }
 

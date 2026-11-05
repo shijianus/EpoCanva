@@ -127,22 +127,29 @@ class PinnedPath {
     exists_ = false;
     error_ = ERROR_SUCCESS;
   }
-  bool Open(const std::filesystem::path& input, bool directory, bool allow_missing = false) {
+  // allow_inner_writes is for the mutable user-data directory the engine holds open for
+  // its whole lifetime: children inside it must stay writable while the directory itself
+  // cannot be renamed or replaced (FILE_SHARE_DELETE is never granted).
+  bool Open(const std::filesystem::path& input, bool directory, bool allow_missing = false,
+            bool allow_inner_writes = false) {
     PreparedPath prepared;
     if (!Prepare(input, &prepared)) { error_ = ERROR_INVALID_NAME; return false; }
-    return Open(prepared, directory, allow_missing);
+    return Open(prepared, directory, allow_missing, allow_inner_writes);
   }
-  bool Open(const PreparedPath& prepared, bool directory, bool allow_missing = false) {
+  bool Open(const PreparedPath& prepared, bool directory, bool allow_missing = false,
+            bool allow_inner_writes = false) {
     Reset();
     if (prepared.volume_root.empty() || (!directory && prepared.components.empty())) {
       error_ = ERROR_INVALID_NAME;
       return false;
     }
     std::filesystem::path current = prepared.volume_root;
-    if (!Pin(current, true)) return false;
+    if (!Pin(current, true, allow_inner_writes && directory)) return false;
     for (std::size_t ordinal = 0; ordinal < prepared.components.size(); ++ordinal) {
       current /= prepared.components[ordinal];
-      if (!Pin(current, directory || ordinal + 1 < prepared.components.size())) {
+      const bool leaf = ordinal + 1 == prepared.components.size();
+      if (!Pin(current, directory || !leaf,
+               allow_inner_writes && (directory || !leaf))) {
         if (!allow_missing || (error_ != ERROR_FILE_NOT_FOUND && error_ != ERROR_PATH_NOT_FOUND))
           return false;
         path_ = prepared.physical;
@@ -185,9 +192,16 @@ class PinnedPath {
   HANDLE handle() const { return handles_.empty() ? INVALID_HANDLE_VALUE : handles_.back(); }
 
  private:
-  bool Pin(const std::filesystem::path& path, bool directory) {
+  bool Pin(const std::filesystem::path& path, bool directory,
+           bool allow_inner_writes = false) {
+    // Mutable user directories allow children to be created/replaced while pinned;
+    // installed resource directories keep denying write handles. FILE_SHARE_DELETE is
+    // never granted, so no pinned directory can be renamed or replaced.
+    const DWORD directory_share = allow_inner_writes
+        ? (FILE_SHARE_READ | FILE_SHARE_WRITE) : FILE_SHARE_READ;
     const HANDLE handle = ::CreateFileW(path.c_str(),
-        directory ? FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY : GENERIC_READ, FILE_SHARE_READ,
+        directory ? FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY : GENERIC_READ,
+        directory ? directory_share : FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OPEN_NO_RECALL |
         FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (handle == INVALID_HANDLE_VALUE) { error_ = ::GetLastError(); return false; }

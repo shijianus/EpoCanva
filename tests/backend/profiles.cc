@@ -193,6 +193,7 @@ struct Fixture {
   std::array<epocanva_backend_resource, 5> resources{};
   std::array<epocanva_backend_profile_resource, kBindingCount> bindings{};
   std::string aff_path, dic_path, japanese_path;
+  std::string terra_path;
   std::string rime_sha256;
   std::string rime_path, shared_path, user_path, log_path, learning_path;
   std::array<std::string, 2> schema_paths;
@@ -251,6 +252,11 @@ struct Fixture {
       Verify(shared / pin.path, pin.sha256);
     }
     rime_path = dll.u8string(); shared_path = shared.u8string();
+    // The Chinese resource binds the same verified Terra dictionary Rime loads.
+    // The decoder uses it only for compact pinyin initials.
+    terra_path = (shared / "epocanva_backend_terra.dict.yaml").u8string();
+    resources[1].conversion_path = View(terra_path);
+    resources[1].conversion_sha256 = View(kChinese[2].sha256);
     user_path = user.u8string(); log_path = logs.u8string(); learning_path = learning_root.u8string();
     schema_paths[0] = (shared / "epocanva_backend_pinyin.schema.yaml").u8string();
     schema_paths[1] = (shared / "epocanva_backend_zhuyin.schema.yaml").u8string();
@@ -489,23 +495,39 @@ Menu ExpectPrediction(const Session& session, const pred::Model& model, const pr
                       const pred::PersonalCounts* personal = nullptr) {
   pred::PredictOptions options;
   options.language_id = kModels[session.profile.language - 1].language;
-  options.max_suggestions = 8;
+  const bool words_only = kind == EPOCANVA_BACKEND_NEXT_WORD;
+  options.max_suggestions = words_only ? pred::kMaxSuggestions : 8;
   options.max_words = kind == EPOCANVA_BACKEND_CONTINUATION ? 2u : 1u;
   const auto reference = model.Predict(std::nullopt, context, options, personal);
   REQUIRE(reference.status == pred::Status::kOk || reference.status == pred::Status::kBeamPruned,
           "reference-prediction-status");
-  REQUIRE(!reference.suggestions.empty(), "reference-real-context-produces-candidates");
+  // NEXT_WORD is word-only: the backend drops terminal/punctuation tokens after asking
+  // the model for its full candidate bound. Mirror that filter here instead of comparing
+  // the menu with the unfiltered token ranking.
+  std::vector<pred::Suggestion> expected;
+  if (words_only) {
+    for (const auto& suggestion : reference.suggestions) {
+      if (suggestion.lexeme_ids.empty() || suggestion.terminal) continue;
+      expected.push_back(suggestion);
+      if (expected.size() == 8) break;
+    }
+  } else {
+    expected = reference.suggestions;
+  }
+  REQUIRE(!expected.empty(), "reference-real-context-produces-candidates");
   auto menu = Query(session, model, kind, static_cast<std::uint32_t>(options.max_words));
-  REQUIRE(menu.rows.size() == reference.suggestions.size() &&
+  REQUIRE(menu.rows.size() == expected.size() &&
       bool(menu.profile.snapshot.search_complete) == reference.complete, "prediction-count-and-completeness-match-reference");
   for (std::size_t ordinal = 0; ordinal < menu.rows.size(); ++ordinal) {
     REQUIRE(menu.rows[ordinal].metadata.kind == EPOCANVA_BACKEND_PREDICTION &&
-        menu.rows[ordinal].ids == reference.suggestions[ordinal].lexeme_ids &&
-        menu.rows[ordinal].text_utf8 == Join(reference.suggestions[ordinal].tokens_utf8, session.profile.language) &&
-        Near(menu.rows[ordinal].metadata.score, reference.suggestions[ordinal].log_probability),
+        menu.rows[ordinal].ids == expected[ordinal].lexeme_ids &&
+        menu.rows[ordinal].text_utf8 == Join(expected[ordinal].tokens_utf8, session.profile.language) &&
+        Near(menu.rows[ordinal].metadata.score, expected[ordinal].log_probability),
         "ranked-prediction-ids-text-and-score-match-model-oracle");
     if (kind == EPOCANVA_BACKEND_NEXT_UNIT)
       REQUIRE(menu.rows[ordinal].ids.size() == 1, "next-unit-emits-one-model-lexical-token");
+    if (words_only)
+      REQUIRE(!expected[ordinal].terminal, "next-word-never-emits-a-terminal-punctuation-token");
   }
   return menu;
 }
@@ -619,6 +641,37 @@ void Conversions(const Backend& backend, const Fixture& fixture) {
            EPOCANVA_STALE_SNAPSHOT, "duplicate-conversion-ack-rejected");
   }
 }
+void PinyinInitialisms(const Backend& backend, const Fixture& fixture) {
+  Session session(backend, fixture.bindings[kPinyin].profile);
+  const auto& model = fixture.Model(2);
+  SetInput(session, "nh");
+  auto menu = Query(session, model);
+  const auto& hello = Find(menu, u8"你好", true);
+  REQUIRE(hello.metadata.kind == EPOCANVA_BACKEND_CONVERSION && hello.ids.size() == 2,
+          "compact-initials-compose-two-admitted-character-ids");
+  // The full pinyin path stays Rime-owned: the synthetic decoder must not replace
+  // the real Rime row's identity with its own character IDs.
+  SetInput(session, "nihao");
+  auto full = Query(session, model);
+  const auto& full_hello = Find(full, u8"你好");
+  REQUIRE(full_hello.ids.empty(), "full-pinyin-target-remains-rime-owned");
+  // The initialism decoder scores characters with the same transient context
+  // ranking as other candidates: the same "nh" must produce a different score
+  // under a real imported context, not a fixed table entry.
+  SetContext(session, u8"我们");
+  SetInput(session, "nh");
+  auto contextual = Query(session, model);
+  const auto& contextual_hello = Find(contextual, u8"你好", true);
+  REQUIRE(contextual_hello.metadata.score != hello.metadata.score,
+          "initialism-score-uses-imported-context");
+  // Selecting the synthetic row commits exactly the composed text.
+  menu = contextual;
+  const auto& selected = Find(menu, u8"你好", true);
+  Select(session, menu, selected);
+  const auto commit = CopyCommit(session, u8"你好");
+  auto ack = Ack(session, commit.commit_token);
+  REQUIRE(!ack.learned, "initialism-commit-consent-off-does-not-learn");
+}
 void KanaNextOutputUnavailable(const Backend& backend, const Fixture& fixture) {
   constexpr std::array<Binding, 4> kana_only_profiles{{
       kRomajiHiragana, kRomajiKatakana, kKanaHiragana, kKanaKatakana}};
@@ -696,7 +749,18 @@ void Contexts(const Backend& backend, const Fixture& fixture) {
     auto next = ExpectPrediction(session, model, context);
     REQUIRE(next.rows.front().ids != baseline.rows.front().ids, "real-context-changes-top-ranked-lexical-token");
     auto same = ExpectPrediction(session, model, context, EPOCANVA_BACKEND_NEXT_WORD);
-    REQUIRE(next.rows.front().ids == same.rows.front().ids, "next-word-and-next-unit-agree-on-one-token");
+    const Row* first_word = nullptr;
+    for (const auto& row : next.rows) {
+      if (row.ids.size() != 1) continue;
+      const auto* entry = model.Find(row.ids.front());
+      if (entry != nullptr && entry->kind == pred::TokenKind::kWord) {
+        first_word = &row;
+        break;
+      }
+    }
+    REQUIRE(first_word != nullptr, "next-unit-menu-contains-a-word");
+    REQUIRE(first_word->ids == same.rows.front().ids,
+            "next-word-selects-the-first-word-token");
     ExpectPrediction(session, model, context, EPOCANVA_BACKEND_CONTINUATION);
     SetContext(session, test.second_utf8);
     ExpectPrediction(session, model, {test.second_id});
@@ -1090,6 +1154,7 @@ int Run(const fs::path& repository_root, const fs::path& run_root,
       Case("same-language-keyboard-bindings", [&] { Bindings(backend, fixture); });
       Case("kana-only-next-output-unavailable", [&] { KanaNextOutputUnavailable(backend, fixture); });
       Case("real-converter-profile-modes", [&] { Conversions(backend, fixture); });
+      Case("pinyin-initialism-context", [&] { PinyinInitialisms(backend, fixture); });
       Case("five-language-context-ranking-oracles", [&] { Contexts(backend, fixture); });
       Case("model-derived-abbreviation-context-flip", [&] { Abbreviations(backend, fixture); });
       Case("edit-context-cancel-token-invalidation", [&] { Edits(backend, fixture); });

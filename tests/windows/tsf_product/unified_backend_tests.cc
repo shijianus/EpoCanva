@@ -81,7 +81,11 @@ int main(int argc, char** argv) {
     auto host = edit::test::TestHost::Create(&error);
     Check(host != nullptr, "real TSF test host created"); if (!host) return 1;
     struct Case { std::uint32_t profile; const char* raw; const char16_t* expected; };
-    const Case cases[] = {{1,"hel",u"hello"},{2,"nihao",u"你好"},{3,"francais",u"français"},
+    // Profiles 11-13 are the same English variant on QWERTZ, Dvorak and AZERTY. A correct
+    // prefix must produce the same completion; the layout affects misspelling cost only.
+    const Case cases[] = {{1,"hel",u"hello"},{11,"hel",u"hello"},{12,"hel",u"hello"},
+                          {13,"hel",u"hello"},{2,"nihao",u"你好"},{2,"nh",u"你好"},{3,"francais",u"français"},
+                          {3,u8"françai",u"français"},
                           {4,"nihon",u"日本"},{5,"dkssud",u"안녕"},{6,"su3cl3",u"你好"},
                           {7,"nihon",u"にほん"},{8,"nihon",u"ニホン"},{9,u8"にほん",u"日本"},
                           {10,u8"안녕",u"안녕"}};
@@ -138,6 +142,44 @@ int main(int argc, char** argv) {
         coordinator.Pump(); host->DispatchQueuedMessages(); std::this_thread::yield();
       }
       coordinator.Close();
+    }
+    // Committed Han text followed by the Latin pinyin/romaji the user is typing must split
+    // at the script boundary: "你好shi" is context "你好" plus the current token "shi".
+    edit::test::TestDocumentOptions mixed;
+    mixed.initial_text_utf16 = L"你好shi";
+    mixed.initial_selection_start_utf16 = mixed.initial_selection_end_utf16 =
+        static_cast<LONG>(mixed.initial_text_utf16.size());
+    auto* mixed_document = host->CreateDocument(mixed, &error);
+    Check(mixed_document != nullptr, "mixed-script document created");
+    if (mixed_document != nullptr) {
+      coord::test::TestTargetRevalidator mixed_target;
+      const auto captured = epocanva::tsf::product::ReadHostContext(
+          mixed_document->context(), host->client_id(),
+          static_cast<LONG>(mixed.initial_text_utf16.size()),
+          mixed_target.CreateWriteGuard(), mixed_document->context_id(), 1);
+      Check(captured.valid && captured.token_utf8 == "shi" &&
+                captured.preceding_utf8 == u8"你好" &&
+                captured.token_start_utf16 == 2,
+            "committed CJK context and the latin input token split at the script boundary");
+    }
+    // The apostrophe the English core admits inside "don't" must not end the token:
+    // otherwise the contraction is split into context plus "t" and cannot be completed.
+    edit::test::TestDocumentOptions contraction;
+    contraction.initial_text_utf16 = L"I don't";
+    contraction.initial_selection_start_utf16 = contraction.initial_selection_end_utf16 =
+        static_cast<LONG>(contraction.initial_text_utf16.size());
+    auto* contraction_document = host->CreateDocument(contraction, &error);
+    Check(contraction_document != nullptr, "contraction document created");
+    if (contraction_document != nullptr) {
+      coord::test::TestTargetRevalidator contraction_target;
+      const auto captured = epocanva::tsf::product::ReadHostContext(
+          contraction_document->context(), host->client_id(),
+          static_cast<LONG>(contraction.initial_text_utf16.size()),
+          contraction_target.CreateWriteGuard(), contraction_document->context_id(), 1);
+      Check(captured.valid && captured.token_utf8 == "don't" &&
+                captured.preceding_utf8 == "I " &&
+                captured.token_start_utf16 == 2,
+            "internal apostrophe stays inside the current english token");
     }
     // The reader may not acquire sensitive text even though the caller supplies an allowed
     // target guard. Field metadata is independently authoritative under the read cookie.

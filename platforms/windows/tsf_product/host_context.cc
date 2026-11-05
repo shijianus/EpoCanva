@@ -18,6 +18,55 @@ bool TokenUnit(wchar_t unit) {
   return (type1 & (C1_ALPHA | C1_DIGIT)) != 0 ||
       (type3 & (C3_NONSPACING | C3_DIACRITIC | C3_VOWELMARK)) != 0;
 }
+// The current token cannot merge committed Han/Kana/Hangul text with the Latin
+// pinyin/romaji the user is typing: "你好shi" is context "你好" plus token "shi".
+// Han, Kana and Hangul stay one class so mixed-script Japanese words ("食べる")
+// remain one token.
+enum class TokenClass { kNone, kLatin, kCjk, kMark, kOther };
+TokenClass ScalarClass(unsigned int scalar) {
+  if (scalar >= 0x1100 && scalar <= 0x11ff) return TokenClass::kCjk;
+  if (scalar >= 0x3040 && scalar <= 0x31ff) return TokenClass::kCjk;
+  if (scalar >= 0x3400 && scalar <= 0x4dbf) return TokenClass::kCjk;
+  if (scalar >= 0x4e00 && scalar <= 0x9fff) return TokenClass::kCjk;
+  if (scalar >= 0xac00 && scalar <= 0xd7af) return TokenClass::kCjk;
+  if (scalar >= 0xf900 && scalar <= 0xfaff) return TokenClass::kCjk;
+  if (scalar >= 0x20000 && scalar <= 0x3ffff) return TokenClass::kCjk;
+  if (scalar >= 0xff66 && scalar <= 0xff9d) return TokenClass::kCjk;
+  if (scalar > 0xffff) return TokenClass::kLatin;  // surrogate pair in another plane
+  const wchar_t unit = static_cast<wchar_t>(scalar);
+  if (!TokenUnit(unit)) return TokenClass::kOther;
+  WORD type3 = 0;
+  if (!::GetStringTypeW(CT_CTYPE3, &unit, 1, &type3)) return TokenClass::kOther;
+  if (type3 & (C3_NONSPACING | C3_DIACRITIC | C3_VOWELMARK)) return TokenClass::kMark;
+  return TokenClass::kLatin;
+}
+std::size_t TokenStartUtf16(const std::wstring& text) {
+  std::size_t begin_utf16 = text.size();
+  TokenClass token_class = TokenClass::kNone;
+  while (begin_utf16) {
+    std::size_t width_utf16 = 1;
+    unsigned int scalar = static_cast<unsigned int>(text[begin_utf16 - 1]);
+    if (scalar >= 0xdc00 && scalar <= 0xdfff) {
+      if (begin_utf16 < 2) break;
+      const auto high = static_cast<unsigned int>(text[begin_utf16 - 2]);
+      if (high < 0xd800 || high > 0xdbff) break;
+      scalar = 0x10000 + ((high - 0xd800) << 10) + (scalar - 0xdc00);
+      width_utf16 = 2;
+    } else if (scalar >= 0xd800 && scalar <= 0xdbff) {
+      break;
+    }
+    const TokenClass unit_class = ScalarClass(scalar);
+    if (unit_class == TokenClass::kMark) {
+      begin_utf16 -= width_utf16;
+      continue;
+    }
+    if (unit_class == TokenClass::kOther) break;
+    if (token_class == TokenClass::kNone) token_class = unit_class;
+    else if (token_class != unit_class) break;
+    begin_utf16 -= width_utf16;
+  }
+  return begin_utf16;
+}
 class Reader final : public ITfEditSession {
  public:
   Reader(ITfContext* context, LONG caret, std::shared_ptr<context::TargetWriteGuard> guard,
@@ -66,8 +115,7 @@ class Reader final : public ITfEditSession {
     if (!text.empty() && text.front() >= 0xdc00 && text.front() <= 0xdfff) {
       text.erase(0, 1); ++actual_begin;
     }
-    std::size_t token_begin_utf16 = text.size();
-    while (token_begin_utf16 && TokenUnit(text[token_begin_utf16 - 1])) --token_begin_utf16;
+    const std::size_t token_begin_utf16 = TokenStartUtf16(text);
     if (token_begin_utf16 == 0 && actual_begin != 0) return S_OK;
     if (text.size() > 512 && token_begin_utf16 == 0) return S_OK;
     auto preceding = text.substr(0, token_begin_utf16);

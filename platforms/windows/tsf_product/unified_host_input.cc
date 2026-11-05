@@ -12,6 +12,7 @@ bool ProductTextController::HandleUnifiedHostKey(const BuiltKey& key) {
   if (IsTextKey(key) || vk == input::kVirtualKeyBack || vk == input::kVirtualKeyReturn ||
       vk == input::kVirtualKeySpace) {
     DismissCandidateMenu();
+    host_text_changed_ = true;
     host_context_read_owed_ = false;  // old prefix cannot be published during the host edit
     ++host_context_read_revision_;
   }
@@ -53,6 +54,7 @@ void ProductTextController::PumpUnifiedHostContext() {
   if (status != coordinator::SubmitStatus::kAccepted) {
     DismissCandidateMenu(); return;
   }
+  host_text_changed_ = false;  // this read describes the current host text
   host_context_work_in_flight_ = true;
   host_context_submitted_revision_ = host_context_read_revision_;
   host_token_units_ = captured.token_utf16.size();

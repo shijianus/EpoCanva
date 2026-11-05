@@ -51,6 +51,9 @@ struct StaWakerDiagnostics {
   std::uint64_t stale_wakes_ignored = 0;
   std::uint64_t wakes_without_registration = 0;
   std::uint64_t stops = 0;
+  std::uint64_t loop_ticks = 0;
+  unsigned long window_thread_id = 0;
+  std::uint64_t window_messages = 0;
 };
 
 class StaResultWaker {
@@ -108,6 +111,8 @@ class StaResultWaker {
   std::atomic<std::uint64_t> wake_post_failures_{0};
   std::atomic<std::uint64_t> wakes_received_{0};
   std::atomic<std::uint64_t> stops_{0};
+  std::atomic<std::uint64_t> loop_ticks_{0};
+  std::atomic<unsigned long> window_thread_id_{0};
   std::uint64_t generation_ = 0;
   bool started_ = false;
   // Protects window_/generation_ against a cross-thread Notify racing Stop(). The window

@@ -387,7 +387,15 @@ def profile_rows(enums: dict[str, int], files: dict[str, Payload]) -> list[list[
     rows = []
     for identifier, lang, mode, output, keyboard, variant in definitions:
         base = f"data/backend/{lang}/"
-        conversion = base + ("fr.aff" if lang == "fr" else "lexicon.bin") if lang in ("fr", "ja") else None
+        if lang == "zh":
+            # The initialism decoder and Rime consume the same verified Terra
+            # dictionary. Binding it here makes the decoder hash-pinned instead
+            # of discovering an unverified file under the Rime data directory.
+            conversion = "data/epocanva_backend_terra.dict.yaml"
+        elif lang in ("fr", "ja"):
+            conversion = base + ("fr.aff" if lang == "fr" else "lexicon.bin")
+        else:
+            conversion = None
         rows.append([str(identifier), enum("EPOCANVA_BACKEND_" + lang.upper()),
                      enum("EPOCANVA_BACKEND_" + mode), enum("EPOCANVA_BACKEND_OUTPUT_" + output),
                      enum("EPOCANVA_BACKEND_KEYBOARD_" + keyboard), variant] +

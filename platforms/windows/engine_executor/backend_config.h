@@ -59,7 +59,8 @@ struct UnifiedBackendConfig {
   bool completion_enabled = true;
   bool spelling_enabled = false;
   bool morphology_enabled = false;
-  bool abbreviation_enabled = false;
+  // Mirrors ProductSettings: contextual abbreviation expansion is on by default.
+  bool abbreviation_enabled = true;
   bool operator==(const UnifiedBackendConfig& rhs) const {
     return std::tie(enabled, use_rime, allow_test_fixture, active_profile_id,
                     max_candidates, completion_enabled, spelling_enabled,

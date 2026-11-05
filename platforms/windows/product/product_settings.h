@@ -32,7 +32,12 @@ struct ProductSettings {
   bool spelling_enabled = false;
   int spelling_candidates = 3;  // 1..3
   bool morphology_enabled = false;
-  bool abbreviation_enabled = false;
+  // Contextual abbreviation expansion is the product's headline prediction path
+  // ("gm" after "have a" -> "good morning"). It must be on for a fresh install:
+  // an opt-in default hides that path and makes the IME look like a prefix-only
+  // word finder. Spelling/morphology stay explicit opt-ins because their
+  // suggestions are noisier.
+  bool abbreviation_enabled = true;
   bool two_edit_spelling_enabled = false;
   CandidateDisplay candidate_display = CandidateDisplay::kHost;
 

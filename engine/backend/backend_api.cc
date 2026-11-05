@@ -22,6 +22,7 @@
 #include <fstream>
 #include "engine/languages/ja/romaji_composer.h"
 #include "engine/languages/ko/two_set_composer.h"
+#include "engine/languages/zh/pinyin_initialism.h"
 #include "engine/japanese_decoder/japanese_decoder.h"
 #include "engine/data_store/windows_learning_repository.h"
 #include "product_io.h"
@@ -108,6 +109,7 @@ struct Resource {
   std::string identity;
   std::filesystem::path conversion_path;
   std::unique_ptr<epocanva::japanese_decoder::Decoder> japanese;
+  std::shared_ptr<const epocanva::zh::PinyinInitialism> pinyin_initialism;
 #ifdef EPOCANVA_BACKEND_FRENCH
   std::shared_ptr<const epocanva::french_dictionary::Dictionary> french;
 #endif
@@ -383,9 +385,31 @@ epocanva_status LoadResource(const epocanva_backend_resource& input, bool fixtur
     if (!resource.lexical) return EPOCANVA_BACKEND_INVALID_RESOURCE;
   }
   if (input.conversion_path.utf8_byte_count) {
-    if (input.language != EPOCANVA_BACKEND_JA && input.language != EPOCANVA_BACKEND_FR)
+    if (input.language != EPOCANVA_BACKEND_JA && input.language != EPOCANVA_BACKEND_FR &&
+        input.language != EPOCANVA_BACKEND_ZH)
       return EPOCANVA_INVALID_ARGUMENT;
     resource.conversion_path = std::filesystem::u8path(Text(input.conversion_path, 30000));
+  }
+  if (input.language == EPOCANVA_BACKEND_ZH && !resource.conversion_path.empty()) {
+    // The pinyin dictionary is the same local Terra file Rime consumes. It is
+    // pinned by the profile resource hash; the decoder only composes characters
+    // that already have an admitted model ID.
+    epocanva::backend::LocalResource dictionary;
+    if (!dictionary.Open(resource.conversion_path) ||
+        !Digest(dictionary.path(), Text(input.conversion_sha256, 64)))
+      return EPOCANVA_BACKEND_INVALID_RESOURCE;
+    std::error_code size_error;
+    const auto bytes = std::filesystem::file_size(dictionary.path(), size_error);
+    if (size_error || bytes == 0 || bytes > 16ull * 1024 * 1024)
+      return EPOCANVA_BACKEND_INVALID_RESOURCE;
+    std::string source(static_cast<std::size_t>(bytes), '\0');
+    std::ifstream dictionary_stream(dictionary.path(), std::ios::binary);
+    if (!dictionary_stream.read(source.data(), static_cast<std::streamsize>(source.size())))
+      return EPOCANVA_BACKEND_INVALID_RESOURCE;
+    std::string diagnostic;
+    resource.pinyin_initialism = epocanva::zh::PinyinInitialism::Build(
+        source, *resource.model, &diagnostic);
+    if (!resource.pinyin_initialism) return EPOCANVA_BACKEND_INVALID_RESOURCE;
   }
   if (input.language == EPOCANVA_BACKEND_JA && !resource.conversion_path.empty()) {
     resource.japanese = std::make_unique<epocanva::japanese_decoder::Decoder>();
@@ -634,6 +658,13 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
             session.profile.output_mode != EPOCANVA_BACKEND_OUTPUT_KANJI) return EPOCANVA_BACKEND_UNAVAILABLE;
         pred::PredictOptions options;
         options.language_id = Language(session.language); options.max_suggestions = query->max_candidates;
+        // NEXT_WORD is a word prediction, not a generic lexical-token prediction. The
+        // model ranks punctuation as ordinary tokens, so asking for only max_candidates
+        // and then dropping punctuation can leave a short or empty menu. Fetch the
+        // documented model maximum and stop once enough words are collected; NEXT_UNIT
+        // still returns punctuation because that is a valid unit there.
+        const bool words_only = query->query_kind == EPOCANVA_BACKEND_NEXT_WORD;
+        if (words_only) options.max_suggestions = pred::kMaxSuggestions;
         options.max_words = query->query_kind == EPOCANVA_BACKEND_CONTINUATION ? query->max_continuation_words : 1;
         options.max_index_entries = static_cast<std::size_t>(query->search_budget);
         const auto predicted = session.resource->model->Predict(std::nullopt, context, options, counts);
@@ -642,6 +673,8 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
         complete = predicted.complete;
         for (const auto& row : predicted.suggestions) {
           if (row.lexeme_ids.empty()) continue;
+          if (words_only && row.terminal) continue;
+          if (candidates.size() >= query->max_candidates) break;
           flow::Candidate candidate;
           candidate.kind = EPOCANVA_BACKEND_PREDICTION; candidate.text_utf8 = Join(row.tokens_utf8, session.language);
           candidate.lexeme_ids = row.lexeme_ids; candidate.score = row.log_probability;
@@ -675,6 +708,28 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
           candidate.input_end_utf8_byte = session.raw.size();
           // Rime menu text can inform transient ranking, not learning identity.
           candidates.push_back(std::move(candidate)); session.rime_ordinals.push_back(ordinal);
+        }
+        if (session.resource->pinyin_initialism && !session.raw.empty()) {
+          const auto initials = session.resource->pinyin_initialism->Query(
+              session.raw, context, counts,
+              std::min<std::size_t>(query->max_candidates, 8));
+          for (const auto& row : initials) {
+            if (candidates.size() >= query->max_candidates) break;
+            const bool duplicate = std::any_of(candidates.begin(), candidates.end(),
+                [&](const flow::Candidate& prior) { return prior.text_utf8 == row.text_utf8; });
+            if (duplicate) continue;
+            flow::Candidate candidate;
+            candidate.kind = EPOCANVA_BACKEND_CONVERSION;
+            candidate.text_utf8 = row.text_utf8;
+            candidate.lexeme_ids = row.lexeme_ids;
+            candidate.score = row.log_score;
+            candidate.input_end_utf8_byte = session.raw.size();
+            candidates.push_back(std::move(candidate));
+            session.rime_ordinals.push_back(UINT32_MAX);
+          }
+          // The initialism decoder is bounded (beam/character caps) and does not
+          // enumerate every pinyin word.
+          if (!initials.empty()) complete = false;
         }
         if (candidates.size() > 1) {
           std::vector<std::size_t> order;

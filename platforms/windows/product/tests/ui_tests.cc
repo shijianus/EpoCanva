@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -396,6 +397,7 @@ int main(int argc, char** argv) {
   std::filesystem::path exe;
   std::filesystem::path user_root;
   std::filesystem::path screenshot;
+  int expected_profiles = 0;
   for (int index = 1; index < argc; ++index) {
     const std::string option = argv[index];
     if (option == "--exe" && index + 1 < argc) {
@@ -404,6 +406,9 @@ int main(int argc, char** argv) {
       user_root = argv[++index];
     } else if (option == "--screenshot" && index + 1 < argc) {
       screenshot = argv[++index];
+    } else if (option == "--expect-profiles" && index + 1 < argc) {
+      expected_profiles = std::atoi(argv[++index]);
+      if (expected_profiles < 0) expected_profiles = 0;
     }
   }
   if (exe.empty() || user_root.empty() || screenshot.empty() ||
@@ -434,6 +439,14 @@ int main(int argc, char** argv) {
   CheckInitialWindow(window);
   CheckDpi(process.handle);
   CheckKeyboardTraversal(window, ::GetWindowThreadProcessId(window, nullptr));
+  if (expected_profiles > 0) {
+    const HWND profile_choice = ::GetDlgItem(window, ui::kProfileChoice);
+    const int profiles = profile_choice == nullptr
+        ? -1
+        : static_cast<int>(::SendMessageW(profile_choice, CB_GETCOUNT, 0, 0));
+    std::cout << "profiles=" << profiles << " expected=" << expected_profiles << "\n";
+    Check(profiles == expected_profiles, "profile list contains the expected entries");
+  }
 
   HWND completion = ::GetDlgItem(window, ui::kCompletionEnabled);
   HWND spelling = ::GetDlgItem(window, ui::kSpellingEnabled);
@@ -457,12 +470,18 @@ int main(int argc, char** argv) {
 
   Check(::SendMessageW(candidate_host, BM_GETCHECK, 0, 0) == BST_CHECKED,
         "the default candidate display follows the host");
-  for (int id : {ui::kMorphologyEnabled, ui::kAbbreviationEnabled,
-                 ui::kTwoEditSpellingEnabled}) {
+  HWND abbreviation = ::GetDlgItem(window, ui::kAbbreviationEnabled);
+  Check(abbreviation != nullptr &&
+            ::SendMessageW(abbreviation, BM_GETCHECK, 0, 0) == BST_CHECKED,
+        "contextual abbreviation expansion starts enabled");
+  for (int id : {ui::kMorphologyEnabled, ui::kTwoEditSpellingEnabled}) {
     HWND feature = ::GetDlgItem(window, id);
     Check(feature != nullptr && ::SendMessageW(feature, BM_GETCHECK, 0, 0) == BST_UNCHECKED,
-          "extended English features start disabled");
-    EnsureCheck(feature, true);
+          "noisier extended English features start disabled");
+  }
+  for (int id : {ui::kMorphologyEnabled, ui::kAbbreviationEnabled,
+                 ui::kTwoEditSpellingEnabled}) {
+    EnsureCheck(::GetDlgItem(window, id), true);
   }
   EnsureCheck(completion, false);
   EnsureCheck(spelling, true);

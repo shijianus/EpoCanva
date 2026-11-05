@@ -431,7 +431,7 @@ void TestRuntimeLease(const std::filesystem::path& run_root) {
   second.spelling_candidates = 3;
   Check(save_bundle(second, &token, &why),
         "runtime: a changed settings bundle is written while the engine runs (" +
-            std::string(why.begin(), why.end()) + ")");
+            epocanva::product::WideToUtf8(why) + ")");
   const std::filesystem::path sentinel = paths.engine_user_dir / L"build" / L"keep.txt";
   {
     std::error_code ec;

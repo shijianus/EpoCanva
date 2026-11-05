@@ -8,6 +8,7 @@ param(
     [string]$BuildDir = '',
     [string]$ProductDataDir = '',
     [string]$RimeDll = '',
+    [string]$BackendResourcesRoot = '',
     [ValidateSet('internal-unsigned', 'public-signed')]
     [string]$AcceptanceProfile = 'internal-unsigned',
     [ValidateSet('internal-only', 'public-candidate')]
@@ -80,6 +81,10 @@ if ($InternalAllowEmbeddedBuildPaths -and
         ($AcceptanceProfile -cne 'internal-unsigned' -or $DistributionPolicy -cne 'internal-only')) {
     Fail 'embedded build-path exceptions are limited to internal diagnostic packages' 2
 }
+if ($BackendResourcesRoot -and
+        ($AcceptanceProfile -cne 'internal-unsigned' -or $DistributionPolicy -cne 'internal-only')) {
+    Fail 'the backend runtime payload is limited to internal-unsigned/internal-only packages' 2
+}
 
 $version = (Get-Content -LiteralPath (Join-Path $RepoRoot 'platforms\windows\product\VERSION') -Raw).Trim()
 if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$') {
@@ -121,6 +126,42 @@ foreach ($line in (Get-Content -LiteralPath $policy -Encoding UTF8)) {
     $entries += $entry
 }
 if ($entries.Count -eq 0) { Fail 'product payload policy is empty' 2 }
+$backendEntries = @()
+if ($BackendResourcesRoot) {
+    $BackendResourcesRoot = [System.IO.Path]::GetFullPath($BackendResourcesRoot)
+    $stagingManifest = Join-Path $BackendResourcesRoot 'data\backend\staging-manifest.json'
+    if (-not (Test-Path -LiteralPath $stagingManifest -PathType Leaf)) {
+        Fail 'backend staging-manifest.json is missing; the resource set is not verified' 3
+    }
+    $staging = Get-Content -LiteralPath $stagingManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not $staging.files -or $staging.files.Count -lt 1) {
+        Fail 'backend staging manifest lists no runtime files' 3
+    }
+    $hasResources = $false
+    foreach ($row in $staging.files) {
+        $relative = [string]$row.path
+        if ($relative -like 'data/backend/provenance/*' -or $relative -eq 'data/backend/staging-manifest.json') {
+            continue
+        }
+        if ($relative -notmatch '^data/(backend/|epocanva_backend_[A-Za-z0-9_.-]+\.(schema\.yaml|dict\.yaml)$|zhuyin\.yaml$)') {
+            Fail "unexpected backend payload path: $relative" 4
+        }
+        if ($destinations.ContainsKey($relative)) {
+            Fail "backend payload duplicates a fixed policy destination: $relative" 2
+        }
+        $destinations[$relative] = $true
+        $backendEntries += [pscustomobject]@{
+            Path = $relative
+            Source = Join-Path $BackendResourcesRoot ($relative -replace '/', '\')
+            Sha256 = [string]$row.sha256
+            Bytes = [long]$row.bytes
+        }
+        if ($relative -eq 'data/backend/resources.tsv') { $hasResources = $true }
+        Assert-FixedFile $backendEntries[-1].Source $backendEntries[-1]
+    }
+    if (-not $hasResources) { Fail 'backend payload has no data/backend/resources.tsv' 4 }
+    if ($backendEntries.Count -lt 1) { Fail 'backend payload lists no runtime files' 4 }
+}
 $productBin = Join-Path $BuildDir 'product\bin'
 $sources = @{}
 foreach ($entry in $entries) {
@@ -171,13 +212,21 @@ foreach ($entry in $entries) {
     Copy-Item -LiteralPath $sources[$entry.Path] -Destination $destination
     Assert-FixedFile $destination $entry
 }
+foreach ($entry in $backendEntries) {
+    $destination = Join-Path $stageFull $entry.Path
+    $parent = Split-Path -Parent $destination
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    Copy-Item -LiteralPath $entry.Source -Destination $destination
+    Assert-FixedFile $destination $entry
+}
 $pathException = if ($InternalAllowEmbeddedBuildPaths) { 'embedded-build-paths' } else { 'none' }
 $versionText = @(
-    'EpoCanva Windows English Alpha',
+    'EpoCanva Windows Multilingual Alpha',
     "Version: $version",
     "Commit: $commit",
     "Acceptance-profile: $AcceptanceProfile",
     "Distribution-policy: $DistributionPolicy",
+    "Backend-runtime-files: $($backendEntries.Count)",
     "Path-exception: $pathException",
     'Built from the verified receipt and current product payload policy.',
     'Runtime network I/O: none by design. See NOTICE.txt.'
@@ -191,7 +240,9 @@ $personalPatterns = @('D:\Users\', 'C:\Users\', 'OneDrive', $RepoRoot, $RepoRoot
 if ($env:USERNAME) { $personalPatterns += $env:USERNAME }
 $binaryMatches = @()
 $payload = @(Get-ChildItem -LiteralPath $stageFull -Recurse -File -Force)
-if ($payload.Count -ne $entries.Count) { Fail 'staged file set differs from product policy' 5 }
+if ($payload.Count -ne ($entries.Count + $backendEntries.Count)) {
+    Fail 'staged file set differs from product policy plus backend runtime payload' 5
+}
 foreach ($file in $payload) {
     $relative = $file.FullName.Substring($stageFull.Length + 1).Replace('\', '/')
     if (-not $destinations.ContainsKey($relative)) { Fail "unlisted staged file: $relative" 5 }

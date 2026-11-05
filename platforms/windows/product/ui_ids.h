@@ -7,7 +7,7 @@ namespace ui {
 
 inline constexpr wchar_t kSettingsWindowClass[] = L"EpoCanvaSettingsWindow";
 inline constexpr wchar_t kSettingsWindowTitle[] =
-    L"EpoCanva English Alpha - Settings";
+    L"EpoCanva Multilingual Alpha - Settings";
 
 enum ControlId : int {
   kSummary = 1001,

@@ -55,6 +55,18 @@ set(_product_defines
 
 # Product uses the shared backend C ABI. Existing runtime/composition/core targets above
 # are reused, so the process contains exactly one Rime owner on the executor worker.
+# The staged resource manifest always carries French profiles, and the backend refuses the
+# whole profile set when a profile cannot be constructed. The shipped product therefore
+# must build the verified Hunspell adapter; a checkout without the pinned archive fails at
+# configure time instead of starting a product whose engine never becomes ready.
+option(EPOCANVA_PRODUCT_WITH_FRENCH_DICTIONARY
+       "Build the product with the verified French Hunspell adapter" ON)
+if(NOT EPOCANVA_PRODUCT_WITH_FRENCH_DICTIONARY)
+  message(FATAL_ERROR
+    "The product resource manifest contains French profiles; build without "
+    "EPOCANVA_PRODUCT_WITH_FRENCH_DICTIONARY cannot open the backend.")
+endif()
+set(EPOCANVA_BACKEND_WITH_FRENCH_DICTIONARY ON)
 if(NOT TARGET epocanva_backend)
   add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../../engine/backend"
                    "${CMAKE_CURRENT_BINARY_DIR}/unified-backend")
@@ -749,6 +761,21 @@ add_test(
 set_tests_properties(product.integration.sink_candidate
   PROPERTIES TIMEOUT 420
              LABELS "windows;product;sink;candidate;selection;stale;no-registration")
+
+add_test(
+  NAME product.integration.sink_multilingual_prediction
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-multilingual-prediction
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-multilingual-prediction;--mode;multilingual-prediction"
+    -DTIMEOUT_SECONDS=600
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_multilingual_prediction
+  PROPERTIES TIMEOUT 660
+             LABELS "windows;product;sink;prediction;context;abbreviation;i18n;keyboard;no-registration")
 
 add_test(
   NAME product.integration.sink_replacement_faults

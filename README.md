@@ -19,12 +19,28 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 `tools/product/stage_product.ps1` 只接受匹配当前源码的成功构建收据，默认拒绝个人构建路径。
 `tools/product/check_release.ps1` 分别检查 `internal-unsigned` 和 `public-signed`；
 无签名模式只省略签名要求，五语言聚合、干净源码、源码归档、安装及宿主门禁仍然必需。
+
+内部验收可先使用 `tools/product/stage_internal_product.ps1` 组装
+`build/<preset>/internal-product/EpoCanva-internal`：它复制当前二进制、产品数据和经
+staging 校验的五语言运行资源，逐文件核对 SHA-256，并写出 `INTERNAL-ONLY.txt`；它**不写**
+`package.manifest`，因此不是发行包，不能通过 `check_release.ps1`。设置窗口会如实显示
+`Package incomplete`，但会加载 13 个真实 profile，统一后端也可用该布局运行五语言与中文简拼
+测试。正式安装器、注册/卸载闭环和公开发行数据授权仍未完成。
+示例：`powershell -NoProfile -ExecutionPolicy Bypass -File tools/product/stage_internal_product.ps1 -BuildDir build/<preset>`
+（默认读取 `build/product-resources/product`；不存在时回退 `build/ime-resources/product`）。
+
+带 `package.manifest` 的内部发行候选包使用正式入口
+`build_product.ps1` + `stage_product.ps1 -BackendResourcesRoot <staged-root>`；当前生成的
+`build/windows-product/stage/EpoCanva-internal` 为 66 文件、171,994,763 bytes，
+`EpoCanva.exe --diagnose` 返回 `package=ready`/`manifest=ok`，设置窗口加载 13 个 profile。
+`check_release.ps1` 仍因 clean source、installer/toolchain、real-host、
+language-acceptance、证据绑定和公开数据授权而阻塞；内部候选包不是公开 release。
 `technical_ready`、`distribution_authorized`、`signature_verified`、`release_ready` 分开报告。
 包内文件校验通过不代表已获得分发许可或已完成系统输入验证。
 
 ## 现在能做什么，不能做什么
 
-已具备五语言离线 n-gram 模型、真实 Rime 中文词典、Hunspell 法文字典、Mozc 数据驱动的日文解码和韩文两套式组字。后端不是只查询前缀：上下文会影响补全、下一词和多词缩写展开，候选选择采用独立的宿主提交确认协议。
+已具备五语言离线 n-gram 模型、真实 Rime 中文词典、Hunspell 法文字典、Mozc 数据驱动的日文解码和韩文两套式组字。后端不是只查询前缀：上下文会影响补全、下一词和多词缩写展开，候选选择采用独立的宿主提交确认协议。2026-11-05 复审把上下文缩写展开改为新装默认开启（`abbreviation_enabled=1`），否则新用户只能看到前缀补全，当前缩写结合上下文的路径形同未交付；拼写、形态和二次编辑建议仍是显式 opt-in。中文简拼（如 `nh` → 你好）由来自身份校验 Terra 词典的有界声母/汉字索引加字符模型解码，合法全拼仍由 Rime 处理；`NEXT_WORD` 只返回词，不再让标点占据下一词首位。
 
 本次审计新增兼容 v1 的 v2 profile 接口、非 ASCII UTF-8 输入、短期上下文导入、模型驱动首字母缩写、部分显式缩写、统一候选评分和前缀索引。US QWERTY、French AZERTY、German QWERTZ、Dvorak 与未知布局中性评分分开建模；语言、键盘布局和输出模式不再混为一个英文 schema。经过来源校验的本地暂存资源提供 13 个 profile，详见 `docs/testing/backend-resource-staging.md`。
 

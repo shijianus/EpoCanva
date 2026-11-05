@@ -338,10 +338,14 @@ class ResourceIndexTests(unittest.TestCase):
         for lang in stage.LANGUAGES:
             for name in ("model.tsv", "fr.aff", "fr.dic", "lexicon.bin", "abbreviations.tsv"):
                 files[f"data/backend/{lang}/{name}"] = stage.Payload("a" * 64, 1, content=b"x")
+        files["data/epocanva_backend_terra.dict.yaml"] = stage.Payload("a" * 64, 1, content=b"x")
         rows = stage.profile_rows(enums, files)
         self.assertEqual([int(row[0]) for row in rows], list(range(1, 14)))
         self.assertEqual([row[5] for row in rows], ["en-US", "zh-pinyin", "fr-FR", "ja-JP", "ko-KR",
                          "zh-zhuyin", "ja-JP", "ja-JP", "ja-JP", "ko-KR", "en-US", "en-US", "en-US"])
+        # Chinese profiles bind the Terra dictionary the initialism decoder reads.
+        self.assertEqual(rows[1][8:10], ["data/epocanva_backend_terra.dict.yaml", "a" * 64])
+        self.assertEqual(rows[5][8:10], ["data/epocanva_backend_terra.dict.yaml", "a" * 64])
         self.assertEqual(int(rows[8][2]), enums["EPOCANVA_BACKEND_KANA"])
         self.assertEqual(int(rows[9][2]), enums["EPOCANVA_BACKEND_LATIN"])
         self.assertEqual([int(rows[i][4]) for i in (10, 11, 12)], [enums["EPOCANVA_BACKEND_KEYBOARD_" + key]

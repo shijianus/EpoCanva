@@ -210,6 +210,7 @@ Add-Gate 'build-tests' {
     "$($cases.Count) actual passing CTest cases; no skips."
 }
 Add-Gate 'source-clean' {
+    if ($null -eq $receipt) { throw 'No verified build receipt exists; a fixture package cannot establish the clean source revision.' }
     if ($null -eq $source -or $source.dirty) { throw 'Aggregate acceptance requires a clean source revision; dirty identity is preserved, never stripped.' }
     'Source worktree is clean.'
 }

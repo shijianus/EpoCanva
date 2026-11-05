@@ -28,8 +28,10 @@ int main(int argc, char** argv) {
   Put(path, legacy);
   const auto old = LoadProductSettings(path);
   Check(old.ok() && !old.settings.morphology_enabled &&
-        !old.settings.abbreviation_enabled && !old.settings.two_edit_spelling_enabled,
-        "legacy settings preserve opt-in defaults");
+        old.settings.abbreviation_enabled && !old.settings.two_edit_spelling_enabled,
+        "legacy settings keep expansion on and the noisier features opt-in");
+  Check(ProductSettings{}.abbreviation_enabled,
+        "a fresh install enables contextual abbreviation expansion");
   for (unsigned mask = 0; mask < 8; ++mask) {
     ProductSettings wanted;
     wanted.morphology_enabled = (mask & 1) != 0;

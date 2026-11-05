@@ -645,6 +645,7 @@ void EngineHostBroker::Snapshot(EngineHostDiagnostics* diagnostics) const {
       static_cast<int>(s.last_report.runtime_start_status);
   diagnostics->runtime_shutdown_status =
       static_cast<int>(s.last_report.runtime_shutdown_status);
+  diagnostics->start_diagnostic = s.last_report.diagnostic;
   diagnostics->start_thread_id = s.last_report.start_thread_id;
   diagnostics->shutdown_thread_id = s.last_report.shutdown_thread_id;
   diagnostics->worker_thread_id = s.worker_thread_id;

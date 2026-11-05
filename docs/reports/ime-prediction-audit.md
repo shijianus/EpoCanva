@@ -38,7 +38,7 @@
 - 本地验证资源覆盖 en/zh/fr/ja/ko。13 个暂存 profile 包含英文多个键盘布局、法文 AZERTY、拼音/注音、日文 Romaji/Kana/Hiragana/Katakana/Kanji 和韩文两套式/原生 Hangul。
 - 拼写键位模型区分 US QWERTY、French AZERTY、German QWERTZ、Dvorak；未知布局使用中性成本，不能静默假设 QWERTY。此处为算法评分，不等于已安装实际物理布局的验收。
 - `stage_resources.py` 只使用现有本地模型/资料；核对 144 项来源输入，生成 55 个文件、13 行 profile manifest；英文 36 项、法文 4 项显式缩写全部解析到实际词条 ID，OOV 跳过 0。
-- 验证根 `build/ime-resources/product`。`data/backend/resources.tsv` 为 2785 bytes，SHA-256 `f41c085855ccfa49735299026784a237c01edf6707a1e26d93523b83a56c0227`。相关署名/来源与分发限制见 `docs/testing/backend-resource-staging.md`。
+- 验证根 `build/ime-resources/product`。`data/backend/resources.tsv` 为 2983 bytes，SHA-256 `f6acd2eaf5c0a660404944d5ddcaaad1477f369035247b057e24c2fb543e9ffd`。相关署名/来源与分发限制见 `docs/testing/backend-resource-staging.md`。
 - 不声称 en-GB 本土化词典、简繁转换或任意新语言已实现。日文假名-only profile 的 NEXT/CONTINUATION 缺少相应资源时明确 unavailable，不返回违背输出脚本的 Kanji。
 
 ### Windows 接入与安全
@@ -203,3 +203,162 @@ python -B tools/backend/stage_resources.py --product-root build/ime-resources/pr
 - `tools/product/build_product.ps1`
 
 起点已有且本轮没有覆盖的修改：`docs/windows/isolation-verification-plan.md`、`tools/product/isolation/layer_c/c_layer_agent.ps1`、`tools/product/isolation/layer_c/trigger.ps1`、`docs/reports/W3-B-c-layer-sessions.md`、`.zcode/`。README 的既有 C 层六轮说明也保留；新增审计状态不改写历史证据。
+
+## 8. 2026-11-05 复审：默认预测路径修正
+
+### 发现
+
+上一轮已经把五语言后端、上下文排序、缩写解码和 13 个 profile 接进产品，但
+`ProductSettings::abbreviation_enabled` 与 `UnifiedBackendConfig::abbreviation_enabled`
+的默认值仍是 `false`，而 `product.integration.sink_multilingual_prediction` 的缩写用例
+又显式把它设为 `true`。结果是：测试证明“打开开关后可用”，却没有证明“新装用户能看到
+当前缩写结合上下文的展开”。新装用户只得到前缀补全和下一词，这正好会把产品用成
+“单独找字”，与本次审计目标冲突。该问题不是测试失败，而是验收覆盖缺口。
+
+同时，设置窗口标题、副标题、About 与 `VERSION.txt` 仍写 “English Alpha”，与已经接入的
+en/zh/fr/ja/ko 输入 profile 不一致。
+
+### 修正
+
+- `ProductSettings::abbreviation_enabled` 默认改为 `true`。显式关闭仍然生效；缺少该键的
+  旧 `settings.ini` 也按新默认启用。
+- `UnifiedBackendConfig::abbreviation_enabled` 默认同步为 `true`，避免绕过产品设置直接
+  构造后端时得到相反行为。
+- `product.integration.sink_multilingual_prediction` 的上下文缩写用例不再显式打开开关，
+  以便默认值回退时该用例会真实转红。
+- 只把缩写展开改为默认开启；拼写建议、形态建议和二次编辑拼写仍是显式 opt-in，
+  因为它们更容易产生噪声。`product_engine_tests` 的三个隔离场景显式关闭缩写，
+  继续只验证它们各自的能力；`product.integration.sink_candidate` 及其余使用固定
+  “4 completion + 2 spelling”预算的生命周期用例也显式关闭缩写，避免默认值把菜单
+  从 7 行扩到 15 行而误报预算失败。
+- 设置窗口标题/副标题/About/暂存 `VERSION.txt` 改为 Multilingual Alpha；
+  `ui_tests` 断言新装缩写开关为选中，形态/二次编辑仍为未选中。
+- 复核英文 contraction：`TokenUnit` 原本已把 `'`、`’`、`_`、`-` 视为 token 字节，
+  所以产品读取 "don't" 时 token 是完整词，不是 "t"。原测试没有覆盖这一点；本轮新增
+  `product.integration.unified_tsf` 的 "I don't" 读取断言，以及
+  `product.integration.sink_multilingual_prediction` 的 "don'" → "don't" 端到端选择用例。
+  负向控制：临时移除 `TokenUnit` 的四个分隔符分支后，前一条断言真实转红
+  （exit 1、`FAIL internal apostrophe stays inside the current english token`），
+  恢复后通过；该用例不是无条件成功。
+- `NEXT_WORD` 改为真正的词级预测：后端向模型请求文档上限的候选，丢弃 terminal/
+  punctuation 路径后再应用调用方 `max_candidates`；`NEXT_UNIT` 仍保留标点，因为标点
+  本身是合法词法单元。ABI 注释与 `docs/architecture/backend-session.md` 已同步。
+  `profiles.cc` 的 oracle 按同一过滤规则比较，并新增“五个语言上下文的 NEXT_WORD 首位
+  必须是词、不得是 terminal 标点”断言。
+- 产品级回归 `RunNextWordWordOnlyCase`：真实 TSF 产品在 "good morning " 后打开的空
+  token 菜单首项必须是词。实际菜单为 `of, before, that, to, in, coffee, till, and,
+  for, at, shift, breeze, the, tom`，首项 `of`；修复前首项是 `,`。该用例同时断言首项
+  不是单标点，并锁定 pinned model 的首词。
+- 负向证据：实现前真实产品链的 "nh" 只有 raw（`build/audit-zh-abbrev.log` 中
+  `profile=2 candidates=1` 且 `FAIL real language candidate exists`）；实现后同一探测
+  出现 你好 并可通过真实 TSF 选择提交。该用例不是无条件成功。
+- 新增有界中文拼音简拼解码器 `engine/languages/zh/pinyin_initialism`。它从已验证的
+  Terra 单字读音构造“声母 → 音节 → 已准入汉字 ID”索引，用字符 n-gram 上下文做 beam
+  搜索；`nihao` 这类合法全拼序列被识别后仍交给 Rime，只有 `nh` 这类非全拼输入才生成
+  简拼候选。词典通过资源的 `conversion_path`/SHA-256 绑定，不是从 Rime 目录静默发现
+  的文件；搜索有 syllable/character/beam 上限，`complete=false`。真实产品链结果是
+  `nh` → 你好 可选中并提交；同一 `nh` 在导入 `我们` 后分数改变；首版排序为 女孩、你会、男孩、你好、你很、能会、你还、
+  你還，质量仍受数据/模型限制，但不依赖固定候选表，也没有硬编码 你好。
+
+### 本轮实际命令与结果
+
+| 命令 | 实际结果 | 证据 |
+| --- | --- | --- |
+| `cmake --build build/audit-r1-product --config Release --parallel 8` | exit 0 | `build/audit-pinyin-product-build.log` |
+| `ctest --test-dir build/ime-audit-integration -C Release` | exit 0；56/56（含新增 `pinyin-initialism-context`） | `build/audit-pinyin-backend-final2-ctest.log` |
+| `ctest --test-dir build/ime-audit-integration -R backend.profiles.real_acceptance` | exit 0；`nh` → 你好 选中/提交、上下文改变分数、全拼仍由 Rime 拥有 | `build/audit-pinyin-context-test.log` |
+| `ctest -R product.integration.unified_tsf` / `sink_multilingual_prediction` | exit 0；各 1/1，后者新增 `zh pinyin initials` | `build/audit-pinyin-unified.log`、`build/audit-pinyin-sink.log` |
+| `python -B -m unittest discover -s tests/backend_resource_staging -p "test_*.py"` | exit 0；37 项，2 项显式跳过 | `build/audit-pinyin-staging-tests2.log` |
+| 全量 `ctest --test-dir build/audit-r1-product -C Release` | exit 0；230/230，2 项显式跳过 | `build/audit-internal-final2-ctest.log` |
+| `ctest --test-dir build/audit-r1-product -R product.integration.unified_tsf`（负向控制：临时移除 `TokenUnit` 的分隔符分支） | exit 1；`FAIL internal apostrophe stays inside the current english token`，恢复后 exit 0 | `build/audit-neg2-unified.log` |
+| 实现前真实产品链 "nh" 探测 | exit 1；`profile=2 candidates=1`、`FAIL real language candidate exists` | `build/audit-zh-abbrev.log` |
+| `stage_internal_product.ps1` + 内部布局 UI/统一后端 | exit 0；55 文件、171,692,101 bytes；`profiles=13 expected=13`；15 个语言/profile 用例全过 | `build/audit-internal-final4-stage.log`、`build/audit-internal-final4-ui.log`、`build/audit-internal-final4-unified.log` |
+| `build_product.ps1`（正式入口） | exit 0；228/230 通过、2 项跳过；verified receipt | `build/audit-official-build5.log` |
+| `stage_product.ps1 -BackendResourcesRoot` + `--diagnose` | exit 0；66 文件、171,994,763 bytes；`package=ready`、`manifest=ok`、`manifest_files=66`；UI 13 profiles；统一后端 15/15 | `build/audit-official-stage2.log`、`build/audit-official-package-diagnose2.txt`、`build/audit-package-ui.log`、`build/audit-package-unified.log` |
+
+### 内部可运行布局（不是发行包）
+
+新增 `tools/product/stage_internal_product.ps1`，把当前产品二进制、产品数据和经过
+staging 校验的五语言运行资源组装到 `<BuildDir>/internal-product/EpoCanva-internal`。
+它复制 staging manifest 中除 `provenance/` 和 staging 清单本身以外的运行文件，逐文件
+校验 SHA-256/字节数，并明确写入 `INTERNAL-ONLY.txt`；**不写 `package.manifest`**，
+因此不能被误当成发布包，也不会通过 `check_release.ps1`。
+
+实际执行：
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/product/stage_internal_product.ps1   -BuildDir build/audit-r1-product -BackendResourcesRoot build/ime-resources/product   -RimeDll build/librime-english/rime/install/lib/rime.dll   -StageRoot build/audit-r1-product/internal-product/EpoCanva-internal -Replace
+```
+
+结果：55 个文件、171,692,101 bytes，其中 39 个后端运行文件；`audit-internal-stage.log`
+exit 0。随后用该布局运行 `epocanva_unified_tsf_tests`，15 个 profile/语言用例全部通过
+（含 `nh` → 你好）；用该布局的 `EpoCanva.exe` 运行设置窗口测试并断言 profile 组合框有
+13 项，`profiles=13 expected=13`、`RESULT PASS`（`audit-internal-final-ui.log`、
+`audit-internal-final-unified.log`）。设置窗口会如实显示 `package.manifest` 缺失，因为该布局
+不是发行包。
+
+这解决的是“本地能运行、能看到五语言 profile”的可用性；正式安装器、注册/卸载闭环和
+公开发行数据授权仍未解决。
+
+### 正式构建与内部发行候选包
+
+`tools/product/build_product.ps1` 在重新构建 English engine receipt 后完成：
+228/230 通过、2 项显式跳过，生成 verified `build/windows-product/product-build-receipt.json`。
+随后：
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/product/stage_product.ps1   -BuildDir build/windows-product -BackendResourcesRoot build/product-resources/product   -StageRoot build/windows-product/stage/EpoCanva-internal -Replace
+```
+
+结果：66 个文件、171,994,763 bytes，`package=ready`、`manifest=ok`、
+`manifest_files=66`、`manifest_failures=0`；设置窗口 `profiles=13 expected=13`；
+统一后端 15 个语言/profile 用例全部通过（含 `nh` → 你好）。证据：
+`audit-official-build5.log`、`audit-official-stage2.log`、
+`audit-official-package-diagnose2.txt`、`audit-package-ui.log`、
+`audit-package-unified.log`。
+
+为了让 73.9MB 的日文 lexicon 参与 manifest 校验，`Sha256File` 改为流式 BCrypt
+哈希，不再受 64MiB 整体读取上限影响；`stage_product.ps1` 的
+`-BackendResourcesRoot` 只允许 `internal-unsigned`/`internal-only`，并按 staging
+manifest 逐文件校验；`product_manifest.cc` 只对 internal-only 包允许
+`data/backend/**` 与中文 schema/dict 运行文件，public-candidate 仍拒绝。
+
+`check_release.ps1` 对该内部包仍报告 21 个阻塞：package-integrity 尚未建模内部
+backend 例外，source 仍为 dirty，缺少 installer/toolchain、real-host、
+language-acceptance、release-evidence 与数据再分发授权。该工具没有因此放行，
+内部包也不是公开 release。记录见 `audit-official-gate.log`。
+
+### 本轮新增/修改文件
+
+- `engine/languages/zh/pinyin_initialism.{h,cc}`：有界拼音简拼解码器。
+- `engine/backend/CMakeLists.txt`、`engine/backend/backend_api.cc`：ZH `conversion_path`
+  绑定、Terra 词典校验与候选合并。
+- `tools/backend/stage_resources.py`、`tests/backend_resource_staging/test_stage_resources.py`：
+  zh profile 的词典路径/哈希与测试。
+- `tests/backend/profiles.cc`：真实资源下的 `pinyin-initialism-context`。
+- `tests/windows/tsf_product/unified_backend_tests.cc`、`product_sink_tests.cc`：
+  产品链 `nh` → 你好、缩写/contraction、word-only 下一词。
+- `platforms/windows/product/product_settings.h`、`platforms/windows/engine_executor/backend_config.h`：
+  缩写默认开启。
+- `platforms/windows/product/settings_window.cc`、`ui_ids.h`、`tools/product/stage_product.ps1`、
+  `README.md`、`docs/architecture/backend-session.md`、`docs/testing/backend-resource-staging.md`：
+  品牌/文档同步。
+- `platforms/windows/product/tests/{extended_settings_tests.cc,ui_tests.cc,product_engine_tests.cc}`：
+  默认值、隔离场景与可选 `--expect-profiles` 断言。
+- `tools/product/stage_internal_product.ps1`：内部可运行布局（无 package.manifest）。
+
+### 仍未闭合（不得据此宣布完整输入法）
+
+- 正式静态 policy 仍未把 `data/backend/**` 列成固定条目；`stage_product.ps1` 的
+  `-BackendResourcesRoot` 允许 internal-only 包追加 staging 校验过的运行文件，
+  `product_manifest.cc` 在 internal-only 下接受这些 extras。已生成带 manifest 的内部
+  候选包（66 文件、171,994,763 bytes、`package=ready`、13 profile），但公开
+  `public-candidate` 仍拒绝未审查的 backend payload；`check_release.ps1` 尚未建模该
+  内部例外，且 installer/signing/real-host/language-acceptance/证据绑定仍阻塞。
+- 产品模式仍是宿主保留原文、显式选择后替换当前 token，不是完整中日韩行内 preedit。
+- 产品持久学习仍关闭；简繁输出、完整法文形态生成、日文母语重写、韩文词尾/自动空格、
+  真实多键盘宿主矩阵未验收。
+- 设置界面本身未做 UI 文案本地化；本次只修正品牌和多语言 profile 标签。
+- 没有 Android 发行物。
+
+状态保持：**工程验证通过，完整产品验收未通过，不交付为完成版。**

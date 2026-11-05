@@ -100,6 +100,13 @@ requested profile label; the Tatoeba model does not establish an independently
 curated US dialect corpus. No en-GB model or distinct Hans/Hant resources are
 supplied or claimed.
 
+Chinese profiles 2 and 6 bind `data/epocanva_backend_terra.dict.yaml` as their
+`conversion_path`/SHA-256. The backend uses that hash-pinned Terra dictionary for
+bounded compact-pinyin initial decoding (`nh` → candidate 你好); Rime consumes
+the same file for full-pinyin conversion. A failed or missing binding disables
+the initialism source instead of silently discovering an unverified file under
+the Rime data directory.
+
 The tool writes
 
 - `data/backend/{language}/model.tsv` for all five languages.
@@ -263,8 +270,8 @@ The verified integration output contains 13 profile records and 55 files.
 
 | Artifact | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `data/backend/resources.tsv` | 2785 | `f41c085855ccfa49735299026784a237c01edf6707a1e26d93523b83a56c0227` |
-| `data/backend/staging-manifest.json` | 51219 | `57f00fd5524c869ee3706b1aa9990c34ae60fdf01591b5a70ba5bd31e56c1ad9` |
+| `data/backend/resources.tsv` | 2983 | `f6acd2eaf5c0a660404944d5ddcaaad1477f369035247b057e24c2fb543e9ffd` |
+| `data/backend/staging-manifest.json` | 51219 | `de9b86a22a0a37c8789c3ce6698d594802cbf7688a4a5096c8aec505f032eabb` |
 | English abbreviation resource | 1693 | `8d1295f2b337ba2c92b194a5e292bda60073abd4ae7c1d8f6327633c2d5e6b3f` |
 | French abbreviation resource | 141 | `452f710342bfac8e0f7bf89fa22c3e9e859f823365f96d61c67a396044210e54` |
 

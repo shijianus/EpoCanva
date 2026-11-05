@@ -23,7 +23,16 @@ if(NOT TARGET epocanva_ko_composition_core)
   add_library(epocanva_ko_composition_core STATIC "${EPOCANVA_BACKEND_ROOT}/engine/languages/ko/two_set_composer.cc")
   target_compile_features(epocanva_ko_composition_core PUBLIC cxx_std_17)
 endif()
-foreach(_composition_target epocanva_ja_composition_core epocanva_ko_composition_core)
+if(NOT TARGET epocanva_zh_pinyin_core)
+  add_library(epocanva_zh_pinyin_core STATIC
+    "${EPOCANVA_BACKEND_ROOT}/engine/languages/zh/pinyin_initialism.cc")
+  target_include_directories(epocanva_zh_pinyin_core PUBLIC
+    "${EPOCANVA_BACKEND_ROOT}" "${EPOCANVA_BACKEND_ROOT}/engine/languages/zh")
+  target_link_libraries(epocanva_zh_pinyin_core PUBLIC epocanva_prediction_core)
+  target_compile_features(epocanva_zh_pinyin_core PUBLIC cxx_std_17)
+endif()
+foreach(_composition_target epocanva_ja_composition_core epocanva_ko_composition_core
+        epocanva_zh_pinyin_core)
   target_compile_options(${_composition_target} PRIVATE /utf-8 /permissive- /W4 /EHsc)
   set_target_properties(${_composition_target} PROPERTIES CXX_EXTENSIONS OFF)
 endforeach()
@@ -50,7 +59,7 @@ target_compile_options(epocanva_backend PRIVATE /utf-8 /permissive- /W4 /EHsc)
 set_target_properties(epocanva_backend PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(epocanva_backend PUBLIC epocanva_engine_api PRIVATE epocanva_backend_session
   epocanva_prediction_core epocanva_prediction_abbreviation epocanva_lexical_service epocanva_windows_learning_repository
-  epocanva_ja_composition_core epocanva_ko_composition_core bcrypt)
+  epocanva_ja_composition_core epocanva_ko_composition_core epocanva_zh_pinyin_core bcrypt)
 add_subdirectory("${EPOCANVA_BACKEND_ROOT}/engine/japanese_decoder" japanese-decoder)
 target_link_libraries(epocanva_backend PRIVATE epocanva_japanese_decoder)
 option(EPOCANVA_BACKEND_WITH_FRENCH_DICTIONARY "Build the verified real Hunspell adapter" OFF)

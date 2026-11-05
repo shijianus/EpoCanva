@@ -36,12 +36,13 @@ constexpr std::array<RequiredFile, 10> kRequiredFiles = {{
 }};
 
 constexpr const char* kCapabilities =
-    "English natural keyboard input through a TSF key sink, prefix completion, "
-    "one-edit spelling suggestions and a native candidate window (8 per page, arrow "
-    "selection, validated acceptance). W3-B adds DllRegisterServer/DllUnregisterServer "
-    "for this product's own CLSID and TSF categories and a candidate_display fallback "
-    "setting. No installer, learning, other languages or system-wide input in this "
-    "build until registration is explicitly run.";
+    "Host-owned TSF text service with five offline language profiles (en/zh/fr/ja/ko), "
+    "13 resource profiles across US QWERTY, French AZERTY, German QWERTZ and Dvorak, "
+    "context-ranked prefix completion, word-only next-word prediction, abbreviation and "
+    "contraction expansion (default on), compact pinyin initial decoding, opt-in spelling "
+    "and word-form suggestions, and a native candidate window. Host text is preserved and "
+    "an explicit selection replaces the current token; this is not inline CJK composition. "
+    "No installer, persistent learning or system-wide input until registration is explicitly run.";
 
 struct WindowsVersion {
   DWORD major = 0;

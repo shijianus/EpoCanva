@@ -181,24 +181,30 @@ bool ValidateOptions(const RuntimeOptions& options, RuntimePaths* paths, std::st
 }
 
 bool PinPath(RuntimePaths* paths, const local::PreparedPath& path, bool directory,
-             bool allow_missing = false) {
+             bool allow_missing = false, bool allow_inner_writes = false) {
   local::PinnedPath pin;
-  if (!pin.Open(path, directory, allow_missing)) return false;
+  if (!pin.Open(path, directory, allow_missing, allow_inner_writes)) return false;
   paths->pins.push_back(std::move(pin));
   return true;
 }
 
 bool PinDirectories(RuntimePaths* paths, std::string* why) {
-  for (const auto* root : {&paths->shared, &paths->user, &paths->log}) {
-    if (!PinPath(paths, *root, true)) {
-      *why = "a runtime directory is missing, redirected, recalled or cannot be pinned";
+  // Shared data is installed read-only; the user directory and the log directory are
+  // written by the running engine and by the product's deployment record.
+  if (!PinPath(paths, paths->shared, true)) {
+    *why = "the shared runtime directory is missing, redirected, recalled or cannot be pinned";
+    return false;
+  }
+  for (const auto* mutable_root : {&paths->user, &paths->log}) {
+    if (!PinPath(paths, *mutable_root, true, false, true)) {
+      *why = "a mutable runtime directory is missing, redirected, recalled or cannot be pinned";
       return false;
     }
   }
   // Rime derives these children (third_party/librime/src/rime/setup.cc:56-65).
   // Do not allow an existing build junction to bypass an otherwise safe root.
   for (const auto* root : {&paths->shared, &paths->user}) {
-    if (!PinPath(paths, ChildPath(*root, L"build"), true, true)) {
+    if (!PinPath(paths, ChildPath(*root, L"build"), true, true, root == &paths->user)) {
       *why = "a runtime build directory cannot be pinned without redirection";
       return false;
     }

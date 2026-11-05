@@ -45,6 +45,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "../engine_executor/backend_config.h"
@@ -145,6 +146,9 @@ struct EngineHostDiagnostics {
   bool abandoned = false;
   int runtime_start_status = 0;
   int runtime_shutdown_status = 0;
+  // Text-free startup diagnostic recorded by the executor (a status phrase, never host
+  // text). Exposed so a failed product start reports why instead of a bare status.
+  std::string start_diagnostic;
   std::uint32_t start_thread_id = 0;     // worker thread that called Runtime::Start
   std::uint32_t shutdown_thread_id = 0;  // worker thread that called Runtime::Shutdown
   std::uint32_t worker_thread_id = 0;

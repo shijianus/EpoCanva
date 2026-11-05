@@ -27,6 +27,70 @@ UINT WindowDpi(HWND window) {
 
 int ScaleFor(UINT dpi, int value) { return ::MulDiv(value, dpi, 96); }
 
+// The profile choice is the only place where a user selects input language, keyboard layout
+// and output variant. Each dimension must be visible in the label: profiles 1, 11, 12 and 13
+// are the same en-US variant on four physical layouts.
+std::wstring LanguageName(std::uint32_t language) {
+  switch (language) {
+    case EPOCANVA_BACKEND_EN: return L"English";
+    case EPOCANVA_BACKEND_ZH: return L"Chinese";
+    case EPOCANVA_BACKEND_FR: return L"French";
+    case EPOCANVA_BACKEND_JA: return L"Japanese";
+    case EPOCANVA_BACKEND_KO: return L"Korean";
+    default: return L"Unknown";
+  }
+}
+
+std::wstring InputModeName(std::uint32_t language, std::uint32_t mode) {
+  switch (mode) {
+    case EPOCANVA_BACKEND_LATIN:
+      return language == EPOCANVA_BACKEND_KO ? L"Native Hangul" : L"Latin text";
+    case EPOCANVA_BACKEND_PINYIN: return L"Pinyin";
+    case EPOCANVA_BACKEND_ZHUYIN: return L"Zhuyin";
+    case EPOCANVA_BACKEND_ROMAJI: return L"Romaji";
+    case EPOCANVA_BACKEND_KATAKANA: return L"Katakana";
+    case EPOCANVA_BACKEND_TWO_SET: return L"Two-set";
+    case EPOCANVA_BACKEND_KANA: return L"Kana";
+    default: return L"Unknown input";
+  }
+}
+
+std::wstring OutputModeName(std::uint32_t mode) {
+  switch (mode) {
+    case EPOCANVA_BACKEND_OUTPUT_LATIN: return L"Latin";
+    case EPOCANVA_BACKEND_OUTPUT_HANZI: return L"Hanzi";
+    case EPOCANVA_BACKEND_OUTPUT_HIRAGANA: return L"Hiragana";
+    case EPOCANVA_BACKEND_OUTPUT_KATAKANA: return L"Katakana";
+    case EPOCANVA_BACKEND_OUTPUT_KANJI: return L"Kanji";
+    case EPOCANVA_BACKEND_OUTPUT_HANGUL: return L"Hangul";
+    default: return L"Default output";
+  }
+}
+
+std::wstring KeyboardName(std::uint32_t layout) {
+  switch (layout) {
+    case EPOCANVA_BACKEND_KEYBOARD_US_QWERTY: return L"US QWERTY";
+    case EPOCANVA_BACKEND_KEYBOARD_FRENCH_AZERTY: return L"French AZERTY";
+    case EPOCANVA_BACKEND_KEYBOARD_GERMAN_QWERTZ: return L"German QWERTZ";
+    case EPOCANVA_BACKEND_KEYBOARD_DVORAK: return L"Dvorak";
+    case EPOCANVA_BACKEND_KEYBOARD_NEUTRAL: return L"Neutral layout";
+    default: return L"Unknown layout";
+  }
+}
+
+std::wstring ProfileLabel(const windows::engine::BackendResourceConfig& row) {
+  const auto& p = row.profile;
+  std::wstring label = LanguageName(p.language);
+  label += L" / "; label += InputModeName(p.language, p.input_mode);
+  label += L" / "; label += OutputModeName(p.output_mode);
+  label += L" / "; label += KeyboardName(p.keyboard_layout);
+  if (!p.variant_id.empty()) {
+    label += L" / "; label += Utf8ToWide(p.variant_id);
+  }
+  label += L" / #" + std::to_wstring(p.profile_id);
+  return label;
+}
+
 UINT StartupDpi() {
   HMONITOR monitor = ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
   UINT dpi_x = 96;
@@ -51,7 +115,7 @@ HFONT CreateUiFont(UINT dpi, int points, int weight) {
 }
 
 std::wstring AboutContent() {
-  std::wstring text = L"EpoCanva English Alpha\nVersion ";
+  std::wstring text = L"EpoCanva Multilingual Alpha\nVersion ";
   text += ProductVersionLine();
   text += L"\n\n";
   text += L"Project licence: GNU AGPL-3.0-only. This internal unsigned build has "
@@ -193,7 +257,7 @@ bool SettingsWindow::OnCreate() {
 
   title_ = CreateControl(L"STATIC", L"EpoCanva", SS_LEFT, 0, margin, 14, 600, 40);
   subtitle_ = CreateControl(L"STATIC",
-                            L"English input for Windows 11 x64 - internal alpha",
+                            L"Multilingual input for Windows 11 x64 - internal alpha",
                             SS_LEFT, 0, margin, 56, 860, 20);
   version_ = CreateControl(L"STATIC", L"", SS_LEFT, 0, margin, 78, 860, 20);
 
@@ -206,8 +270,8 @@ bool SettingsWindow::OnCreate() {
           WS_TABSTOP,
       ui::kStatusEdit, right_x + 14, 158, right_width - 28, 160);
 
-  CreateControl(L"BUTTON", L"English completion", BS_GROUPBOX, 0, margin, 108,
-                left_width, 104);
+  CreateControl(L"BUTTON", L"Text completion", BS_GROUPBOX, 0, margin,
+                108, left_width, 104);
   completion_enabled_ = CreateControl(
       L"BUTTON", L"Offer prefix &completions", BS_AUTOCHECKBOX | WS_TABSTOP,
       ui::kCompletionEnabled, margin + 14, 136, left_width - 28, 22);
@@ -416,19 +480,9 @@ void SettingsWindow::LoadState() {
   ::SendMessageW(profile_choice_, CB_RESETCONTENT, 0, 0);
   if (LoadBackendResources(paths_, &resources, &resource_why)) {
     for (const auto& row : resources.profiles) {
-      const auto& p = row.profile;
-      std::wstring label = Utf8ToWide(p.variant_id);
-      const wchar_t* input = p.input_mode == EPOCANVA_BACKEND_PINYIN ? L"Pinyin" :
-          p.input_mode == EPOCANVA_BACKEND_ZHUYIN ? L"Zhuyin" :
-          p.input_mode == EPOCANVA_BACKEND_TWO_SET ? L"Two-set" :
-          p.input_mode == EPOCANVA_BACKEND_KANA ? L"Kana" :
-          p.input_mode == EPOCANVA_BACKEND_ROMAJI ? L"Romaji" : L"Native text";
-      label += L" / "; label += input;
-      if (p.language == EPOCANVA_BACKEND_JA) label += p.output_mode == EPOCANVA_BACKEND_OUTPUT_HIRAGANA
-          ? L" / Hiragana" : p.output_mode == EPOCANVA_BACKEND_OUTPUT_KATAKANA ? L" / Katakana" : L" / Kanji";
-      label += L" / #" + std::to_wstring(p.profile_id);
+      const std::wstring label = ProfileLabel(row);
       ::SendMessageW(profile_choice_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
-      profile_ids_.push_back(p.profile_id);
+      profile_ids_.push_back(row.profile.profile_id);
     }
   }
   if (profile_ids_.empty()) {
@@ -667,7 +721,7 @@ void SettingsWindow::ShowAbout() {
   config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
   config.pszWindowTitle = L"About EpoCanva";
   config.pszMainIcon = TD_INFORMATION_ICON;
-  config.pszMainInstruction = L"EpoCanva English Alpha";
+  config.pszMainInstruction = L"EpoCanva Multilingual Alpha";
   config.pszContent = content.c_str();
   config.cButtons = 1;
   config.pButtons = custom_buttons;

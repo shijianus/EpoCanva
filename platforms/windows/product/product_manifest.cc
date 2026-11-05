@@ -288,21 +288,49 @@ bool ValidateProductAcceptancePolicy(const ProductManifest& manifest, std::wstri
   return true;
 }
 
+// The fixed policy covers the binaries, product data and licences. An internal
+// diagnostics package may additionally carry the reviewed five-language runtime
+// payload. This exception is scoped to distribution_policy=internal-only and to
+// the runtime paths the backend loader actually reads; public candidates still
+// require an exactly reviewed policy.
+bool IsInternalBackendRuntimePath(const std::string& path) {
+  if (path.rfind("data/backend/", 0) == 0) return true;
+  return path == "data/epocanva_backend_pinyin.schema.yaml" ||
+      path == "data/epocanva_backend_zhuyin.schema.yaml" ||
+      path == "data/epocanva_backend_terra.dict.yaml" ||
+      path == "data/zhuyin.yaml";
+}
+
 bool ValidateProductPayloadPolicy(const ProductManifest& manifest, std::wstring* why) {
   const auto& required = RequiredProductFiles();
-  if (manifest.files.size() != required.size()) {
-    if (why != nullptr) { *why = L"package.manifest does not list the exact required payload"; }
+  if (manifest.files.size() < required.size()) {
+    if (why != nullptr) { *why = L"package.manifest does not list the required payload"; }
     return false;
   }
+  const bool internal_only = manifest.distribution_policy == "internal-only";
   std::set<std::string> seen;
+  bool has_backend_payload = false;
   for (const ManifestEntry& entry : manifest.files) {
-    if (!seen.insert(entry.relative_path).second ||
-        std::none_of(required.begin(), required.end(), [&entry](const RequiredProductFile& file) {
-          return entry.relative_path == file.relative_path;
-        })) {
-      if (why != nullptr) { *why = L"package.manifest contains a duplicate or unapproved payload path"; }
+    if (!seen.insert(entry.relative_path).second) {
+      if (why != nullptr) { *why = L"package.manifest contains a duplicate payload path"; }
       return false;
     }
+    const bool is_required = std::any_of(required.begin(), required.end(),
+        [&entry](const RequiredProductFile& file) {
+          return entry.relative_path == file.relative_path;
+        });
+    if (!is_required) {
+      if (!internal_only || !IsInternalBackendRuntimePath(entry.relative_path)) {
+        if (why != nullptr) { *why = L"package.manifest contains an unapproved payload path"; }
+        return false;
+      }
+      has_backend_payload = true;
+    }
+  }
+  if (has_backend_payload &&
+      FindManifestEntry(manifest, "data/backend/resources.tsv") == nullptr) {
+    if (why != nullptr) { *why = L"internal backend payload has no verified resources.tsv"; }
+    return false;
   }
   for (const RequiredProductFile& file : required) {
     const ManifestEntry* entry = FindManifestEntry(manifest, file.relative_path);

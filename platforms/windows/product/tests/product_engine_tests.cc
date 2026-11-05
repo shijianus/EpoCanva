@@ -386,16 +386,21 @@ int main(int argc, char** argv) {
   completion_only.completion_candidates = 7;
   completion_only.spelling_enabled = false;
   completion_only.spelling_candidates = 3;
+  // The default enables contextual abbreviation expansion. These scenarios isolate
+  // completion/spelling, so they must opt out explicitly rather than inherit it.
+  completion_only.abbreviation_enabled = false;
   epocanva::product::ProductSettings spelling_only;
   spelling_only.completion_enabled = false;
   spelling_only.completion_candidates = 5;
   spelling_only.spelling_enabled = true;
   spelling_only.spelling_candidates = 3;
+  spelling_only.abbreviation_enabled = false;
   epocanva::product::ProductSettings disabled;
   disabled.completion_enabled = false;
   disabled.completion_candidates = 5;
   disabled.spelling_enabled = false;
   disabled.spelling_candidates = 3;
+  disabled.abbreviation_enabled = false;
 
   const bool completion_ok = RunScenario(arguments, arguments.run_root / L"设置 完成",
                                          completion_only, true, false,
