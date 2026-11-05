@@ -7,8 +7,11 @@ learning store, or platform dependency. No third-party code/data was added or
 fetched. Product activation still requires independently verified data, Rime,
 TSF, privacy admission and cross-application behavior.
 
-The task brief takes precedence over the older multilingual plan's integration
-order: **English > Chinese > French > Japanese > Korean**. English implementation,
+The integration order at the time of this work was
+**English > Chinese > French > Japanese > Korean**. That five-language order was
+superseded on 2026-11-05 by ADR 0005 and `docs/product/requirements.md` §3
+(`English > Chinese > French > Spanish > Japanese > Korean > German`); the
+French-specific facts below are unaffected. English implementation,
 learning and integration remain with their owners. The on-disk AGENTS licensing
 section now records the owner's AGPL choice, while the supplied context retained
 older wording; this task introduces no licensing decision or licence header.

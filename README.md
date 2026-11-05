@@ -44,6 +44,14 @@ language-acceptance、证据绑定和公开数据授权而阻塞；内部候选�
 
 本次审计新增兼容 v1 的 v2 profile 接口、非 ASCII UTF-8 输入、短期上下文导入、模型驱动首字母缩写、部分显式缩写、统一候选评分和前缀索引。US QWERTY、French AZERTY、German QWERTZ、Dvorak 与未知布局中性评分分开建模；语言、键盘布局和输出模式不再混为一个英文 schema。经过来源校验的本地暂存资源提供 13 个 profile，详见 `docs/testing/backend-resource-staging.md`。
 
+2026-11-05 的第二轮独立复审又新增两个**跨平台**核心库，均不含 Windows 头文件：
+`engine/locale` 负责 BCP 47 语言标签解析与匹配、七语言固定优先级、输入 profile 注册表
+与输入方案的三级实现状态（已实现/未验证/缺失，`kImplemented` 必须带本地证据）；
+`engine/ranking` 负责有界确定性候选排序与学习事件语义（显式选择/拒绝/被替代/手动词条，
+没有按键或退格事件类型）。两者合计 16 条可失败测试，其中 1 条负向控制已验证会转红。
+**它们尚未接进统一后端或 TSF 产品路径**：设置界面里不会出现"学习"或"智能排序"的开关，
+产品也不会因此改变候选顺序。逐项证据见 `docs/reports/multilingual-intelligence-audit.md`。
+
 **当前仍不可作为完整输入法交付。** Windows 新路径接入统一后端，但采用宿主保留原文、显式选择后替换目标词的模式，不是完整中日韩行内组合输入。产品持久学习尚因字段权限锁生命周期未闭合而禁用；简繁、部分确认、韩文词尾/空格、完整 Unicode 字素编辑和真实多键盘宿主矩阵仍未验收。没有 Android IME 发行物，当前源码的安装器与注册后跨宿主闭环也未完成。
 
 本轮真实命令、测试结果、失败修复和剩余阻塞见 `docs/reports/ime-prediction-audit.md`。此前 44 项后端、228 项产品等记录属于历史源码，不能替代当前构建收据。语言声明保持 blocked/partial，不以核心或受控文本存储测试通过冒充正式宿主验收。
@@ -141,7 +149,8 @@ language-acceptance、证据绑定和公开数据授权而阻塞；内部候选�
 | 发行准备修复 | 构建身份/收据、权限失败拒绝、运行库绑定、生命周期/共享锁、注册回滚、精确载荷/许可、路径清理与发行检查 | 产品 161 项：160 通过、1 显式跳过；内测候选已重建；公开发行仍阻塞 | `docs/reports/release-readiness-hardening.md` |
 | 离线五语言后端 | 真实五语言资源、n-gram 预测、确认学习协议及训练评测 | 已有工程检查点；语言完整性、端到端性能与发行门禁未闭合 | `docs/reports/backend-prediction-development.md` |
 | 预测输入法审计 | 上下文缩写、多 profile、键盘评分、资源暂存、统一后端 TSF 接线与回归 | 审计修正；不作为完整输入法交付，实际验收与阻塞见报告 | `docs/reports/ime-prediction-audit.md` |
-| 之后 | 安装器、当前包 C 层闭环、完整中日韩组合与用户学习、其余英文能力、Android | 尚未交付 | — |
+| 多语言复审与核心切片 | 独立复审（15 项证据等级）、规格升级、BCP 47 locale/profile 注册表、有界自适应排序与学习事件语义 | 核心库已实现并 16 条测试通过；**未接产品路径** | `docs/reports/multilingual-intelligence-audit.md`、`docs/reports/multilingual-intelligence-slice.md` |
+| 之后 | 学习持久化接线、安装器、当前包 C 层闭环、完整中日韩组合、Android、模型目录 | 尚未交付 | `docs/task-briefs/multilingual-next-phase.md` |
 
 ## 目录结构
 
@@ -153,6 +162,8 @@ engine/
   rime_components/
     probe/                  P1.4 可达性探针组件（编译进 rime.dll）
     english/                P2.1 英文组件（模块 epocanva_english）：Translator + P2.5 空格 Processor
+  locale/                   BCP 47 身份、七语言优先级、输入 profile 注册表（跨平台，无平台头）
+  ranking/                  有界自适应排序与学习事件语义（跨平台，无 I/O，未接产品）
   languages/en/             英文语言核心：词表、大小写、词形(token)、空格与提交边界、前缀查询，不含 Rime 头
 platforms/windows/
   product/                  W1 产品壳：EpoCanva.exe、产品 TSF 配置、设置/清单/诊断、GUI 与引擎测试
@@ -187,7 +198,7 @@ tests/
 docs/
   product/requirements.md   产品定位、语言优先级、隐私与验收原则
   architecture/             分层与模块边界
-  adr/                      架构决策记录（0001 英文优先 … 0004 编译进引擎的组件）
+  adr/                      架构决策记录（0001 英文优先 … 0010 模型分发与离线运行）
   security/threat-model.md  隐私威胁模型
   compliance/               依赖与许可证审计、english-pilot-data.md（试验词表授权）
   build/                    从零搭建步骤、librime Windows 基线
@@ -216,9 +227,11 @@ cmake --build --preset vs2022-x64-debug
 ctest --test-dir build/vs2022-x64-debug -C Debug --output-on-failure --no-tests=error
 ```
 
-（该套件现在是 **8 条**：4 条工具链基础设施 + 4 条英文核心单测。第 8 条
-`english.core.spelling_cost_trial_on_pilot_lexicon` 只在生成的真实词表在位时才注册，
-所以没有该产物的机器上是 7 条——不存在"静默跳过"的那一条。）
+（该套件现在是 **72 条**：4 条工具链基础设施、4 条英文核心、中文/法文/组字核心、
+学习存储与 Windows 学习仓库、语言包、locale 注册表 3 条、自适应排序 13 条。
+其中 1 条 Windows 符号链接用例在有权限限制时显式跳过，不会静默变绿。
+第 8 条 `english.core.spelling_cost_trial_on_pilot_lexicon` 只在生成的真实词表在位时
+才注册，所以没有该产物的机器上会少一条——不存在"静默跳过"的那一条。）
 
 `vs2026-x64-debug`（生成器 `Visual Studio 18 2026`）是**可选路径，本机未验证**：
 上游 CMake 4.2 发布说明确认该生成器自 4.2 起提供，而本机 CMake 3.31.6 没有它，

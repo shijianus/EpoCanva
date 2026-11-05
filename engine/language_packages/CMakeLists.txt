@@ -17,9 +17,14 @@ if(NOT TARGET epocanva_strict)
   endif()
 endif()
 
+if(NOT TARGET epocanva_locale)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../locale"
+                   "${CMAKE_CURRENT_BINARY_DIR}/locale_core")
+endif()
+
 add_library(epocanva_language_packages STATIC language_package.cc language_package.h
   module_requirements.h)
 target_include_directories(epocanva_language_packages PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(epocanva_language_packages PRIVATE epocanva_strict)
+target_link_libraries(epocanva_language_packages PRIVATE epocanva_strict epocanva_locale)
 set_target_properties(epocanva_language_packages PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

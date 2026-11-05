@@ -1,144 +1,160 @@
 # EpoCanva 架构总览
 
-> **这是规划文档。** 下列分层、模块与协议在本仓库中**尚未实现**。
-> 本文件描述的是目标形态，不是当前实现清单；每一行的真实状态只以 §5 为准，
-> 而阶段结论以 `docs/reports/` 与 `README.md` 的阶段状态表为准。
-> 文中出现的模块名是未来实现的命名约定，不代表对应代码已存在。
+> 本文件同时描述**目标分层**与**当前真实状态**。§2 说明目标形态，§5 是逐模块的
+> 证据状态表；两者冲突时以 §5 与 `docs/reports/` 为准。
+>
+> 上一版曾整篇写"下列分层尚未实现"，但其中 C ABI、Session、学习存储、语言能力模块
+> 早已落地。那种写法会让协作者按错误前提工作，因此本轮重写。
 
 ## 1. 目标与约束来源
 
-架构必须同时满足 `docs/product/requirements.md` 中的：固定语言优先级
-（English > Chinese > French > Japanese > Korean > 通用 i18n）、librime 作为可改造底座、
-运行期完全离线、以及 Windows/Android 权限模型不对称这三条硬约束。
+架构必须同时满足 `docs/product/requirements.md` 中的：
+
+- 固定语言优先级 `English > Chinese > French > Spanish > Japanese > Korean > German`
+  （机器可读实现：`engine/locale/language_tag.cc` 的 `LanguagePriority`）；
+- librime 作为可改造底座；
+- 运行期完全离线；
+- 不装神经模型也能完成基础打字与候选排序；
+- Windows / Android 权限模型不对称。
 
 ## 2. 分层
 
 ```
 ┌──────────────────────────┬───────────────────────────┐
-│  platform-win/tsf        │  platform-android/ime     │   平台适配层
-│  (TSF COM 组件, UTF-16)  │  (InputMethodService)     │
+│  platforms/windows/*     │  (future) android/ime     │   平台适配层
+│  TSF COM 组件, UTF-16    │  InputMethodService       │
 └────────────┬─────────────┴────────────┬──────────────┘
-             │   epocanva_engine.h  (自有 C ABI, UTF-8 + 显式单位)
+             │  epocanva_engine.h / epocanva_backend.h
+             │  （自有 C ABI，UTF-8 + 显式单位，带 struct_size 版本）
 ┌────────────┴──────────────────────────┴──────────────┐
-│  engine-core        Session / 编辑协议 / 候选编排      │   引擎门面
+│  engine core / backend session                       │   引擎门面
+│  Session、候选快照、选择、提交与 ACK 协议             │
 ├─────────────────────────────────────────────────────┤
-│  english-*          英文能力模块（非词库配置项）        │   能力层
-│  rime-adapter       librime 生命周期与线程模型封装      │
-├─────────────────────────────────────────────────────┤
-│  data-store         用户词库 / 学习状态 / 同步与备份     │   数据层
+│  engine/locale         语言/文字/地区/方案身份       │   身份层
+│  engine/language_packages  包清单与能力准入           │
+│  engine/languages/{en,zh,fr,ja,ko}  语言能力模块      │
+│  engine/lexical_service  跨语言词法候选               │
+│  engine/prediction       n-gram 与缩写解码            │
+│  engine/ranking          自适应排序与学习事件语义      │   排序层
+│  engine/data_store       本地学习存储（ID/计数）       │   数据层
+│  engine/neural           可选神经重排（未接产品）      │   可选层
+│  engine/adapter + rime_components  librime 边界       │
 └─────────────────────────────────────────────────────┘
 ```
 
+依赖方向（仍然有效）：
+
+```
+platform-*  →  C ABI  →  engine core/backend  →  {locale, languages/*, lexical_service,
+                                                    prediction, ranking, data_store, adapter}
+engine/adapter → librime（仅此处可见）
+```
+
+禁止：`platform-* → librime`、`data_store → platform-*`、任何反向依赖、
+跨层共享 librime 类型。语言算法层（`locale`、`languages/*`、`ranking`）不得包含
+Windows 头文件——这是 Android 复用的前提。
+
 ### 2.1 平台适配层
 
-职责：把宿主应用的文本接口翻译成引擎语义，不承载任何语言学决策。
+职责：把宿主文本接口翻译成引擎语义，不承载语言学决策。
 
-- `platform-win/tsf`：实现 TSF 的 `ITfTextInput`/`ITfComposition`/
-  `ITfTextEditSource` 一类接口，向宿主提供 preedit 绘制与提交、UI 回调、
-  以及宿主焦点与字段属性（密码字段等）读取。语言：UTF-16。
-- `platform-android/ime`：`InputMethodService` 封装，负责候选窗口、
-  提交、以及 `InputConnection` 的 `setComposingText`/`commitText` 语义。
-- 两者**都不得**包含候选排序、语言判断、学习逻辑；两者**都不得**直接调用 librime。
-- 字段隐私等级由适配层识别（TSF `TATTE_*` / Android `imeOptions`、
-  `inputType` 的 visible-password 标志），并作为枚举传给引擎；
-  适配层不上传字段名或窗口标题（见威胁模型）。
+- `platforms/windows/tsf`：TSF COM 组件，UTF-16。负责按键准入、上下文观察、
+  字段权限、候选 UI、编辑会话与卸载生命周期。
+- `platforms/windows/tsf_product`：产品级控制器，协调上述组件与统一后端。
+- `platforms/windows/text`：严格 UTF-8 ↔ UTF-16 转换与边界表。
+- 未来 `android/ime`：`InputMethodService`，`setComposingText`/`commitText`。
+- 两者**都不**包含候选排序、语言判断或学习逻辑；**都不**直接调用 librime。
 
-### 2.2 自有 C ABI（`epocanva_engine.h`，未实现）
+### 2.2 自有 C ABI
 
-存在理由：librime 的 C++ 类型、DLL 导出面与内存所有权约定不适合直接暴露给
-两个差异极大的平台层。自有 ABI 提供稳定边界，使 librime 可被替换或源码级改造
-而不触动适配层。
+已存在，不是规划：
 
-约定（未来实现时逐条固化）：
+- `engine/include/epocanva_engine.h`（`EPOCANVA_ENGINE_ABI_VERSION 1`）：
+  引擎打开/关闭、会话、按键、候选、提交、信息查询。
+- `engine/include/epocanva_backend.h`（`EPOCANVA_BACKEND_ABI_VERSION 1`，
+  追加式 profile 扩展 `EPOCANVA_BACKEND_PROFILE_ABI_VERSION 2`）：
+  多资源后端、profile 会话、UTF-8 输入、上下文导入、确认与 ACK。
+- 约定：`extern "C"`；不跨边界抛异常；不跨边界 new/delete；每个结构体以
+  `struct_size_bytes` + `abi_version` 开头；句柄是不透明的 `uint64_t` 令牌；
+  所有文本偏移显式命名为 `*_utf8_byte_offset` / `*_utf8_byte_count`。
 
-- `extern "C"`，不跨边界抛异常，不跨边界 new/delete，结构体带 `size` 字段做版本协商。
-- 文本一律 UTF-8；偏移必须带显式单位，ABI 文档禁止裸 `int index`。
-- 句柄式 `epocanva_session_t*`，所有权在 ABI 文档中逐函数说明。
-- ABI 变更需 ADR，且需提供兼容性检查用例。
+新增语言身份不得靠追加 ABI 枚举值来"声明支持"。`EPOCANVA_BACKEND_ES/DE` 只是身份常量，
+后端在缺少资源时拒绝打开。
 
-### 2.3 Session / 编辑协议（未实现）
+### 2.3 Session / 编辑协议
 
-一个 Session 表示"一次从按下第一键到上屏或取消的输入过程"，状态机至少需要区分：
-`idle / composing / candidate-shown / committed / reverted / cancelled`。
+**已实现（引擎侧）**，平台侧仍是"宿主保留原文 + 显式选择后替换"。
 
-编辑协议必须回答清楚（这是当前规划里最容易出错、必须最早定下的部分）：
+一个 Session 表示"一次从按下第一键到上屏或取消的输入过程"。已定义的状态与操作：
 
-| 概念 | 定义要求 |
+| 概念 | 当前实现 |
 | --- | --- |
-| preedit 区间 | `[start, end)` + **单位**（UTF-16 代码单元，或 UTF-8 字节，或字素簇） |
-| caret 锚点 | preedit 内部光标位置 + 同一单位声明 |
-| commit | 一次性文本 + 其上屏位置 + 单位 |
-| 回改（revert） | 已 commit 文本被重新取回编辑的前提与失败降级 |
-| 选择/替换 | 宿主存在选区时的行为（替换 / 追加 / 放弃组合） |
-| 外部修改 | 宿主在组合期间自行改文本时的检测与恢复策略 |
-| 跨字段 | 焦点切换时 Session 是丢弃、迁移还是提交 |
+| 候选快照 | 带 `snapshot_token`、`context_target`、`generation` |
+| 候选选择 | 需要快照令牌 + 候选令牌双重校验 |
+| 提交 | `read_commit` 只复制；`ack_commit` 才推进上下文与学习 |
+| 上下文 | 短期 ID 上下文，`set_context` 由调用方提供已确认文本 |
+| 取消 | `cancel` 丢弃未提交状态 |
+| 单位 | 所有偏移为 UTF-8 字节；`NEXT_UNIT` 的单位是**模型词法 token**，不是字素簇 |
+| 外部修改/焦点切换 | 平台层以代际、目标范围、字段权限校验拒绝陈旧写入 |
 
-Windows（UTF-16）与 librime（UTF-8）的单位转换**只允许**发生在适配层，
-并在转换处配对抗性测试（代理对、组合字符、ZWJ emoji、CJK 扩展区）。
+**未实现**：完整中日韩行内 preedit、多段组合、部分确认、字素簇级编辑。
 
-### 2.4 rime-adapter（未实现）
+### 2.4 librime 边界
 
-- 唯一被允许 `#include <rime/...>` 并链接 librime 的模块。
-- 负责：初始化、部署、线程与消息回调、Schema/Option 管理、
-  把 librime 的组合/候选模型映射到自有 Session/编辑协议。
-- 源码级改造通过 `third_party/patches/` 施加，见 `third_party/README.md`；
-  适配层负责隔离补丁带来的行为差异。
-- librime 的"部署（deployment）/用户目录同步"是重量级操作，
-  其触发时机与失败恢复策略必须由该层显式定义，而不是继承自参考实现的默认行为。
-- 上游实际接口与挂载点已按固定提交调查完毕，结论见
-  `docs/architecture/librime-integration-map.md`（含"现有 API 满足不了的 8 项"）；
-  构建形态见 `docs/build/librime-windows-baseline.md`，依赖与许可证见
-  `docs/compliance/dependency-audit.md`。
+- `engine/adapter/rime_adapter.{h,cc}` 与 `engine/rime_components/*` 是唯一接触 librime 的地方。
+- 现有形态是**编译进 `rime.dll` 的自有组件**（英文 Translator/Processor、探针），
+  不是完整的封装层。ADR 0004 记录了该选择。
+- 源码级改造走 `third_party/patches/`；该目录目前不存在，因为至今没有修改上游源码。
+  这是**文档与现实的差距**，不是能力。
 
-### 2.5 英文能力模块（部分实现）
+### 2.5 语言能力模块
 
-独立于 rime-adapter 的能力层，**不以"一个英文 Translator + 一个词库"为交付**。
-规划中的子组件（名称为占位约定）与当前实际状态：
+已存在且可独立单测（`engine/languages/en`）：
+词表与前缀查询、ASCII 大小写、词形与受保护文本、空格与提交边界、形态规则、
+一次编辑拼写建议、连写分段。
 
-已存在（`engine/languages/en/`，不含任何 Rime 或平台头，因此可被根工程直接单测）：
+`engine/languages/zh`：拼音音节/声母索引与有界简拼解码。
+`engine/languages/fr`：法文核心与词典。
+`engine/languages/ja`：Romaji/假名合成与 Mozc 数据驱动解码。
+`engine/languages/ko`：两套式组字。
 
-- `english-tokenizer` → **部分**：`english_token.{h,cc}` 判定**单个 token** 的形状
-  （字母串、至多一个 ASCII 分隔符、停止字节类别）。它**不**把连续输入流切成多个词——
-  词与词之间的边界目前由用户的空格键决定（见下），不是切分算法。
-- 词表与查询：`english_lexicon.{h,cc}` + `prefix_completer.{h,cc}`（P2.1）。
-- ASCII 大小写：`english_case.{h,cc}`（P2.2）。
-- **空格与提交边界**：`english_space_policy.{h,cc}`（P2.5）。它只回答两件事——
-  这次按键事件是不是"用户要一个空格"（Ctrl/Alt/Super/release 都不是），
-  以及当前组合状态落到哪条规则（A 提交原文 + 空格 / B 提交已选词 + 空格 / C 只空格）。
-  决策与副作用分离：规则在这个纯函数层，执行在编译进 `rime.dll` 的
-  `engine/rime_components/english/english_space_processor.{h,cc}`；
-  后者**不保存任何文本状态**（无成员数据），所以"重复提交上一个词"这类故障在结构上
-  就不可能出现，session 之间也不存在共享状态。
+未实现：Unicode 大小写折叠、句首自动大写、专名大小写恢复、URL/邮箱/代码语法解析、
+中文简繁与地区词表、法文完整形态生成、日文母语重写、韩文词尾与自动空格。
 
-未实现：
+### 2.6 身份与排序层（本轮新增）
 
-- `english-morphology`：词形生成/归一（复数、时态、所有格、缩写还原）。
-- `english-ranker`：结合词频、上下文、个人学习信号的候选排序。
-  （P2.4 试验词表的权重是"被几部源词典收录"的粗分层，**不是**语料词频。）
-- `english-corrector`：拼写纠错与键位邻近容错。
-- `english-segmenter`：连写切分与短语还原（`helloworld` 目前整串保留）。
-- `english-predictor`：上屏后下一词预测。
+- `engine/locale`：BCP 47 子集解析与规范化、RFC 4647 lookup 匹配、默认文字、RTL 判定、
+  七语言优先级、输入 profile 注册表与三级方案状态。
+  这是**唯一**的语言身份来源；`engine/language_packages` 委托它。
+- `engine/ranking`：有界确定性候选排序与学习事件语义。
+  特征先钳制再加权；原样候选是硬分层；语言识别锁存；学习事件没有"按键/提交/退格"类型。
+  **尚未接进 `engine/backend` 或 TSF 产品路径**，只在单元测试与 `--demo` 中真实运行。
 
-与中文路径的关系：共享 Session 与候选编排框架，不共享语言学假设。
-其他语言（法/日/韩）在英文与中文之后复用同一能力层接口，不另起架构。
+### 2.7 数据与学习存储
 
-### 2.6 数据与学习存储（未实现）
+- `engine/data_store/learning_store.{h,cc}`：有界 ID/计数模型，schema v2（v1 可迁移），
+  隐私分类在写入侧生效。
+- `engine/data_store/windows_learning_repository.cc`：原子写（临时文件 + 刷盘 + 重命名）、
+  孤儿临时文件清理、每次操作前重新查询字段权限。
+- 限制：无时间衰减、无负反馈、无用户覆盖字段；**产品路径未启用**（`learning_enabled = 0`）。
+- `engine/ranking` 的学习事件模型是**内存原型**，尚未持久化。
 
-- 用户词组、学习计数、个人偏好、同步元数据。
-- 必须支持：隐私字段黑名单在**写入侧**生效（而非读取侧过滤）；
-  导出/备份的显式用户动作；本地删除语义（见威胁模型第 6 节）。
-- 学习信号不得包含可还原的原始输入序列。
-- 该层的格式版本化与迁移策略属于数据层，不下沉到平台适配层。
+### 2.8 可选神经层
+
+- `engine/neural/lexical_reranker.{h,cc}` 有真实 llama.cpp 推理与 SHA-256 模型校验。
+- 不接产品、默认不启用、无模型目录、无下载器。
+- 架构约束：模型不得加载进宿主进程内的 TSF DLL；需要独立本地预测服务与严格 IPC，
+  或 Android 侧的应用私有推理进程。
 
 ## 3. 依赖方向
 
-```
-platform-*  →  epocanva_engine.h(ABI)  →  engine-core  →  {english-*, rime-adapter, data-store}
-rime-adapter → librime (third_party, 仅此处可见)
-```
+见 §2 的图。补充规则：
 
-禁止：`platform-* → librime`、`data-store → platform-*`、任何反向依赖、
-以及跨层共享 librime 类型。
+- `engine/locale` 不依赖任何其他 engine 模块。
+- `engine/language_packages` 依赖 `engine/locale`，不反向。
+- `engine/ranking` 只依赖自身；不得包含平台头文件或 I/O。
+- `engine/backend` 目前是 Windows-only（`CMakeLists.txt:3` 非 WIN32/MSVC 直接 fatal），
+  这是 Android 复用的头号阻断项。
 
 ## 4. 与参考实现的关系
 
@@ -148,19 +164,25 @@ rime-adapter → librime (third_party, 仅此处可见)
 
 ## 5. 当前实现状态
 
-| 规划模块 | 状态 |
+| 模块 | 状态 |
 | --- | --- |
-| toolchain probe | **已实现**（P0.1，仅工具链/字节/摘要自检） |
-| CTest 基础设施 | **已实现**（4 条用例，运行真实探针） |
-| librime 引入与构建 | 上游已锁定并审查（P1.1：librime 1.17.0 @ `33e7814…`，见 `third_party/sources.lock.json`）；**已构建两套引擎**：原版 baseline（P1.2）与把自有组件编译进去的 component-probe（P1.4），均为 Release/x64/静态依赖/共享 `rime.dll`/`/MT` |
-| 自有 rime 组件 | **已实现一个测试探针**（P1.4，`engine/rime_components/probe/`）：可达性见证，不含任何语言能力；接入形态见 `docs/adr/0004-compiled-in-rime-components.md` |
-| 无界面测试前端 | **已实现**（P1.2 生命周期冒烟、P1.3 按键回放、P1.4 组件可达性），全部只使用公开 C API |
-| epocanva_engine.h (C ABI) | 未实现 |
-| platform-win/tsf | **W3-B 已实现注册导出**：`platforms/windows/tsf/` 导出恰好 `DllGetClassObject`/`DllCanUnloadNow`/`DllRegisterServer`/`DllUnregisterServer`，注册策略支持 HKLM/HKCU、逐项回读、失败回滚、外来 CLSID 拒绝；**本机尚未执行系统注册**（安装器工具链缺失，C 层闭环待授权）。产品 TSF 层（W1–W3-A）已有按键 sink、候选 UI、宿主文本编辑与引擎接入；C ABI 单位换算的适配层函数已落地但尚未接到 ABI 边界与会话上。构建与验证见 `docs/windows/tsf-bootstrap.md` 与 `docs/reports/W3-B-install-and-fallback.md` |
-| platform-win/text | **已实现**（P3.2，落地目录 `platforms/windows/text/`）：严格 UTF-8 ↔ UTF-16 转换（只经 `MultiByteToWideChar` / `WideCharToMultiByte` + `CP_UTF8` + `*_ERR_INVALID_CHARS`，先查询容量再核对写入长度），以及一份与**同一份不可变文本**绑定的 UTF-8 字节偏移 ↔ UTF-16 码元偏移边界表；越界、序列内部、代理对内部偏移一律拒绝，不取整不 clamp。规范化、字素簇、大小写、文本身份/版本校验**未实现**；契约与验证见 `docs/windows/text-boundary-contract.md` |
-| platform-android/ime | 未实现 |
-| engine-core / Session 协议 | 未实现 |
-| rime-adapter（本项目的引擎封装层） | 未实现——现有 `engine/rime_components/` 只是编译进引擎的组件，不是封装层 |
-| english-* 能力模块 | **部分实现**：`engine/languages/en/` 有词表加载与前缀查询（P2.1）、ASCII 大小写映射（P2.2）、词形与受保护文本判定（P2.3）、空格与提交边界判定（P2.5），均以编译进 `rime.dll` 的自有组件形态存在（P2.1/P2.5）。规划中的 `english-morphology`、`english-ranker`、`english-corrector`、`english-segmenter`、`english-predictor` **未实现** |
-| data-store / 学习 | 未实现 |
-| 安装包与签名 | 未实现 |
+| toolchain probe | 已实现（P0.1） |
+| CTest 基础设施 | 已实现；根工程当前 **72 条**用例 |
+| librime 引入与构建 | 已锁定 librime 1.17.0 @ `33e7814…`，两套构建（baseline / component-probe） |
+| 自有 C ABI | **已实现**：`epocanva_engine.h` v1 + `epocanva_backend.h` v1/v2，有 C 消费者测试 |
+| engine backend session | **已实现**（单会话单语言；五语言资源绑定；确认/ACK 协议） |
+| platform-win/tsf | **已实现注册导出与编辑路径**；本机未注册；当前包的真实宿主闭环未完成 |
+| platform-win/tsf_product | 已实现控制器、候选窗口、权限门、STA 唤醒；产品学习关闭 |
+| platform-win/text | 已实现严格 UTF-8↔UTF-16 与边界表 |
+| platform-android/ime | **未实现** |
+| engine/locale | **已实现**（本轮）：BCP 47 + profile 注册表 + 3 条 CTest |
+| engine/language_packages | 已实现；语言身份与优先级改为委托 `engine/locale` |
+| engine/languages/en | 部分实现（见 §2.5）；不满足完整英文验收 |
+| engine/languages/{zh,fr,ja,ko} | 部分实现，各有独立单测 |
+| engine/lexical_service | 已实现（en/fr/ko 词法候选、拼写、形态、分段） |
+| engine/prediction | 已实现（n-gram、缩写解码、前缀索引） |
+| engine/ranking | **已实现但未接线**（本轮）：13 条 CTest，无持久化 |
+| engine/data_store | 已实现存储层；产品路径未启用；无衰减/负反馈 |
+| engine/neural | 推理已实现；未接产品；默认不启用 |
+| 模型目录 / 下载 / 领域路由 | **未实现** |
+| 安装包、签名、CI | **未实现** |

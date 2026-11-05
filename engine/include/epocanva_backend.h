@@ -17,7 +17,12 @@ enum {
   EPOCANVA_BACKEND_ZH = 2,
   EPOCANVA_BACKEND_FR = 3,
   EPOCANVA_BACKEND_JA = 4,
-  EPOCANVA_BACKEND_KO = 5
+  EPOCANVA_BACKEND_KO = 5,
+  /* Additive identity only. Spanish and German are core-required by the product
+   * spec, but no engine or admitted resource exists for them yet, so the backend
+   * rejects these values at open. Never treat the constant as support. */
+  EPOCANVA_BACKEND_ES = 6,
+  EPOCANVA_BACKEND_DE = 7
 };
 enum {
   EPOCANVA_BACKEND_LATIN = 1,

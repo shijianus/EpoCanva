@@ -288,4 +288,6 @@ This work verifies the installed MSVC Debug and Release configurations. It does
 not claim GCC/Clang, Android, platform-IME equivalence, complete romanization
 alias coverage, historical Hangul, or all possible long input sequences. Unicode
 normalization of host-provided text and raw Unicode input are outside this API.
-Language priority remains English > Chinese > French > Japanese > Korean.
+Language priority is `English > Chinese > French > Spanish > Japanese > Korean > German`
+(see `docs/product/requirements.md` §3 and ADR 0005; the five-language order printed
+in earlier revisions of this document is superseded).

@@ -46,10 +46,16 @@ void Tests() {
         admission.refused.front().reason == lp::AdmissionReason::kResourceMissing,
         "declared missing data fails capability admission");
 
+  // Product order: English > Chinese > French > Spanish > Japanese > Korean >
+  // German. Spanish and German are core-required by the spec even though their
+  // engines do not exist yet; priority is a planning statement, not a claim.
   Check(lp::LanguagePriority("en") == 0 && lp::LanguagePriority("zh") == 1 &&
-        lp::LanguagePriority("fr") == 2 && lp::LanguagePriority("ja") == 3 &&
-        lp::LanguagePriority("ko") == 4 && lp::LanguagePriority("zz") == -1,
-        "fixed language priority");
+        lp::LanguagePriority("fr") == 2 && lp::LanguagePriority("es") == 3 &&
+        lp::LanguagePriority("ja") == 4 && lp::LanguagePriority("ko") == 5 &&
+        lp::LanguagePriority("de") == 6,
+        "fixed seven-language priority");
+  Check(lp::LanguagePriority("pt") == -1 && lp::LanguagePriority("zz") == -1,
+        "manifest priority only ranks the core languages");
   Check(lp::ValidateModuleRequirements({"epocanva_english"}) ==
         lp::ModuleRequirementsStatus::kOk, "default English module valid");
   Check(lp::ValidateModuleRequirements({}) == lp::ModuleRequirementsStatus::kEmpty,

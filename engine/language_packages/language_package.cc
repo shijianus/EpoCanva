@@ -5,6 +5,8 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../locale/language_tag.h"
+
 namespace epocanva {
 namespace language_packages {
 namespace {
@@ -13,8 +15,11 @@ void Add(ValidationResult* result, ValidationCode code, const char* field) {
   result->issues.push_back({code, field});
 }
 
+// Language identity is owned by engine/locale. This predicate must not become a
+// second, divergent list: a manifest that names a language the rest of the
+// system does not know would pass validation and fail at runtime.
 bool IsLanguageId(std::string_view id) {
-  return id == "en" || id == "zh" || id == "fr" || id == "ja" || id == "ko";
+  return locale::IsCoreLanguage(id) || locale::IsDeclaredLanguage(id);
 }
 
 bool IsHexDigest(std::string_view value) {
@@ -187,12 +192,11 @@ bool MatchesIdentity(const Manifest& manifest, const DataResource& resource,
 }  // namespace
 
 int LanguagePriority(std::string_view language_id) {
-  if (language_id == "en") return 0;
-  if (language_id == "zh") return 1;
-  if (language_id == "fr") return 2;
-  if (language_id == "ja") return 3;
-  if (language_id == "ko") return 4;
-  return -1;
+  // Delegated so the product's fixed order has exactly one definition. Unknown
+  // languages return -1 here; locale::LanguagePriority distinguishes "declared
+  // but non-core" (7) from "unsupported" (-1) for callers that need it.
+  const int priority = locale::LanguagePriority(language_id);
+  return priority == locale::kPriorityOtherDeclared ? -1 : priority;
 }
 
 ValidationResult ValidateManifest(const Manifest& manifest) {
