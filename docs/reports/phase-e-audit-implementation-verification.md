@@ -1,5 +1,11 @@
 # Phase E Audit, Implementation and Verification Report
 
+> **Historical audit.** This report describes HEAD `0ec6072`. The later
+> implementation and verification round on `0798bcb` is recorded in
+> `docs/reports/phase-e-followup-implementation.md`. That round did not reproduce
+> the `backend.profiles.real_acceptance` failure described below; see the newer
+> report before using this one as current evidence.
+
 **Date**: 2026-11-06
 **Status**: PARTIALLY COMPLETE — M0 quality baseline established; M1–M3 audit complete, implementation pending
 **Author**: Phase E audit session
