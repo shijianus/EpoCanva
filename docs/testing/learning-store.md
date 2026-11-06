@@ -1,4 +1,9 @@
-# Local learning store contract
+# Local learning store contract (historical v2)
+
+> **Historical (schema v2).** The current schema is v3 with profile/language
+> identity, decay, negative evidence, manual entries and read-while-paused
+> semantics. See `docs/testing/learning-store-v3.md` and ADR 0011. This file keeps
+> the v2 contract for audit history; do not use it as the current specification.
 
 The core in `engine/data_store/learning_store.h` accepts admitted dictionary IDs and aggregate counts. It accepts no keystroke sequence, preedit, committed text, clipboard content, field name, application identity or timestamp. IDs are reversible against the admitted dictionary and remain personal data; they are not anonymisation or encryption.
 

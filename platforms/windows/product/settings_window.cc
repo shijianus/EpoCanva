@@ -12,13 +12,14 @@
 #include "ui_ids.h"
 #include "product_backend_resources.h"
 #include "product_io.h"
+#include "product_learning.h"
 
 namespace epocanva {
 namespace product {
 namespace {
 
 constexpr int kClientWidth = 900;
-constexpr int kClientHeight = 736;
+constexpr int kClientHeight = 880;
 
 UINT WindowDpi(HWND window) {
   const UINT dpi = ::GetDpiForWindow(window);
@@ -324,14 +325,42 @@ bool SettingsWindow::OnCreate() {
       BS_AUTOCHECKBOX | WS_TABSTOP, ui::kTwoEditSpellingEnabled, right_x + 14, 580,
       right_width - 28, 20);
 
+  CreateControl(L"BUTTON", L"Local learning", BS_GROUPBOX, 0, margin, 610,
+                left_width, 112);
+  CreateControl(L"STATIC",
+                L"Recording is unavailable in this alpha: the Windows field-permission "
+                L"lock is not proven for the queued worker path. Existing local "
+                L"preferences, if any, still affect candidate order.",
+                SS_LEFT, 0, margin + 14, 632, left_width - 28, 46);
+  learning_enabled_ = CreateControl(
+      L"BUTTON", L"Record confirmed candidate choices (unavailable)",
+      BS_AUTOCHECKBOX | WS_TABSTOP, ui::kLearningEnabled, margin + 14, 682,
+      left_width - 28, 20);
+
+  CreateControl(L"BUTTON", L"Learning data", BS_GROUPBOX, 0, right_x, 610,
+                right_width, 112);
+  CreateControl(L"STATIC", L"Folder:", SS_LEFT, 0, right_x + 14, 632, 58, 20);
+  path_learning_ = CreateControl(L"EDIT", L"",
+                                 ES_AUTOHSCROLL | ES_READONLY | WS_BORDER |
+                                     WS_TABSTOP,
+                                 ui::kPathLearning, right_x + 78, 630,
+                                 right_width - 92, 22);
+  clear_learning_ = CreateControl(
+      L"BUTTON", L"&Clear local learning data", BS_PUSHBUTTON | WS_TABSTOP,
+      ui::kClearLearning, right_x + 14, 662, 250, 28);
+  CreateControl(L"STATIC",
+                L"Clearing removes every profile's learning data, pre-v3 backup and "
+                L"quarantined file. It never affects basic input.",
+                SS_LEFT, 0, right_x + 14, 694, right_width - 28, 24);
+
   CreateControl(L"BUTTON", L"Offline and privacy", BS_GROUPBOX, 0, margin, 470,
                 left_width, 132);
   CreateControl(L"STATIC",
                 L"No network I/O: no telemetry, updates, dictionary sync or cloud "
                 L"lookup.\r\n"
                 L"Settings, logs and Rime user data stay under the user data folder.\r\n"
-                L"No input history or learning. No keystroke, clipboard or field "
-                L"logging.",
+                L"Local learning data, if any, stays on this device. It can be cleared "
+                L"below. No keystroke, clipboard or field logging.",
                 SS_LEFT, 0, margin + 14, 494, left_width - 28, 100);
 
   CreateControl(L"BUTTON", L"Data locations", BS_GROUPBOX, 0, right_x, 344,
@@ -355,17 +384,17 @@ bool SettingsWindow::OnCreate() {
                 ui::kOpenUser, right_x + 204, 468, 180, 28);
 
   CreateControl(L"STATIC", L"Language / input profile (next engine start):", SS_LEFT,
-                0, margin, 608, 400, 20);
+                0, margin, 738, 400, 20);
   profile_choice_ = CreateControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
-      ui::kProfileChoice, margin, 632, 860, 240);
-  save_status_ = CreateControl(L"STATIC", L"", SS_LEFT, ui::kSaveStatus, margin, 678,
+      ui::kProfileChoice, margin, 762, 860, 240);
+  save_status_ = CreateControl(L"STATIC", L"", SS_LEFT, ui::kSaveStatus, margin, 808,
                                860, 20);
   CreateControl(L"BUTTON", L"&About / licences", BS_PUSHBUTTON | WS_TABSTOP,
-                ui::kAbout, margin, 700, 180, 30);
+                ui::kAbout, margin, 830, 180, 30);
   CreateControl(L"BUTTON", L"&Save", BS_DEFPUSHBUTTON | WS_TABSTOP, ui::kSave, 660,
-                700, 100, 30);
+                830, 100, 30);
   CreateControl(L"BUTTON", L"&Close", BS_PUSHBUTTON | WS_TABSTOP, ui::kClose, 770,
-                700, 110, 30);
+                830, 110, 30);
 
   // Group boxes are siblings of their contents; without this they end up above the
   // controls and paint their background over the checkboxes, edits and status text.
@@ -507,6 +536,11 @@ void SettingsWindow::RefreshControlsFromSettings() {
                  settings_.abbreviation_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
   ::SendMessageW(two_edit_spelling_enabled_, BM_SETCHECK,
                  settings_.two_edit_spelling_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  const bool learning_available = ProductLearningWritesPermitted();
+  ::SendMessageW(learning_enabled_, BM_SETCHECK,
+                 (learning_available && settings_.learning_recording_enabled)
+                     ? BST_CHECKED : BST_UNCHECKED, 0);
+  ::EnableWindow(learning_enabled_, learning_available ? TRUE : FALSE);
   if (::SendMessageW(completion_count_, CB_GETCOUNT, 0, 0) == 0) {
     for (int count = 1; count <= 7; ++count) {
       const std::wstring label = std::to_wstring(count);
@@ -555,6 +589,7 @@ void SettingsWindow::RefreshPathFields() {
   set(path_user_, paths_.user_root);
   set(path_settings_, paths_.settings_file);
   set(path_engine_, paths_.engine_user_dir);
+  set(path_learning_, paths_.learning_dir);
 }
 
 void SettingsWindow::SetSaveStatus(const std::wstring& text) {
@@ -594,6 +629,9 @@ bool SettingsWindow::Save() {
       ::SendMessageW(abbreviation_enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
   next.two_edit_spelling_enabled =
       ::SendMessageW(two_edit_spelling_enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  next.learning_recording_enabled =
+      ProductLearningWritesPermitted() &&
+      ::SendMessageW(learning_enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
   const LRESULT completion_index =
       ::SendMessageW(completion_count_, CB_GETCURSEL, 0, 0);
   const LRESULT spelling_index =
@@ -678,10 +716,16 @@ void SettingsWindow::OnCommand(int id, int notification, HWND control) {
     case ui::kMorphologyEnabled:
     case ui::kAbbreviationEnabled:
     case ui::kTwoEditSpellingEnabled:
+    case ui::kLearningEnabled:
     case ui::kCandidateDisplayHost:
     case ui::kCandidateDisplayAlwaysSelf:
       if (notification == BN_CLICKED) {
         SetDirty(true);
+      }
+      return;
+    case ui::kClearLearning:
+      if (notification == BN_CLICKED) {
+        ClearLearning();
       }
       return;
     case ui::kSave:
@@ -709,6 +753,36 @@ void SettingsWindow::OnCommand(int id, int notification, HWND control) {
     default:
       return;
   }
+}
+
+void SettingsWindow::ClearLearning() {
+  if (paths_.user_root.empty()) {
+    ::MessageBoxW(hwnd_, L"The user data path is unavailable; learning data cannot be cleared.",
+                  ui::kSettingsWindowTitle, MB_OK | MB_ICONERROR);
+    return;
+  }
+  const bool present = LocalLearningDataPresent(paths_);
+  const std::wstring question = present
+      ? L"Remove all locally learned preferences for every profile?\n\n"
+        L"This removes the learning files written by EpoCanva on this device. It does "
+        L"not change text already typed into other applications, and it does not affect "
+        L"basic input. This cannot be undone from the app."
+      : L"No local learning data is present. Run the clear operation anyway to remove "
+        L"empty locks and any quarantined files?";
+  if (::MessageBoxW(hwnd_, question.c_str(), L"Clear local learning",
+                    MB_YESNO | MB_ICONWARNING) != IDYES) {
+    return;
+  }
+  std::wstring why;
+  if (!ClearAllLocalLearning(paths_, &why)) {
+    const std::wstring message = L"Could not clear local learning data:\n" + why;
+    ::MessageBoxW(hwnd_, message.c_str(), ui::kSettingsWindowTitle,
+                  MB_OK | MB_ICONERROR);
+    SetSaveStatus(L"Local learning data was not cleared.");
+    return;
+  }
+  SetSaveStatus(L"Local learning data cleared. Basic input is unaffected.");
+  RefreshPathFields();
 }
 
 void SettingsWindow::ShowAbout() {

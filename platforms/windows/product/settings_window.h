@@ -52,6 +52,7 @@ class SettingsWindow {
   bool Save();
   void TryClose();
   void OnCommand(int id, int notification, HWND control);
+  void ClearLearning();
   void ShowAbout();
   void OpenFolder(const std::filesystem::path& path, const wchar_t* what);
   HBRUSH OnCtlColor(HDC dc, HWND control, UINT message);
@@ -87,6 +88,8 @@ class SettingsWindow {
   HWND morphology_enabled_ = nullptr;
   HWND abbreviation_enabled_ = nullptr;
   HWND two_edit_spelling_enabled_ = nullptr;
+  HWND learning_enabled_ = nullptr;
+  HWND clear_learning_ = nullptr;
   HWND candidate_display_host_ = nullptr;
   HWND candidate_display_always_self_ = nullptr;
   HWND save_status_ = nullptr;
@@ -94,6 +97,7 @@ class SettingsWindow {
   HWND path_user_ = nullptr;
   HWND path_settings_ = nullptr;
   HWND path_engine_ = nullptr;
+  HWND path_learning_ = nullptr;
 };
 
 }  // namespace product

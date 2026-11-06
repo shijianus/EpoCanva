@@ -11,6 +11,7 @@
 
 #include "engine_host.h"
 #include "product_io.h"
+#include "product_learning.h"
 #include "product_paths.h"
 #include "product_settings.h"
 #include "product_display_preference.h"
@@ -428,6 +429,15 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
   epocanva::tsf::EngineHostConfig base = BaseConfig(paths);
 #ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
   if (!LoadBackendResources(paths, &base.backend, why)) { ReleaseStartLock(&mutex_); return false; }
+  // Existing preferences are read for ranking even while recording is paused. A durable
+  // write additionally needs learning_writes_trusted, which stays false until a real
+  // field-permission lock covers the queued worker path. Avoid per-query filesystem work
+  // when the store does not exist; a store created later is picked up at the next start.
+  if (LocalLearningDataPresent(paths)) base.backend.learning_root = paths.user_root;
+  base.backend.learning_writes_trusted = ProductLearningWritesPermitted();
+  base.backend.learning_recording_enabled =
+      display_settings.settings.learning_recording_enabled &&
+      base.backend.learning_writes_trusted;
   base.backend.active_profile_id = static_cast<std::uint32_t>(display_settings.settings.profile_id);
   base.backend.completion_enabled = display_settings.settings.completion_enabled;
   base.backend.spelling_enabled = display_settings.settings.spelling_enabled;

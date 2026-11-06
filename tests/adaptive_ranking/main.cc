@@ -427,6 +427,52 @@ void RejectionTests() {
   Check(!learning.Lookup("en", "mine", &preference), "manual word removed");
 }
 
+void PersistenceTests() {
+  // The persistence adapter installs a stored summary without inventing an event or a
+  // gain. It must still clamp values and preserve user-authored entries under pressure.
+  rk::LearningEventModel learning;
+  rk::Preference imported;
+  imported.positive = 1.8;
+  imported.negative = 0.2;
+  imported.last_tick = 100;
+  Check(learning.SetPreference("en", "c_tea", imported), "stored preference imported");
+  rk::AdaptiveRanker ranker;
+  rk::RankRequest request;
+  request.user_language = "en";
+  request.proposals = {
+      MakeProposal("coffee", "en", "c_coffee", 0.50),
+      MakeProposal("tea", "en", "c_tea", 0.40),
+  };
+  Check(SameText(request, ranker.Rank(request, &learning), 0, "tea"),
+        "imported preference changes the order without an event");
+  rk::Preference clamped;
+  clamped.positive = 99.0;
+  clamped.negative = 99.0;
+  Check(learning.SetPreference("en", "c_tea", clamped), "out-of-range import clipped");
+  rk::Preference stored;
+  Check(learning.Lookup("en", "c_tea", &stored) &&
+        stored.positive == rk::kMaxPersonalBoost &&
+        stored.negative == rk::kMaxNegativePenalty, "import uses the same bounds");
+  rk::Preference bad = clamped;
+  bad.positive = std::nan("");
+  Check(!learning.SetPreference("en", "c_bad", bad), "non-finite import rejected");
+  Check(!learning.SetPreference("EN", "c_bad", clamped), "invalid language import rejected");
+  Check(!learning.SetPreference("en", "", clamped), "empty candidate import rejected");
+
+  rk::LearningEventModel full;
+  for (std::size_t i = 0; i < rk::kMaxLearnedEntries; ++i) {
+    rk::Preference manual;
+    manual.positive = rk::kMaxPersonalBoost;
+    manual.manual = true;
+    const std::string id = "m" + std::to_string(i);
+    Check(full.SetPreference("en", id, manual), "manual entry fills the bound");
+  }
+  rk::Preference inferred;
+  inferred.positive = 1.0;
+  Check(!full.SetPreference("en", "new-inferred", inferred),
+        "inferred import cannot evict a manual entry");
+}
+
 void ClearTests() {
   rk::LearningEventModel learning;
   rk::AdaptiveRanker ranker;
@@ -662,6 +708,7 @@ const Case kCases[] = {
     {"ordering", OrderingTests},
     {"no_model", NoModelTests},
     {"learning", LearningTests},
+    {"persistence", PersistenceTests},
     {"isolation", IsolationTests},
     {"negative", NegativeTests},
     {"decay", DecayTests},

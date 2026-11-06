@@ -211,6 +211,13 @@ en zh fr es ja ko de pt it ru ar hi id vi th tr nl pl uk bn fa ur he el sv cs ro
 密码、一次性验证码、平台标记的敏感字段、用户隐私模式、以及无法可靠确认安全的字段，
 一律禁止学习与持久化，也禁止把上下文交给神经预测器。
 
+**当前实现状态（2026-11-06，阶段 D）：** schema v3 存储层已支持 profile/language 身份、
+正负摘要、UTC 毫秒衰减、手动词条、v1/v2 迁移、原子写、`.corrupt` 隔离与显式清除；
+读取与写入已分离，暂停记录不再写新数据，但既有偏好仍参与排序。产品 **持久写入仍关闭**：
+TSF 字段权限判定没有形成覆盖排队、worker、确认和持久化的 OS 锁，`ProductLearningWritesPermitted()`
+因此返回 false。设置页明确显示该限制并提供真实清除入口；不能把存储/桥接测试通过表述为
+"产品已经会持久学习"。
+
 ### 4.4 可选轻量神经预测
 
 - **默认不下载模型、默认不加载神经模型、默认不进行神经推理。**
@@ -316,13 +323,15 @@ History 等领域配置。领域名称是配置，不等于每个领域一套独
   UIElement 候选与 `DllRegisterServer`/`DllUnregisterServer`。当前源码对应的正式包尚无完整的
   真实宿主输入与安装/卸载验收；旧包的注册实验不等于该闭环已通过。
   公开发行逐项条件与证据格式见 `docs/product/release-gate.md`。
-- 历史产品包包含 42,356 行英文词表，新增本地验证包具有五语言语料模型、词典和 profile 资源；两者不能混称为已验收的正式发行包。后端有有界 ID 计数学习存储，但产品路径未启用持久学习；公开数据分发、署名完整性与 relinkable 交付仍需独立验收。
+- 历史产品包包含 42,356 行英文词表，新增本地验证包具有五语言语料模型、词典和 profile 资源；两者不能混称为已验收的正式发行包。后端与 `engine/data_store` 已有 schema v3 学习存储（profile/language、衰减、正负反馈、手动词条、v1/v2 迁移与清除）；产品路径**只读既有偏好**，持久写入因字段锁未证明而关闭。公开数据分发、署名完整性与 relinkable 交付仍需独立验收。
 - **语言身份层**（`engine/locale`）已实现 BCP 47 解析、lookup 匹配、七语言优先级与
   三级输入方案状态，并有 3 条 CTest。它**未**与 `tools/backend/stage_resources.py`
   的 13 个 profile 合并成单一数据源；两套清单分叉是已知风险。
-- **自适应排序与学习事件语义**（`engine/ranking`）已实现并有 13 条 CTest，
-  但**未接进** `epocanva_backend` 候选生成或 TSF 产品路径；学习模型只在内存，
-  没有持久化、迁移或崩溃恢复。因此不能宣称产品已经会学习或会智能排序。
+- **自适应排序与学习事件语义**（`engine/ranking`）已实现并有 14 条 CTest；
+  v3 持久化偏好经 `LearningEventModel::SetPreference` 安装后，已对统一后端的
+  **COMPLETION 候选**做有界只读重排（原文候选保持首位，权重是工程默认值、未校准；
+  NEXT_WORD 仍用上下文模型顺序）。产品持久写入仍未打开，故不能宣称产品已经会学习；
+  "会智能排序"只可按"有界、可解释、未校准的个性化重排"表述，并须由阶段 E 做离线评测。
 - Spanish、German 及其余声明语言：只有身份与优先级，**没有**引擎、词表或 profile 条目。
   中文的 `zh-Hant-TW`、`zh-Hant-HK`、`yue-Hant-HK` 与双拼/仓颉/五笔/粤拼同样只有身份。
 - 无 Android IME 组件。

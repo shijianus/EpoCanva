@@ -86,6 +86,9 @@ int main(int argc,char** argv){
       Check(epocanva_backend_ack_commit(session,&access,commit.commit_token,1,&acknowledgement)==EPOCANVA_OK && acknowledgement.consumed && acknowledgement.learned,"confirmed commit learns once");
       Check(epocanva_backend_ack_commit(session,&access,commit.commit_token,1,&acknowledgement)==EPOCANVA_STALE_SNAPSHOT,"duplicate ack rejected");
       auto next=Query(session,access,EPOCANVA_BACKEND_NEXT_WORD);
+      if (next.text.empty() || next.text.front()!="morning") {
+        for (const auto& value : next.text) std::cerr << "next-word candidate=" << value << '\n';
+      }
       Check(!next.text.empty() && next.text.front()=="morning","confirmed context predicts next word");
     }
     auto denied=access;denied.context.privacy_class=EPOCANVA_PRIVACY_SENSITIVE;

@@ -59,7 +59,7 @@ struct LocalFreeDeleter {
 };
 using LocalMemory = std::unique_ptr<void, LocalFreeDeleter>;
 
-enum class Operation { kLearning, kExport, kDelete };
+enum class Operation { kLearning, kRead, kMaintenance, kExport, kDelete, kDeleteAll };
 
 // A new query precedes each filesystem operation, not just construction/open.
 // Closing handles and deleting our uncommitted temporary file are unconditional
@@ -71,7 +71,8 @@ class Gate {
       : operation_(operation), callback_(callback), selection_(selection) {}
 
   Status Check() {
-    if (operation_ == Operation::kDelete) return Status::kOk;
+    if (operation_ == Operation::kDelete || operation_ == Operation::kDeleteAll)
+      return Status::kOk;
     Access current;
     try {
       if (callback_) current = callback_();
@@ -85,20 +86,38 @@ class Gate {
       if (selection_ != nullptr && (!selection_->host_write_confirmed ||
           selection_->context_target != current.context_target ||
           selection_->generation != current.generation)) return Status::kStale;
-      if (queried_ && (current.context_target != current_.context_target ||
-          current.generation != current_.generation)) return Status::kStale;
+    } else if (operation_ == Operation::kRead) {
+      // Reading an existing preference is allowed while recording is paused. The field
+      // must still be Normal and attributable to a current target/generation; a settings
+      // window cannot read it without that context.
+      if (current.context_target == 0 || current.generation == 0)
+        return Status::kDenied;
+    } else if (operation_ == Operation::kMaintenance) {
+      // Explicit removal of a user-authored entry only needs a Normal classification.
+      // It is not new learning and is allowed while recording is paused.
     }
+    if (queried_ && (current.context_target != current_.context_target ||
+        current.generation != current_.generation)) return Status::kStale;
     current_ = current;
     queried_ = true;
     return Status::kOk;
   }
 
   Access CoreAccess() const {
-    if (operation_ != Operation::kExport) return current_;
-    // Explicit export is authorized by its fresh Normal callback and user action,
-    // not by the focused-field learning toggle. These in-memory sentinel values
-    // adapt the core's Load gate; they are never persisted or returned.
-    return {PrivacyClass::kNormal, true, 1, 1};
+    if (operation_ == Operation::kExport) {
+      // Explicit export is authorized by its fresh Normal callback and user action,
+      // not by the focused-field learning toggle. These in-memory sentinel values
+      // adapt the core's Load gate; they are never persisted or returned.
+      return {PrivacyClass::kNormal, true, 1, 1, 0};
+    }
+    if (operation_ == Operation::kMaintenance) {
+      Access maintenance = current_;
+      maintenance.learning_enabled = true;  // explicit removal may rewrite the file
+      maintenance.context_target = maintenance.context_target == 0 ? 1 : maintenance.context_target;
+      maintenance.generation = maintenance.generation == 0 ? 1 : maintenance.generation;
+      return maintenance;
+    }
+    return current_;
   }
  private:
   Operation operation_;
@@ -309,8 +328,7 @@ class Transaction {
  public:
   explicit Transaction(Gate& gate) : gate_(gate) {}
 
-  Status Open(const std::filesystem::path& root, const Catalog& catalog,
-              bool create_directory) {
+  Status OpenRoot(const std::filesystem::path& root, bool create_directory) {
     std::wstring drive;
     std::vector<std::wstring> components;
     if (!ParseRoot(root, &drive, &components)) return Status::kIoError;
@@ -359,9 +377,50 @@ class Transaction {
       status = PinDirectory(directory_, true);
       if (status != Status::kOk) return status;
     }
+    return Status::kOk;
+  }
+
+  Status LockAllDirectory(bool exclusive) {
+    if (missing_) return Status::kOk;
+    Status status = gate_.Check();
+    if (status != Status::kOk) return status;
+    const std::wstring all_lock_path = directory_ + L"\\all.lock";
+    all_lock_.Reset(::CreateFileW(all_lock_path.c_str(), GENERIC_READ | GENERIC_WRITE |
+          READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE, security_.attributes(false),
+          OPEN_ALWAYS, kFileFlags, nullptr));
+    if (!all_lock_.valid()) return FileError(::GetLastError());
+    BY_HANDLE_FILE_INFORMATION info = {};
+    status = CheckObject(all_lock_.get(), false, gate_, &info);
+    if (status != Status::kOk) return status;
+    if (info.nFileSizeHigh != 0 || info.nFileSizeLow != 0)
+      return Status::kInvalidFormat;
+    status = security_.Check(all_lock_.get(), false, gate_);
+    if (status != Status::kOk) return status;
+    status = gate_.Check();
+    if (status != Status::kOk) return status;
+    OVERLAPPED zero = {};
+    DWORD flags = LOCKFILE_FAIL_IMMEDIATELY;
+    if (exclusive) flags |= LOCKFILE_EXCLUSIVE_LOCK;
+    if (!::LockFileEx(all_lock_.get(), flags, 0, 1, 0, &zero))
+      return FileError(::GetLastError());
+    return Status::kOk;
+  }
+
+  Status Open(const std::filesystem::path& root, const Catalog& catalog,
+              bool create_directory) {
+    Status status = OpenRoot(root, create_directory);
+    if (status != Status::kOk) return status;
+    if (missing_) return Status::kOk;
+    // A directory-wide shared lock makes "clear all learning" serialise with every
+    // per-namespace transaction. The file is empty and contains no personal data.
+    status = LockAllDirectory(false);
+    if (status != Status::kOk) return status;
+
     const std::wstring stem = directory_ + L"\\" + CatalogStem(catalog);
     data_path_ = stem + L".dat";
     temporary_path_ = stem + L".tmp";
+    backup_path_ = stem + L".v2";
+    backup_temporary_path_ = stem + L".v2.tmp";
     status = gate_.Check();
     if (status != Status::kOk) return status;
     lock_.Reset(::CreateFileW((stem + L".lock").c_str(), GENERIC_READ | GENERIC_WRITE |
@@ -378,7 +437,7 @@ class Transaction {
     if (status != Status::kOk) return status;
     OVERLAPPED byte_zero = {};  // UTF-8 byte offset zero, lock extent one byte.
     if (!::LockFileEx(lock_.get(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                     0, 1, 0, &byte_zero)) return FileError(::GetLastError());
+                      0, 1, 0, &byte_zero)) return FileError(::GetLastError());
     return Status::kOk;
   }
 
@@ -407,16 +466,199 @@ class Transaction {
     }
     status = gate_.Check();
     if (status != Status::kOk) return status;
-    return store->Load(bytes, gate_.CoreAccess());
+    std::uint32_t version = 0;
+    const bool versioned = SerializedFormatVersion(bytes, &version);
+    if (versioned && version < 3) {
+      legacy_ = true;
+      legacy_bytes_ = bytes;
+    }
+    file.Reset();
+    const Status loaded = store->Load(bytes, gate_.CoreAccess());
+    if (loaded == Status::kInvalidFormat) {
+      // The bytes are not a valid store. Quarantine the original file instead of leaving
+      // it in place to block every future transaction; the caller receives the parse
+      // error, and a subsequent write starts from an empty in-memory store.
+      const Status quarantined = Quarantine();
+      if (quarantined != Status::kOk) return quarantined;
+      return Status::kInvalidFormat;
+    }
+    if (loaded != Status::kOk) return loaded;
+    if (legacy_) {
+      // Upgrade v1/v2 to v3 now, with the memory store's baseline timestamp. Save writes
+      // the private .v2 backup first, then atomically publishes the v3 file. A read path
+      // may perform this one-time upgrade; it is storage maintenance, not new learning.
+      std::string migrated;
+      Status migration_status = store->Export(true, &migrated);
+      if (migration_status != Status::kOk) return migration_status;
+      migration_status = Save(migrated);
+      if (migration_status != Status::kOk) return migration_status;
+      legacy_ = false;
+    }
+    return Status::kOk;
   }
+
+  bool quarantined() const { return quarantined_; }
+  bool legacy_migration() const { return legacy_; }
 
   Status Save(const std::string& bytes) {
     if (bytes.size() > kMaxStoreBytes) return Status::kLimitExceeded;
-    Status status = Remove(temporary_path_);
+    // A v1/v2 file is copied to a private .v2 backup before the first v3 publication.
+    // The backup is never read automatically; it only preserves the pre-migration bytes
+    // until the explicit user clear removes every learning artefact.
+    if (legacy_) {
+      const Status backup = Publish(backup_path_, backup_temporary_path_, legacy_bytes_);
+      if (backup != Status::kOk) return backup;
+    }
+    return Publish(data_path_, temporary_path_, bytes);
+  }
+
+  Status Quarantine() {
+    if (missing_) return Status::kOk;
+    Handle file;
+    bool absent = false;
+    Status status = OpenForDeletion(data_path_, &file, &absent);
+    if (status != Status::kOk || absent) return status;
+    std::wstring target;
+    for (int suffix = 0; suffix < 8; ++suffix) {
+      std::wstring candidate = data_path_ + L".corrupt";
+      if (suffix != 0) candidate += L"." + std::to_wstring(suffix);
+      const DWORD attributes = ::GetFileAttributesW(candidate.c_str());
+      if (attributes == INVALID_FILE_ATTRIBUTES &&
+          ::GetLastError() == ERROR_FILE_NOT_FOUND) {
+        target = std::move(candidate);
+        break;
+      }
+    }
+    if (target.empty()) return Status::kLimitExceeded;
+    const std::size_t path_utf16_bytes = target.size() * sizeof(wchar_t);
+    const std::size_t rename_bytes = sizeof(FILE_RENAME_INFO) + path_utf16_bytes;
+    std::vector<BYTE> rename_buffer(rename_bytes, 0);
+    auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(rename_buffer.data());
+    rename->Flags = FILE_RENAME_FLAG_POSIX_SEMANTICS;  // never replace an existing file
+    rename->RootDirectory = nullptr;
+    rename->FileNameLength = static_cast<DWORD>(path_utf16_bytes);
+    std::memcpy(rename->FileName, target.data(), path_utf16_bytes);
+    status = gate_.Check();
+    if (status != Status::kOk) return status;
+    if (!::SetFileInformationByHandle(file.get(), FileRenameInfoEx, rename,
+                                     static_cast<DWORD>(rename_bytes)))
+      return FileError(::GetLastError());
+    quarantined_ = true;
+    return Status::kOk;
+  }
+
+  Status DeleteFiles() {
+    if (missing_) return Status::kOk;
+    Status status = Remove(data_path_);
+    if (status != Status::kOk) return status;
+    status = Remove(temporary_path_);
+    if (status != Status::kOk) return status;
+    status = Remove(backup_path_);
+    if (status != Status::kOk) return status;
+    status = Remove(backup_temporary_path_);
+    if (status != Status::kOk) return status;
+    return RemoveCorruptFiles();
+  }
+
+  Status DeleteAllFiles() {
+    if (missing_) return Status::kOk;
+    WIN32_FIND_DATAW data = {};
+    const std::wstring pattern = directory_ + L"\\n-*";
+    HANDLE search = ::FindFirstFileW(pattern.c_str(), &data);
+    if (search == INVALID_HANDLE_VALUE) {
+      const DWORD error = ::GetLastError();
+      return error == ERROR_FILE_NOT_FOUND ? Status::kOk : FileError(error);
+    }
+    struct Closer {
+      HANDLE value;
+      ~Closer() { ::FindClose(value); }
+    } closer{search};
+    Status result = Status::kOk;
+    do {
+      const std::wstring name(data.cFileName);
+      if (name.size() < 5 || name.compare(0, 2, L"n-") != 0) continue;
+      const bool data_file = name.find(L".dat") != std::wstring::npos;
+      const bool temporary = name.find(L".tmp") != std::wstring::npos;
+      const bool backup = name.find(L".v2") != std::wstring::npos;
+      const bool corrupt = name.find(L".corrupt") != std::wstring::npos;
+      if (!data_file && !temporary && !backup && !corrupt) continue;  // keep .lock files
+      if (name.find(L'\\') != std::wstring::npos) return Status::kIoError;
+      Handle file;
+      bool absent = false;
+      const Status status = OpenForDeletion(directory_ + L"\\" + name, &file, &absent);
+      if (status != Status::kOk) { result = status; continue; }
+      if (absent) continue;
+      FILE_DISPOSITION_INFO remove = {TRUE};
+      if (!::SetFileInformationByHandle(file.get(), FileDispositionInfo, &remove,
+                                        sizeof(remove))) result = FileError(::GetLastError());
+    } while (::FindNextFileW(search, &data) != FALSE);
+    return result;
+  }
+
+ private:
+  Status PinDirectory(const std::wstring& path, bool private_directory) {
+    Status status = gate_.Check();
+    if (status != Status::kOk) return status;
+    Handle handle(::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING, kDirectoryFlags, nullptr));
+    if (!handle.valid()) {
+      const DWORD error = ::GetLastError();
+      missing_ = private_directory && Missing(error);
+      return FileError(error);
+    }
+    status = CheckObject(handle.get(), true, gate_);
+    if (status != Status::kOk) return status;
+    if (private_directory) {
+      status = security_.Check(handle.get(), true, gate_);
+      if (status != Status::kOk) return status;
+    }
+    directories_.push_back(std::move(handle));
+    return Status::kOk;
+  }
+
+  Status OpenForDeletion(const std::wstring& path, Handle* file, bool* absent) {
+    *absent = false;
+    Status status = gate_.Check();
+    if (status != Status::kOk) return status;
+    file->Reset(::CreateFileW(path.c_str(), DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL,
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING, kFileFlags, nullptr));
+    if (!file->valid()) {
+      const DWORD error = ::GetLastError();
+      if (Missing(error)) { *absent = true; return Status::kOk; }
+      return FileError(error);
+    }
+    // Deletion never reads the file, so an inherited or weakened DACL is not a reason to
+    // leave sensitive bytes behind. The private directory and the transaction locks still
+    // prevent another user from placing a file here. Reparse points and hard links remain
+    // rejected by CheckObject.
+    return CheckObject(file->get(), false, gate_);
+  }
+
+  Status OpenFile(const std::wstring& path, DWORD access, Handle* file,
+                  bool* absent, BY_HANDLE_FILE_INFORMATION* info = nullptr) {
+    *absent = false;
+    Status status = gate_.Check();
+    if (status != Status::kOk) return status;
+    file->Reset(::CreateFileW(path.c_str(), access, FILE_SHARE_READ, nullptr,
+                             OPEN_EXISTING, kFileFlags, nullptr));
+    if (!file->valid()) {
+      const DWORD error = ::GetLastError();
+      if (Missing(error)) { *absent = true; return Status::kOk; }
+      return FileError(error);
+    }
+    status = CheckObject(file->get(), false, gate_, info);
+    if (status != Status::kOk) return status;
+    return security_.Check(file->get(), false, gate_);
+  }
+
+  Status Publish(const std::wstring& target, const std::wstring& temporary_path,
+                 const std::string& bytes) {
+    if (bytes.size() > kMaxStoreBytes) return Status::kLimitExceeded;
+    Status status = Remove(temporary_path);
     if (status != Status::kOk) return status;
     status = gate_.Check();
     if (status != Status::kOk) return status;
-    Handle temporary(::CreateFileW(temporary_path_.c_str(), GENERIC_READ | GENERIC_WRITE |
+    Handle temporary(::CreateFileW(temporary_path.c_str(), GENERIC_READ | GENERIC_WRITE |
         DELETE | READ_CONTROL, 0, security_.attributes(false), CREATE_NEW,
         FILE_ATTRIBUTE_TEMPORARY | kFileFlags, nullptr));
     if (!temporary.valid()) return FileError(::GetLastError());
@@ -452,7 +694,7 @@ class Transaction {
     // Rename the already validated temporary HANDLE, not a re-resolved source
     // pathname. All directories remain pinned without write/delete sharing, and
     // the distinct stable lock remains held across this atomic same-volume move.
-    const std::size_t path_utf16_bytes = data_path_.size() * sizeof(wchar_t);
+    const std::size_t path_utf16_bytes = target.size() * sizeof(wchar_t);
     const std::size_t rename_bytes = sizeof(FILE_RENAME_INFO) + path_utf16_bytes;
     std::vector<BYTE> rename_buffer(rename_bytes, 0);
     auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(rename_buffer.data());
@@ -463,7 +705,7 @@ class Transaction {
     rename->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
     rename->RootDirectory = nullptr;
     rename->FileNameLength = static_cast<DWORD>(path_utf16_bytes);
-    std::memcpy(rename->FileName, data_path_.data(), path_utf16_bytes);
+    std::memcpy(rename->FileName, target.data(), path_utf16_bytes);
     status = gate_.Check();  // no filesystem work between this query and publication
     if (status != Status::kOk) return status;
     if (!::SetFileInformationByHandle(temporary.get(), FileRenameInfoEx, rename,
@@ -473,56 +715,38 @@ class Transaction {
     return Status::kOk;
   }
 
-  Status DeleteFiles() {
-    if (missing_) return Status::kOk;
-    Status status = Remove(data_path_);
-    if (status != Status::kOk) return status;
-    return Remove(temporary_path_);
-  }
-
- private:
-  Status PinDirectory(const std::wstring& path, bool private_directory) {
-    Status status = gate_.Check();
-    if (status != Status::kOk) return status;
-    Handle handle(::CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
-        FILE_SHARE_READ, nullptr, OPEN_EXISTING, kDirectoryFlags, nullptr));
-    if (!handle.valid()) {
+  Status RemoveCorruptFiles() {
+    WIN32_FIND_DATAW data = {};
+    const std::wstring pattern = data_path_ + L".corrupt*";
+    HANDLE search = ::FindFirstFileW(pattern.c_str(), &data);
+    if (search == INVALID_HANDLE_VALUE) {
       const DWORD error = ::GetLastError();
-      missing_ = private_directory && Missing(error);
-      return FileError(error);
+      return error == ERROR_FILE_NOT_FOUND ? Status::kOk : FileError(error);
     }
-    status = CheckObject(handle.get(), true, gate_);
-    if (status != Status::kOk) return status;
-    if (private_directory) {
-      status = security_.Check(handle.get(), true, gate_);
-      if (status != Status::kOk) return status;
-    }
-    directories_.push_back(std::move(handle));
-    return Status::kOk;
-  }
-
-  Status OpenFile(const std::wstring& path, DWORD access, Handle* file,
-                  bool* absent, BY_HANDLE_FILE_INFORMATION* info = nullptr) {
-    *absent = false;
-    Status status = gate_.Check();
-    if (status != Status::kOk) return status;
-    file->Reset(::CreateFileW(path.c_str(), access, FILE_SHARE_READ, nullptr,
-                             OPEN_EXISTING, kFileFlags, nullptr));
-    if (!file->valid()) {
-      const DWORD error = ::GetLastError();
-      if (Missing(error)) { *absent = true; return Status::kOk; }
-      return FileError(error);
-    }
-    status = CheckObject(file->get(), false, gate_, info);
-    if (status != Status::kOk) return status;
-    return security_.Check(file->get(), false, gate_);
+    struct Closer {
+      HANDLE value;
+      ~Closer() { ::FindClose(value); }
+    } closer{search};
+    Status result = Status::kOk;
+    do {
+      const std::wstring name(data.cFileName);
+      if (name.find(L'\\') != std::wstring::npos) return Status::kIoError;
+      Handle file;
+      bool absent = false;
+      const Status status = OpenForDeletion(directory_ + L"\\" + name, &file, &absent);
+      if (status != Status::kOk) { result = status; continue; }
+      if (absent) continue;
+      FILE_DISPOSITION_INFO remove = {TRUE};
+      if (!::SetFileInformationByHandle(file.get(), FileDispositionInfo, &remove,
+                                        sizeof(remove))) result = FileError(::GetLastError());
+    } while (::FindNextFileW(search, &data) != FALSE);
+    return result;
   }
 
   Status Remove(const std::wstring& path) {
     Handle file;
     bool absent = false;
-    Status status = OpenFile(path, DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL,
-                             &file, &absent);
+    Status status = OpenForDeletion(path, &file, &absent);
     if (status != Status::kOk || absent) return status;
     status = gate_.Check();
     if (status != Status::kOk) return status;
@@ -536,10 +760,16 @@ class Transaction {
   UserSecurity security_;
   std::vector<Handle> directories_;
   Handle lock_;  // closes before directory handles; CloseHandle releases LockFileEx
+  Handle all_lock_;  // directory-wide shared lock; DeleteAll holds it exclusively
   bool missing_ = false;
+  bool legacy_ = false;
+  bool quarantined_ = false;
+  std::string legacy_bytes_;
   std::wstring directory_;
   std::wstring data_path_;
   std::wstring temporary_path_;
+  std::wstring backup_path_;
+  std::wstring backup_temporary_path_;
 };
 
 Status ValidateSelection(const LearningStore& store, const Selection& selection) {
@@ -572,7 +802,12 @@ Status WindowsLearningRepository::Record(const Catalog& catalog,
     if (status != Status::kOk) return status;
     bool read_only = false;
     status = transaction.Load(store.get(), &read_only);
-    if (status != Status::kOk) return status;
+    if (status == Status::kInvalidFormat && transaction.quarantined()) {
+      // The corrupt file was renamed to .corrupt. Start a fresh v3 store instead of
+      // failing forever; the explicit user clear still removes the quarantine.
+    } else if (status != Status::kOk) {
+      return status;
+    }
     if (read_only) return Status::kIoError;
     status = gate.Check();
     if (status != Status::kOk) return status;
@@ -589,11 +824,48 @@ Status WindowsLearningRepository::Record(const Catalog& catalog,
   }
 }
 
+Status WindowsLearningRepository::RecordFeedback(const Catalog& catalog,
+    FeedbackKind kind, std::string_view candidate_id,
+    std::string_view normalized_identity, const std::vector<LexemeId>& lexeme_ids,
+    bool attributable, std::uint64_t generation, bool explicit_user_action,
+    const PrivacyCallback& privacy) const noexcept {
+  try {
+    const bool maintenance = kind == FeedbackKind::kManualWordRemoved;
+    Gate gate(maintenance ? Operation::kMaintenance : Operation::kLearning, privacy);
+    Status status = gate.Check();
+    if (status != Status::kOk) return status;
+    auto store = LearningStore::Create(catalog);
+    if (!store) return Status::kInvalidCatalog;
+    Transaction transaction(gate);
+    status = transaction.Open(root_, catalog, true);
+    if (status != Status::kOk) return status;
+    status = transaction.Load(store.get());
+    if (status == Status::kInvalidFormat && transaction.quarantined()) {
+      // Corrupt file quarantined; apply the event to an empty store.
+    } else if (status != Status::kOk) {
+      return status;
+    }
+    status = store->RecordFeedback(kind, candidate_id, normalized_identity, lexeme_ids,
+                                   attributable, generation, gate.CoreAccess(),
+                                   explicit_user_action);
+    if (status != Status::kOk) return status;
+    std::string bytes;
+    status = gate.Check();
+    if (status != Status::kOk) return status;
+    status = store->Serialize(gate.CoreAccess(), &bytes);
+    if (status != Status::kOk) return status;
+    return transaction.Save(bytes);
+  } catch (...) {
+    return Status::kIoError;
+  }
+}
+
+
 Status WindowsLearningRepository::LoadSnapshot(const Catalog& catalog,
     const PrivacyCallback& privacy, Snapshot* out) const noexcept {
   if (out != nullptr) *out = {};
   try {
-    Gate gate(Operation::kLearning, privacy);
+    Gate gate(Operation::kRead, privacy);
     Status status = gate.Check();
     if (status != Status::kOk) return status;
     if (out == nullptr) return Status::kInvalidFormat;
@@ -617,12 +889,30 @@ Status WindowsLearningRepository::Delete(const Catalog& catalog, bool explicit_u
     const PrivacyCallback& privacy) const noexcept {
   if (!explicit_user_action) return Status::kDenied;
   try {
-    if (!LearningStore::Create(catalog)) return Status::kInvalidCatalog;
+    // Deletion only needs the file identity. It must work even when the dictionary is
+    // unavailable or the on-disk file is corrupt/oversized.
+    if (!ValidCatalogIdentity(catalog)) return Status::kInvalidCatalog;
     Gate gate(Operation::kDelete, privacy);  // explicit control action: never invokes privacy
     Transaction transaction(gate);
     const Status status = transaction.Open(root_, catalog, false);
     if (status != Status::kOk) return status;
     return transaction.DeleteFiles();
+  } catch (...) {
+    return Status::kIoError;
+  }
+}
+
+Status WindowsLearningRepository::DeleteAll(bool explicit_user_action) const noexcept {
+  if (!explicit_user_action) return Status::kDenied;
+  try {
+    Gate gate(Operation::kDeleteAll, {});
+    Transaction transaction(gate);
+    Status status = transaction.OpenRoot(root_, false);
+    if (status != Status::kOk) return status;
+    if (transaction.missing()) return Status::kOk;
+    status = transaction.LockAllDirectory(true);
+    if (status != Status::kOk) return status;
+    return transaction.DeleteAllFiles();
   } catch (...) {
     return Status::kIoError;
   }

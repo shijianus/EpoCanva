@@ -116,7 +116,8 @@ bool ReadSettingsMap(const std::filesystem::path& path,
                        key == "completion_candidates" || key == "spelling_enabled" ||
                        key == "spelling_candidates" || key == "candidate_display" ||
                        key == "morphology_enabled" || key == "abbreviation_enabled" ||
-                       key == "two_edit_spelling_enabled" || key == "profile_id";
+                       key == "two_edit_spelling_enabled" || key == "profile_id" ||
+                       key == "learning_recording_enabled";
     if (!known) {
       continue;
     }
@@ -229,7 +230,8 @@ SettingsLoadResult LoadProductSettings(const std::filesystem::path& path) {
   const std::pair<const char*, bool*> optional_flags[] = {
       {"morphology_enabled", &loaded.morphology_enabled},
       {"abbreviation_enabled", &loaded.abbreviation_enabled},
-      {"two_edit_spelling_enabled", &loaded.two_edit_spelling_enabled}};
+      {"two_edit_spelling_enabled", &loaded.two_edit_spelling_enabled},
+      {"learning_recording_enabled", &loaded.learning_recording_enabled}};
   for (const auto& flag : optional_flags) {
     const std::string* value = find(flag.first);
     if (value != nullptr && !ParseBoolExact(*value, flag.second)) {
@@ -284,8 +286,17 @@ std::string BuildSettingsText(const ProductSettings& settings) {
   text += settings.abbreviation_enabled ? "1" : "0";
   text += "\ntwo_edit_spelling_enabled=";
   text += settings.two_edit_spelling_enabled ? "1" : "0";
+  text += "\nlearning_recording_enabled=";
+  text += settings.learning_recording_enabled ? "1" : "0";
   text += "\n";
   return text;
+}
+
+bool ProductLearningWritesPermitted() {
+  // A point-in-time permission query that can be revoked between queueing, worker
+  // execution and persistence is not the lock this flag claims. Keep durable product
+  // learning closed; the storage/bridge path is verified by backend.learning.*.
+  return false;
 }
 
 bool SaveProductSettings(const std::filesystem::path& path,

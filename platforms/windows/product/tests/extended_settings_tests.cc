@@ -4,6 +4,10 @@
 #include <string>
 
 #include "product_settings.h"
+#include "product_learning.h"
+#include "engine/data_store/windows_learning_repository.h"
+
+#include <cstdint>
 
 namespace {
 int failures = 0;
@@ -30,6 +34,18 @@ int main(int argc, char** argv) {
   Check(old.ok() && !old.settings.morphology_enabled &&
         old.settings.abbreviation_enabled && !old.settings.two_edit_spelling_enabled,
         "legacy settings keep expansion on and the noisier features opt-in");
+  Check(old.ok() && !old.settings.learning_recording_enabled,
+        "legacy settings default durable recording off");
+  Check(!ProductLearningWritesPermitted(),
+        "durable product learning stays closed without a proven field lock");
+  {
+    ProductSettings wanted;
+    wanted.learning_recording_enabled = true;
+    Put(path, BuildSettingsText(wanted));
+    const auto loaded = LoadProductSettings(path);
+    Check(loaded.ok() && loaded.settings.learning_recording_enabled,
+          "learning recording intent round trips");
+  }
   Check(ProductSettings{}.abbreviation_enabled,
         "a fresh install enables contextual abbreviation expansion");
   for (unsigned mask = 0; mask < 8; ++mask) {
@@ -55,13 +71,38 @@ int main(int argc, char** argv) {
           "two-edit switch projected");
   }
   for (const auto* key : {"morphology_enabled", "abbreviation_enabled",
-                          "two_edit_spelling_enabled"}) {
+                          "two_edit_spelling_enabled", "learning_recording_enabled"}) {
     Put(path, legacy + key + "=true\n");
     Check(LoadProductSettings(path).status == SettingsLoadStatus::kCorrupt,
           "malformed flag rejected");
     Put(path, legacy + key + "=1\n" + key + "=0\n");
     Check(LoadProductSettings(path).status == SettingsLoadStatus::kCorrupt,
           "duplicate flag rejected");
+  }
+  {
+    const auto learning_root = root / "learning-clear";
+    std::filesystem::create_directories(learning_root);
+    ProductPaths paths;
+    paths.user_root = learning_root;
+    paths.learning_dir = learning_root / "learning-v2";
+    epocanva::learning::Catalog catalog;
+    catalog.name_space = "product.test.v1";
+    catalog.sha256 = std::string(64, 'a');
+    catalog.admitted_ids = {1};
+    catalog.profile_id = "1";
+    catalog.language = "en";
+    epocanva::learning::WindowsLearningRepository repository(learning_root);
+    epocanva::learning::Access access{epocanva::learning::PrivacyClass::kNormal, true, 7, 9,
+                                      epocanva::learning::CurrentTickMilliseconds()};
+    const epocanva::learning::PrivacyCallback allow = [access] { return access; };
+    Check(repository.RecordFeedback(catalog,
+          epocanva::learning::FeedbackKind::kManualWordAdded, "manual:hello", "hello", {},
+          false, 0, true, allow) == epocanva::learning::Status::kOk,
+          "learning fixture persists");
+    Check(LocalLearningDataPresent(paths), "learning data is detected");
+    std::wstring why;
+    Check(ClearAllLocalLearning(paths, &why), "explicit clear removes learning data");
+    Check(!LocalLearningDataPresent(paths), "clear leaves only empty locks");
   }
   if (failures) return 1;
   std::cout << "PASS extended settings contract\n";

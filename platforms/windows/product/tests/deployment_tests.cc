@@ -546,6 +546,9 @@ void TestCleanupLock(const std::filesystem::path& run_root,
   configure(2);  // initialize and its cleanup finalize both throw
   epocanva::tsf::EngineHostConfig config;
   Check(transaction.config(&config), "cleanup: transaction configuration captured");
+  Check(!config.backend.learning_writes_trusted &&
+        !config.backend.learning_recording_enabled,
+        "cleanup: durable product learning is closed at the engine boundary");
   config.rime_dll_path = fault_dll;
   config.deployment.reset();
   epocanva::tsf::EngineLease lease;

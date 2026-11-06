@@ -32,6 +32,9 @@ enum ControlId : int {
   kPathUser = 1061,
   kPathSettings = 1062,
   kPathEngine = 1063,
+  kLearningEnabled = 1070,
+  kClearLearning = 1071,
+  kPathLearning = 1072,
 };
 
 }  // namespace ui

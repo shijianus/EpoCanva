@@ -69,9 +69,16 @@
 - 学习库文件权限：仅当前用户可读；Android 侧使用应用私有目录，
   不放在外部存储；Windows 侧放在用户配置目录并声明其内容性质。
 
-状态：**部分实现**。存储层（`engine/data_store`）已实现写入侧隐私过滤、原子写与清除；
-负反馈、时间衰减与产品路径启用仍缺失。学习事件语义在 `engine/ranking/learning_events.h`
-中已有可测试定义（不存在按键/退格事件类型），但尚未持久化。
+状态：**存储与桥接已实现，产品持久写入关闭**。`engine/data_store` 现在是 schema v3：
+profile/language 身份、正负摘要、UTC 毫秒衰减、手动词条、v1/v2 迁移、原子写、
+`.v2` 迁移备份、`.corrupt` 损坏隔离与显式清除（含跨 profile 的 `DeleteAll`）。
+读取与写入分离：`Read` 只需 Normal 字段与当前 target/generation，`Record` 才要求
+录制开关；因此暂停记录停止新写入，但既有偏好仍参与排序，设置页明确说明这一点。
+`engine/ranking` 的偏好只读接入统一后端的 COMPLETION 候选，原文候选保持首位。
+**产品持久写入仍关闭**，因为 TSF 的字段权限判定是一次查询，不是覆盖排队、worker、
+确认和持久化的 OS 锁；`ProductLearningWritesPermitted()` 返回 false。
+`.corrupt`、`.v2` 与 `.tmp` 都按敏感用户数据处理，显式清除会删除它们，绝不自动恢复。
+DACL 只是访问控制，不是加密、匿名化或同用户沙箱；导出副本与系统备份不在删除承诺内。
 
 ### 3.2a 神经预测（Neural prediction）
 

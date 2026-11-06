@@ -113,8 +113,44 @@ void LearningEventModel::EvictIfNeeded() {
   if (victim != entries_.end()) entries_.erase(victim);
 }
 
-EventStatus LearningEventModel::Apply(const LearningEvent& event) {
-  if (!IsValidLanguage(event.language) || !IsValidCandidateId(event.candidate_id)) {
+bool LearningEventModel::SetPreference(std::string_view language,
+                                       std::string_view candidate_id,
+                                       const Preference& value) {
+  if (!IsValidLanguage(language) || !IsValidCandidateId(candidate_id)) return false;
+  if (!std::isfinite(value.positive) || !std::isfinite(value.negative)) return false;
+  const std::string key = Key(language, candidate_id);
+  auto it = entries_.find(key);
+  if (it == entries_.end()) {
+    if (entries_.size() >= kMaxLearnedEntries) {
+      auto victim = entries_.end();
+      for (auto candidate = entries_.begin(); candidate != entries_.end(); ++candidate) {
+        if (candidate->second.preference.manual) continue;
+        if (victim == entries_.end() ||
+            candidate->second.preference.last_tick <
+                victim->second.preference.last_tick ||
+            (candidate->second.preference.last_tick ==
+                 victim->second.preference.last_tick &&
+             candidate->second.key_ordinal < victim->second.key_ordinal)) {
+          victim = candidate;
+        }
+      }
+      if (victim == entries_.end()) return false;  // all entries are user-authored
+      entries_.erase(victim);
+    }
+    Entry entry;
+    entry.key_ordinal = next_key_ordinal_++;
+    it = entries_.emplace(key, entry).first;
+  }
+  Preference& preference = it->second.preference;
+  preference.positive = Saturate(value.positive, kMaxPersonalBoost);
+  preference.negative = Saturate(value.negative, kMaxNegativePenalty);
+  preference.last_tick = value.last_tick;
+  preference.manual = value.manual;
+  if (value.last_tick > newest_tick_) newest_tick_ = value.last_tick;
+  return true;
+}
+
+EventStatus LearningEventModel::Apply(const LearningEvent& event) {  if (!IsValidLanguage(event.language) || !IsValidCandidateId(event.candidate_id)) {
     return EventStatus::kInvalidArgument;
   }
   if (event.privacy == PrivacyClass::kSensitive) return EventStatus::kDeniedSensitive;

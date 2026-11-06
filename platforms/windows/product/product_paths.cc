@@ -199,6 +199,7 @@ bool ResolveProductPaths(HMODULE module, ProductPaths* paths, std::wstring* why)
   resolved.user_root = user_path.display;
   resolved.engine_user_dir = resolved.user_root / L"engine";
   resolved.log_dir = resolved.user_root / L"logs";
+  resolved.learning_dir = resolved.user_root / L"learning-v2";
   resolved.settings_file = resolved.user_root / L"settings.ini";
   resolved.schema_patch_file =
       resolved.engine_user_dir / L"epocanva_english.custom.yaml";

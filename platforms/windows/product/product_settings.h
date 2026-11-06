@@ -39,11 +39,21 @@ struct ProductSettings {
   // suggestions are noisier.
   bool abbreviation_enabled = true;
   bool two_edit_spelling_enabled = false;
+  // User intent for durable local learning. Product builds currently force this to false
+  // at the execution boundary because the Windows field-permission lock does not cover
+  // the queued worker call chain. Existing local preferences are still used for ranking.
+  bool learning_recording_enabled = false;
   CandidateDisplay candidate_display = CandidateDisplay::kHost;
 
   static ProductSettings Defaults() { return ProductSettings{}; }
   bool valid() const;
 };
+
+// True only when this build can prove a field-permission lock across observation,
+// queueing, worker execution, event confirmation and persistence. It is false today:
+// the TSF permission verdict is a point-in-time query, not an OS-enforced lock held by
+// the worker. Do not flip this to true without the evidence described in the phase report.
+bool ProductLearningWritesPermitted();
 
 enum class SettingsLoadStatus {
   kLoaded = 0,

@@ -25,6 +25,7 @@
 #include "engine/languages/zh/pinyin_initialism.h"
 #include "engine/japanese_decoder/japanese_decoder.h"
 #include "engine/data_store/windows_learning_repository.h"
+#include "engine/ranking/adaptive_ranker.h"
 #include "product_io.h"
 #include "local_resource.h"
 #ifdef EPOCANVA_BACKEND_FRENCH
@@ -36,6 +37,7 @@ namespace pred = epocanva::prediction;
 namespace lex = epocanva::lexical;
 namespace flow = epocanva::backend_session;
 namespace learn = epocanva::learning;
+namespace rk = epocanva::ranking;
 constexpr std::size_t kMaxInputBytes = 4096;
 const char* Language(std::uint32_t language) {
   switch (language) {
@@ -100,7 +102,8 @@ epocanva_status Result(flow::Status status) {
 learn::Access Access(const epocanva_context& context, std::uint32_t enabled) {
   return {context.privacy_class == EPOCANVA_PRIVACY_NORMAL ? learn::PrivacyClass::kNormal :
       context.privacy_class == EPOCANVA_PRIVACY_SENSITIVE ? learn::PrivacyClass::kSensitive :
-      learn::PrivacyClass::kUnknown, enabled != 0, context.context_target, context.generation};
+      learn::PrivacyClass::kUnknown, enabled != 0, context.context_target, context.generation,
+      learn::CurrentTickMilliseconds()};
 }
 struct Resource {
   std::shared_ptr<const pred::Model> model;
@@ -336,11 +339,105 @@ void MergeCandidate(std::vector<flow::Candidate>* candidates, flow::Candidate ca
     same->exact_expansion = exact;
   }
 }
+rk::SourceKind RankSource(std::uint32_t kind) {
+  switch (kind) {
+    case EPOCANVA_BACKEND_SPELLING: return rk::SourceKind::kSpelling;
+    case EPOCANVA_BACKEND_MORPHOLOGY: return rk::SourceKind::kMorphology;
+    case EPOCANVA_BACKEND_EXPANSION: return rk::SourceKind::kAbbreviation;
+    case EPOCANVA_BACKEND_CONVERSION: return rk::SourceKind::kConversion;
+    case EPOCANVA_BACKEND_PREDICTION: return rk::SourceKind::kPrediction;
+    case EPOCANVA_BACKEND_RAW: return rk::SourceKind::kOriginal;
+    default: return rk::SourceKind::kCompletion;
+  }
+}
+// A bounded personal re-rank of candidates the backend already produced. The backend's
+// order is the prior (normalised to [0,1] by position, not by the raw model log-probability,
+// so unrelated score scales are never added together). Stored preferences can move a
+// candidate within that order; they cannot displace the raw candidate, which is kept out
+// of the ranking pass and prepended unchanged. A missing/corrupt/empty preference set is
+// a no-op, so the model-free path is unchanged.
+void ApplyPersonalRanking(Session& session,
+                          const std::vector<learn::PreferenceRecord>& preferences,
+                          std::vector<flow::Candidate>* candidates) {
+  if (preferences.empty() || candidates == nullptr || candidates->size() < 2) return;
+  if (session.raw.size() > rk::kMaxInputKeyUtf8Bytes) return;
+  const char* language = Language(session.language);
+  if (language == nullptr) return;
+  const std::size_t first =
+      candidates->front().kind == EPOCANVA_BACKEND_RAW ? 1u : 0u;
+  // The backend contract puts the raw candidate first. If a future source violates that,
+  // skip the personal pass rather than risk displacing the user's own text.
+  for (std::size_t ordinal = first; ordinal < candidates->size(); ++ordinal)
+    if ((*candidates)[ordinal].kind == EPOCANVA_BACKEND_RAW) return;
+  const std::size_t remaining = candidates->size() - first;
+  if (remaining < 2) return;
+
+  rk::LearningEventModel learning;
+  for (const auto& row : preferences) {
+    if (row.candidate_id.empty()) continue;
+    rk::Preference value;
+    value.positive = static_cast<double>(row.positive_units) / 1000.0;
+    value.negative = static_cast<double>(row.negative_units) / 1000.0;
+    value.last_tick = row.last_tick_ms;
+    value.manual = row.manual;
+    (void)learning.SetPreference(language, row.candidate_id, value);
+  }
+  if (learning.size() == 0) return;
+
+  std::vector<rk::Proposal> proposals;
+  proposals.reserve(remaining);
+  for (std::size_t ordinal = first; ordinal < candidates->size(); ++ordinal) {
+    const auto& candidate = (*candidates)[ordinal];
+    if (candidate.text_utf8.empty() ||
+        candidate.text_utf8.size() > rk::kMaxDisplayTextUtf8Bytes) return;
+    rk::Proposal proposal;
+    proposal.text_utf8 = candidate.text_utf8;
+    proposal.language = language;
+    if (!candidate.lexeme_ids.empty())
+      proposal.candidate_id = learn::CandidateKey(candidate.lexeme_ids);
+    proposal.static_weight = remaining <= 1 ? 1.0 :
+        1.0 - static_cast<double>(ordinal - first) /
+                  static_cast<double>(remaining - 1);
+    proposal.context_logp = 0.0;  // the backend order is the prior; no second score scale
+    proposal.source = RankSource(candidate.kind);
+    proposals.push_back(std::move(proposal));
+  }
+
+  rk::RankRequest request;
+  request.user_language = language;
+  request.input_key_utf8 = session.raw;
+  request.generation = session.identity.generation;
+  request.proposals = std::move(proposals);
+  request.weights.prefix = 0.0;
+  request.weights.lexical = 1.0;
+  request.weights.context = 0.0;
+  // Engineering default, not a corpus-calibrated weight. The backend order is a strong
+  // prior; one selection adds +0.06 point, so a real context/model gap (for example
+  // "good" -> "morning") is not overturned by a single click. Repeated selections and
+  // explicit manual words can still move a candidate. This is the same honesty rule as
+  // AdaptiveRanker's DefaultWeights: replace through offline evaluation before claiming
+  // calibrated ranking.
+  request.weights.personal = 0.25;
+  request.weights.negative = 0.25;
+  request.weights.source = 0.0;
+  request.weights.language = 0.0;
+  request.learning_enabled = true;  // read existing preferences even while recording is paused
+  rk::AdaptiveRanker ranker;
+  const rk::RankResult result = ranker.Rank(request, &learning);
+  if (result.status != rk::RankStatus::kOk || result.ordered.size() != remaining) return;
+
+  std::vector<flow::Candidate> ordered;
+  ordered.reserve(candidates->size());
+  if (first == 1) ordered.push_back(std::move(candidates->front()));
+  for (const auto& item : result.ordered)
+    ordered.push_back(std::move((*candidates)[first + item.proposal_ordinal]));
+  *candidates = std::move(ordered);
+}
 void Personal(Session& session, const learn::Access& access, pred::PersonalCounts* counts,
               lex::RankingInputs* ranking, std::vector<lex::LearnedCount>* words,
-              std::vector<lex::ContextCount>* pairs) {
+              std::vector<lex::ContextCount>* pairs,
+              std::vector<learn::PreferenceRecord>* preferences) {
   learn::Snapshot snapshot;
-  if (!access.learning_enabled) return;
   if (session.backend->repository) {
     auto status = session.backend->repository->LoadSnapshot(session.flow->catalog(), [access] { return access; }, &snapshot);
     if (status != learn::Status::kOk) return;
@@ -348,6 +445,7 @@ void Personal(Session& session, const learn::Access& access, pred::PersonalCount
   } else if (session.flow->ReadLearning(access, &snapshot) != learn::Status::kOk) return;
   for (auto row : snapshot.words) { counts->unigrams.push_back({row.id,row.count}); words->push_back({row.id,row.count}); }
   for (auto row : snapshot.pairs) { counts->bigrams.push_back({row.previous_id,row.id,row.count}); pairs->push_back({row.previous_id,row.id,row.count}); }
+  if (preferences != nullptr) *preferences = snapshot.preferences;
   ranking->allow_learning = true; ranking->learned = words; ranking->context = pairs;
   const auto context = session.flow->Context(access);
   ranking->previous_id = context.empty() ? 0 : context.back();
@@ -501,7 +599,15 @@ epocanva_status RegisterSession(Backend& backend, Resource& resource, Profile pr
   auto session = std::make_unique<Session>();
   session->backend = &backend; session->resource = &resource; session->profile = std::move(profile);
   session->language = options.language; session->mode = options.input_mode; session->identity = options.context;
-  session->flow = flow::Session::Create(resource.catalog, resource.model_sha256, Access(options.context, options.learning_enabled));
+  // Learning is scoped by profile, not merely by language. The short primary subtag stays
+  // in Catalog::language; the numeric product profile identity gets its own file namespace
+  // and header field. A full BCP 47 tag is never stored in the language slot.
+  auto catalog = resource.catalog;
+  catalog.language = Language(options.language);
+  catalog.profile_id = session->profile.id ? std::to_string(session->profile.id) : "legacy";
+  catalog.name_space = "backend." + catalog.language +
+      (session->profile.id ? ".p" + catalog.profile_id : ".legacy") + ".v1";
+  session->flow = flow::Session::Create(catalog, resource.model_sha256, Access(options.context, options.learning_enabled));
   if (!session->flow) return EPOCANVA_BACKEND_INVALID_RESOURCE;
   if (options.language == EPOCANVA_BACKEND_ZH) {
     auto request = Init<epocanva_session_options>(); request.context = options.context;
@@ -646,9 +752,13 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
       flow::Commit pending; if (session.flow->ReadCommit(access, &pending) == flow::Status::kOk) return EPOCANVA_BUSY;
       pred::PersonalCounts personal; lex::RankingInputs ranking;
       std::vector<lex::LearnedCount> words; std::vector<lex::ContextCount> pairs;
-      Personal(session, access, &personal, &ranking, &words, &pairs);
+      std::vector<learn::PreferenceRecord> preferences;
+      Personal(session, access, &personal, &ranking, &words, &pairs, &preferences);
       const auto context = session.flow->Context(access);
-      const auto* counts = access.learning_enabled ? &personal : nullptr;
+      // Existing preferences participate even while recording is paused. An empty set is
+      // the model-free path and leaves the backend's order untouched.
+      const auto* counts =
+          personal.unigrams.empty() && personal.bigrams.empty() ? nullptr : &personal;
       std::vector<flow::Candidate> candidates;
       bool complete = true;
       session.rime_ordinals.clear();
@@ -872,6 +982,11 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
         });
         if(candidates.size()>query->max_candidates)candidates.resize(query->max_candidates);
       }
+      // Personal preferences re-rank the completion/conversion menu the user is choosing
+      // from. Next-word/next-unit predictions keep their context-model order in this phase;
+      // a just-committed word must not displace the model's next-word prediction.
+      if (query->query_kind == EPOCANVA_BACKEND_COMPLETION)
+        ApplyPersonalRanking(session, preferences, &candidates);
       return Result(session.flow->Publish(std::move(candidates),complete,access));
     });
   });

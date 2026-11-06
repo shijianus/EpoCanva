@@ -39,6 +39,28 @@ add_dependencies(epocanva_backend_contract_tests epocanva_backend_fixtures)
 add_test(NAME backend.headless.contracts COMMAND epocanva_backend_contract_tests
   "${_backend_fixtures}/model.tsv" "${_backend_fixtures}/model.sha256")
 set_tests_properties(backend.headless.contracts PROPERTIES TIMEOUT 120)
+
+add_executable(epocanva_backend_learning_integration learning_integration.cc)
+target_link_libraries(epocanva_backend_learning_integration PRIVATE
+  epocanva_backend epocanva_windows_learning_repository advapi32)
+target_include_directories(epocanva_backend_learning_integration PRIVATE "${_backend_repo}")
+target_compile_features(epocanva_backend_learning_integration PRIVATE cxx_std_17)
+target_compile_definitions(epocanva_backend_learning_integration PRIVATE
+  NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+target_compile_options(epocanva_backend_learning_integration PRIVATE
+  /utf-8 /permissive- /W4 /EHsc)
+add_dependencies(epocanva_backend_learning_integration epocanva_backend_fixtures)
+add_test(NAME backend.learning.persistence_ranking
+  COMMAND epocanva_backend_learning_integration
+    "${_backend_fixtures}/model.tsv" "${_backend_fixtures}/model.sha256"
+    "${CMAKE_CURRENT_BINARY_DIR}/learning-integration")
+set_tests_properties(backend.learning.persistence_ranking PROPERTIES TIMEOUT 120
+  LABELS "backend;learning;integration")
+add_test(NAME backend.learning.can_fail COMMAND "${CMAKE_COMMAND}"
+  "-DEXE=$<TARGET_FILE:epocanva_backend_learning_integration>" -DEXPECTED_EXIT=1
+  -DCASE=backend-learning-negative -DMARKER=RESULT -DMARKER_POLICY=forbid
+  -DPASS_ARGS=--force-failure
+  -P "${_backend_repo}/tests/english_completion/assert_exit.cmake")
 if(EPOCANVA_BACKEND_WITH_FRENCH_DICTIONARY)
   add_executable(epocanva_backend_profiles profiles.cc)
   target_link_libraries(epocanva_backend_profiles PRIVATE epocanva_backend epocanva_prediction_core)

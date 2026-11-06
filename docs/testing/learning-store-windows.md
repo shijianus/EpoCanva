@@ -1,4 +1,10 @@
-# Windows learning-store persistence verification
+# Windows learning-store persistence verification (historical v2)
+
+> **Historical (schema v2).** The current schema is v3 with profile/language
+> identity, decay, negative evidence, manual entries, `.v2` migration backups,
+> `.corrupt` quarantine and clear-all semantics. See
+> `docs/testing/learning-store-v3.md` and ADR 0011. The commands and results below
+> are the v2 evidence for that revision, not the current test count.
 
 ## Scope and environment
 

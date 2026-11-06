@@ -90,13 +90,18 @@ add_library(epocanva_product_state STATIC
   product_io.cc
   product_io.h
   product_settings.cc
+  product_learning.cc
+  product_learning.h
   product_backend_resources.cc
   product_settings.h)
 target_compile_definitions(epocanva_product_state PRIVATE
   ${_product_definitions} ${_product_defines})
 target_compile_options(epocanva_product_state PRIVATE ${_product_options})
 target_include_directories(epocanva_product_state PUBLIC "${_product_source_dir}")
-target_link_libraries(epocanva_product_state PUBLIC bcrypt shell32 ole32)
+target_include_directories(epocanva_product_state PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/../../..")
+target_link_libraries(epocanva_product_state PUBLIC bcrypt shell32 ole32
+  epocanva_windows_learning_repository advapi32)
 
 add_library(epocanva_product_core STATIC
   product_manifest.cc
@@ -419,6 +424,8 @@ target_link_libraries(epocanva_runtime_modules_tests PRIVATE epocanva_engine_bri
 add_executable(epocanva_extended_settings_tests tests/extended_settings_tests.cc)
 target_compile_definitions(epocanva_extended_settings_tests PRIVATE ${_product_definitions})
 target_compile_options(epocanva_extended_settings_tests PRIVATE ${_product_options})
+target_include_directories(epocanva_extended_settings_tests PRIVATE
+  "${_product_source_dir}" "${CMAKE_CURRENT_LIST_DIR}/../../..")
 target_link_libraries(epocanva_extended_settings_tests PRIVATE epocanva_product_state)
 
 add_executable(epocanva_ui_tests

@@ -327,20 +327,33 @@ struct Fixture {
     return options;
   }
   const pred::Model& Model(std::uint32_t language) const { return *models.at(language - 1); }
-  learn::Catalog Catalog(std::uint32_t language) const {
-    learn::Catalog catalog;
-    catalog.name_space = std::string("backend.") + kModels.at(language - 1).language + ".v1";
-    catalog.sha256 = kModels.at(language - 1).sha256;
-    for (const auto& row : Model(language).lexemes())
-      if (row.language_id == kModels.at(language - 1).language) catalog.admitted_ids.push_back(row.id);
-    REQUIRE(!catalog.admitted_ids.empty(), "reference-catalog-admits-real-ids");
-    return catalog;
+  learn::Catalog Catalog(std::uint32_t profile_id) const {
+    for (const auto& binding : bindings) {
+      if (binding.profile.profile_id != profile_id) continue;
+      const auto language = binding.profile.language;
+      const auto& model = kModels.at(language - 1);
+      learn::Catalog catalog;
+      catalog.name_space = std::string("backend.") + model.language + ".p" +
+          std::to_string(profile_id) + ".v1";
+      catalog.sha256 = model.sha256;
+      catalog.profile_id = std::to_string(profile_id);
+      catalog.language = model.language;
+      for (const auto& row : Model(language).lexemes())
+        if (row.language_id == model.language) catalog.admitted_ids.push_back(row.id);
+      REQUIRE(!catalog.admitted_ids.empty(), "reference-catalog-admits-real-ids");
+      return catalog;
+    }
+    REQUIRE(false, "known-profile-for-learning-catalog");
+    return {};
   }
 };
 
+std::uint32_t EnglishLearningProfile(const Fixture& fixture) {
+  return fixture.bindings[kEnglishQwerty].profile.profile_id;
+}
+
 struct Backend {
-  epocanva_backend_handle handle = 0;
-  explicit Backend(Fixture& fixture, bool deploy = true) {
+  epocanva_backend_handle handle = 0;  explicit Backend(Fixture& fixture, bool deploy = true) {
     auto options = fixture.Options(deploy);
     EXPECT(epocanva_backend_open_profiles(&options, &handle), EPOCANVA_OK, "real-profiles-backend-open");
     REQUIRE(handle != 0, "backend-handle-nonzero");
@@ -539,11 +552,11 @@ pred::LexemeId Known(const pred::Model& model, std::uint32_t language,
   return row->id;
 }
 
-learn::Snapshot Disk(const Fixture& fixture, std::uint32_t language) {
+learn::Snapshot Disk(const Fixture& fixture, std::uint32_t profile_id) {
   learn::WindowsLearningRepository repository(fixture.learning_root);
   learn::Snapshot snapshot;
   const learn::Access access{learn::PrivacyClass::kNormal, true, 900, 1};
-  const auto status = repository.LoadSnapshot(fixture.Catalog(language), [access] { return access; }, &snapshot);
+  const auto status = repository.LoadSnapshot(fixture.Catalog(profile_id), [access] { return access; }, &snapshot);
   REQUIRE(status == learn::Status::kOk, "isolated-learning-snapshot-readable");
   return snapshot;
 }
@@ -567,8 +580,8 @@ std::uint64_t PairCount(const learn::Snapshot& snapshot, pred::LexemeId previous
   for (const auto& pair : snapshot.pairs) if (pair.previous_id == previous && pair.id == id) return pair.count;
   return 0;
 }
-void Unchanged(const Fixture& fixture, std::uint32_t language, const learn::Snapshot& before) {
-  REQUIRE(Same(Disk(fixture, language), before), "no-unacknowledged-learning-reached-disk");
+void Unchanged(const Fixture& fixture, std::uint32_t profile_id, const learn::Snapshot& before) {
+  REQUIRE(Same(Disk(fixture, profile_id), before), "no-unacknowledged-learning-reached-disk");
 }
 epocanva_backend_commit CopyCommit(const Session& session, const std::string& expected_utf8) {
   auto commit = Init<epocanva_backend_commit>();
@@ -897,14 +910,14 @@ epocanva_backend_ack_result Confirm(const Session& session, std::uint64_t event_
 void Confirmations(const Backend& backend, const Fixture& fixture) {
   Session session(backend, fixture.bindings[kEnglishQwerty].profile, true);
   const auto& model = fixture.Model(1);
-  const auto before = Disk(fixture, 1);
+  const auto before = Disk(fixture, EnglishLearningProfile(fixture));
   const auto have = Known(model, 1, "have", UINT64_C(13325501036273435738));
   const auto a = Known(model, 1, "a", UINT64_C(9897245132611483951));
   const auto good = Known(model, 1, "good", UINT64_C(11777008999757419033));
   const auto morning = Known(model, 1, "morning", UINT64_C(6271964512396262284));
   SetContext(session, "have");
   SetInput(session, "good"); auto unselected = Query(session, model);
-  Unchanged(fixture, 1, before);
+  Unchanged(fixture, EnglishLearningProfile(fixture), before);
   auto ack = Confirm(session, 10, "a");
   REQUIRE(ack.consumed && ack.context_advanced && !ack.learned, "ordinary-confirmation-is-transient-only");
   OldMenuRejected(session, unselected);
@@ -926,21 +939,21 @@ void Confirmations(const Backend& backend, const Fixture& fixture) {
   ExpectPrediction(session, model, {});
   SetInput(session, "hello"); Query(session, model); Cancel(session);
   ExpectPrediction(session, model, {});
-  Unchanged(fixture, 1, before);
+  Unchanged(fixture, EnglishLearningProfile(fixture), before);
 }
 
 void Persistence(const Backend& backend, const Fixture& fixture) {
   const auto& model = fixture.Model(1);
   const auto good = Known(model, 1, "good", UINT64_C(11777008999757419033));
   const auto morning = Known(model, 1, "morning", UINT64_C(6271964512396262284));
-  auto before = Disk(fixture, 1);
+  auto before = Disk(fixture, EnglishLearningProfile(fixture));
   REQUIRE(before.revision == 0 && before.words.empty() && before.pairs.empty(), "isolated-run-starts-with-zero-learning");
   Session session(backend, fixture.bindings[kEnglishQwerty].profile, true);
   SetInput(session, "good"); auto menu = Query(session, model);
   const auto& row = Find(menu, "good", true);
   REQUIRE(row.ids == std::vector<pred::LexemeId>{good}, "confirmed-candidate-has-explicit-known-id");
-  Unchanged(fixture, 1, before);
-  Select(session, menu, row); Unchanged(fixture, 1, before);
+  Unchanged(fixture, EnglishLearningProfile(fixture), before);
+  Select(session, menu, row); Unchanged(fixture, EnglishLearningProfile(fixture), before);
   auto sizing = Init<epocanva_backend_commit>();
   EXPECT(epocanva_backend_read_commit(session.handle, &session.request, &sizing, nullptr, 0),
          EPOCANVA_BUFFER_TOO_SMALL, "learning-commit-sizing");
@@ -951,26 +964,26 @@ void Persistence(const Backend& backend, const Fixture& fixture) {
   EXPECT(epocanva_backend_set_context(session.handle, &session.request, View("have a")),
          EPOCANVA_BUSY, "context-import-cannot-replace-pending-commit");
   const auto commit = CopyCommit(session, "good");
-  Unchanged(fixture, 1, before);
+  Unchanged(fixture, EnglishLearningProfile(fixture), before);
   result = Ack(session, commit.commit_token);
   REQUIRE(result.learned && result.context_advanced &&
       result.persistence_status == static_cast<std::uint32_t>(learn::Status::kOk), "ack-persists-confirmed-id");
-  auto learned = Disk(fixture, 1);
+  auto learned = Disk(fixture, EnglishLearningProfile(fixture));
   REQUIRE(learned.revision == 1 && learned.words.size() == 1 && Count(learned, good) == 1 && learned.pairs.empty(),
           "disk-contains-exactly-one-confirmed-id-count");
   EXPECT(epocanva_backend_ack_commit(session.handle, &session.request, commit.commit_token, 1, &result),
          EPOCANVA_STALE_SNAPSHOT, "duplicate-ack-cannot-double-count-disk");
-  Unchanged(fixture, 1, learned);
+  Unchanged(fixture, EnglishLearningProfile(fixture), learned);
 
   SetInput(session, "morning"); menu = Query(session, model);
   const auto& next = Find(menu, "morning", true);
   REQUIRE(next.ids == std::vector<pred::LexemeId>{morning}, "second-confirmed-candidate-has-explicit-known-id");
   Select(session, menu, next);
   auto next_commit = CopyCommit(session, "morning");
-  Unchanged(fixture, 1, learned);
+  Unchanged(fixture, EnglishLearningProfile(fixture), learned);
   result = Ack(session, next_commit.commit_token);
   REQUIRE(result.learned && result.context_advanced, "second-confirmed-id-learns");
-  learned = Disk(fixture, 1);
+  learned = Disk(fixture, EnglishLearningProfile(fixture));
   REQUIRE(learned.revision == 2 && learned.words.size() == 2 && Count(learned, good) == 1 &&
       Count(learned, morning) == 1 && learned.pairs.size() == 1 && PairCount(learned, good, morning) == 1,
       "disk-pair-only-links-two-confirmed-candidates");
@@ -981,7 +994,7 @@ void Persistence(const Backend& backend, const Fixture& fixture) {
   next_commit = CopyCommit(session, "good");
   result = Ack(session, next_commit.commit_token);
   REQUIRE(result.learned, "candidate-after-context-import-learns-own-id");
-  learned = Disk(fixture, 1);
+  learned = Disk(fixture, EnglishLearningProfile(fixture));
   REQUIRE(learned.revision == 3 && Count(learned, good) == 2 && Count(learned, morning) == 1 &&
       learned.words.size() == 2 && learned.pairs.size() == 1 && PairCount(learned, good, morning) == 1,
       "imported-text-never-becomes-personal-learning-predecessor");
@@ -992,19 +1005,19 @@ void Persistence(const Backend& backend, const Fixture& fixture) {
   Select(session, menu, menu.rows.front());
   next_commit = CopyCommit(session, "hello"); result = Ack(session, next_commit.commit_token);
   REQUIRE(!result.learned && result.context_advanced, "raw-selection-can-advance-transient-context-without-learning");
-  Unchanged(fixture, 1, learned);
+  Unchanged(fixture, EnglishLearningProfile(fixture), learned);
   SetInput(session, "good"); menu = Query(session, model);
   Select(session, menu, Find(menu, "good", true));
   next_commit = CopyCommit(session, "good"); result = Ack(session, next_commit.commit_token, false);
   REQUIRE(!result.learned && !result.context_advanced, "unapplied-host-edit-does-not-learn");
-  Unchanged(fixture, 1, learned);
+  Unchanged(fixture, EnglishLearningProfile(fixture), learned);
 }
 
 void Privacy(const Backend& backend, const Fixture& fixture) {
   for (const auto& test : kContexts) {
     const auto& profile = fixture.bindings[test.binding].profile;
     const auto& model = fixture.Model(profile.language);
-    const auto before = Disk(fixture, profile.language);
+    const auto before = Disk(fixture, profile.profile_id);
     const std::array<std::uint32_t, 2> privacy_classes{{EPOCANVA_PRIVACY_SENSITIVE, EPOCANVA_PRIVACY_UNKNOWN}};
     for (const std::uint32_t privacy : privacy_classes) {
       auto options = Init<epocanva_backend_session_options>();
@@ -1084,7 +1097,7 @@ void Privacy(const Backend& backend, const Fixture& fixture) {
       cleared = Read(session, model);
       REQUIRE(cleared.raw_utf8.empty() && cleared.preedit_utf8.empty() && cleared.rows.empty(), "private-cancel-leaves-no-composition");
       ExpectPrediction(session, model, {});
-      Unchanged(fixture, profile.language, before);
+      Unchanged(fixture, profile.profile_id, before);
     }
   }
 }
@@ -1122,7 +1135,7 @@ void Admission(Fixture& fixture) {
   REQUIRE(session == 0, "no-fake-kanji-session");
 }
 void Reopened(const Backend& backend, const Fixture& fixture) {
-  const auto snapshot = Disk(fixture, 1);
+  const auto snapshot = Disk(fixture, EnglishLearningProfile(fixture));
   const auto& model = fixture.Model(1);
   const auto good = Known(model, 1, "good", UINT64_C(11777008999757419033));
   const auto morning = Known(model, 1, "morning", UINT64_C(6271964512396262284));
@@ -1132,16 +1145,17 @@ void Reopened(const Backend& backend, const Fixture& fixture) {
   pred::PersonalCounts personal;
   for (const auto& row : snapshot.words) personal.unigrams.push_back({row.id, row.count});
   for (const auto& row : snapshot.pairs) personal.bigrams.push_back({row.previous_id, row.id, row.count});
-  Session session(backend, fixture.bindings[kEnglishDvorak].profile, true);
+  Session session(backend, fixture.bindings[kEnglishQwerty].profile, true);
   auto learned = ExpectPrediction(session, model, {}, EPOCANVA_BACKEND_NEXT_WORD, &personal);
   REQUIRE(learned.rows.front().ids == std::vector<pred::LexemeId>{good}, "reopened-public-ranking-exposes-confirmed-learning");
   session.request.learning_enabled = 0;
-  auto static_only = ExpectPrediction(session, model, {}, EPOCANVA_BACKEND_NEXT_WORD);
-  REQUIRE(static_only.rows.front().ids != learned.rows.front().ids, "consent-off-does-not-read-personal-ranking");
+  auto paused = ExpectPrediction(session, model, {}, EPOCANVA_BACKEND_NEXT_WORD, &personal);
+  REQUIRE(paused.rows.front().ids == learned.rows.front().ids,
+          "paused-recording-still-uses-existing-personal-ranking");
   session.request.learning_enabled = 1;
   SetContext(session, "good");
   ExpectPrediction(session, model, {good}, EPOCANVA_BACKEND_NEXT_UNIT, &personal);
-  Unchanged(fixture, 1, snapshot);
+  Unchanged(fixture, EnglishLearningProfile(fixture), snapshot);
 }
 
 int Run(const fs::path& repository_root, const fs::path& run_root,

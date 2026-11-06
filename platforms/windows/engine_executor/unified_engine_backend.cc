@@ -162,7 +162,12 @@ class UnifiedEngineBackend final : public EngineBackend {
     options.profiles = resources.data(); options.profile_count = static_cast<std::uint32_t>(resources.size());
     options.allow_test_fixture = config_.allow_test_fixture ? 1u : 0u;
     options.rime_options = config_.use_rime ? &rime : nullptr;
-    // No learning root: a revocable queue value is not the ABI's current field lock.
+    // The root is used for reads even when recording is paused. The backend's write gate
+    // still requires learning_enabled on the request; this adapter only sets that when
+    // learning_writes_trusted is true (never in a product build until a real field lock
+    // covers the queued worker path).
+    const std::string learning_root = config_.learning_root.u8string();
+    if (!learning_root.empty()) options.learning_root = View(learning_root);
     const auto status = epocanva_backend_open_profiles(&options, &backend_);
     result.status = status == EPOCANVA_OK ? RuntimeStartStatus::kOk : RuntimeStartStatus::kInitializeFailed;
     result.diagnostic = status == EPOCANVA_OK ? "" : "unified backend open refused: " + std::to_string(status);
@@ -195,7 +200,11 @@ class UnifiedEngineBackend final : public EngineBackend {
     auto request = Header<epocanva_backend_request>();
     request.context = {work.access.context_target, work.access.generation,
         static_cast<std::uint32_t>(allowed ? EPOCANVA_PRIVACY_NORMAL : EPOCANVA_PRIVACY_UNKNOWN), 0};
-    request.learning_enabled = 0;
+    // Reads use the root regardless of this flag; a positive value is required for a
+    // durable write. Product builds keep learning_writes_trusted false.
+    request.learning_enabled =
+        (allowed && config_.learning_writes_trusted && config_.learning_recording_enabled)
+            ? 1u : 0u;
     if (!allowed && work.operation != BackendOperation::kAcknowledgeCommit) {
       if (client.session) (void)epocanva_backend_cancel(client.session, &request);
       result.backend_status = EPOCANVA_PRIVACY_DENIED; return result;

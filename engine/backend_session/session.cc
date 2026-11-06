@@ -55,6 +55,17 @@ bool Sha(std::string_view value) {
     return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
   });
 }
+// A bounded, deterministic lexical identity for an admitted candidate. ASCII case is
+// folded; non-ASCII surfaces are preserved exactly because this layer has no Unicode
+// case-folding table. The stable CandidateKey remains the learning key either way.
+std::string LearningIdentity(const std::string& text_utf8) {
+  if (text_utf8.size() > 96 || !Utf8(text_utf8)) return {};
+  std::string identity = text_utf8;
+  for (char& byte : identity) {
+    if (byte >= 'A' && byte <= 'Z') byte = static_cast<char>(byte - 'A' + 'a');
+  }
+  return identity;
+}
 }  // namespace
 
 struct Session::Impl {
@@ -206,6 +217,10 @@ AckResult Session::Acknowledge(std::uint64_t token, bool applied,
   selected.host_write_confirmed = true;
   selected.previous_id = current.learning_enabled ? impl_->learning_previous_id : 0;
   selected.lexeme_ids = impl_->commit.lexeme_ids;
+  selected.candidate_id = learning::CandidateKey(selected.lexeme_ids);
+  // The normalized surface is descriptive personal data, not context. Keep it only when
+  // it fits the store's bounded identity field and contains no control characters.
+  selected.normalized_identity = LearningIdentity(impl_->commit.text_utf8);
   Snapshot next_snapshot;
   next_snapshot.raw_utf8 = impl_->commit.remaining_raw_utf8;
   next_snapshot.preedit_utf8 = impl_->commit.remaining_preedit_utf8;
@@ -291,15 +306,7 @@ learning::Status Session::ReadLearning(const Access& current, learning::Snapshot
 }
 learning::Status Session::ImportLearning(const learning::Snapshot& snapshot, const Access& current) {
   if (Check(current) != Status::kOk) return learning::Status::kDenied;
-  if (snapshot.words.size() > learning::kMaxWordRecords || snapshot.pairs.size() > learning::kMaxPairRecords)
-    return learning::Status::kLimitExceeded;
-  std::string bytes = "epocanva-learning\t2\nnamespace\t" + impl_->store->catalog().name_space +
-      "\ncatalog-sha256\t" + impl_->store->catalog().sha256 + "\nrevision\t" +
-      std::to_string(snapshot.revision) + "\n";
-  for (auto row : snapshot.words) bytes += "w\t" + std::to_string(row.id) + "\t" + std::to_string(row.count) + "\n";
-  for (auto row : snapshot.pairs) bytes += "b\t" + std::to_string(row.previous_id) + "\t" +
-      std::to_string(row.id) + "\t" + std::to_string(row.count) + "\n";
-  return impl_->store->Load(bytes, current);
+  return impl_->store->Import(snapshot, current);
 }
 const learning::Catalog& Session::catalog() const { return impl_->store->catalog(); }
 const std::string& Session::model_sha256() const { return impl_->model_sha256; }

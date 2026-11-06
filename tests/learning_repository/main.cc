@@ -72,6 +72,22 @@ fs::path Leaf(const fs::path& root, const wchar_t* extension,
   }
   return StoreDirectory(root) / (stem + extension);
 }
+fs::path LatestCorrupt(const fs::path& root) {
+  const auto directory = StoreDirectory(root);
+  std::error_code error;
+  if (!fs::exists(directory, error) || error) return {};
+  fs::path latest;
+  for (const auto& entry : fs::directory_iterator(directory, error)) {
+    if (error) break;
+    const std::wstring name = entry.path().filename().wstring();
+    if (name.find(L".corrupt") == std::wstring::npos) continue;
+    if (latest.empty() || entry.path().filename().wstring() >
+                              latest.filename().wstring()) {
+      latest = entry.path();
+    }
+  }
+  return latest;
+}
 fs::path NewRoot(const fs::path& base, const wchar_t* name) {
   const fs::path root = base / (std::wstring(name) + L"-" +
       std::to_wstring(::GetCurrentProcessId()) + L"-" + std::to_wstring(::GetTickCount64()));
@@ -105,7 +121,8 @@ std::vector<BYTE> CurrentSid() {
   return sid;
 }
 
-bool ApplyAcl(const fs::path& path, bool directory, DWORD mask, bool add_world = false) {
+bool ApplyAcl(const fs::path& path, bool directory, DWORD mask, bool add_world = false,
+              bool set_owner = false) {
   auto sid = CurrentSid();
   if (sid.empty()) return false;
   EXPLICIT_ACCESS_W entries[2] = {};
@@ -126,15 +143,16 @@ bool ApplyAcl(const fs::path& path, bool directory, DWORD mask, bool add_world =
   }
   PACL acl = nullptr;
   if (::SetEntriesInAclW(add_world ? 2 : 1, entries, nullptr, &acl) != ERROR_SUCCESS) return false;
+  SECURITY_INFORMATION information = DACL_SECURITY_INFORMATION |
+      PROTECTED_DACL_SECURITY_INFORMATION;
+  if (set_owner) information |= OWNER_SECURITY_INFORMATION;
   const DWORD result = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
-      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-      nullptr, nullptr, acl, nullptr);
+      information, set_owner ? sid.data() : nullptr, nullptr, acl, nullptr);
   ::LocalFree(acl);
   return result == ERROR_SUCCESS;
 }
 
-bool RestrictedAcl(const fs::path& path, bool directory) {
-  Handle file(::CreateFileW(path.c_str(), READ_CONTROL,
+bool RestrictedAcl(const fs::path& path, bool directory) {  Handle file(::CreateFileW(path.c_str(), READ_CONTROL,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
       FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0), nullptr));
   if (!file.valid()) return false;
@@ -162,6 +180,15 @@ bool RestrictedAcl(const fs::path& path, bool directory) {
   }
   ::LocalFree(descriptor);
   return ok;
+}
+
+// std::ofstream may recreate a leaf and inherit the directory ACE (with inherited flags),
+// while the adapter deliberately requires its exact protected one-ACE descriptor. Fixture
+// writes that the adapter must read restore that descriptor explicitly.
+void WritePrivateFixture(const fs::path& path, const std::string& bytes) {
+  WriteFixture(path, bytes);
+  Check(ApplyAcl(path, false, FILE_ALL_ACCESS, false, true),
+        "fixture private owner and ACL restored");
 }
 
 std::uint64_t Count(const Snapshot& snapshot, LexemeId id) {
@@ -198,9 +225,13 @@ void Persistence(const fs::path& base) {
   Check(fs::file_size(Leaf(root, L".dat")) <= kMaxStoreBytes, "durable store bounded");
   Check(fs::file_size(Leaf(root, L".lock")) == 0, "stable lock has no personal data");
   const auto bytes = ReadFixture(Leaf(root, L".dat"));
-  Check(bytes.find("epocanva-learning\t2\n") == 0 && bytes.find("context") == bytes.npos &&
+  Check(bytes.find("epocanva-learning\t3\n") == 0 && bytes.find("context") == bytes.npos &&
         bytes.find("generation") == bytes.npos && bytes.find("host") == bytes.npos,
         "only versioned catalog ID/count representation persists");
+  Check(bytes.find("profile-id\tlegacy\n") != bytes.npos &&
+        bytes.find("language\ten\n") != bytes.npos &&
+        bytes.find("decay-unit\tms\n") != bytes.npos,
+        "v3 profile, language and decay unit persist");
   Check(!fs::exists(Leaf(root, L".tmp")), "temporary file consumed by atomic rename");
   // A real extra handle to the old file reproduces legacy FileRenameInfo's
   // replacement restriction. POSIX replacement must preserve that reader's old
@@ -228,8 +259,10 @@ void Persistence(const fs::path& base) {
   Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "real persisted v1 migration");
   Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kOk, "migrated snapshot");
   Check(snapshot.revision == 10 && Count(snapshot, 11) == 5, "migration retains counts and revision");
-  Check(ReadFixture(Leaf(root, L".dat")).find("epocanva-learning\t2\n") == 0,
-        "migration writes version two only");
+  Check(ReadFixture(Leaf(root, L".dat")).find("epocanva-learning\t3\n") == 0,
+        "migration writes version three only");
+  Check(ReadFixture(Leaf(root, L".v2")) == legacy,
+        "pre-v3 bytes preserved in the private backup");
   Cleanup(root);
 }
 
@@ -265,10 +298,19 @@ void Privacy(const fs::path& base) {
     const auto load = repository.LoadSnapshot(catalog, callback, &snapshot);
     const bool after_ok = ::GetProcessIoCounters(::GetCurrentProcess(), &after) != FALSE;
     Expect(record, Status::kDenied, "privacy state denies record");
-    Expect(load, Status::kDenied, "privacy state denies load");
-    Check(queries == 2, "fresh initial callback on each denied operation");
-    Check(before_ok && after_ok && SameIo(before, after), "denied learning performs zero process file I/O");
-    Check(!fs::exists(StoreDirectory(root)), "denied operations create no storage");
+    if (state == 2) {
+      // Pausing recording is not the same as forgetting. Existing preferences remain
+      // readable for ranking, while the write above is refused.
+      Expect(load, Status::kOk, "paused recording still reads an empty snapshot");
+    } else {
+      Expect(load, Status::kDenied, "privacy state denies load");
+    }
+    Check(queries >= 2, "fresh initial callback on each denied or read operation");
+    if (state != 2) {
+      Check(before_ok && after_ok && SameIo(before, after),
+            "denied learning performs zero process file I/O");
+    }
+    Check(!fs::exists(StoreDirectory(root)), "denied and paused reads create no storage");
     if (state != 2) {
       exported = "clear this";
       Expect(repository.Export(catalog, true, callback, &exported), Status::kDenied,
@@ -343,17 +385,24 @@ void Errors(const fs::path& base) {
   const auto path = Leaf(root, L".dat");
   const auto valid = ReadFixture(path);
   Snapshot snapshot;
-  WriteFixture(path, std::string(kMaxStoreBytes + 1, 'x'));
+  WritePrivateFixture(path, std::string(kMaxStoreBytes + 1, 'x'));
   Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kLimitExceeded, "oversize rejected before allocation/read");
   Expect(repository.Record(catalog, Confirmed(), allow), Status::kLimitExceeded, "oversize not overwritten");
   Check(fs::file_size(path) == kMaxStoreBytes + 1, "oversize store unchanged");
   for (const auto& bytes : {std::string("broken\n"), std::string(), valid + "w\t11\t1\n"}) {
-    WriteFixture(path, bytes);
-    Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kInvalidFormat, "corrupt record rejected");
-    Expect(repository.Record(catalog, Confirmed(), allow), Status::kInvalidFormat, "corrupt record not reset silently");
-    Check(ReadFixture(path) == bytes, "corrupt bytes preserved for explicit deletion");
+    WritePrivateFixture(path, bytes);
+    Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kInvalidFormat,
+           "corrupt record reported");
+    const auto quarantined = LatestCorrupt(root);
+    Check(!quarantined.empty() && ReadFixture(quarantined) == bytes,
+          "corrupt bytes quarantined for explicit deletion");
+    Check(!fs::exists(path), "corrupt file removed from the active path");
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk,
+           "safe recovery starts a fresh v3 store after quarantine");
+    Check(ReadFixture(path).find("epocanva-learning\t3\n") == 0,
+          "recovery writes a v3 store");
   }
-  WriteFixture(path, valid);
+  WritePrivateFixture(path, valid);
   auto different = catalog; different.sha256 = std::string(64, 'b');
   Expect(repository.LoadSnapshot(different, allow, &snapshot), Status::kCatalogMismatch, "wrong digest fails closed");
   Expect(repository.Record(different, Confirmed(), allow), Status::kCatalogMismatch, "wrong digest never overwrites counts");
@@ -363,9 +412,9 @@ void Errors(const fs::path& base) {
   Check(revision_utf8_byte != exhausted.npos, "revision fixture located");
   if (revision_utf8_byte != exhausted.npos)
     exhausted.replace(revision_utf8_byte, 11, "revision\t18446744073709551615\n");
-  WriteFixture(path, exhausted);
+  WritePrivateFixture(path, exhausted);
   Expect(repository.Record(catalog, Confirmed(), allow), Status::kRevisionExhausted, "revision never wraps");
-  WriteFixture(path, valid);
+  WritePrivateFixture(path, valid);
   const DWORD original_attributes = ::GetFileAttributesW(path.c_str());
   Check(original_attributes != INVALID_FILE_ATTRIBUTES &&
       ::SetFileAttributesW(path.c_str(), original_attributes | FILE_ATTRIBUTE_READONLY),
@@ -665,6 +714,103 @@ void WaitChild(Handle& child, const char* label) {
   }
 }
 
+void Corruption(const fs::path& base) {
+  const auto root = NewRoot(base, L"corruption");
+  const auto catalog = TestCatalog();
+  WindowsLearningRepository repository(root);
+  Snapshot snapshot;
+  Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "corruption baseline");
+  const auto path = Leaf(root, L".dat");
+  const auto original = ReadFixture(path);
+  // A valid v1 file migrates to v3 and leaves a private backup. Both are learning data.
+  auto legacy = std::string("epocanva-learning\t1\nnamespace\t") + catalog.name_space +
+      "\ncatalog-sha256\t" + catalog.sha256 + "\nrevision\t4\nw\t11\t3\n";
+  WritePrivateFixture(path, legacy);
+  const Status migration_read = repository.LoadSnapshot(catalog, allow, &snapshot);
+  if (migration_read != Status::kOk) {
+    std::fprintf(stderr, "v1 migration read status=%s exists=%d restricted_acl=%d\n",
+                 StatusName(migration_read), fs::exists(path) ? 1 : 0,
+                 RestrictedAcl(path, false) ? 1 : 0);
+  }
+  Expect(migration_read, Status::kOk, "v1 read migrates");
+  Check(ReadFixture(path).find("epocanva-learning\t3\n") == 0,
+        "read-time migration writes v3");
+  Check(fs::exists(Leaf(root, L".v2")), "v1 backup exists after migration");
+  Check(snapshot.revision == 4 && Count(snapshot, 11) == 3,
+        "read-time migration preserves counts");
+  // Corrupt the active file; the next read quarantines it, and explicit deletion must
+  // remove the quarantine and the backup rather than letting either resurrect state.
+  WritePrivateFixture(path, "broken\n");
+  Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kInvalidFormat,
+         "corrupt active file rejected");
+  const auto quarantined = LatestCorrupt(root);
+  Check(!quarantined.empty() && ReadFixture(quarantined) == "broken\n",
+        "corrupt bytes quarantined");
+  Check(fs::exists(Leaf(root, L".v2")), "pre-v3 backup still present before clear");
+  Expect(repository.Delete(catalog, true), Status::kOk, "explicit clear removes artifacts");
+  Check(!fs::exists(quarantined) && !fs::exists(Leaf(root, L".v2")) &&
+        !fs::exists(path), "clear removes data, quarantine and backup");
+  Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kOk,
+         "clear leaves an empty store");
+  Check(snapshot.words.empty() && snapshot.preferences.empty(),
+        "clear cannot be undone by a backup or quarantine file");
+  // DeleteAll covers every namespace and residual stage, and keeps only the empty locks.
+  auto second = catalog;
+  second.name_space = "fr.test-v3";
+  second.language = "fr";
+  second.profile_id = "7";
+  Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "first namespace record");
+  Expect(repository.Record(second, Confirmed(), allow), Status::kOk, "second namespace record");
+  WriteFixture(Leaf(root, L".tmp"), "staged sensitive aggregate");
+  WriteFixture(Leaf(root, L".v2"), "legacy sensitive aggregate");
+  Expect(repository.DeleteAll(false), Status::kDenied, "delete-all requires explicit action");
+  Expect(repository.DeleteAll(true), Status::kOk, "delete-all succeeds");
+  Check(!fs::exists(Leaf(root, L".dat")) && !fs::exists(Leaf(root, L".tmp")) &&
+        !fs::exists(Leaf(root, L".v2")),
+        "delete-all removes every namespace data artefact");
+  Check(!fs::exists(Leaf(root, L".dat", second)),
+        "delete-all removes the second namespace");
+  Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kOk,
+         "delete-all leaves an empty first namespace");
+  Expect(repository.LoadSnapshot(second, allow, &snapshot), Status::kOk,
+         "delete-all leaves an empty second namespace");
+  Cleanup(root);
+}
+
+void Feedback(const fs::path& base) {
+  const auto root = NewRoot(base, L"feedback");
+  const auto catalog = TestCatalog();
+  WindowsLearningRepository repository(root);
+  Snapshot snapshot;
+  Expect(repository.RecordFeedback(catalog, FeedbackKind::kManualWordAdded,
+                                   "manual:hello", "hello", {}, false, 0, true, allow),
+         Status::kOk, "manual word persisted");
+  Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kOk,
+         "manual word read");
+  Check(snapshot.preferences.size() == 1 &&
+        snapshot.preferences[0].candidate_id == "manual:hello" &&
+        snapshot.preferences[0].manual &&
+        snapshot.preferences[0].positive_units == kMaxPositiveUnits,
+        "manual word survives reopen with its flag");
+  auto paused = Normal();
+  paused.learning_enabled = false;
+  const PrivacyCallback paused_read = [paused] { return paused; };
+  Expect(repository.LoadSnapshot(catalog, paused_read, &snapshot), Status::kOk,
+         "paused recording reads the manual word");
+  Check(snapshot.preferences.size() == 1, "paused read keeps the preference");
+  Expect(repository.RecordFeedback(catalog, FeedbackKind::kRejected, "manual:hello",
+                                   "", {}, true, 9, false, paused_read),
+         Status::kDenied, "paused recording refuses new negative feedback");
+  Expect(repository.RecordFeedback(catalog, FeedbackKind::kManualWordRemoved,
+                                   "manual:hello", "", {}, false, 0, true,
+                                   paused_read),
+         Status::kOk, "paused recording allows explicit manual removal");
+  Expect(repository.LoadSnapshot(catalog, paused_read, &snapshot), Status::kOk,
+         "post-removal read");
+  Check(snapshot.preferences.empty(), "manual removal removes the durable preference");
+  Cleanup(root);
+}
+
 void Concurrency(const fs::path& base) {
   const auto root = NewRoot(base, L"concurrency");
   WindowsLearningRepository repository(root);
@@ -728,6 +874,8 @@ int wmain(int argc, wchar_t** argv) {
     else if (mode == L"privacy") Privacy(base);
     else if (mode == L"revocation") Revocation(base);
     else if (mode == L"errors") Errors(base);
+    else if (mode == L"corruption") Corruption(base);
+    else if (mode == L"feedback") Feedback(base);
     else if (mode == L"management") Management(base);
     else if (mode == L"acl") Acl(base);
     else if (mode == L"paths") Paths(base);

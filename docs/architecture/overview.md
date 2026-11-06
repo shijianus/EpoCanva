@@ -128,16 +128,25 @@ Windows 头文件——这是 Android 复用的前提。
   这是**唯一**的语言身份来源；`engine/language_packages` 委托它。
 - `engine/ranking`：有界确定性候选排序与学习事件语义。
   特征先钳制再加权；原样候选是硬分层；语言识别锁存；学习事件没有"按键/提交/退格"类型。
-  **尚未接进 `engine/backend` 或 TSF 产品路径**，只在单元测试与 `--demo` 中真实运行。
+  它已被 `engine/backend/backend_api.cc` 在 **COMPLETION 候选**上只读使用：
+  持久化偏好经 `LearningEventModel::SetPreference` 安装，后端既有顺序作为归一化先验，
+  个性化项为有界的工程默认权重（未做语料校准）；原文候选不进入重排且保持首位。
+  NEXT_WORD/NEXT_UNIT 在本阶段保持上下文模型顺序；扩展需阶段 E 的证据。
 
 ### 2.7 数据与学习存储
 
-- `engine/data_store/learning_store.{h,cc}`：有界 ID/计数模型，schema v2（v1 可迁移），
-  隐私分类在写入侧生效。
-- `engine/data_store/windows_learning_repository.cc`：原子写（临时文件 + 刷盘 + 重命名）、
-  孤儿临时文件清理、每次操作前重新查询字段权限。
-- 限制：无时间衰减、无负反馈、无用户覆盖字段；**产品路径未启用**（`learning_enabled = 0`）。
-- `engine/ranking` 的学习事件模型是**内存原型**，尚未持久化。
+- `engine/data_store/learning_store.{h,cc}`：schema v3。保留 v2 的有界 word/pair 计数，
+  新增 profile/language 头、候选稳定 ID、规范化词条身份、正/负摘要（千分点）、
+  UTC 毫秒衰减时间戳、手动词条标志、半衰期与 revision。v1/v2 可迁移；格式损坏原子拒绝。
+- 读取与写入分离：`Read`/`LoadSnapshot` 只要求 Normal 字段与当前 target/generation，
+  **不要求** `learning_enabled`；`Record`/`RecordFeedback` 才要求录制开关。
+  因此暂停录制停止新写入，但既有偏好仍参与排序；UI 明确说明这一点。
+- `engine/data_store/windows_learning_repository.cc`：原子写（临时文件 + 刷盘 + 句柄重命名）、
+  目录级共享锁、迁移前 `.v2` 备份、损坏文件 `.corrupt` 隔离、显式清除覆盖 data/tmp/backup/corrupt、
+  `DeleteAll` 覆盖所有 profile。每个 profile 使用独立 catalog namespace。
+- **产品持久学习仍关闭**：`ProductLearningWritesPermitted()` 为 false，因为 TSF 的字段权限
+  判定是一次查询，不是覆盖排队、worker、确认和持久化的 OS 锁。产品会读取既有 v3 偏好，
+  设置页显示"录制不可用"并提供真实清除入口；不能在无证据时宣称产品会写入学习。
 
 ### 2.8 可选神经层
 
@@ -167,12 +176,12 @@ Windows 头文件——这是 Android 复用的前提。
 | 模块 | 状态 |
 | --- | --- |
 | toolchain probe | 已实现（P0.1） |
-| CTest 基础设施 | 已实现；根工程当前 **72 条**用例 |
+| CTest 基础设施 | 已实现；根工程当前 **78 条**用例（1 条符号链接用例在有权限限制时显式跳过） |
 | librime 引入与构建 | 已锁定 librime 1.17.0 @ `33e7814…`，两套构建（baseline / component-probe） |
 | 自有 C ABI | **已实现**：`epocanva_engine.h` v1 + `epocanva_backend.h` v1/v2，有 C 消费者测试 |
 | engine backend session | **已实现**（单会话单语言；五语言资源绑定；确认/ACK 协议） |
 | platform-win/tsf | **已实现注册导出与编辑路径**；本机未注册；当前包的真实宿主闭环未完成 |
-| platform-win/tsf_product | 已实现控制器、候选窗口、权限门、STA 唤醒；产品学习关闭 |
+| platform-win/tsf_product | 已实现控制器、候选窗口、权限门、STA 唤醒；产品只读既有偏好，持久写入因字段锁未证明而关闭 |
 | platform-win/text | 已实现严格 UTF-8↔UTF-16 与边界表 |
 | platform-android/ime | **未实现** |
 | engine/locale | **已实现**（本轮）：BCP 47 + profile 注册表 + 3 条 CTest |
@@ -181,8 +190,8 @@ Windows 头文件——这是 Android 复用的前提。
 | engine/languages/{zh,fr,ja,ko} | 部分实现，各有独立单测 |
 | engine/lexical_service | 已实现（en/fr/ko 词法候选、拼写、形态、分段） |
 | engine/prediction | 已实现（n-gram、缩写解码、前缀索引） |
-| engine/ranking | **已实现但未接线**（本轮）：13 条 CTest，无持久化 |
-| engine/data_store | 已实现存储层；产品路径未启用；无衰减/负反馈 |
+| engine/ranking | 已实现；14 条 CTest；仅读偏好已接 COMPLETION 后端候选（有界、未校准）；NEXT_WORD 未接 |
+| engine/data_store | schema v3（v1/v2 迁移、profile/language、衰减、正负反馈、手动词条、损坏隔离与清除）；产品持久写入仍关闭 |
 | engine/neural | 推理已实现；未接产品；默认不启用 |
 | 模型目录 / 下载 / 领域路由 | **未实现** |
 | 安装包、签名、CI | **未实现** |

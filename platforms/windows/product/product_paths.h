@@ -26,6 +26,7 @@ namespace product {
 // Per-user layout:
 //   <user root>/settings.ini
 //   <user root>/logs/
+//   <user root>/learning-v2/                  (local learning store; schema v3 files)
 //   <user root>/engine/                       (Rime user data)
 //   <user root>/engine/epocanva_english.custom.yaml
 //   <user root>/engine/deploy-required
@@ -46,6 +47,7 @@ struct ProductPaths {
   std::filesystem::path user_root;
   std::filesystem::path engine_user_dir;
   std::filesystem::path log_dir;
+  std::filesystem::path learning_dir;  // <user root>/learning-v2, may be absent
   std::filesystem::path settings_file;
   std::filesystem::path schema_patch_file;
   std::filesystem::path deploy_marker_file;

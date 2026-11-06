@@ -37,6 +37,12 @@ class WindowsLearningRepository {
 
   Status Record(const Catalog& catalog, const Selection& selection,
                 const PrivacyCallback& privacy) const noexcept;
+  Status RecordFeedback(const Catalog& catalog, FeedbackKind kind,
+                        std::string_view candidate_id,
+                        std::string_view normalized_identity,
+                        const std::vector<LexemeId>& lexeme_ids, bool attributable,
+                        std::uint64_t generation, bool explicit_user_action,
+                        const PrivacyCallback& privacy) const noexcept;
   Status LoadSnapshot(const Catalog& catalog, const PrivacyCallback& privacy,
                       Snapshot* out) const noexcept;
 
@@ -51,6 +57,13 @@ class WindowsLearningRepository {
   // a later record; callers should disable learning first when that is unwanted.
   Status Delete(const Catalog& catalog, bool explicit_user_action,
                 const PrivacyCallback& privacy = {}) const noexcept;
+
+  // Explicit "clear all local learning" control. Removes every namespace data file,
+  // temporary stage, pre-v3 backup and .corrupt quarantine under this adapter's learning
+  // directory. It keeps the directory and the empty locks. It never reads file contents,
+  // so a corrupt or oversized file cannot block deletion. A writer that starts after this
+  // call can create new data; callers should pause recording first when that matters.
+  Status DeleteAll(bool explicit_user_action) const noexcept;
 
   // Explicit export returns bounded ID/count bytes to the caller, NOT a file.
   // A fresh Normal callback is required, but learning_enabled may be false and

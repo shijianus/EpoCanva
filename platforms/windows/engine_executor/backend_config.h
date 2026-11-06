@@ -61,13 +61,23 @@ struct UnifiedBackendConfig {
   bool morphology_enabled = false;
   // Mirrors ProductSettings: contextual abbreviation expansion is on by default.
   bool abbreviation_enabled = true;
+  // Existing local preferences are read for ranking whenever this root is supplied,
+  // even while recording is paused. Writes additionally require both flags below.
+  std::filesystem::path learning_root;
+  bool learning_recording_enabled = false;
+  // Hard gate: product builds leave this false because no OS-enforced field-permission
+  // lock covers the queued worker call chain. Tests and a future proven lock may set it.
+  bool learning_writes_trusted = false;
   bool operator==(const UnifiedBackendConfig& rhs) const {
     return std::tie(enabled, use_rime, allow_test_fixture, active_profile_id,
                     max_candidates, completion_enabled, spelling_enabled,
-                    morphology_enabled, abbreviation_enabled) ==
+                    morphology_enabled, abbreviation_enabled, learning_root,
+                    learning_recording_enabled, learning_writes_trusted) ==
            std::tie(rhs.enabled, rhs.use_rime, rhs.allow_test_fixture,
                     rhs.active_profile_id, rhs.max_candidates, rhs.completion_enabled,
-                    rhs.spelling_enabled, rhs.morphology_enabled, rhs.abbreviation_enabled) &&
+                    rhs.spelling_enabled, rhs.morphology_enabled, rhs.abbreviation_enabled,
+                    rhs.learning_root, rhs.learning_recording_enabled,
+                    rhs.learning_writes_trusted) &&
            profiles == rhs.profiles;
   }
 };

@@ -29,6 +29,7 @@ set(_ranking_cases
   ordering
   no_model
   learning
+  persistence
   isolation
   negative
   decay

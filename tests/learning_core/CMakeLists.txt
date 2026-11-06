@@ -13,7 +13,7 @@ set_target_properties(epocanva_learning_tests PROPERTIES CXX_EXTENSIONS OFF)
 if(MSVC)
   target_compile_options(epocanva_learning_tests PRIVATE /utf-8 /permissive- /W4 /EHsc)
 endif()
-foreach(case privacy identity counts migration malformed bounded export)
+foreach(case privacy identity counts migration malformed bounded feedback decay manual export)
   add_test(NAME learning.core.${case} COMMAND epocanva_learning_tests ${case})
 endforeach()
 add_test(NAME learning.core.can_fail COMMAND "${CMAKE_COMMAND}"

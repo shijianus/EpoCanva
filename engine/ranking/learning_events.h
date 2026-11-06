@@ -111,6 +111,14 @@ class LearningEventModel {
 
   EventStatus Apply(const LearningEvent& event);
 
+  // Persistence adapter, not an event: install a previously stored summary without
+  // counting a new selection, applying a gain or inventing attribution. Values are
+  // clamped to the same saturation bounds as Apply; non-finite input is rejected.
+  // Returns false for an invalid key or when the bounded table is full of manual
+  // entries (a user-authored entry is never evicted to make room for imported data).
+  bool SetPreference(std::string_view language, std::string_view candidate_id,
+                     const Preference& value);
+
   // Returns false and leaves `out` untouched when nothing is known.
   bool Lookup(std::string_view language, std::string_view candidate_id,
               Preference* out) const;
