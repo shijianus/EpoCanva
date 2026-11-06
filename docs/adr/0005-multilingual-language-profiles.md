@@ -2,8 +2,9 @@
 
 ## 状态
 
-Accepted。实现：`engine/locale/language_tag.{h,cc}`、`engine/locale/locale_profile.{h,cc}`；
-测试：`tests/locale_registry`（3 条 CTest）。
+Accepted。实现：`engine/locale/language_tag.{h,cc}`、`engine/locale/locale_profile.{h,cc}`、
+`engine/locale/backend_manifest.{h,cc}`；测试：`tests/locale_registry`（5 条 CTest，
+含确定性 manifest 与负向漂移门禁）。
 
 ## 背景
 
@@ -56,11 +57,14 @@ Accepted。实现：`engine/locale/language_tag.{h,cc}`、`engine/locale/locale_
 
 - 多了一层解析与匹配；调用方必须处理 `kAmbiguous`。
 - `language_packages` 现在依赖 `locale`，独立配置时必须一起引入。
-- 代码内目录与 `tools/backend/stage_resources.py` 生成的 13 个 profile
-  **尚未合并**，两套清单可能分叉。这是登记在案的已知风险。
+- 代码内目录是唯一手工维护的 profile/binding 来源；`tools/backend/stage_resources.py`
+  通过 `data/locale/backend-bindings.json` 读取由 C++ 导出的确定性 manifest，不再维护
+  第二份 13 行定义。`tests/locale_registry.manifest` 在每次构建中重新导出并逐字节比对，
+  C++ locale 层复制的 ABI 数值由同一测试对照 `epocanva_backend.h` 校验。
 
 ## 重新评估条件
 
 1. 需要支持扩展/私有子标签（例如第三方方案命名空间）时。
 2. 需要 Unicode 完整 Locale 语义（排序、日期、数字格式）时——那时才评估 ICU。
-3. 代码内目录与 staging 清单合并为单一数据源后，本 ADR 的 §决策 3 需要改成"从数据文件加载"。
+3. 若未来 profile 数量或方案状态开始由外部数据文件驱动，§决策 3 需要改成"从数据文件加载"；
+   当前仍以编译进产品的 C++ 注册表为准，staging 只消费其导出。

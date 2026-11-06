@@ -334,12 +334,14 @@ class ResourceIndexTests(unittest.TestCase):
 
     def test_profiles_use_actual_header_enums_and_requested_variants(self):
         enums = stage.api_enums((ROOT / "engine/include/epocanva_backend.h").read_bytes())
+        bindings = stage.parse_binding_manifest(
+            (ROOT / stage.BACKEND_BINDINGS_PATH).read_bytes())
         files = {}
         for lang in stage.LANGUAGES:
             for name in ("model.tsv", "fr.aff", "fr.dic", "lexicon.bin", "abbreviations.tsv"):
                 files[f"data/backend/{lang}/{name}"] = stage.Payload("a" * 64, 1, content=b"x")
         files["data/epocanva_backend_terra.dict.yaml"] = stage.Payload("a" * 64, 1, content=b"x")
-        rows = stage.profile_rows(enums, files)
+        rows = stage.profile_rows(enums, bindings, files)
         self.assertEqual([int(row[0]) for row in rows], list(range(1, 14)))
         self.assertEqual([row[5] for row in rows], ["en-US", "zh-pinyin", "fr-FR", "ja-JP", "ko-KR",
                          "zh-zhuyin", "ja-JP", "ja-JP", "ja-JP", "ko-KR", "en-US", "en-US", "en-US"])
@@ -353,7 +355,97 @@ class ResourceIndexTests(unittest.TestCase):
         self.assertEqual(rows[0][6:8], rows[12][6:8])
         del enums["EPOCANVA_BACKEND_KANA"]
         with self.assertRaises(stage.StagingError):
-            stage.profile_rows(enums, files)
+            stage.profile_rows(enums, bindings, files)
+
+    def test_manifest_is_the_only_catalogue_source(self):
+        manifest = json.loads((ROOT / stage.BACKEND_BINDINGS_PATH).read_bytes())
+        self.assertEqual(manifest["owner"], stage.BACKEND_BINDINGS_OWNER)
+        self.assertEqual(manifest["format"], stage.BACKEND_BINDINGS_FORMAT)
+        bindings = stage.parse_binding_manifest(
+            (ROOT / stage.BACKEND_BINDINGS_PATH).read_bytes())
+        self.assertEqual(len(bindings), 13)
+        self.assertEqual(sorted(b["numeric_id"] for b in bindings), list(range(1, 14)))
+        # The zhuyin binding is exported with its real unverified state; a staged
+        # resource or binding never upgrades it to an implemented scheme.
+        zhuyin = next(b for b in bindings if b["numeric_id"] == 6)
+        self.assertEqual(zhuyin["scheme_id"], "zhuyin")
+        self.assertEqual(zhuyin["scheme_implementation"], "unverified")
+        self.assertTrue(all(b["scheme_implementation"] != "absent" for b in bindings))
+
+    def test_manifest_rejects_drift_and_duplicate_configurations(self):
+        original = json.loads((ROOT / stage.BACKEND_BINDINGS_PATH).read_bytes())
+
+        def rejected(mutation, message):
+            manifest = copy.deepcopy(original)
+            mutation(manifest)
+            with self.assertRaisesRegex(stage.StagingError, message):
+                stage.parse_binding_manifest(json.dumps(manifest).encode("utf-8"))
+
+        rejected(lambda m: m.__setitem__("owner", "someone-else"), "owner")
+        rejected(lambda m: m.__setitem__("format", 99), "format")
+        rejected(lambda m: m.__setitem__(
+            "bindings", [dict(m["bindings"][0], numeric_id=i) for i in range(1, 34)]), "1..32")
+        rejected(lambda m: m["bindings"][0].__setitem__("numeric_id", 0), "nonzero")
+        rejected(lambda m: m["bindings"][1].__setitem__("numeric_id", 1), "unique")
+        rejected(lambda m: m["bindings"][0].__setitem__("language_tag", "es"), "not staged")
+        rejected(lambda m: m["bindings"][0].__setitem__("language_value", -1), "uint32")
+        rejected(lambda m: m["bindings"][0].__setitem__("scheme_implementation", "absent"), "absent")
+        rejected(lambda m: m["bindings"][0].__setitem__("unexpected", "field"), "unexpected fields")
+
+        def duplicate_configuration(m):
+            row = m["bindings"][12]
+            row["variant_id"] = m["bindings"][0]["variant_id"]
+            row["keyboard_layout"] = m["bindings"][0]["keyboard_layout"]
+            row["keyboard_layout_value"] = m["bindings"][0]["keyboard_layout_value"]
+
+        rejected(duplicate_configuration, "duplicates")
+
+        # A manifest whose numeric enum value disagrees with its symbolic ABI
+        # name is rejected when the staging rows are built against the header.
+        drifted = copy.deepcopy(original)
+        drifted["bindings"][0]["language_value"] = 2
+        bindings = stage.parse_binding_manifest(json.dumps(drifted).encode("utf-8"))
+        enums = stage.api_enums((ROOT / "engine/include/epocanva_backend.h").read_bytes())
+        files = {
+            f"data/backend/{lang}/model.tsv": stage.Payload("a" * 64, 1, content=b"x")
+            for lang in stage.LANGUAGES
+        }
+        files["data/epocanva_backend_terra.dict.yaml"] = stage.Payload("a" * 64, 1, content=b"x")
+        for lang in ("fr", "ja"):
+            files[f"data/backend/{lang}/" + ("fr.aff" if lang == "fr" else "lexicon.bin")] = \
+                stage.Payload("a" * 64, 1, content=b"x")
+        files["data/backend/fr/fr.dic"] = stage.Payload("a" * 64, 1, content=b"x")
+        for lang in ("en", "fr"):
+            files[f"data/backend/{lang}/abbreviations.tsv"] = stage.Payload("a" * 64, 1, content=b"x")
+        with self.assertRaisesRegex(stage.StagingError, "differs"):
+            stage.profile_rows(enums, bindings, files)
+        drifted = copy.deepcopy(original)
+        drifted["bindings"][11]["keyboard_layout_value"] = 0
+        bindings = stage.parse_binding_manifest(json.dumps(drifted).encode("utf-8"))
+        with self.assertRaisesRegex(stage.StagingError, "differs"):
+            stage.profile_rows(enums, bindings, files)
+
+    def test_wrong_resource_digest_or_missing_resource_fails(self):
+        enums = stage.api_enums((ROOT / "engine/include/epocanva_backend.h").read_bytes())
+        bindings = stage.parse_binding_manifest(
+            (ROOT / stage.BACKEND_BINDINGS_PATH).read_bytes())
+        files = {
+            f"data/backend/{lang}/model.tsv": stage.Payload("a" * 64, 1, content=b"x")
+            for lang in stage.LANGUAGES
+        }
+        with self.assertRaisesRegex(stage.StagingError, "missing from stage plan"):
+            stage.profile_rows(enums, bindings, files)
+        files["data/epocanva_backend_terra.dict.yaml"] = stage.Payload("a" * 64, 1, content=b"x")
+        for lang in ("fr", "ja"):
+            files[f"data/backend/{lang}/" + ("fr.aff" if lang == "fr" else "lexicon.bin")] = \
+                stage.Payload("a" * 64, 1, content=b"x")
+        files["data/backend/fr/fr.dic"] = stage.Payload("a" * 64, 1, content=b"x")
+        for lang in ("en", "fr"):
+            files[f"data/backend/{lang}/abbreviations.tsv"] = stage.Payload("a" * 64, 1, content=b"x")
+        rows = stage.profile_rows(enums, bindings, files)
+        rows[0][7] = "not-a-digest"
+        with self.assertRaisesRegex(stage.StagingError, "SHA-256"):
+            stage.resource_index(rows)
 
 
 class PublicationTests(FixtureTest):

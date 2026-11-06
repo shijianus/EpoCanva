@@ -73,8 +73,17 @@ profile records and at most 65,536 UTF-8 code units (bytes). All paths are
 slash-separated and relative to the product root. Optional absent resources
 use `-` in both path and hash columns. A model path/hash is always required.
 
-The current enum values are read from `engine/include/epocanva_backend.h`, not
-invented in the staging tool. Profile IDs are fixed as follows.
+The 13 rows are not declared in this tool. They come from
+`data/locale/backend-bindings.json`, a deterministic export of the C++
+`BuiltinProfiles()` registry in `engine/locale`. The export carries both the
+symbolic C ABI enum name and its numeric value; the tool resolves each name
+against `engine/include/epocanva_backend.h` and refuses a mismatch. The committed
+JSON is regenerated and byte-compared by `tests/locale_registry.manifest`, so a
+registry change without a regenerated export fails the build. The staging tool
+therefore keeps no second profile/ID/variant table; only resource-path selection
+is staging logic.
+
+Profile IDs produced by the export are stable as follows.
 
 | ID | Language | Input mode | Output mode | Keyboard | Variant |
 | ---: | --- | --- | --- | --- | --- |

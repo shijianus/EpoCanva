@@ -324,9 +324,11 @@ History 等领域配置。领域名称是配置，不等于每个领域一套独
   真实宿主输入与安装/卸载验收；旧包的注册实验不等于该闭环已通过。
   公开发行逐项条件与证据格式见 `docs/product/release-gate.md`。
 - 历史产品包包含 42,356 行英文词表，新增本地验证包具有五语言语料模型、词典和 profile 资源；两者不能混称为已验收的正式发行包。后端与 `engine/data_store` 已有 schema v3 学习存储（profile/language、衰减、正负反馈、手动词条、v1/v2 迁移与清除）；产品路径**只读既有偏好**，持久写入因字段锁未证明而关闭。公开数据分发、署名完整性与 relinkable 交付仍需独立验收。
-- **语言身份层**（`engine/locale`）已实现 BCP 47 解析、lookup 匹配、七语言优先级与
-  三级输入方案状态，并有 3 条 CTest。它**未**与 `tools/backend/stage_resources.py`
-  的 13 个 profile 合并成单一数据源；两套清单分叉是已知风险。
+- **语言身份层**（`engine/locale`）已实现 BCP 47 解析、lookup 匹配、七语言优先级、
+  三级输入方案状态，以及 13 条 backend binding 的确定性导出（5 条 CTest，含 manifest
+  漂移负向门禁）。`tools/backend/stage_resources.py` 只读取
+  `data/locale/backend-bindings.json`，不再维护第二份 profile 定义；C++ locale 层复制的
+  ABI 数值由测试对照 `epocanva_backend.h` 校验。
 - **自适应排序与学习事件语义**（`engine/ranking`）已实现并有 14 条 CTest；
   v3 持久化偏好经 `LearningEventModel::SetPreference` 安装后，已对统一后端的
   **COMPLETION 候选**做有界只读重排（原文候选保持首位，权重是工程默认值、未校准；

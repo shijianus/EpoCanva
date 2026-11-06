@@ -80,6 +80,9 @@ enum class RegistryError {
   kDuplicateTag,
   kRegistryFull,
   kInvalidDisplayLabel,
+  kInvalidBackendBinding,
+  kBackendBindingForAbsentScheme,
+  kDuplicateBackendBindingId,
 };
 
 const char* RegistryErrorName(RegistryError error);
@@ -155,9 +158,10 @@ std::vector<LocaleProfile> BuiltinProfiles();
 
 // Collects all BackendBinding entries from the builtin profiles, in a stable
 // order (profile registration order, then binding order within each profile).
-// This is the single authoritative source for profile→backend enum mapping.
-// The staging script and product code derive from this rather than maintaining
-// a duplicate list.
+// This is the single authored source for the profile→backend enum mapping.
+// Build tooling consumes the deterministic export from backend_manifest.h
+// (checked in as data/locale/backend-bindings.json); it never keeps a second
+// hand-maintained catalogue.
 std::vector<BackendBinding> AllBackendBindings();
 
 }  // namespace locale

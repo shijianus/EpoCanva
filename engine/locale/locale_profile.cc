@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <set>
 
+#include "backend_abi_values.h"
+
 namespace epocanva {
 namespace locale {
 namespace {
@@ -111,18 +113,10 @@ InputScheme Scheme(std::string id, SchemeImplementation implementation,
   return scheme;
 }
 
-// Backend API enum constants from epocanva_backend.h. Embedded here to avoid
-// a header dependency from the locale layer (which has no platform headers)
-// into the backend ABI layer. These values are stable ABI and must not change.
-namespace api {
-constexpr std::uint32_t kEn = 1, kZh = 2, kFr = 3, kJa = 4, kKo = 5;
-constexpr std::uint32_t kLatin = 1, kPinyin = 2, kZhuyin = 3, kRomaji = 4;
-constexpr std::uint32_t kTwoSet = 6, kKana = 7;
-constexpr std::uint32_t kOutLatin = 1, kOutHanzi = 2, kOutHiragana = 3;
-constexpr std::uint32_t kOutKatakana = 4, kOutKanji = 5, kOutHangul = 6;
-constexpr std::uint32_t kKbNeutral = 0, kKbUsQwerty = 1, kKbFrAzerty = 2;
-constexpr std::uint32_t kKbDeQwertz = 3, kKbDvorak = 4;
-}  // namespace api
+// Stable numeric values live in backend_abi_values.h, the single copy inside
+// this layer. tests/locale_registry compares every one against the public
+// epocanva_backend.h; this file must not repeat the literals.
+namespace api = abi_values;
 
 BackendBinding Binding(std::uint32_t id, std::uint32_t lang,
                        std::uint32_t input, std::uint32_t output,
@@ -152,6 +146,9 @@ const char* RegistryErrorName(RegistryError error) {
     case RegistryError::kDuplicateTag: return "duplicate_tag";
     case RegistryError::kRegistryFull: return "registry_full";
     case RegistryError::kInvalidDisplayLabel: return "invalid_display_label";
+    case RegistryError::kInvalidBackendBinding: return "invalid_backend_binding";
+    case RegistryError::kBackendBindingForAbsentScheme: return "backend_binding_for_absent_scheme";
+    case RegistryError::kDuplicateBackendBindingId: return "duplicate_backend_binding_id";
   }
   return "invalid_profile_id";
 }
@@ -230,6 +227,43 @@ RegisterResult LocaleRegistry::Register(LocaleProfile profile) {
     }
   }
 
+  // A backend binding is only legal when it names a scheme this profile really
+  // declares, that scheme is not kAbsent, and the numeric id is unique across
+  // the whole registry. A resource file existing on disk never upgrades a
+  // kUnverified scheme; it only enables internal staging.
+  std::set<std::uint32_t> profile_binding_ids;
+  for (const BackendBinding& binding : profile.backend_bindings) {
+    if (binding.numeric_id == 0 || binding.scheme_id.empty() ||
+        binding.variant_id.empty() || !scheme_ids.count(binding.scheme_id)) {
+      result.error = RegistryError::kInvalidBackendBinding;
+      return result;
+    }
+    const auto scheme = std::find_if(profile.schemes.begin(), profile.schemes.end(),
+        [&](const InputScheme& candidate) {
+          return candidate.scheme_id == binding.scheme_id;
+        });
+    if (scheme == profile.schemes.end()) {
+      result.error = RegistryError::kInvalidBackendBinding;
+      return result;
+    }
+    if (scheme->implementation == SchemeImplementation::kAbsent) {
+      result.error = RegistryError::kBackendBindingForAbsentScheme;
+      return result;
+    }
+    if (!profile_binding_ids.insert(binding.numeric_id).second) {
+      result.error = RegistryError::kDuplicateBackendBindingId;
+      return result;
+    }
+    for (const LocaleProfile& existing : profiles_) {
+      for (const BackendBinding& prior : existing.backend_bindings) {
+        if (prior.numeric_id == binding.numeric_id) {
+          result.error = RegistryError::kDuplicateBackendBindingId;
+          return result;
+        }
+      }
+    }
+  }
+
   profiles_.push_back(std::move(profile));
   result.profile_ordinal = profiles_.size() - 1;
   return result;
@@ -294,17 +328,17 @@ std::vector<LocaleProfile> BuiltinProfiles() {
       "en-US-latin", "en-US", u8"English (United States)",
       {Scheme("latin", SchemeImplementation::kImplemented, "engine/languages/en")}));
   profiles.back().backend_bindings = {
-      Binding(1, api::kEn, api::kLatin, api::kOutLatin, api::kKbUsQwerty, "en-US", "latin"),
-      Binding(11, api::kEn, api::kLatin, api::kOutLatin, api::kKbDeQwertz, "en-US", "latin"),
-      Binding(12, api::kEn, api::kLatin, api::kOutLatin, api::kKbDvorak, "en-US", "latin"),
-      Binding(13, api::kEn, api::kLatin, api::kOutLatin, api::kKbFrAzerty, "en-US", "latin"),
+      Binding(1, api::kLanguageEn, api::kInputLatin, api::kOutputLatin, api::kKeyboardUsQwerty, "en-US", "latin"),
+      Binding(11, api::kLanguageEn, api::kInputLatin, api::kOutputLatin, api::kKeyboardGermanQwertz, "en-US", "latin"),
+      Binding(12, api::kLanguageEn, api::kInputLatin, api::kOutputLatin, api::kKeyboardDvorak, "en-US", "latin"),
+      Binding(13, api::kLanguageEn, api::kInputLatin, api::kOutputLatin, api::kKeyboardFrenchAzerty, "en-US", "latin"),
   };
 
   profiles.push_back(MakeProfile(
       "fr-FR-latin", "fr-FR", u8"Fran\u00e7ais (France)",
       {Scheme("latin", SchemeImplementation::kImplemented, "engine/languages/fr")}));
   profiles.back().backend_bindings = {
-      Binding(3, api::kFr, api::kLatin, api::kOutLatin, api::kKbFrAzerty, "fr-FR", "latin"),
+      Binding(3, api::kLanguageFr, api::kInputLatin, api::kOutputLatin, api::kKeyboardFrenchAzerty, "fr-FR", "latin"),
   };
 
   profiles.push_back(MakeProfile(
@@ -314,10 +348,10 @@ std::vector<LocaleProfile> BuiltinProfiles() {
        Scheme("kana", SchemeImplementation::kImplemented,
               "engine/languages/ja/romaji_composer.cc")}));
   profiles.back().backend_bindings = {
-      Binding(4, api::kJa, api::kRomaji, api::kOutKanji, api::kKbUsQwerty, "ja-JP", "romaji"),
-      Binding(7, api::kJa, api::kRomaji, api::kOutHiragana, api::kKbUsQwerty, "ja-JP", "romaji"),
-      Binding(8, api::kJa, api::kRomaji, api::kOutKatakana, api::kKbUsQwerty, "ja-JP", "romaji"),
-      Binding(9, api::kJa, api::kKana, api::kOutKanji, api::kKbUsQwerty, "ja-JP", "kana"),
+      Binding(4, api::kLanguageJa, api::kInputRomaji, api::kOutputKanji, api::kKeyboardUsQwerty, "ja-JP", "romaji"),
+      Binding(7, api::kLanguageJa, api::kInputRomaji, api::kOutputHiragana, api::kKeyboardUsQwerty, "ja-JP", "romaji"),
+      Binding(8, api::kLanguageJa, api::kInputRomaji, api::kOutputKatakana, api::kKeyboardUsQwerty, "ja-JP", "romaji"),
+      Binding(9, api::kLanguageJa, api::kInputKana, api::kOutputKanji, api::kKeyboardUsQwerty, "ja-JP", "kana"),
   };
 
   profiles.push_back(MakeProfile(
@@ -325,8 +359,8 @@ std::vector<LocaleProfile> BuiltinProfiles() {
       {Scheme("two_set", SchemeImplementation::kImplemented,
               "engine/languages/ko/two_set_composer.cc")}));
   profiles.back().backend_bindings = {
-      Binding(5, api::kKo, api::kTwoSet, api::kOutHangul, api::kKbUsQwerty, "ko-KR", "two_set"),
-      Binding(10, api::kKo, api::kLatin, api::kOutHangul, api::kKbUsQwerty, "ko-KR", "two_set"),
+      Binding(5, api::kLanguageKo, api::kInputTwoSet, api::kOutputHangul, api::kKeyboardUsQwerty, "ko-KR", "two_set"),
+      Binding(10, api::kLanguageKo, api::kInputLatin, api::kOutputHangul, api::kKeyboardUsQwerty, "ko-KR", "two_set"),
   };
 
   profiles.push_back(MakeProfile(
@@ -336,8 +370,8 @@ std::vector<LocaleProfile> BuiltinProfiles() {
        Scheme("double_pinyin", SchemeImplementation::kAbsent, ""),
        Scheme("zhuyin", SchemeImplementation::kUnverified, "")}));
   profiles.back().backend_bindings = {
-      Binding(2, api::kZh, api::kPinyin, api::kOutHanzi, api::kKbUsQwerty, "zh-pinyin", "pinyin"),
-      Binding(6, api::kZh, api::kZhuyin, api::kOutHanzi, api::kKbUsQwerty, "zh-zhuyin", "zhuyin"),
+      Binding(2, api::kLanguageZh, api::kInputPinyin, api::kOutputHanzi, api::kKeyboardUsQwerty, "zh-pinyin", "pinyin"),
+      Binding(6, api::kLanguageZh, api::kInputZhuyin, api::kOutputHanzi, api::kKeyboardUsQwerty, "zh-zhuyin", "zhuyin"),
   };
 
   // zh-Hant profiles are registered with unverified schemes only. No registered

@@ -19,6 +19,9 @@ endif()
 
 # Identity and admission only: no platform header, no librime header, no I/O.
 add_library(epocanva_locale STATIC
+  backend_abi_values.h
+  backend_manifest.cc
+  backend_manifest.h
   language_tag.cc
   language_tag.h
   locale_profile.cc
