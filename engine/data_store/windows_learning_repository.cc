@@ -133,6 +133,23 @@ Status FileError(DWORD error) {
   return Status::kIoError;
 }
 
+// Last failed filesystem step on this thread. The repository never logs paths,
+// text or IDs; a caller can report the stage and Win32 code without user data.
+thread_local IoFailure g_last_io_failure{};
+
+void ClearIoFailure() noexcept { g_last_io_failure = {}; }
+
+void SetIoFailure(IoStage stage, DWORD error) noexcept {
+  g_last_io_failure = IoFailure{stage, static_cast<std::uint32_t>(error)};
+}
+
+Status Fail(IoStage stage, DWORD error) {
+  SetIoFailure(stage, error);
+  return FileError(error);
+}
+
+Status FailLast(IoStage stage) { return Fail(stage, ::GetLastError()); }
+
 bool Missing(DWORD error) {
   return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
@@ -426,7 +443,7 @@ class Transaction {
     lock_.Reset(::CreateFileW((stem + L".lock").c_str(), GENERIC_READ | GENERIC_WRITE |
           READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE, security_.attributes(false),
           OPEN_ALWAYS, kFileFlags, nullptr));
-    if (!lock_.valid()) return FileError(::GetLastError());
+    if (!lock_.valid()) return FailLast(IoStage::kLock);
     BY_HANDLE_FILE_INFORMATION info = {};
     status = CheckObject(lock_.get(), false, gate_, &info);
     if (status != Status::kOk) return status;
@@ -437,7 +454,7 @@ class Transaction {
     if (status != Status::kOk) return status;
     OVERLAPPED byte_zero = {};  // UTF-8 byte offset zero, lock extent one byte.
     if (!::LockFileEx(lock_.get(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                      0, 1, 0, &byte_zero)) return FileError(::GetLastError());
+                      0, 1, 0, &byte_zero)) return FailLast(IoStage::kLock);
     return Status::kOk;
   }
 
@@ -460,8 +477,9 @@ class Transaction {
       if (status != Status::kOk) return status;
       DWORD read_utf8_bytes = 0;
       if (!::ReadFile(file.get(), bytes.data() + offset_utf8_byte,
-            static_cast<DWORD>(bytes.size() - offset_utf8_byte), &read_utf8_bytes, nullptr) ||
-          read_utf8_bytes == 0) return Status::kIoError;
+            static_cast<DWORD>(bytes.size() - offset_utf8_byte), &read_utf8_bytes, nullptr))
+        return FailLast(IoStage::kRead);
+      if (read_utf8_bytes == 0) return Fail(IoStage::kRead, 0);
       offset_utf8_byte += read_utf8_bytes;
     }
     status = gate_.Check();
@@ -542,7 +560,7 @@ class Transaction {
     if (status != Status::kOk) return status;
     if (!::SetFileInformationByHandle(file.get(), FileRenameInfoEx, rename,
                                      static_cast<DWORD>(rename_bytes)))
-      return FileError(::GetLastError());
+      return FailLast(IoStage::kReplace);
     quarantined_ = true;
     return Status::kOk;
   }
@@ -625,7 +643,7 @@ class Transaction {
     if (!file->valid()) {
       const DWORD error = ::GetLastError();
       if (Missing(error)) { *absent = true; return Status::kOk; }
-      return FileError(error);
+      return Fail(IoStage::kOpen, error);
     }
     // Deletion never reads the file, so an inherited or weakened DACL is not a reason to
     // leave sensitive bytes behind. The private directory and the transaction locks still
@@ -644,11 +662,16 @@ class Transaction {
     if (!file->valid()) {
       const DWORD error = ::GetLastError();
       if (Missing(error)) { *absent = true; return Status::kOk; }
-      return FileError(error);
+      return Fail(IoStage::kOpen, error);
     }
     status = CheckObject(file->get(), false, gate_, info);
-    if (status != Status::kOk) return status;
-    return security_.Check(file->get(), false, gate_);
+    if (status != Status::kOk) {
+      if (status == Status::kIoError) SetIoFailure(IoStage::kSecurity, 0);
+      return status;
+    }
+    status = security_.Check(file->get(), false, gate_);
+    if (status == Status::kIoError) SetIoFailure(IoStage::kSecurity, 0);
+    return status;
   }
 
   Status Publish(const std::wstring& target, const std::wstring& temporary_path,
@@ -661,7 +684,7 @@ class Transaction {
     Handle temporary(::CreateFileW(temporary_path.c_str(), GENERIC_READ | GENERIC_WRITE |
         DELETE | READ_CONTROL, 0, security_.attributes(false), CREATE_NEW,
         FILE_ATTRIBUTE_TEMPORARY | kFileFlags, nullptr));
-    if (!temporary.valid()) return FileError(::GetLastError());
+    if (!temporary.valid()) return FailLast(IoStage::kOpen);
     // Unconditional handle-based cleanup also covers exceptions and callback
     // revocation. It never follows a pathname or reads staged content.
     struct Cleanup {
@@ -684,13 +707,14 @@ class Transaction {
       if (status != Status::kOk) return status;
       DWORD written_utf8_bytes = 0;
       if (!::WriteFile(temporary.get(), bytes.data() + offset_utf8_byte,
-            static_cast<DWORD>(bytes.size() - offset_utf8_byte), &written_utf8_bytes, nullptr) ||
-          written_utf8_bytes == 0) return Status::kIoError;
+            static_cast<DWORD>(bytes.size() - offset_utf8_byte), &written_utf8_bytes, nullptr))
+        return FailLast(IoStage::kWrite);
+      if (written_utf8_bytes == 0) return Fail(IoStage::kWrite, 0);
       offset_utf8_byte += written_utf8_bytes;
     }
     status = gate_.Check();
     if (status != Status::kOk) return status;
-    if (!::FlushFileBuffers(temporary.get())) return Status::kIoError;
+    if (!::FlushFileBuffers(temporary.get())) return FailLast(IoStage::kFlush);
     // Rename the already validated temporary HANDLE, not a re-resolved source
     // pathname. All directories remain pinned without write/delete sharing, and
     // the distinct stable lock remains held across this atomic same-volume move.
@@ -710,7 +734,7 @@ class Transaction {
     if (status != Status::kOk) return status;
     if (!::SetFileInformationByHandle(temporary.get(), FileRenameInfoEx, rename,
                                      static_cast<DWORD>(rename_bytes)))
-      return FileError(::GetLastError());
+      return FailLast(IoStage::kReplace);
     cleanup.published = true;
     return Status::kOk;
   }
@@ -752,7 +776,7 @@ class Transaction {
     if (status != Status::kOk) return status;
     FILE_DISPOSITION_INFO remove = {TRUE};
     if (!::SetFileInformationByHandle(file.get(), FileDispositionInfo, &remove, sizeof(remove)))
-      return FileError(::GetLastError());
+      return FailLast(IoStage::kDelete);
     return Status::kOk;
   }
 
@@ -784,11 +808,31 @@ Status ValidateSelection(const LearningStore& store, const Selection& selection)
 
 }  // namespace
 
+const char* IoStageName(IoStage stage) noexcept {
+  switch (stage) {
+    case IoStage::kNone: return "none";
+    case IoStage::kOpen: return "open/reopen";
+    case IoStage::kRead: return "read";
+    case IoStage::kWrite: return "write";
+    case IoStage::kFlush: return "flush";
+    case IoStage::kReplace: return "replace";
+    case IoStage::kDelete: return "delete";
+    case IoStage::kLock: return "lock";
+    case IoStage::kSecurity: return "security";
+    case IoStage::kReadOnly: return "read-only";
+    case IoStage::kException: return "exception";
+  }
+  return "unknown";
+}
+
+IoFailure LastIoFailure() noexcept { return g_last_io_failure; }
+
 WindowsLearningRepository::WindowsLearningRepository(std::filesystem::path root)
     : root_(std::move(root)) {}
 
 Status WindowsLearningRepository::Record(const Catalog& catalog,
     const Selection& selection, const PrivacyCallback& privacy) const noexcept {
+  ClearIoFailure();
   try {
     Gate gate(Operation::kLearning, privacy, &selection);
     Status status = gate.Check();
@@ -808,7 +852,7 @@ Status WindowsLearningRepository::Record(const Catalog& catalog,
     } else if (status != Status::kOk) {
       return status;
     }
-    if (read_only) return Status::kIoError;
+    if (read_only) return Fail(IoStage::kReadOnly, 0);
     status = gate.Check();
     if (status != Status::kOk) return status;
     status = store->Record(selection, gate.CoreAccess());
@@ -820,6 +864,7 @@ Status WindowsLearningRepository::Record(const Catalog& catalog,
     if (status != Status::kOk) return status;
     return transaction.Save(bytes);
   } catch (...) {
+    SetIoFailure(IoStage::kException, 0);
     return Status::kIoError;
   }
 }
@@ -829,6 +874,7 @@ Status WindowsLearningRepository::RecordFeedback(const Catalog& catalog,
     std::string_view normalized_identity, const std::vector<LexemeId>& lexeme_ids,
     bool attributable, std::uint64_t generation, bool explicit_user_action,
     const PrivacyCallback& privacy) const noexcept {
+  ClearIoFailure();
   try {
     const bool maintenance = kind == FeedbackKind::kManualWordRemoved;
     Gate gate(maintenance ? Operation::kMaintenance : Operation::kLearning, privacy);
@@ -856,6 +902,7 @@ Status WindowsLearningRepository::RecordFeedback(const Catalog& catalog,
     if (status != Status::kOk) return status;
     return transaction.Save(bytes);
   } catch (...) {
+    SetIoFailure(IoStage::kException, 0);
     return Status::kIoError;
   }
 }
@@ -864,6 +911,7 @@ Status WindowsLearningRepository::RecordFeedback(const Catalog& catalog,
 Status WindowsLearningRepository::LoadSnapshot(const Catalog& catalog,
     const PrivacyCallback& privacy, Snapshot* out) const noexcept {
   if (out != nullptr) *out = {};
+  ClearIoFailure();
   try {
     Gate gate(Operation::kRead, privacy);
     Status status = gate.Check();
@@ -881,12 +929,14 @@ Status WindowsLearningRepository::LoadSnapshot(const Catalog& catalog,
     return store->Read(gate.CoreAccess(), out);
   } catch (...) {
     if (out != nullptr) *out = {};
+    SetIoFailure(IoStage::kException, 0);
     return Status::kIoError;
   }
 }
 
 Status WindowsLearningRepository::Delete(const Catalog& catalog, bool explicit_user_action,
     const PrivacyCallback& privacy) const noexcept {
+  ClearIoFailure();
   if (!explicit_user_action) return Status::kDenied;
   try {
     // Deletion only needs the file identity. It must work even when the dictionary is
@@ -898,11 +948,13 @@ Status WindowsLearningRepository::Delete(const Catalog& catalog, bool explicit_u
     if (status != Status::kOk) return status;
     return transaction.DeleteFiles();
   } catch (...) {
+    SetIoFailure(IoStage::kException, 0);
     return Status::kIoError;
   }
 }
 
 Status WindowsLearningRepository::DeleteAll(bool explicit_user_action) const noexcept {
+  ClearIoFailure();
   if (!explicit_user_action) return Status::kDenied;
   try {
     Gate gate(Operation::kDeleteAll, {});
@@ -914,6 +966,7 @@ Status WindowsLearningRepository::DeleteAll(bool explicit_user_action) const noe
     if (status != Status::kOk) return status;
     return transaction.DeleteAllFiles();
   } catch (...) {
+    SetIoFailure(IoStage::kException, 0);
     return Status::kIoError;
   }
 }
@@ -921,6 +974,7 @@ Status WindowsLearningRepository::DeleteAll(bool explicit_user_action) const noe
 Status WindowsLearningRepository::Export(const Catalog& catalog, bool explicit_user_action,
     const PrivacyCallback& privacy, std::string* out) const noexcept {
   if (out != nullptr) out->clear();
+  ClearIoFailure();
   if (!explicit_user_action) return Status::kDenied;
   try {
     Gate gate(Operation::kExport, privacy);
@@ -943,6 +997,7 @@ Status WindowsLearningRepository::Export(const Catalog& catalog, bool explicit_u
     *out = std::move(bytes);
     return Status::kOk;
   } catch (...) {
+    SetIoFailure(IoStage::kException, 0);
     return Status::kIoError;
   }
 }

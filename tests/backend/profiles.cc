@@ -352,6 +352,17 @@ std::uint32_t EnglishLearningProfile(const Fixture& fixture) {
   return fixture.bindings[kEnglishQwerty].profile.profile_id;
 }
 
+// Text-free failure diagnostic: status names and flags, never candidate text,
+// preedit or any host content.
+void DiagnoseAck(const epocanva_backend_ack_result& result, const char* step) {
+  if (result.learned) return;
+  std::cerr << "DIAG ack step=" << step
+            << " consumed=" << result.consumed
+            << " context_advanced=" << result.context_advanced
+            << " persistence=" << static_cast<std::uint32_t>(result.persistence_status)
+            << " (" << learn::StatusName(static_cast<learn::Status>(result.persistence_status)) << ")\n";
+}
+
 struct Backend {
   epocanva_backend_handle handle = 0;  explicit Backend(Fixture& fixture, bool deploy = true) {
     auto options = fixture.Options(deploy);
@@ -557,6 +568,14 @@ learn::Snapshot Disk(const Fixture& fixture, std::uint32_t profile_id) {
   learn::Snapshot snapshot;
   const learn::Access access{learn::PrivacyClass::kNormal, true, 900, 1};
   const auto status = repository.LoadSnapshot(fixture.Catalog(profile_id), [access] { return access; }, &snapshot);
+  if (status != learn::Status::kOk) {
+    // Text-free: status and aggregate counts only, never prepared or committed text.
+    std::cerr << "DIAG learning-load profile=" << profile_id
+              << " status=" << learn::StatusName(status)
+              << " revision=" << snapshot.revision
+              << " words=" << snapshot.words.size()
+              << " pairs=" << snapshot.pairs.size() << '\n';
+  }
   REQUIRE(status == learn::Status::kOk, "isolated-learning-snapshot-readable");
   return snapshot;
 }
@@ -966,6 +985,7 @@ void Persistence(const Backend& backend, const Fixture& fixture) {
   const auto commit = CopyCommit(session, "good");
   Unchanged(fixture, EnglishLearningProfile(fixture), before);
   result = Ack(session, commit.commit_token);
+  DiagnoseAck(result, "first-confirmed-id");
   REQUIRE(result.learned && result.context_advanced &&
       result.persistence_status == static_cast<std::uint32_t>(learn::Status::kOk), "ack-persists-confirmed-id");
   auto learned = Disk(fixture, EnglishLearningProfile(fixture));
@@ -982,6 +1002,7 @@ void Persistence(const Backend& backend, const Fixture& fixture) {
   auto next_commit = CopyCommit(session, "morning");
   Unchanged(fixture, EnglishLearningProfile(fixture), learned);
   result = Ack(session, next_commit.commit_token);
+  DiagnoseAck(result, "second-confirmed-id");
   REQUIRE(result.learned && result.context_advanced, "second-confirmed-id-learns");
   learned = Disk(fixture, EnglishLearningProfile(fixture));
   REQUIRE(learned.revision == 2 && learned.words.size() == 2 && Count(learned, good) == 1 &&
@@ -993,6 +1014,7 @@ void Persistence(const Backend& backend, const Fixture& fixture) {
   Select(session, menu, Find(menu, "good", true));
   next_commit = CopyCommit(session, "good");
   result = Ack(session, next_commit.commit_token);
+  DiagnoseAck(result, "after-context-import");
   REQUIRE(result.learned, "candidate-after-context-import-learns-own-id");
   learned = Disk(fixture, EnglishLearningProfile(fixture));
   REQUIRE(learned.revision == 3 && Count(learned, good) == 2 && Count(learned, morning) == 1 &&
@@ -1139,6 +1161,14 @@ void Reopened(const Backend& backend, const Fixture& fixture) {
   const auto& model = fixture.Model(1);
   const auto good = Known(model, 1, "good", UINT64_C(11777008999757419033));
   const auto morning = Known(model, 1, "morning", UINT64_C(6271964512396262284));
+  if (!(snapshot.revision == 3 && snapshot.words.size() == 2 && snapshot.pairs.size() == 1 &&
+        Count(snapshot, good) == 2 && Count(snapshot, morning) == 1 &&
+        PairCount(snapshot, good, morning) == 1)) {
+    std::cerr << "DIAG reopen revision=" << snapshot.revision
+              << " words=" << snapshot.words.size() << " pairs=" << snapshot.pairs.size()
+              << " good_count=" << Count(snapshot, good)
+              << " morning_count=" << Count(snapshot, morning) << '\n';
+  }
   REQUIRE(snapshot.revision == 3 && snapshot.words.size() == 2 && snapshot.pairs.size() == 1 &&
       Count(snapshot, good) == 2 && Count(snapshot, morning) == 1 && PairCount(snapshot, good, morning) == 1,
       "reopen-retains-exact-confirmed-id-counts");

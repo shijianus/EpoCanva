@@ -33,6 +33,15 @@ void Expect(Status actual, Status expected, const char* label) {
                  StatusName(actual), StatusName(expected));
   }
 }
+void ExpectIo(IoStage expected, const char* label) {
+  const IoFailure failure = LastIoFailure();
+  if (failure.stage != expected) {
+    ++failures;
+    std::fprintf(stderr, "FAIL %s (io stage=%s expected=%s win32=%u)\n", label,
+                 IoStageName(failure.stage), IoStageName(expected),
+                 failure.win32_error);
+  }
+}
 
 class Handle {
  public:
@@ -382,6 +391,7 @@ void Errors(const fs::path& base) {
   const auto catalog = TestCatalog();
   WindowsLearningRepository repository(root);
   Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "error suite baseline");
+  ExpectIo(IoStage::kNone, "successful record leaves no io diagnostic");
   const auto path = Leaf(root, L".dat");
   const auto valid = ReadFixture(path);
   Snapshot snapshot;
@@ -420,8 +430,25 @@ void Errors(const fs::path& base) {
       ::SetFileAttributesW(path.c_str(), original_attributes | FILE_ATTRIBUTE_READONLY),
       "read-only fixture set");
   Expect(repository.Record(catalog, Confirmed(), allow), Status::kIoError, "read-only target returns I/O status");
+  ExpectIo(IoStage::kReadOnly, "read-only target reports its stage");
   Check(ReadFixture(path) == valid, "read-only target unchanged");
   Check(::SetFileAttributesW(path.c_str(), original_attributes) != FALSE, "read-only fixture restored");
+  // A handle that does not share delete blocks the atomic replacement, while the
+  // read-only open still lets Load succeed. This exercises the replace stage
+  // deterministically without a synthetic filesystem shim.
+  Handle no_delete(::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  Check(no_delete.valid(), "no-delete target handle acquired");
+  Expect(repository.Record(catalog, Confirmed(), allow), Status::kBusy,
+         "no-delete target handle blocks replacement");
+  ExpectIo(IoStage::kReplace, "blocked replacement reports the replace stage");
+  Check(LastIoFailure().win32_error == ERROR_SHARING_VIOLATION ||
+            LastIoFailure().win32_error == ERROR_LOCK_VIOLATION,
+        "blocked replacement preserves the Win32 error code");
+  Check(ReadFixture(path) == valid, "blocked replacement preserves the old snapshot");
+  no_delete.Reset();
+  Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk,
+         "replacement succeeds after the conflicting handle closes");
   const auto lock_path = Leaf(root, L".lock");
   Handle lock(::CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE,
       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
@@ -430,12 +457,19 @@ void Errors(const fs::path& base) {
       LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &byte_zero), "contention lock acquired");
   const auto before = ::GetTickCount64();
   Expect(repository.Record(catalog, Confirmed(), allow), Status::kBusy, "stable file lock contention reports busy");
+  ExpectIo(IoStage::kLock, "lock contention reports the lock stage");
+  Check(LastIoFailure().win32_error == ERROR_LOCK_VIOLATION ||
+            LastIoFailure().win32_error == ERROR_SHARING_VIOLATION,
+        "lock contention preserves the Win32 error code");
   Check(::GetTickCount64() - before < 2000, "busy transaction never waits indefinitely");
   Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kBusy, "load participates in same transaction lock");
+  ExpectIo(IoStage::kLock, "load contention reports the lock stage");
   lock.Reset();
   Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "retry after contention succeeds");
+  ExpectIo(IoStage::kNone, "successful retry clears the io diagnostic");
   Check(ApplyAcl(path, false, FILE_GENERIC_READ | WRITE_DAC | DELETE), "read-only DACL fixture applied");
   Expect(repository.Record(catalog, Confirmed(), allow), Status::kIoError, "weakened/read-only DACL not silently repaired");
+  ExpectIo(IoStage::kSecurity, "weakened DACL reports the security stage");
   Check(ApplyAcl(path, false, FILE_ALL_ACCESS), "DACL fixture restored");
   Cleanup(root);
 }

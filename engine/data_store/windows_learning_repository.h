@@ -3,12 +3,43 @@
 
 #include "learning_store.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <string>
 
 namespace epocanva {
 namespace learning {
+
+// Filesystem step that produced the last kIoError/kBusy result on this thread.
+// kOpen also covers opening an existing store for a new transaction (reopen).
+// This is diagnostic metadata only: it carries no path, text or ID bytes.
+enum class IoStage : std::uint32_t {
+  kNone = 0,
+  kOpen,
+  kRead,
+  kWrite,
+  kFlush,
+  kReplace,
+  kDelete,
+  kLock,
+  kSecurity,
+  kReadOnly,
+  kException,
+};
+
+const char* IoStageName(IoStage stage) noexcept;
+
+struct IoFailure {
+  IoStage stage = IoStage::kNone;
+  std::uint32_t win32_error = 0;
+};
+
+// Returns the stage and Win32 error of the last failed filesystem step on the
+// calling thread. Each public repository operation clears it on entry. A value
+// with stage kNone means no filesystem step failed (for example a denied
+// privacy gate or a format rejection).
+IoFailure LastIoFailure() noexcept;
 
 // Queried synchronously, never retained. An empty/throwing callback is Unknown.
 // Record's caller must hold the current host permission read-lock for the entire
