@@ -57,6 +57,21 @@ using epocanva::tsf::context::test::TestHost;
 
 int g_failures = 0;
 
+// One readiness budget covers worker activation plus ReadyToType. The main
+// thread waits until deadline + margin, so it cannot time out while the worker
+// is still legitimately inside the same bounded readiness phase. Join and
+// cleanup waits have their own separate bounds.
+constexpr DWORD kEngineReadinessBudgetMs = 90000;
+constexpr DWORD kReadinessSignalMarginMs = 10000;
+constexpr DWORD kEngineIdleBudgetMs = 30000;
+constexpr DWORD kSessionReleaseBudgetMs = 30000;
+constexpr DWORD kModuleReleaseBudgetMs = 30000;
+
+DWORD RemainingMs(ULONGLONG deadline) {
+  const ULONGLONG now = ::GetTickCount64();
+  return now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+}
+
 void LocalCheck(bool condition, const std::string& what) {
   std::cout << (condition ? "  ok   " : "  FAIL ") << what << "\n";
   if (!condition) {
@@ -1956,7 +1971,8 @@ struct HoldSessionResult {
 };
 
 void HoldSessionWorker(const std::filesystem::path& stage, HANDLE ready_event,
-                       HANDLE release_event, HoldSessionResult* result) {
+                       HANDLE release_event, HoldSessionResult* result,
+                       ULONGLONG ready_deadline) {
   TestHost* host = TestHost::Create(&result->error).release();
   if (host == nullptr) {
     ::SetEvent(ready_event);
@@ -1991,9 +2007,10 @@ void HoldSessionWorker(const std::filesystem::path& stage, HANDLE ready_event,
   result->ready.store(true);
   result->counters.pumps = ~0ull;
   result->ok.store(
-      ReadyToType(*host, product.sink, document->context(), 60000, &result->counters));
+      ReadyToType(*host, product.sink, document->context(), RemainingMs(ready_deadline),
+                  &result->counters));
   ::SetEvent(ready_event);
-  (void)::WaitForSingleObject(release_event, 30000);
+  (void)::WaitForSingleObject(release_event, kSessionReleaseBudgetMs);
   ReleaseProduct(&product, true);
   ::DestroyWindow(window);
   delete host;
@@ -2127,7 +2144,8 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
     LocalCheck(false, "timing: the first session activates");
     return false;
   }
-  LocalCheck(ReadyToType(*held.host, held.product.sink, held.doc->context(), 60000),
+  LocalCheck(ReadyToType(*held.host, held.product.sink, held.doc->context(),
+                         kEngineReadinessBudgetMs),
              "timing: the first session is ready");
   const std::string first_digest = SettingsDigestForTest(user_root);
   const std::string before = ReadNarrow(state);
@@ -2145,14 +2163,15 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
   HANDLE ready_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
   HANDLE release_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
   HoldSessionResult deferred;
-  std::thread waiter(HoldSessionWorker, stage, ready_event, release_event, &deferred);
-  const bool ready_signalled = ::WaitForSingleObject(ready_event, 25000) == WAIT_OBJECT_0;
-  LocalCheck(ready_signalled && deferred.ok.load(),
-             "timing: the second session joins the running engine");
-  if (!deferred.ok.load()) {
-    std::cout << "  [timing] second session error: " << deferred.error << std::endl;
-    PrintSeamCounters(deferred.counters, "timing second session");
-  }
+  const ULONGLONG session_start = ::GetTickCount64();
+  const ULONGLONG ready_deadline = session_start + kEngineReadinessBudgetMs;
+  std::thread waiter(HoldSessionWorker, stage, ready_event, release_event, &deferred,
+                     ready_deadline);
+  const bool ready_signalled =
+      ::WaitForSingleObject(ready_event, RemainingMs(ready_deadline + kReadinessSignalMarginMs)) ==
+      WAIT_OBJECT_0;
+  const bool second_ready = ready_signalled && deferred.ok.load();
+  LocalCheck(second_ready, "timing: the second session joins the running engine");
   LocalCheck(std::filesystem::is_regular_file(marker),
              "timing: the new settings marker survives while the engine runs");
   const std::string during = ReadNarrow(state);
@@ -2160,6 +2179,18 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
              "timing: the running engine is not redeployed underneath itself");
   ::SetEvent(release_event);
   waiter.join();
+  // Read worker-owned diagnostics only after the join; the event signal alone
+  // does not order the non-atomic counter/error fields.
+  if (!second_ready) {
+    std::cout << "  [timing] second session failed after "
+              << (::GetTickCount64() - session_start) << " ms (ready_event="
+              << (ready_signalled ? "signalled" : "timeout") << "): " << deferred.error
+              << std::endl;
+    PrintSeamCounters(deferred.counters, "timing second session");
+  } else {
+    std::cout << "  [timing] second session ready in "
+              << (::GetTickCount64() - session_start) << " ms" << std::endl;
+  }
   ::CloseHandle(release_event);
   ::CloseHandle(ready_event);
   // The engine lease release is deliberately off the STA. Wait (bounded) until the engine
@@ -2170,7 +2201,7 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
     const auto host_state = reinterpret_cast<HostStateFn>(
         ::GetProcAddress(held.product.module, "EpoCanvaTestEngineHostState"));
     (void)held.product.tip->Deactivate();
-    const ULONGLONG idle_deadline = ::GetTickCount64() + 10000;
+    const ULONGLONG idle_deadline = ::GetTickCount64() + kEngineIdleBudgetMs;
     while (host_state != nullptr && host_state() != 0 &&
            ::GetTickCount64() < idle_deadline) {
       ::Sleep(20);
@@ -2181,7 +2212,7 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
   EndCase(&held);
   // The worker session's load reference was parked. Free it now so the restarted case gets a
   // fresh module and a fresh bootstrap singleton, exactly as the settings contract assumes.
-  LocalCheck(FreeDeferredProductModules(15000, "settings-timing"),
+  LocalCheck(FreeDeferredProductModules(kModuleReleaseBudgetMs, "settings-timing"),
              "timing: the parked load references were released before the restart");
 
   Case renewed;
@@ -2190,7 +2221,7 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
     return false;
   }
   LocalCheck(ReadyToType(*renewed.host, renewed.product.sink, renewed.doc->context(),
-                         60000),
+                         kEngineReadinessBudgetMs),
              "timing: the restarted engine is ready");
   const std::string second_digest = SettingsDigestForTest(user_root);
   const std::string after = ReadNarrow(state);
@@ -4385,7 +4416,7 @@ bool RunLeaseLockCase(const std::filesystem::path& stage,
   }
   ITfKeyEventSink* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "lease: the product engine is running");
   PumpSlice(*test_case.host, 300);
 
@@ -4411,9 +4442,15 @@ bool RunLeaseLockCase(const std::filesystem::path& stage,
     return false;
   }
   HoldSessionResult second;
-  std::thread waiter(HoldSessionWorker, stage, ready_event, release_event, &second);
-  const bool ready = ::WaitForSingleObject(ready_event, 25000) == WAIT_OBJECT_0;
-  LocalCheck(ready && second.ok.load() && wait_leases(2),
+  const ULONGLONG lease_ready_deadline = ::GetTickCount64() + kEngineReadinessBudgetMs;
+  std::thread waiter(HoldSessionWorker, stage, ready_event, release_event, &second,
+                     lease_ready_deadline);
+  const bool ready =
+      ::WaitForSingleObject(ready_event,
+                            RemainingMs(lease_ready_deadline + kReadinessSignalMarginMs)) ==
+      WAIT_OBJECT_0;
+  const bool second_ready = ready && second.ok.load();
+  LocalCheck(second_ready && wait_leases(2),
              "lease: two real attachments share the running engine");
 
   const std::filesystem::path marker = user_root / L"engine" / L"deploy-required";
@@ -4480,6 +4517,11 @@ bool RunLeaseLockCase(const std::filesystem::path& stage,
 
   ::SetEvent(release_event);
   waiter.join();
+  if (!second_ready) {
+    std::cout << "  [lease] second attachment failed (ready_event="
+              << (ready ? "signalled" : "timeout") << "): " << second.error << std::endl;
+    PrintSeamCounters(second.counters, "lease second attachment");
+  }
   ::CloseHandle(release_event);
   ::CloseHandle(ready_event);
   LocalCheck(wait_leases(0), "lease: final attachment released its engine lease");
