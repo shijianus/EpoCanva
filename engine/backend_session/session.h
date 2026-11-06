@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "candidate_contract.h"
 #include "learning_store.h"
 
 namespace epocanva::backend_session {
@@ -29,6 +30,9 @@ struct Candidate {
   std::size_t input_begin_utf8_byte = 0;
   std::size_t input_end_utf8_byte = 0;
   bool exact_expansion = false;
+  // Unified identity/contract for this candidate. Populated by the backend
+  // adapter; the ABI still reads the v1 fields above unchanged.
+  candidates::Record contract;
 };
 struct Snapshot {
   std::uint64_t token = 0;

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "engine/backend_session/session.h"
+#include "engine/candidates/candidate_contract.h"
 #include "engine/lexical_service/lexical_service.h"
 #include "engine/prediction/model.h"
 #include "engine/prediction/abbreviation.h"
@@ -38,6 +39,7 @@ namespace lex = epocanva::lexical;
 namespace flow = epocanva::backend_session;
 namespace learn = epocanva::learning;
 namespace rk = epocanva::ranking;
+namespace cand = epocanva::candidates;
 constexpr std::size_t kMaxInputBytes = 4096;
 const char* Language(std::uint32_t language) {
   switch (language) {
@@ -46,6 +48,18 @@ const char* Language(std::uint32_t language) {
     case EPOCANVA_BACKEND_FR: return "fr";
     case EPOCANVA_BACKEND_JA: return "ja";
     case EPOCANVA_BACKEND_KO: return "ko";
+    default: return nullptr;
+  }
+}
+const char* Scheme(std::uint32_t input_mode) {
+  switch (input_mode) {
+    case EPOCANVA_BACKEND_LATIN: return "latin";
+    case EPOCANVA_BACKEND_PINYIN: return "pinyin";
+    case EPOCANVA_BACKEND_ZHUYIN: return "zhuyin";
+    case EPOCANVA_BACKEND_ROMAJI: return "romaji";
+    case EPOCANVA_BACKEND_KATAKANA: return "katakana";
+    case EPOCANVA_BACKEND_TWO_SET: return "two_set";
+    case EPOCANVA_BACKEND_KANA: return "kana";
     default: return nullptr;
   }
 }
@@ -987,6 +1001,27 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
       // a just-committed word must not displace the model's next-word prediction.
       if (query->query_kind == EPOCANVA_BACKEND_COMPLETION)
         ApplyPersonalRanking(session, preferences, &candidates);
+      // Unified candidate contract. Language + scheme scope a stable identity;
+      // learnable rows use the same `lex:<id>` key schema v3 persists. A source
+      // that cannot produce a valid contract is a programming error, not an
+      // empty menu, so the query is refused instead of publishing an identity
+      // the learning layer could not round-trip.
+      const char* language_tag = Language(session.language);
+      const char* scheme_id = Scheme(session.mode);
+      if (language_tag == nullptr || scheme_id == nullptr)
+        return EPOCANVA_BACKEND_UNAVAILABLE;
+      for (auto& candidate : candidates) {
+        cand::Record record;
+        if (!cand::Describe(language_tag, scheme_id, session.language, session.mode,
+                            candidate.kind, candidate.text_utf8, candidate.lexeme_ids,
+                            candidate.score, &record))
+          return EPOCANVA_BACKEND_UNAVAILABLE;
+        record.input_begin_utf8_byte = candidate.input_begin_utf8_byte;
+        record.input_end_utf8_byte = candidate.input_end_utf8_byte;
+        std::string reason;
+        if (!cand::Validate(record, &reason)) return EPOCANVA_BACKEND_UNAVAILABLE;
+        candidate.contract = std::move(record);
+      }
       return Result(session.flow->Publish(std::move(candidates),complete,access));
     });
   });
