@@ -6,7 +6,9 @@
 #include "language_tag.h"
 #include "locale_profile.h"
 
+#include <cstdint>
 #include <iostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -286,12 +288,61 @@ void AdmissionTests() {
         "duplicate scheme rejected");
 }
 
+void BackendBindingTests() {
+  auto bindings = loc::AllBackendBindings();
+  Check(!bindings.empty(), "builtin profiles produce at least one backend binding");
+
+  // Verify all numeric IDs are unique and nonzero.
+  std::set<std::uint32_t> ids;
+  for (const auto& b : bindings) {
+    Check(b.numeric_id != 0, "backend binding has nonzero numeric id");
+    Check(ids.insert(b.numeric_id).second, "backend binding numeric id is unique");
+    Check(!b.variant_id.empty(), "backend binding has a variant id");
+    Check(!b.scheme_id.empty(), "backend binding has a scheme id");
+    Check(b.language >= 1 && b.language <= 5, "backend binding language is in en..ko range");
+    Check(b.input_mode >= 1 && b.input_mode <= 7, "backend binding input mode is valid");
+    Check(b.output_mode >= 1 && b.output_mode <= 6, "backend binding output mode is valid");
+    Check(b.keyboard_layout <= 4, "backend binding keyboard layout is valid");
+  }
+
+  // Verify the exact count matches the staging script's 13 profile definitions.
+  Check(bindings.size() == 13, "backend binding count matches staging script (13 profiles)");
+
+  // Verify every backend binding's scheme_id exists in its parent profile.
+  for (const auto& profile : loc::BuiltinProfiles()) {
+    for (const auto& b : profile.backend_bindings) {
+      bool found = false;
+      for (const auto& scheme : profile.schemes) {
+        if (scheme.scheme_id == b.scheme_id) { found = true; break; }
+      }
+      Check(found, "backend binding scheme_id exists in parent profile schemes");
+    }
+  }
+
+  // Verify specific well-known bindings are present.
+  bool has_en_qwerty = false, has_zh_pinyin = false, has_fr = false;
+  bool has_ja_romaji = false, has_ko_two_set = false;
+  for (const auto& b : bindings) {
+    if (b.numeric_id == 1 && b.language == 1 && b.input_mode == 1) has_en_qwerty = true;
+    if (b.numeric_id == 2 && b.language == 2 && b.input_mode == 2) has_zh_pinyin = true;
+    if (b.numeric_id == 3 && b.language == 3 && b.input_mode == 1) has_fr = true;
+    if (b.numeric_id == 4 && b.language == 4 && b.input_mode == 4) has_ja_romaji = true;
+    if (b.numeric_id == 5 && b.language == 5 && b.input_mode == 6) has_ko_two_set = true;
+  }
+  Check(has_en_qwerty, "English QWERTY binding present (id=1)");
+  Check(has_zh_pinyin, "Chinese Pinyin binding present (id=2)");
+  Check(has_fr, "French binding present (id=3)");
+  Check(has_ja_romaji, "Japanese Romaji binding present (id=4)");
+  Check(has_ko_two_set, "Korean Two-Set binding present (id=5)");
+}
+
 void Run() {
   ParseTests();
   MatchingTests();
   PriorityTests();
   BuiltinResolutionTests();
   AdmissionTests();
+  BackendBindingTests();
 }
 
 }  // namespace

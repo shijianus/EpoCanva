@@ -111,6 +111,30 @@ InputScheme Scheme(std::string id, SchemeImplementation implementation,
   return scheme;
 }
 
+// Backend API enum constants from epocanva_backend.h. Embedded here to avoid
+// a header dependency from the locale layer (which has no platform headers)
+// into the backend ABI layer. These values are stable ABI and must not change.
+namespace api {
+constexpr std::uint32_t kEn = 1, kZh = 2, kFr = 3, kJa = 4, kKo = 5;
+constexpr std::uint32_t kLatin = 1, kPinyin = 2, kZhuyin = 3, kRomaji = 4;
+constexpr std::uint32_t kTwoSet = 6, kKana = 7;
+constexpr std::uint32_t kOutLatin = 1, kOutHanzi = 2, kOutHiragana = 3;
+constexpr std::uint32_t kOutKatakana = 4, kOutKanji = 5, kOutHangul = 6;
+constexpr std::uint32_t kKbNeutral = 0, kKbUsQwerty = 1, kKbFrAzerty = 2;
+constexpr std::uint32_t kKbDeQwertz = 3, kKbDvorak = 4;
+}  // namespace api
+
+BackendBinding Binding(std::uint32_t id, std::uint32_t lang,
+                       std::uint32_t input, std::uint32_t output,
+                       std::uint32_t kb, std::string variant,
+                       std::string scheme) {
+  BackendBinding b;
+  b.numeric_id = id; b.language = lang; b.input_mode = input;
+  b.output_mode = output; b.keyboard_layout = kb;
+  b.variant_id = std::move(variant); b.scheme_id = std::move(scheme);
+  return b;
+}
+
 }  // namespace
 
 const char* RegistryErrorName(RegistryError error) {
@@ -269,10 +293,19 @@ std::vector<LocaleProfile> BuiltinProfiles() {
   profiles.push_back(MakeProfile(
       "en-US-latin", "en-US", u8"English (United States)",
       {Scheme("latin", SchemeImplementation::kImplemented, "engine/languages/en")}));
+  profiles.back().backend_bindings = {
+      Binding(1, api::kEn, api::kLatin, api::kOutLatin, api::kKbUsQwerty, "en-US", "latin"),
+      Binding(11, api::kEn, api::kLatin, api::kOutLatin, api::kKbDeQwertz, "en-US", "latin"),
+      Binding(12, api::kEn, api::kLatin, api::kOutLatin, api::kKbDvorak, "en-US", "latin"),
+      Binding(13, api::kEn, api::kLatin, api::kOutLatin, api::kKbFrAzerty, "en-US", "latin"),
+  };
 
   profiles.push_back(MakeProfile(
       "fr-FR-latin", "fr-FR", u8"Fran\u00e7ais (France)",
       {Scheme("latin", SchemeImplementation::kImplemented, "engine/languages/fr")}));
+  profiles.back().backend_bindings = {
+      Binding(3, api::kFr, api::kLatin, api::kOutLatin, api::kKbFrAzerty, "fr-FR", "latin"),
+  };
 
   profiles.push_back(MakeProfile(
       "ja-JP-romaji", "ja-JP", u8"\u65e5\u672c\u8a9e (Romaji)",
@@ -280,11 +313,21 @@ std::vector<LocaleProfile> BuiltinProfiles() {
               "engine/languages/ja/romaji_composer.cc"),
        Scheme("kana", SchemeImplementation::kImplemented,
               "engine/languages/ja/romaji_composer.cc")}));
+  profiles.back().backend_bindings = {
+      Binding(4, api::kJa, api::kRomaji, api::kOutKanji, api::kKbUsQwerty, "ja-JP", "romaji"),
+      Binding(7, api::kJa, api::kRomaji, api::kOutHiragana, api::kKbUsQwerty, "ja-JP", "romaji"),
+      Binding(8, api::kJa, api::kRomaji, api::kOutKatakana, api::kKbUsQwerty, "ja-JP", "romaji"),
+      Binding(9, api::kJa, api::kKana, api::kOutKanji, api::kKbUsQwerty, "ja-JP", "kana"),
+  };
 
   profiles.push_back(MakeProfile(
       "ko-KR-two-set", "ko-KR", u8"\ud55c\uad6d\uc5b4 (\ub450\ubc8c\uc2dd)",
       {Scheme("two_set", SchemeImplementation::kImplemented,
               "engine/languages/ko/two_set_composer.cc")}));
+  profiles.back().backend_bindings = {
+      Binding(5, api::kKo, api::kTwoSet, api::kOutHangul, api::kKbUsQwerty, "ko-KR", "two_set"),
+      Binding(10, api::kKo, api::kLatin, api::kOutHangul, api::kKbUsQwerty, "ko-KR", "two_set"),
+  };
 
   profiles.push_back(MakeProfile(
       "zh-Hans-CN-pinyin", "zh-Hans-CN", u8"\u4e2d\u6587\uff08\u7b80\u4f53\uff0c\u62fc\u97f3\uff09",
@@ -292,6 +335,10 @@ std::vector<LocaleProfile> BuiltinProfiles() {
               "engine/languages/zh/pinyin_initialism.cc"),
        Scheme("double_pinyin", SchemeImplementation::kAbsent, ""),
        Scheme("zhuyin", SchemeImplementation::kUnverified, "")}));
+  profiles.back().backend_bindings = {
+      Binding(2, api::kZh, api::kPinyin, api::kOutHanzi, api::kKbUsQwerty, "zh-pinyin", "pinyin"),
+      Binding(6, api::kZh, api::kZhuyin, api::kOutHanzi, api::kKbUsQwerty, "zh-zhuyin", "zhuyin"),
+  };
 
   // zh-Hant profiles are registered with unverified schemes only. No registered
   // zh-Hant data set exists, so claiming zhuyin or cangjie here would repeat the
@@ -312,6 +359,16 @@ std::vector<LocaleProfile> BuiltinProfiles() {
       {Scheme("jyutping", SchemeImplementation::kAbsent, "")}));
 
   return profiles;
+}
+
+std::vector<BackendBinding> AllBackendBindings() {
+  std::vector<BackendBinding> all;
+  for (const auto& profile : BuiltinProfiles()) {
+    for (const auto& binding : profile.backend_bindings) {
+      all.push_back(binding);
+    }
+  }
+  return all;
 }
 
 }  // namespace locale

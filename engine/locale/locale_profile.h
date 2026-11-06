@@ -12,6 +12,7 @@
 #define EPOCANVA_LOCALE_LOCALE_PROFILE_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,6 +40,19 @@ struct InputScheme {
   std::string evidence_ref;
 };
 
+// Backend-facing binding: maps a locale profile + scheme pair to the numeric
+// enum values used by the C ABI (epocanva_backend.h). A single locale profile
+// can produce several backend bindings (one per scheme × output mode).
+struct BackendBinding {
+  std::uint32_t numeric_id = 0;      // epocanva_backend_profile.profile_id
+  std::uint32_t language = 0;        // EPOCANVA_BACKEND_{EN,ZH,FR,JA,KO}
+  std::uint32_t input_mode = 0;      // EPOCANVA_BACKEND_{LATIN,PINYIN,...}
+  std::uint32_t output_mode = 0;     // EPOCANVA_BACKEND_OUTPUT_{LATIN,...}
+  std::uint32_t keyboard_layout = 0; // EPOCANVA_BACKEND_KEYBOARD_{...}
+  std::string variant_id;            // BCP 47 variant or product variant
+  std::string scheme_id;             // links back to InputScheme
+};
+
 struct LocaleProfile {
   // Stable ASCII identifier, unique in the registry. This is the value a
   // platform adapter stores in its settings; it is never a display label.
@@ -47,6 +61,9 @@ struct LocaleProfile {
   // Human-readable label. Never used for lookup, ordering or persistence keys.
   std::string display_label_utf8;
   std::vector<InputScheme> schemes;
+  // Backend bindings derived from this profile. May be empty for profiles
+  // whose schemes are all kAbsent.
+  std::vector<BackendBinding> backend_bindings;
 };
 
 enum class RegistryError {
@@ -135,6 +152,13 @@ class LocaleRegistry {
 //   yue-Hant-HK jyutping absent
 // es, de and the remaining declared languages have no profile entry at all.
 std::vector<LocaleProfile> BuiltinProfiles();
+
+// Collects all BackendBinding entries from the builtin profiles, in a stable
+// order (profile registration order, then binding order within each profile).
+// This is the single authoritative source for profile→backend enum mapping.
+// The staging script and product code derive from this rather than maintaining
+// a duplicate list.
+std::vector<BackendBinding> AllBackendBindings();
 
 }  // namespace locale
 }  // namespace epocanva
