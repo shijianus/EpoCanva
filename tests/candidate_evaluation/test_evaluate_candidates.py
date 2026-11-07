@@ -378,7 +378,7 @@ class MetricVectorTests(unittest.TestCase):
         self.assertEqual(values["raw_present"], 1.0)
         self.assertEqual(values["raw_first"], 1.0)
         self.assertEqual(values["empty_menu"], 0.0)
-        self.assertEqual(values["wrong_language"], 0.0)
+        self.assertNotIn("wrong_language", values)  # never claimed as 0.0
         self.assertEqual(values["latency_ms"], 1.0)
 
     def test_missed_target_vector(self):
@@ -411,6 +411,140 @@ class MetricVectorTests(unittest.TestCase):
         record = {"status": "ok", "repeats": [repeat([row(0, "go"), row(1, "good", ids=[11])])]}
         values = ev.metric_values(METRIC_CASE, record)
         self.assertEqual(values["raw_present"], 0.0)
+
+
+def gate_language(**overrides):
+    """A per-language block for gate tests: every mandatory predicate healthy
+    except wrong_language (structurally not observable at this ABI)."""
+    values = {
+        "cases": 1001,
+        "measured_cases": 1001,
+        "minimum_cases_met": True,
+        "top1": 0.5, "top3": 0.6, "mrr": 0.4,
+        "suggestion_top1": 0.5, "suggestion_top3": 0.6, "suggestion_mrr": 0.4,
+        "ci95": {"top1": [0.4, 0.6]},
+        "raw_present_rate": 1.0,
+        "raw_first_rate": 1.0,
+        "empty_menu_rate": 0.0,
+        "wrong_language_rate": None,
+        "in_process_repeat_deterministic_rate": 1.0,
+        "cross_process_deterministic_rate": 1.0,
+        "latency_ms": {"cold": 1.0,
+                       "warm": {"p50": 1.0, "p95": 2.0, "p99": 3.0, "queries": 10},
+                       "warmup_queries": 0},
+        "resource_load_ms": 5.0,
+        "peak_working_set_bytes": 1000,
+    }
+    values.update(overrides)
+    return values
+
+
+HEALTHY_PROTOCOL = {"en": {"fresh_runs": 2, "fresh_runs_expected": 2,
+                           "repeat_counts": [2], "repeat_expected": 2}}
+HEALTHY_IDS = {"en": {"en-a", "en-b"}}
+
+
+def healthy_gate(**overrides):
+    per_language = {"en": gate_language(**overrides)}
+    return ev.evaluate_quality_gate(
+        per_language=per_language, failures=[],
+        expected_case_ids=HEALTHY_IDS, observed_case_ids=HEALTHY_IDS,
+        protocol=HEALTHY_PROTOCOL)
+
+
+class QualityGateTests(unittest.TestCase):
+    """The fail-closed gate semantics: unmet or unevaluated mandatory
+    predicates can never produce met == true (policy v1)."""
+
+    def test_everything_measured_still_cannot_pass_at_this_abi(self):
+        # wrong_language_observable is not evaluable on the v1 candidate ABI,
+        # so the honest ceiling of policy v1 is not_evaluable, never passed.
+        gate = healthy_gate()
+        self.assertEqual(gate["status"], "not_evaluable")
+        self.assertFalse(gate["met"])
+        self.assertIn("wrong_language_observable",
+                      [entry["predicate"] for entry in gate["not_evaluated_predicates"]])
+        self.assertEqual(gate["unmet_reasons"], [])
+
+    def test_single_validation_failure_blocks_passed(self):
+        gate = ev.evaluate_quality_gate(
+            per_language={"en": gate_language()},
+            failures=[{"case_id": "en-a", "reason": "menu-not-deterministic"}],
+            expected_case_ids=HEALTHY_IDS, observed_case_ids=HEALTHY_IDS,
+            protocol=HEALTHY_PROTOCOL)
+        self.assertEqual(gate["status"], "failed")
+        self.assertFalse(gate["met"])
+        self.assertIn("validation_failures_empty",
+                      [entry["predicate"] for entry in gate["unmet_reasons"]])
+
+    def test_determinism_below_one_blocks_passed(self):
+        for key in ("cross_process_deterministic_rate", "in_process_repeat_deterministic_rate"):
+            with self.subTest(key=key):
+                gate = healthy_gate(**{key: 0.9})
+                self.assertEqual(gate["status"], "failed")
+                self.assertFalse(gate["met"])
+
+    def test_empty_menu_blocks_passed(self):
+        gate = healthy_gate(empty_menu_rate=0.1)
+        self.assertEqual(gate["status"], "failed")
+        self.assertIn("empty_menu_rate_zero",
+                      [entry["predicate"] for entry in gate["unmet_reasons"]])
+
+    def test_raw_contract_failure_blocks_passed(self):
+        gate = healthy_gate(raw_present_rate=0.5, raw_first_rate=0.5)
+        self.assertEqual(gate["status"], "failed")
+        self.assertIn("raw_contract",
+                      [entry["predicate"] for entry in gate["unmet_reasons"]])
+
+    def test_insufficient_samples_block_pass_and_are_named(self):
+        gate = healthy_gate(cases=15, measured_cases=15, minimum_cases_met=False)
+        self.assertEqual(gate["status"], "failed")
+        self.assertIn("minimum_samples",
+                      [entry["predicate"] for entry in gate["unmet_reasons"]])
+        self.assertIn("en: 15/1001 cases", gate["unmet_reasons"][0]["reason"])
+
+    def test_missing_expected_case_blocks_passed(self):
+        gate = ev.evaluate_quality_gate(
+            per_language={"en": gate_language()}, failures=[],
+            expected_case_ids=HEALTHY_IDS, observed_case_ids={"en": {"en-a"}},
+            protocol=HEALTHY_PROTOCOL)
+        self.assertEqual(gate["status"], "failed")
+        self.assertIn("all_expected_cases_executed",
+                      [entry["predicate"] for entry in gate["unmet_reasons"]])
+
+    def test_extra_unexpected_case_blocks_passed(self):
+        gate = ev.evaluate_quality_gate(
+            per_language={"en": gate_language()}, failures=[],
+            expected_case_ids=HEALTHY_IDS,
+            observed_case_ids={"en": {"en-a", "en-b", "en-ghost"}},
+            protocol=HEALTHY_PROTOCOL)
+        self.assertEqual(gate["status"], "failed")
+        self.assertIn("no_extra_cases",
+                      [entry["predicate"] for entry in gate["unmet_reasons"]])
+
+    def test_protocol_mismatch_blocks_passed(self):
+        protocol = {"en": {"fresh_runs": 1, "fresh_runs_expected": 2,
+                           "repeat_counts": [2, 3], "repeat_expected": 2}}
+        gate = ev.evaluate_quality_gate(
+            per_language={"en": gate_language()}, failures=[],
+            expected_case_ids=HEALTHY_IDS, observed_case_ids=HEALTHY_IDS,
+            protocol=protocol)
+        self.assertEqual(gate["status"], "failed")
+        self.assertIn("exact_process_and_repeat_protocol",
+                      [entry["predicate"] for entry in gate["unmet_reasons"]])
+
+    def test_baseline_records_the_same_gate_without_passing(self):
+        # The report the baseline mode writes for the same evidence carries the
+        # identical gate block: unmet reasons named, met still false.
+        failing = healthy_gate(cases=15, minimum_cases_met=False)
+        self.assertFalse(failing["met"])
+        self.assertIn(failing["status"], ("failed", "not_evaluable"))
+        self.assertTrue(failing["unmet_reasons"] or failing["not_evaluated_predicates"])
+
+    def test_met_is_true_only_when_status_is_passed(self):
+        for gate in (healthy_gate(), healthy_gate(cases=15),
+                     healthy_gate(empty_menu_rate=0.1)):
+            self.assertEqual(gate["met"], gate["status"] == "passed")
 
 
 class HelperTests(unittest.TestCase):

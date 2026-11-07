@@ -404,7 +404,10 @@ def metric_values(case: dict[str, Any], record: dict[str, Any]) -> dict[str, Any
         "raw_present": 1.0 if raw_match else 0.0,
         "raw_first": 1.0 if raw_match and raw_rows and raw_rows[0] is rows[0] else 0.0,
         "empty_menu": 1.0 if not rows else 0.0,
-        "wrong_language": 0.0,  # structural: each case runs in its declared profile's session
+        # wrong_language is deliberately absent: the public v1 candidate ABI
+        # carries no per-candidate language attribution, so no honest per-case
+        # value exists. The report records wrong_language_rate as null with an
+        # explicit not_observable status; it must never surface as 0.0.
         "latency_ms": first.get("latency_ns", 0) / 1e6,
     }
     return values
@@ -510,6 +513,184 @@ def read_staged_model_maps(resources_index: bytes) -> tuple[dict[str, str | None
     return per_language, by_profile, notes
 
 
+# --- quality gate ------------------------------------------------------------
+
+# Mandatory predicates of QUALITY_POLICY_VERSION. Any predicate that is
+# measurably failed makes the gate "failed"; any that cannot be evaluated
+# makes it at best "not_evaluable"; "passed" requires every predicate passed.
+GATE_PREDICATES = (
+    "minimum_samples",
+    "exact_process_and_repeat_protocol",
+    "all_expected_cases_executed",
+    "no_extra_cases",
+    "validation_failures_empty",
+    "cross_process_determinism",
+    "in_process_repeat_determinism",
+    "empty_menu_rate_zero",
+    "raw_contract",
+    "candidate_quality_metrics_recorded",
+    "latency_memory_recorded",
+    "privacy_and_abi_status",
+    "wrong_language_observable",
+)
+WRONG_LANGUAGE_REASON = ("the public v1 candidate ABI carries no per-candidate language "
+                         "attribution, so wrong-language behaviour is not observable at "
+                         "this ABI; it is reported as null, never as 0.0, and no Unicode "
+                         "script heuristic substitutes for a measurement")
+
+
+def evaluate_quality_gate(*, per_language: dict[str, Any], failures: list[dict[str, str]],
+                          expected_case_ids: dict[str, set[str]],
+                          observed_case_ids: dict[str, set[str]],
+                          protocol: dict[str, Any]) -> dict[str, Any]:
+    """Derive the fail-closed quality_gate block from measured report data.
+
+    Statuses: "failed" when a mandatory predicate measurably fails,
+    "not_evaluable" when a mandatory predicate cannot be evaluated (insufficient
+    samples, unobservable measurement), "passed" only when every predicate
+    passed. "met" is true exactly when status == "passed".
+    """
+    predicates: dict[str, dict[str, str]] = {}
+    unmet_reasons: list[dict[str, str]] = []
+    not_evaluated: list[dict[str, str]] = []
+
+    def record(name: str, status: str, reason: str = "") -> None:
+        predicates[name] = {"status": status, **({"reason": reason} if reason else {})}
+        if status == "failed" and reason:
+            unmet_reasons.append({"predicate": name, "reason": reason})
+        if status == "not_evaluable" and reason:
+            not_evaluated.append({"predicate": name, "reason": reason})
+
+    # minimum_samples -----------------------------------------------------------
+    shortfalls = [f"{language}: {values['cases']}/{GATE_MINIMUM_CASES[language]} cases"
+                  for language, values in per_language.items()
+                  if values["cases"] < GATE_MINIMUM_CASES[language]]
+    record("minimum_samples", "failed" if shortfalls else "passed",
+           "; ".join(shortfalls))
+
+    # exact_process_and_repeat_protocol ----------------------------------------
+    protocol_problems = []
+    for language, observed in protocol.items():
+        if observed["fresh_runs"] != observed["fresh_runs_expected"]:
+            protocol_problems.append(f"{language}: {observed['fresh_runs']} fresh runs, "
+                                     f"expected {observed['fresh_runs_expected']}")
+        if observed["repeat_counts"] != [observed["repeat_expected"]]:
+            protocol_problems.append(
+                f"{language}: repeat counts {observed['repeat_counts']}, "
+                f"expected exactly [{observed['repeat_expected']}]")
+    record("exact_process_and_repeat_protocol",
+           "failed" if protocol_problems else "passed", "; ".join(protocol_problems))
+
+    # all_expected_cases_executed / no_extra_cases ------------------------------
+    missing = [f"{language}: {len(expected_case_ids.get(language, set()) - observed_case_ids.get(language, set()))} "
+               "expected cases absent from the results"
+               for language in per_language
+               if expected_case_ids.get(language, set()) - observed_case_ids.get(language, set())]
+    extra = [f"{language}: {len(observed_case_ids.get(language, set()) - expected_case_ids.get(language, set()))} "
+             "unexpected cases present"
+             for language in observed_case_ids
+             if observed_case_ids.get(language, set()) - expected_case_ids.get(language, set())]
+    record("all_expected_cases_executed", "failed" if missing else "passed", "; ".join(missing))
+    record("no_extra_cases", "failed" if extra else "passed", "; ".join(extra))
+
+    # validation_failures_empty -------------------------------------------------
+    record("validation_failures_empty", "failed" if failures else "passed",
+           f"{len(failures)} case-level failures recorded" if failures else "")
+
+    # determinism / empty menu / raw contract -----------------------------------
+    for name, key in (("cross_process_determinism", "cross_process_deterministic_rate"),
+                      ("in_process_repeat_determinism", "in_process_repeat_deterministic_rate")):
+        problems = []
+        unevaluable = []
+        for language, values in per_language.items():
+            rate = values.get(key)
+            if rate is None:
+                unevaluable.append(language)
+            elif rate < 1.0:
+                problems.append(f"{language}: {rate:.3f}")
+        record(name, "failed" if problems else ("not_evaluable" if unevaluable else "passed"),
+               "; ".join(problems + [f"{language}: no measured cases" for language in unevaluable]))
+    empty_problems = [f"{language}: empty_menu_rate {values['empty_menu_rate']}"
+                      for language, values in per_language.items()
+                      if values["empty_menu_rate"] is not None and values["empty_menu_rate"] != 0.0]
+    empty_unevaluable = [language for language, values in per_language.items()
+                         if values["empty_menu_rate"] is None]
+    record("empty_menu_rate_zero",
+           "failed" if empty_problems else ("not_evaluable" if empty_unevaluable else "passed"),
+           "; ".join(empty_problems + [f"{language}: no measured cases" for language in empty_unevaluable]))
+    raw_problems = []
+    raw_unevaluable = []
+    for language, values in per_language.items():
+        for key in ("raw_present_rate", "raw_first_rate"):
+            rate = values[key]
+            if rate is None:
+                raw_unevaluable.append(f"{language}: {key} not measurable")
+            elif rate < 1.0:
+                raw_problems.append(f"{language}: {key} {rate:.3f}")
+    record("raw_contract", "failed" if raw_problems else ("not_evaluable" if raw_unevaluable else "passed"),
+           "; ".join(raw_problems + raw_unevaluable))
+
+    # candidate quality metrics + CIs --------------------------------------------
+    quality_gaps = []
+    for language, values in per_language.items():
+        for key in ("top1", "top3", "mrr", "suggestion_top1", "suggestion_top3", "suggestion_mrr"):
+            if values.get(key) is None:
+                quality_gaps.append(f"{language}: {key} not recorded")
+        if not values.get("ci95"):
+            quality_gaps.append(f"{language}: grouped confidence intervals empty")
+    record("candidate_quality_metrics_recorded",
+           "failed" if quality_gaps else ("not_evaluable" if not per_language else "passed"),
+           "; ".join(quality_gaps) if quality_gaps else
+           ("no languages measured" if not per_language else ""))
+
+    # latency / memory ------------------------------------------------------------
+    latency_gaps = []
+    for language, values in per_language.items():
+        latency = values["latency_ms"]
+        if latency["cold"] is None:
+            latency_gaps.append(f"{language}: cold latency not recorded")
+        for key in ("p50", "p95", "p99"):
+            if latency["warm"][key] is None:
+                latency_gaps.append(f"{language}: warm {key} not recorded")
+        if values["peak_working_set_bytes"] is None:
+            latency_gaps.append(f"{language}: peak working set not recorded")
+        if values["resource_load_ms"] is None:
+            latency_gaps.append(f"{language}: resource load time not recorded")
+    record("latency_memory_recorded",
+           "failed" if latency_gaps else ("not_evaluable" if not per_language else "passed"),
+           "; ".join(latency_gaps) if latency_gaps else
+           ("no languages measured" if not per_language else ""))
+
+    # privacy / ABI ---------------------------------------------------------------
+    # Evaluable by construction of this evaluator: candidate surfaces reach only
+    # the build/-contained results files and report, every harness session is
+    # opened with learning_enabled=0 and no learning root, and the evaluated
+    # code path performs no network I/O (architectural property, AGENTS.md §2).
+    record("privacy_and_abi_status", "passed",
+           "surfaces confined to build/ artifacts; learning disabled; no network I/O path")
+
+    # wrong language observability -------------------------------------------------
+    record("wrong_language_observable", "not_evaluable", WRONG_LANGUAGE_REASON)
+
+    if any(entry["status"] == "failed" for entry in predicates.values()):
+        status = "failed"
+    elif any(entry["status"] == "not_evaluable" for entry in predicates.values()):
+        status = "not_evaluable"
+    else:
+        status = "passed"
+    return {
+        "policy_version": QUALITY_POLICY_VERSION,
+        "minimum_cases": GATE_MINIMUM_CASES,
+        "status": status,
+        "met": status == "passed",
+        "claim": {"passed": "gate-met", "failed": "gate-failed",
+                  "not_evaluable": "gate-not-evaluable"}[status],
+        "unmet_reasons": unmet_reasons,
+        "not_evaluated_predicates": not_evaluated,
+        "predicates": predicates,
+    }
+
+
 # --- report ------------------------------------------------------------------
 
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
@@ -583,6 +764,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     per_language: dict[str, Any] = {}
     failures: list[dict[str, str]] = []
     unverified: dict[str, dict[str, Any]] = {}
+    observed_case_ids: dict[str, set[str]] = {}
+    protocol: dict[str, Any] = {}
     for language, runs in per_run.items():
         cases = corpus[language]
         verified_cases = [case for case in cases if case["scheme"] != "zhuyin"]
@@ -590,8 +773,19 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         if zhuyin_cases:
             unverified["zhuyin"] = {"cases": len(zhuyin_cases), "reason": "scheme-unverified"}
 
+        observed_case_ids[language] = set()
+        for _, records_by_id in runs:
+            observed_case_ids[language].update(records_by_id)
+        protocol[language] = {
+            "fresh_runs": len(runs),
+            "fresh_runs_expected": args.runs,
+            "repeat_counts": sorted({meta.get("repeat") for meta, _ in runs}),
+            "repeat_expected": args.repeat,
+        }
+
         values_by_id: dict[str, dict[str, Any]] = {}
-        deterministic: list[float] = []
+        in_process_rates: list[float] = []
+        fresh_process_rates: list[float] = []
         latencies_warm: list[float] = []
         cold_latency: float | None = None
         for case in verified_cases:
@@ -608,12 +802,17 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             signatures = [[menu_signature(repeat) for repeat in record.get("repeats", [])]
                           for record in records]
             lengths_ok = all(len(repeats) == args.repeat for repeats in signatures)
-            deterministic.append(1.0 if lengths_ok and all(repeats == signatures[0] for repeats in signatures)
-                                 else 0.0)
+            within = lengths_ok and all(sigs == signatures[0] for sigs in signatures)
+            across = within and all(sigs == signatures[0] for sigs in signatures)
+            in_process_rates.append(1.0 if within else 0.0)
+            fresh_process_rates.append(1.0 if across else 0.0)
             if not lengths_ok:
                 failures.append({"case_id": case_id, "reason": "repeat-count-mismatch"})
-            elif any(repeats != signatures[0] for repeats in signatures):
+            elif not within:
                 failures.append({"case_id": case_id, "reason": "menu-not-deterministic"})
+            elif not across:
+                failures.append({"case_id": case_id,
+                                 "reason": "menu-not-deterministic-across-processes"})
             values_by_id[case_id] = metric_values(case, records[0])
             for run_ordinal, record in enumerate(records):
                 for repeat_ordinal, repeat in enumerate(record.get("repeats", [])):
@@ -632,8 +831,19 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "raw_present_rate": ratio(verified_cases, values_by_id, "raw_present"),
             "raw_first_rate": ratio(verified_cases, values_by_id, "raw_first"),
             "empty_menu_rate": ratio(verified_cases, values_by_id, "empty_menu"),
-            "wrong_language_rate": ratio(verified_cases, values_by_id, "wrong_language"),
-            "deterministic_cases": (sum(deterministic) / len(deterministic) if deterministic else None),
+            # The v1 candidate ABI exposes no per-candidate language, so no
+            # honest wrong-language measurement exists; null + not_observable,
+            # never 0.0 and never a Unicode script heuristic.
+            "wrong_language_rate": None,
+            "wrong_language_observability": {
+                "status": "not_observable",
+                "reason": ("the public v1 candidate ABI carries no per-candidate language "
+                           "attribution; the case runs in its declared profile's session"),
+            },
+            "in_process_repeat_deterministic_rate": (sum(in_process_rates) / len(in_process_rates)
+                                                     if in_process_rates else None),
+            "cross_process_deterministic_rate": (sum(fresh_process_rates) / len(fresh_process_rates)
+                                                 if fresh_process_rates else None),
             "latency_ms": {"cold": cold_latency,
                            "warm": {"p50": percentile(latencies_warm, 0.50) if latencies_warm else None,
                                     "p95": percentile(latencies_warm, 0.95) if latencies_warm else None,
@@ -653,8 +863,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             language_values["schemes"] = schemes
         per_language[language] = language_values
 
-    gate_met = all(per_language[language]["minimum_cases_met"]
-                   for language in per_language) and per_language
+    quality_gate = evaluate_quality_gate(
+        per_language=per_language, failures=failures,
+        expected_case_ids={language: {case["id"] for case in corpus[language]}
+                           for language in per_language},
+        observed_case_ids=observed_case_ids, protocol=protocol)
     report = {
         "format": EVALUATOR_SCHEMA_VERSION,
         "corpus": {"id": manifest["corpus_id"], "version": manifest["corpus_version"],
@@ -680,8 +893,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "failures": failures,
         "determinism": {"repeats_per_case": args.repeat, "fresh_runs": args.runs,
                         "method": "full ordered (kind, text_utf8, lexeme_ids, input range) list equality"},
-        "quality_gate": {"minimum_cases": GATE_MINIMUM_CASES, "met": bool(gate_met),
-                         "claim": "baseline-only" if not gate_met else "gate-met"},
+        "quality_gate": quality_gate,
         "metrics_note": (
             "The backend contract pins the raw candidate at ordinal 0 for completion queries, "
             "so top1/top3/mrr measure target position under that contract; the suggestion_* "
@@ -753,11 +965,24 @@ def main(argv: list[str] | None = None) -> int:
         report = evaluate(args)
         save_report(Path(args.output), report)
         print(f"wrote candidate evaluation report to {args.output}")
-        if not report["quality_gate"]["met"]:
-            print("quality claim withheld: the Tier A corpus is below the E4 entry gate minimums",
-                  file=sys.stderr)
+        status = report["quality_gate"]["status"]
+        if status != "passed":
+            reasons = "; ".join(entry["reason"] for entry in report["quality_gate"]["unmet_reasons"])
+            unevaluated = "; ".join(entry["predicate"] for entry in
+                                    report["quality_gate"]["not_evaluated_predicates"])
+            print(f"quality gate {status} (mode {args.mode})", file=sys.stderr)
+            if reasons:
+                print(f"unmet: {reasons}", file=sys.stderr)
+            if unevaluated:
+                print(f"not evaluated: {unevaluated}", file=sys.stderr)
         if report["failures"]:
             print(f"failures recorded: {len(report['failures'])}", file=sys.stderr)
+        # baseline: an unmet quality gate is recorded evidence, not an exit
+        # failure; structural, identity, schema and run-integrity errors above
+        # already exit 1. qualification: any unmet or unevaluated mandatory
+        # predicate is a nonzero exit, after the report is written as evidence.
+        if args.mode == "qualification" and status != "passed":
+            return 1
     except (OSError, EvaluationError, UnicodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
