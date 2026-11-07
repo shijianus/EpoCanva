@@ -145,6 +145,39 @@ def optional_ratio(numerator: int, denominator: int) -> float | None:
 
 # --- corpus ------------------------------------------------------------------
 
+def reject_unicode_escapes(raw: bytes, where: str) -> None:
+    """Reject \\uXXXX escapes in the raw JSON bytes, lexically.
+
+    The corpus policy is literal UTF-8 only, so the native parser and
+    json.loads must read identical bytes; a \\u escape would decode in Python
+    but fail the native harness. The scan walks JSON string state and consumes
+    escaped backslashes first, so a string legitimately containing a literal
+    backslash followed by 'u' (encoded as \\\\u) does not false-positive.
+    """
+    in_string = False
+    index = 0
+    while index < len(raw):
+        byte = raw[index]
+        if not in_string:
+            if byte == 0x22:  # '"'
+                in_string = True
+            index += 1
+            continue
+        if byte == 0x22:
+            in_string = False
+            index += 1
+            continue
+        if byte == 0x5C:  # '\\'
+            if index + 1 >= len(raw):
+                raise EvaluationError(f"{where} ends in a dangling backslash")
+            if raw[index + 1] == 0x75:  # 'u'
+                raise EvaluationError(
+                    f"{where} uses a \\uXXXX escape; the corpus policy is literal UTF-8 only")
+            index += 2
+            continue
+        index += 1
+
+
 def read_corpus_file(path: Path, language: str) -> list[dict[str, Any]]:
     if not path.is_file():
         raise EvaluationError(f"corpus file missing: {path.name}")
@@ -159,6 +192,7 @@ def read_corpus_file(path: Path, language: str) -> list[dict[str, Any]]:
             if line_number == len(raw.split(b"\n")):
                 break  # a single trailing newline is required, more is tolerated
             raise EvaluationError(f"{path.name} line {line_number} is blank")
+        reject_unicode_escapes(line, f"{path.name} line {line_number}")
         try:
             text = line.decode("utf-8", errors="strict")
         except UnicodeDecodeError as exc:
@@ -182,10 +216,9 @@ def check_text_field(value: Any, name: str, where: str, maximum_bytes: int) -> N
         raise EvaluationError(f"{where} {name} exceeds {maximum_bytes} UTF-8 bytes")
     if any(ord(scalar) < 0x20 or ord(scalar) == 0x7F for scalar in value):
         raise EvaluationError(f"{where} {name} contains a control scalar")
-    if "\\u" in value:
-        # The corpus is authored without \\u escapes so the native parser and the
-        # Python validator read identical bytes.
-        raise EvaluationError(f"{where} {name} uses a \\\\u escape")
+    # \uXXXX escapes are rejected lexically on the raw bytes (read_corpus_file),
+    # before decoding; a literal backslash in decoded text is ordinary data and
+    # must not be flagged here.
 
 
 def validate_cases(language: str, records: list[dict[str, Any]], bindings: dict[int, dict[str, Any]],
@@ -328,20 +361,96 @@ def run_harness(executable: Path, argv: list[str], output_path: Path, timeout: f
         # stderr may name stages and codes only; the exit code is kept, the text
         # is dropped, because harness diagnostics must stay text-free by design.
         raise EvaluationError(f"native harness exited with observed status {completed.returncode}")
+    if completed.stderr != "":
+        # The harness contract is: success writes nothing to stderr. Any stderr
+        # on exit 0 means the run violated its own protocol; the run is invalid
+        # even though a results file may exist.
+        raise EvaluationError(
+            "native harness exited 0 but wrote unexpected diagnostics to stderr")
     executable_sha256_after = sha256_bytes(executable.read_bytes())
     if executable_sha256_before != executable_sha256_after:
         raise EvaluationError("native harness changed while evaluation was running; results are invalid")
     if not output_path.is_file():
         raise EvaluationError("native harness reported success but did not create results JSONL")
     return {"exit_status": completed.returncode,
+            "stderr_empty": completed.stderr == "",
             "harness_sha256_before": executable_sha256_before,
             "harness_sha256_after": executable_sha256_after,
             "results_sha256": sha256_bytes(output_path.read_bytes())}
 
 
-def read_results(path: Path) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+# The candidate kind enum of the public v1 ABI (engine/include/epocanva_backend.h):
+# RAW, WORD, SPELLING, MORPHOLOGY, EXPANSION, CONVERSION, PREDICTION.
+LEGAL_CANDIDATE_KINDS = frozenset(range(0, 7))
+LEGAL_CASE_STATUSES = frozenset(("ok", "unavailable", "incomplete"))
+MAX_LEXEME_ID = 2 ** 64 - 1
+
+
+def validate_result_record(record: dict[str, Any], where: str) -> None:
+    """Structural validation of one harness case record (units are UTF-8 bytes)."""
+    for key in ("case_id", "profile_id", "status", "repeats"):
+        if key not in record:
+            raise EvaluationError(f"{where} is missing {key}")
+    profile_id = record["profile_id"]
+    if not isinstance(profile_id, int) or isinstance(profile_id, bool) or profile_id <= 0:
+        raise EvaluationError(f"{where} profile_id must be a positive integer")
+    status = record["status"]
+    if status not in LEGAL_CASE_STATUSES:
+        raise EvaluationError(f"{where} has unknown status {status!r}")
+    repeats = record["repeats"]
+    if not isinstance(repeats, list):
+        raise EvaluationError(f"{where} repeats must be an array")
+    for repeat_ordinal, repeat in enumerate(repeats):
+        repeat_where = f"{where} repeat {repeat_ordinal}"
+        if not isinstance(repeat, dict):
+            raise EvaluationError(f"{repeat_where} must be an object")
+        latency = repeat.get("latency_ns")
+        if not isinstance(latency, int) or isinstance(latency, bool) or latency < 0:
+            raise EvaluationError(f"{repeat_where} latency_ns must be a nonnegative integer")
+        if not isinstance(repeat.get("search_complete"), bool):
+            raise EvaluationError(f"{repeat_where} search_complete must be a boolean")
+        candidates = repeat.get("candidates")
+        if not isinstance(candidates, list):
+            raise EvaluationError(f"{repeat_where} candidates must be an array")
+        for row_ordinal, row in enumerate(candidates):
+            row_where = f"{repeat_where} candidate {row_ordinal}"
+            if not isinstance(row, dict):
+                raise EvaluationError(f"{row_where} must be an object")
+            rank = row.get("rank")
+            if rank != row_ordinal:
+                raise EvaluationError(
+                    f"{row_where} rank {rank!r} is not the contiguous ordinal {row_ordinal}")
+            kind = row.get("kind")
+            if not isinstance(kind, int) or isinstance(kind, bool) or kind not in LEGAL_CANDIDATE_KINDS:
+                raise EvaluationError(f"{row_where} kind {kind!r} is outside the v1 ABI enum")
+            text = row.get("text_utf8")
+            if not isinstance(text, str):
+                raise EvaluationError(f"{row_where} text_utf8 must be a string")
+            try:
+                text.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EvaluationError(f"{row_where} text_utf8 is not valid UTF-8") from exc
+            lexeme_ids = row.get("lexeme_ids")
+            if not isinstance(lexeme_ids, list) or any(
+                    not isinstance(item, int) or isinstance(item, bool)
+                    or item < 0 or item > MAX_LEXEME_ID for item in lexeme_ids):
+                raise EvaluationError(f"{row_where} lexeme_ids must be uint64 values")
+            begin = row.get("input_begin_utf8_byte")
+            end = row.get("input_end_utf8_byte")
+            for name, value in (("input_begin_utf8_byte", begin), ("input_end_utf8_byte", end)):
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise EvaluationError(f"{row_where} {name} must be a nonnegative byte offset")
+            if begin > end:
+                raise EvaluationError(f"{row_where} input byte range is inverted")
+
+
+def read_results(path: Path, *, language: str, repeat: int, case_count: int) -> tuple[
+        dict[str, Any], dict[str, list[dict[str, Any]]]]:
     meta: dict[str, Any] | None = None
     cases: dict[str, list[dict[str, Any]]] = {}
+    if not path.name.startswith(f"{language}.run"):
+        raise EvaluationError(
+            f"results file {path.name} does not name language {language!r} in its file name")
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
@@ -359,10 +468,56 @@ def read_results(path: Path) -> tuple[dict[str, Any], dict[str, list[dict[str, A
             raise EvaluationError(f"{path.name} line {line_number} needs a case_id")
         if case_id in cases:
             raise EvaluationError(f"{path.name} line {line_number} repeats case {case_id!r}")
+        validate_result_record(record, f"{path.name} line {line_number} ({case_id})")
         cases[case_id] = record
     if meta is None:
         raise EvaluationError(f"{path.name} has no run_meta line")
+    if meta.get("language") != language:
+        raise EvaluationError(
+            f"{path.name} run_meta language {meta.get('language')!r} does not match {language!r}")
+    if meta.get("repeat") != repeat:
+        raise EvaluationError(
+            f"{path.name} run_meta repeat {meta.get('repeat')!r} does not match the protocol repeat {repeat}")
+    if meta.get("case_count") != case_count:
+        raise EvaluationError(
+            f"{path.name} run_meta case_count {meta.get('case_count')!r} does not match the "
+            f"corpus count {case_count}")
     return meta, cases
+
+
+def validate_records_against_corpus(records: dict[str, list[dict[str, Any]]],
+                                    cases: list[dict[str, Any]], source_name: str) -> None:
+    """Cross-check one run's records against the corpus definition.
+
+    Every expected case must appear exactly once (duplicates are already
+    rejected while reading), no unknown case may appear, each record's
+    profile_id must equal the corpus definition, and every candidate's input
+    byte range must stay inside the case's raw UTF-8 input (units: bytes).
+    """
+    by_id = {case["id"]: case for case in cases}
+    missing = sorted(set(by_id) - set(records))
+    if missing:
+        raise EvaluationError(
+            f"{source_name} is missing expected cases {missing}; every expected case must "
+            "appear exactly once")
+    unknown = sorted(set(records) - set(by_id))
+    if unknown:
+        raise EvaluationError(f"{source_name} contains cases outside the corpus: {unknown}")
+    for case_id, case in by_id.items():
+        record = records[case_id]
+        if record["profile_id"] != case["profile_id"]:
+            raise EvaluationError(
+                f"{source_name} case {case_id} ran profile {record['profile_id']}, "
+                f"corpus declares {case['profile_id']}")
+        raw_bytes = len(case["raw_input"].encode("utf-8"))
+        for repeat in record["repeats"]:
+            for ordinal, row in enumerate(repeat.get("candidates", [])):
+                begin = row["input_begin_utf8_byte"]
+                end = row["input_end_utf8_byte"]
+                if end > raw_bytes:
+                    raise EvaluationError(
+                        f"{source_name} case {case_id} candidate {ordinal} quotes input bytes "
+                        f"[{begin}, {end}) beyond the {raw_bytes}-byte raw input")
 
 
 def menu_signature(repeat: dict[str, Any]) -> tuple:
@@ -721,10 +876,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     model_sha256, model_sha256_by_profile, model_sha256_notes = read_staged_model_maps(
         resources_index)
 
-    output_path = Path(args.output)
-    require_safe_output_path(output_path, repo_root)
+    output_path = require_contained_build_path(Path(args.output), repo_root)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    runs_dir = output_path.parent / "runs"
+    runs_dir = require_contained_build_dir(output_path.parent / "runs", repo_root)
     runs_dir.mkdir(exist_ok=True)
 
     zh_cases = [case for case in corpus["zh"]]
@@ -733,7 +887,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         for name in ("rime_dll", "rime_dll_sha256", "rime_shared"):
             if not getattr(args, name):
                 raise EvaluationError(f"--{name.replace('_', '-')} is required when zh cases exist")
-        work_root = runs_dir / "rime-work"
+        work_root = require_contained_build_dir(runs_dir / "rime-work", repo_root)
         work_root.mkdir(exist_ok=True)
         rime_argv = ["--rime-dll", args.rime_dll, "--rime-dll-sha256", args.rime_dll_sha256,
                      "--rime-shared", args.rime_shared, "--work", str(work_root)]
@@ -745,6 +899,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         per_run[language] = []
         for run_ordinal in range(args.runs):
             results_path = runs_dir / f"{language}.run{run_ordinal}.jsonl"
+            require_contained_build_path(results_path, repo_root)
             argv = ["--resources", str(resources_root),
                     "--cases", str(cases_dir / f"{language}.jsonl"),
                     "--language", language, "--output", str(results_path),
@@ -752,7 +907,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             if rime_argv and language == "zh":
                 argv += rime_argv
             command = run_harness(Path(args.harness), argv, results_path, args.timeout)
-            meta, records = read_results(results_path)
+            meta, records = read_results(results_path, language=language, repeat=args.repeat,
+                                         case_count=len(corpus[language]))
+            validate_records_against_corpus(records, corpus[language], results_path.name)
             meta["command"] = command
             per_run[language].append((meta, records))
     harness_sha256s = {runs[0][0]["command"]["harness_sha256_before"]
@@ -902,17 +1059,33 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
-def require_safe_output_path(output_path: Path, repo_root: Path) -> None:
-    """Candidate surfaces land only under build/ or outside the repository."""
-    resolved = output_path.resolve()
-    try:
-        relative = resolved.relative_to(repo_root.resolve())
-    except ValueError:
-        return  # outside the repository entirely
-    if relative.parts and relative.parts[0] == "build":
-        return
-    raise EvaluationError(
-        "report path inside the repository must stay under build/ (results carry candidate surfaces)")
+def require_contained_build_path(path: Path, repo_root: Path) -> Path:
+    """Confine evaluation artifacts to the resolved canonical <repo>/build/.
+
+    Candidate surfaces live in the report's runs directory, so every artifact
+    path -- report, runs, worktree, temp file -- must resolve strictly inside
+    the repository's build/ directory. Rejected: absolute escapes, any `..`
+    component, symlink/junction/reparse-point escapes (the final resolved
+    path must remain inside), paths in the source tree outside build/, and
+    paths outside the repository entirely.
+    """
+    build_root = (repo_root / "build").resolve()
+    if ".." in path.parts:
+        raise EvaluationError(f"artifact path must not contain '..': {path.name}")
+    resolved = path.resolve()
+    if not (resolved == build_root or build_root in resolved.parents):
+        raise EvaluationError(
+            "evaluation artifacts must stay under the resolved repository build/ directory "
+            "(results carry candidate surfaces); refusing "
+            f"{resolved} outside {build_root}")
+    return resolved
+
+
+def require_contained_build_dir(path: Path, repo_root: Path) -> Path:
+    resolved = require_contained_build_path(path, repo_root)
+    if resolved.exists() and not resolved.is_dir():
+        raise EvaluationError(f"artifact path must be a directory: {resolved}")
+    return resolved
 
 
 def save_report(path: Path, report: dict[str, Any]) -> None:

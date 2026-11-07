@@ -274,7 +274,6 @@ class ValidatorTests(unittest.TestCase):
             ("empty raw_input", [mutated_case(raw_input="")]),
             ("control scalar in raw_input", [mutated_case(raw_input="he\tl")]),
             ("raw_input byte bound", [mutated_case(raw_input="x" * 4097)]),
-            ("escaped unicode in raw_input", [mutated_case(raw_input="h\\u00e9l")]),
             ("empty expected", [mutated_case(expected=[])]),
             ("too many surfaces", [mutated_case(expected=["a"] * 9)]),
             ("duplicate surfaces", [mutated_case(expected=["hello", "hello"])]),
@@ -302,6 +301,9 @@ class ValidatorTests(unittest.TestCase):
         self.validate([mutated_case(profile_id=1)])                     # valid binding
         self.validate([mutated_case(expected_languages=["en", "fr"])])  # superset is legal
         self.validate([mutated_case(raw_input="x" * 4096)])             # exactly at the bound
+        # A literal backslash followed by 'u' is ordinary text data; the \uXXXX
+        # ban is lexical on the raw JSON bytes, not a decoded-substring rule.
+        self.validate([mutated_case(raw_input="h\\u00e9l")])
 
 
 class CorpusFileTests(unittest.TestCase):
@@ -347,6 +349,75 @@ class CorpusFileTests(unittest.TestCase):
             path.write_bytes(json.dumps(BASE_CASE).encode("utf-8") + b"\n")
             records = ev.read_corpus_file(path, "en")
             self.assertEqual(len(records), 1)
+
+    def test_rejects_literal_unicode_escape_in_raw_bytes(self):
+        # Integration negative: the escape is real raw JSON bytes ("\u0068"),
+        # exactly what json.loads would silently decode and the native parser
+        # would reject; the evaluator must reject it before decoding.
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "en.jsonl"
+            payload = json.dumps(BASE_CASE).encode("utf-8").replace(b'"hel"', b'"\\u0068"')
+            self.assertIn(b'"\\u0068"', payload)  # the fixture is what it claims
+            path.write_bytes(payload + b"\n")
+            with self.assertRaises(ev.EvaluationError):
+                ev.read_corpus_file(path, "en")
+
+    def test_escaped_backslash_before_u_is_not_an_escape(self):
+        # "\\u0068" in raw bytes is an escaped backslash followed by 'u'; it
+        # decodes to a literal backslash-u text and must not false-positive.
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "en.jsonl"
+            payload = json.dumps(BASE_CASE).encode("utf-8").replace(b'"hel"', b'"\\\\u0068"')
+            self.assertIn(b'"\\\\u0068"', payload)
+            path.write_bytes(payload + b"\n")
+            records = ev.read_corpus_file(path, "en")
+            self.assertEqual(records[0]["raw_input"], "\\u0068")
+            seen: set[str] = set()
+            ev.validate_cases("en", records, ev.load_bindings(BINDINGS_PATH), seen)
+
+
+@unittest.skipUnless(os.name == "nt", "the fake harness fixture is a Windows batch file")
+class HarnessStderrTests(unittest.TestCase):
+    """run_harness integration: a harness that exits 0 with stderr output
+    violates its own protocol and must be rejected even with a results file."""
+
+    def setUp(self) -> None:
+        self.root = REPO_ROOT / "build" / "test-tmp" / f"harness-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        self.root.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.output = self.root / "results.jsonl"
+        self.cmd = Path(os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe"))
+
+    def make_bat(self, body: str) -> Path:
+        path = self.root / "fake-harness.cmd"
+        path.write_bytes(body.encode("ascii"))
+        return path
+
+    def run_fake(self, body: str) -> dict:
+        harness = self.make_bat(body)
+        # run_harness inherits the process environment; point the fixture at
+        # the expected results path for the duration of the call.
+        original = os.environ.get("EPOCANVA_FAKE_OUT")
+        os.environ["EPOCANVA_FAKE_OUT"] = str(self.output)
+        try:
+            return ev.run_harness(self.cmd, ["/c", str(harness)], self.output, 60)
+        finally:
+            if original is None:
+                os.environ.pop("EPOCANVA_FAKE_OUT", None)
+            else:
+                os.environ["EPOCANVA_FAKE_OUT"] = original
+
+    def test_silent_success_passes(self):
+        command = self.run_fake("@echo off\r\ntype nul > \"%EPOCANVA_FAKE_OUT%\"\r\n")
+        self.assertEqual(command["exit_status"], 0)
+        self.assertTrue(command["stderr_empty"])
+        self.assertTrue(self.output.is_file())
+
+    def test_stderr_on_success_is_fatal(self):
+        with self.assertRaises(ev.EvaluationError):
+            self.run_fake("@echo off\r\n"
+                          "echo unexpected diagnostic 1>&2\r\n"
+                          "type nul > \"%EPOCANVA_FAKE_OUT%\"\r\n")
 
 
 METRIC_CASE = mutated_case(raw_input="goo", expected=["good", "goodness"])
@@ -597,42 +668,188 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(result["top1"], 1.0)
 
     def test_output_path_rules(self):
-        ev.require_safe_output_path(REPO_ROOT / "build" / "candidate-eval" / "report.json",
-                                    REPO_ROOT)
-        ev.require_safe_output_path(Path(tempfile.gettempdir()) / "report.json", REPO_ROOT)
+        # Candidate surfaces may land only under the resolved build/ tree.
+        ev.require_contained_build_path(REPO_ROOT / "build" / "candidate-eval" / "report.json",
+                                        REPO_ROOT)
+        for forbidden in (
+                REPO_ROOT / "docs" / "report.json",                 # source tree, not build/
+                REPO_ROOT / "build" / ".." / "docs" / "evil.json",  # .. traversal
+                Path(tempfile.gettempdir()) / "report.json",        # outside the repository
+                REPO_ROOT / "buildx" / "report.json",               # prefix lookalike
+        ):
+            with self.subTest(path=str(forbidden)):
+                with self.assertRaises(ev.EvaluationError):
+                    ev.require_contained_build_path(forbidden, REPO_ROOT)
+
+    def test_junction_escape_is_rejected(self):
+        if os.name != "nt":
+            self.skipTest("junction reparse points are a Windows behaviour")
+        link = REPO_ROOT / "build" / "test-tmp" / f"junction-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        link.parent.mkdir(parents=True, exist_ok=True)
+
+        def remove_junction() -> None:
+            try:
+                os.rmdir(link)  # removes the reparse point itself, never the target
+            except OSError:
+                pass
+
+        try:
+            import _winapi
+            _winapi.CreateJunction(str(REPO_ROOT / "docs"), str(link))
+        except (ImportError, OSError):
+            self.skipTest("creating a junction requires privileges this host lacks")
+        self.addCleanup(remove_junction)
         with self.assertRaises(ev.EvaluationError):
-            ev.require_safe_output_path(REPO_ROOT / "docs" / "report.json", REPO_ROOT)
+            ev.require_contained_build_path(link / "report.json", REPO_ROOT)
 
 
 class ResultsReaderTests(unittest.TestCase):
+    @staticmethod
+    def write_results(path: Path, meta_overrides: dict | None = None,
+                      record_overrides: dict | None = None,
+                      meta: dict | None = None) -> None:
+        base_meta = {"language": "en", "repeat": 2, "case_count": 1, "load_ms": 1.0,
+                     "peak_working_set_bytes": 2}
+        if meta is None:
+            meta = dict(base_meta)
+            meta.update(meta_overrides or {})
+        record = {"case_id": "en-a", "profile_id": 1, "status": "ok",
+                  "repeats": [repeat([row(0, "goo")]), repeat([row(0, "goo")])]}
+        record.update(record_overrides or {})
+        if record is not None and record_overrides and record_overrides.get("repeats") is DELETE:
+            record.pop("repeats")
+        path.write_text(json.dumps({"run_meta": meta}) + "\n" + json.dumps(record) + "\n",
+                        encoding="utf-8")
+
+    def read(self, path: Path, **overrides):
+        expectations = {"language": "en", "repeat": 2, "case_count": 1}
+        expectations.update(overrides)
+        return ev.read_results(path, **expectations)
+
     def test_read_results_round_trip(self):
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "results.jsonl"
-            meta = {"language": "en", "repeat": 2, "case_count": 1, "load_ms": 1.0,
-                    "peak_working_set_bytes": 2}
-            payload = (json.dumps({"run_meta": meta}) + "\n" +
-                       json.dumps({"case_id": "en-a", "profile_id": 1, "status": "ok",
-                                   "repeats": [repeat([row(0, "goo")]), repeat([row(0, "goo")])]}) + "\n")
-            path.write_text(payload, encoding="utf-8")
-            read_meta, records = ev.read_results(path)
+            path = Path(temporary) / "en.run0.jsonl"
+            self.write_results(path)
+            read_meta, records = self.read(path)
             self.assertEqual(read_meta["language"], "en")
             self.assertIn("en-a", records)
 
+    def test_read_results_rejects_wrong_file_name_language(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "zh.run0.jsonl"
+            self.write_results(path)
+            with self.assertRaises(ev.EvaluationError):
+                self.read(path)
+
     def test_read_results_rejects_missing_meta(self):
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "results.jsonl"
+            path = Path(temporary) / "en.run0.jsonl"
             path.write_text(json.dumps({"case_id": "en-a"}) + "\n", encoding="utf-8")
             with self.assertRaises(ev.EvaluationError):
-                ev.read_results(path)
+                self.read(path)
 
     def test_read_results_rejects_duplicate_case(self):
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "results.jsonl"
+            path = Path(temporary) / "en.run0.jsonl"
             line = json.dumps({"case_id": "en-a", "status": "ok", "repeats": []})
-            path.write_text(json.dumps({"run_meta": {}}) + "\n" + line + "\n" + line + "\n",
+            path.write_text(json.dumps({"run_meta": {"language": "en", "repeat": 2,
+                                                     "case_count": 1}}) + "\n" + line + "\n" + line + "\n",
                             encoding="utf-8")
             with self.assertRaises(ev.EvaluationError):
-                ev.read_results(path)
+                self.read(path)
+
+    def test_meta_mismatches_are_fatal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, overrides, kwargs in (
+                    ("language", {"language": "fr"}, {}),
+                    ("repeat", {"repeat": 3}, {}),
+                    ("case-count", {"case_count": 5}, {}),
+            ):
+                with self.subTest(rule=name):
+                    path = Path(temporary) / f"{name}.jsonl"
+                    self.write_results(path, meta_overrides=overrides)
+                    with self.assertRaises(ev.EvaluationError):
+                        self.read(path)
+
+    def test_record_schema_violations_are_fatal(self):
+        bad_rows = [
+            ("unknown status", {"status": "mysterious"}),
+            ("missing repeats", {"repeats": DELETE}),
+            ("negative latency", {"repeats": [repeat([row(0, "goo")], latency_ns=-1),
+                                              repeat([row(0, "goo")])]}),
+            ("non-bool search_complete", {"repeats": [repeat([row(0, "goo")], complete=1),
+                                                      repeat([row(0, "goo")])]}),
+            ("rank not contiguous", {"repeats": [repeat([{**row(0, "goo"), "rank": 4}]),
+                                                 repeat([row(0, "goo")])]}),
+            ("kind outside enum", {"repeats": [repeat([row(7, "goo")]),
+                                               repeat([row(7, "goo")])]}),
+            ("text not a string", {"repeats": [repeat([{**row(0, "x"), "text_utf8": 5}]),
+                                               repeat([{**row(0, "x"), "text_utf8": 5}])]}),
+            ("lexeme id not uint64", {"repeats": [repeat([{**row(0, "goo"), "lexeme_ids": [-1]}]),
+                                                  repeat([{**row(0, "goo"), "lexeme_ids": [-1]}])]}),
+            ("inverted byte range", {"repeats": [repeat([{**row(0, "goo"),
+                                                          "input_begin_utf8_byte": 2,
+                                                          "input_end_utf8_byte": 1}]),
+                                                 repeat([{**row(0, "goo"),
+                                                          "input_begin_utf8_byte": 2,
+                                                          "input_end_utf8_byte": 1}])]}),
+            ("negative byte offset", {"repeats": [repeat([{**row(0, "goo"),
+                                                           "input_begin_utf8_byte": -1}]),
+                                                  repeat([{**row(0, "goo"),
+                                                           "input_begin_utf8_byte": -1}])]}),
+        ]
+        for name, record_overrides in bad_rows:
+            with self.subTest(rule=name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "en.run0.jsonl"
+                    self.write_results(path, record_overrides=record_overrides)
+                    with self.assertRaises(ev.EvaluationError):
+                        self.read(path)
+
+    def test_rank_and_kind_are_accepted_when_correct(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "en.run0.jsonl"
+            rows = [dict(row(0, "goo"), rank=0), dict(row(1, "good", ids=[11]), rank=1)]
+            self.write_results(path, record_overrides={
+                "repeats": [repeat(list(rows)), repeat(list(rows))]})
+            self.read(path)  # must not raise
+
+
+class CorpusCrossCheckTests(unittest.TestCase):
+    CORPUS_CASE = {"id": "en-a", "profile_id": 1, "raw_input": "goo"}
+
+    def records(self, case: dict) -> dict:
+        return {case["id"]: {"profile_id": case["profile_id"], "status": "ok", "repeats": [
+            {"latency_ns": 1, "search_complete": True,
+             "candidates": [dict(rank=0, kind=0, text_utf8="goo", lexeme_ids=[],
+                                  input_begin_utf8_byte=0, input_end_utf8_byte=3)]}]}}
+        # raw_input "goo" is exactly 3 UTF-8 bytes
+
+    def test_matching_records_pass(self):
+        ev.validate_records_against_corpus(self.records(self.CORPUS_CASE),
+                                           [self.CORPUS_CASE], "en.run0.jsonl")
+
+    def test_missing_case_is_fatal(self):
+        with self.assertRaises(ev.EvaluationError):
+            ev.validate_records_against_corpus({}, [self.CORPUS_CASE], "en.run0.jsonl")
+
+    def test_extra_case_is_fatal(self):
+        records = self.records(self.CORPUS_CASE)
+        records["en-ghost"] = dict(records["en-a"])
+        with self.assertRaises(ev.EvaluationError):
+            ev.validate_records_against_corpus(records, [self.CORPUS_CASE], "en.run0.jsonl")
+
+    def test_profile_mismatch_is_fatal(self):
+        records = self.records(self.CORPUS_CASE)
+        records["en-a"]["profile_id"] = 12
+        with self.assertRaises(ev.EvaluationError):
+            ev.validate_records_against_corpus(records, [self.CORPUS_CASE], "en.run0.jsonl")
+
+    def test_byte_range_beyond_raw_input_is_fatal(self):
+        records = self.records(self.CORPUS_CASE)
+        records["en-a"]["repeats"][0]["candidates"][0]["input_end_utf8_byte"] = 4
+        with self.assertRaises(ev.EvaluationError):
+            ev.validate_records_against_corpus(records, [self.CORPUS_CASE], "en.run0.jsonl")
 
 
 class ReportWriterTests(unittest.TestCase):
