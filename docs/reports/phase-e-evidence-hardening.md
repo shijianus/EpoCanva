@@ -238,12 +238,30 @@ surfaces; never committed, never uploaded).
 
 ## 7. Hosted contract gate
 
-Recorded after push in the follow-up commit to this report (run ids, head
-SHAs, conclusions and durations read from the Actions API; no values
-predicted in advance). The hosted run is the **contract gate only** — it is
-not a hosted full backend/product validation: those require the self-hosted
-runner with the hash-verified Tier 2 input cache (docs/ci/windows-ci.md §2)
-and are not enabled.
+Read back from the public Actions pages after the non-forced push
+(`dafd05f..3722744`, exit 0); no values were predicted in advance. The
+hosted run is the **contract gate only** — it is not a hosted full
+backend/product validation: those require the self-hosted runner with the
+hash-verified Tier 2 input cache (docs/ci/windows-ci.md §2) and are not
+enabled.
+
+| Field | Value |
+| --- | --- |
+| run id | `42346805346` (windows-ci #5) |
+| event | push (`dafd05f..3722744` to `feat/phase-e-quality-gates`) |
+| head_sha | `37227442a5e3fd8f38d64712cbedb5b2820f538a` |
+| workflow path | `.github/workflows/windows-ci.yml` |
+| conclusion | **success** (1 m 13 s; jobs `contract-gate` ≈65 s and `contract-gate-canary` ≈70 s both success) |
+| attempt | 1 |
+| timestamps | created/observed 2026-11-07 (UTC); per-step timestamps require sign-in |
+
+The green gate now proves more than the previous round's: the whitespace
+gate ran over the real committed event range, the exact inventory
+(12 contract tests) was verified against the committed set before `ctest -L
+contract-gate` executed, the aggregate target built both native probes, and
+the canary exercised the same steps under `windows-latest` — which also
+exercised the new gate tooling under pwsh 7 (the verifier subprocess itself
+runs under Windows PowerShell 5.1 on the runner, as designed).
 
 ## 8. Unfinished items, risks
 
