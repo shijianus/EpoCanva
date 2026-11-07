@@ -41,9 +41,32 @@ this document stays the single description of what exists:
   except the single cold first query of each language, and the report records
   `warmup_queries: 0` so the numbers are not mistaken for the designed
   post-warm-up regime.
-- `wrong_language_rate` is structural for this backend: each case runs in its
-  declared profile's session and the v1 ABI carries no per-candidate language,
-  so the value is 0.0 by construction, not a measured claim.
+- `wrong_language_rate` is **not observable** at the public v1 candidate ABI:
+  candidates carry no per-candidate language attribution, so the report
+  records `wrong_language_rate: null` and a `not_observable` status. It is
+  never written as 0.0, and no Unicode script heuristic substitutes for a
+  measurement. The quality policy's `wrong_language_observable` predicate is
+  therefore not evaluable, which caps policy v1 at `not_evaluable`/`failed`
+  — a gate cannot pass on an unobservable mandatory predicate, and
+  qualification mode exits nonzero until E4 exposes candidate language.
+- The evaluator is fail-closed (`--mode baseline|qualification`): a
+  quality_gate block with versioned mandatory predicates and statuses
+  `failed`/`not_evaluable`/`passed` (`met` true only when `passed`);
+  `unmet_reasons` and `not_evaluated_predicates` are always listed. Baseline
+  writes unmet-quality reports with exit 0; structural, identity, schema and
+  whole-run integrity failures exit 1 in both modes; qualification exits
+  nonzero whenever the gate is not passed.
+- Every run result is schema-validated (exactly one `run_meta` matching
+  language/repeat/case_count, the v1 candidate kind enum, contiguous ranks,
+  byte-range bounds inside the raw UTF-8 input, exactly the expected case
+  set, empty stderr on exit 0), determinism is reported as separate
+  in-process and cross-process rates, and `\uXXXX` escapes are rejected
+  lexically on the raw JSON bytes (literal UTF-8 only; escaped backslashes
+  do not false-positive).
+- All evaluation artifacts (report, runs, worktree, temp files) must resolve
+  strictly inside the canonical `<repo>/build/`; escapes, `..` components,
+  source-tree paths and outside-repository paths are rejected, and a real
+  junction-escape negative test pins the resolution.
 - Measurement discovered the raw-first contract: every COMPLETION menu pins the
   raw candidate at ordinal 0 (zh/ja explicitly; en/fr/ko via the lexical
   service's kOriginal row). `top1`/`top3`/`mrr` are kept exactly as designed
@@ -53,9 +76,9 @@ this document stays the single description of what exists:
   suggestion ordering directly. For ko two-set, the "raw" row carries the
   composed Hangul rather than the typed romanization keys, so `raw_present_rate`
   is a real per-language property, not a constant.
-- The evaluator refuses a report path inside the repository that is not under
-  `build/`; the runs directory (which carries candidate surfaces) lives beside
-  the report.
+- The evaluator refuses any artifact path that does not resolve strictly
+  inside the repository's `build/`; the runs directory (which carries
+  candidate surfaces) lives beside the report.
 
 ## 1. Purpose and non-goals
 

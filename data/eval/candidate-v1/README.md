@@ -49,8 +49,11 @@ independent signal. They can be added when an authored pin exists.
 (1,001 cases per language; 500 for Korean — see the design document §9). It
 proves the measurement plumbing, the raw-first contract checks, determinism
 and the recorded baseline numbers; it is **not** a natural-language quality
-claim, and `evaluate_candidates.py` withholds the quality claim accordingly
-(`quality_gate.met == false`, `claim: baseline-only`).
+claim, and `evaluate_candidates.py` records that honestly: the fail-closed
+`quality_gate` reports `status: failed` (or `not_evaluable`) with named
+`unmet_reasons`, and `met` is true only when every mandatory predicate
+passes — which also requires candidate language observability the v1 ABI
+does not provide.
 
 **Reproduction.** From the repository root, with the pinned Tier 2 inputs and
 staged backend resources in place (see

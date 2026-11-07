@@ -1,5 +1,26 @@
 # Phase E quality gates — verification, fixes, and the E6 minimal baseline
 
+> **Correction (2026-11-07, evidence-hardening round).** Two identity fields in
+> this earlier round are wrong and are superseded by
+> `docs/reports/phase-e-evidence-hardening.md`:
+>
+> 1. **§3.5 / §7.3, windows-ci #3 (run 42336295759)**: the run's real head SHA is
+>    `022ff38f3626f8b724389dadcef142ed61529cf4`, not `2145cf0`. The fix commit
+>    `2145cf0` is an *ancestor* of that run's head, not its head; the run was
+>    triggered by a push whose tip was the later docs commit `022ff38`. The
+>    conclusion (success) and the run id are unchanged; verified against the
+>    GitHub Actions API this round. A fourth hosted run
+>    (`42336892770`, head `dafd05f18def82743ea1c7021be4809abfe28ae4`) also
+>    succeeded and was not recorded here.
+> 2. **§5.4 / §7 row 13, the recorded E6 baseline**: the evaluator of that round
+>    wrote the caller-supplied `--repo-commit 38b8693…` into the report
+>    identity without verifying anything, while the tree it actually measured
+>    was at `12c7647` with an untracked report file. That report's
+>    `identity.repo_commit` is therefore not a source binding and the run is
+>    superseded by the round-2 baseline (`build/candidate-eval-r2/report.json`,
+>    bound to a real clean HEAD by the evaluator itself). The old report bytes
+>    are kept unchanged under `build/candidate-eval/` as historical evidence.
+
 **Date**: 2026-11-07
 **Branch**: `feat/phase-e-quality-gates`
 **Baseline HEAD (unchanged remote head of this round's start)**: `38b8693ef11d4f8192237c11a57c0c47e6695851`
