@@ -62,6 +62,25 @@ $commit_pattern = '^[0-9a-f]{40}$'
 $failures = New-Object System.Collections.Generic.List[string]
 $verified = 0
 
+# SHA-256 via the .NET APIs, not Get-FileHash: the Utility module that provides
+# Get-FileHash fails to auto-load under Windows PowerShell 5.1 when the host
+# environment carries a pwsh 7 PSModulePath (the GitHub-hosted runner does), and
+# the verifier must behave identically under powershell.exe and pwsh.
+function Get-Sha256Lowercase([string]$literal_path) {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [System.IO.File]::OpenRead($literal_path)
+    try {
+      $digest = $sha.ComputeHash($stream)
+    } finally {
+      $stream.Dispose()
+    }
+  } finally {
+    $sha.Dispose()
+  }
+  return [System.BitConverter]::ToString($digest).Replace('-', '').ToLowerInvariant()
+}
+
 foreach ($entry in $entries) {
   $kind = $entry.kind
   $path = $entry.path
@@ -82,7 +101,7 @@ foreach ($entry in $entries) {
       $failures.Add("FAIL file $path SIZE_MISMATCH expected=$($entry.size_bytes) actual=$($item.Length)")
       continue
     }
-    $actual = (Get-FileHash -LiteralPath $absolute -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actual = Get-Sha256Lowercase $absolute
     if ($actual -ne "$($entry.sha256)") {
       $failures.Add("FAIL file $path HASH_MISMATCH expected=$($entry.sha256) actual=$actual")
     } else {
