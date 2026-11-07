@@ -888,6 +888,226 @@ void Concurrency(const fs::path& base) {
   Cleanup(root);
 }
 
+// Deterministic fault injection: every fault below is produced by a real
+// filesystem object or a real killed process, not by a synthetic shim, so each
+// assertion is reproducible and each diagnosed stage/Win32 code is the adapter's
+// own observable behavior. These tests were derived from the actual
+// implementation, not from the designed-but-unimplemented fault table: for
+// example the adapter removes a foreign staging file before CREATE_NEW, so a
+// pre-created .tmp never reaches a CREATE_NEW failure, and a valid-format file
+// with a foreign catalog digest fails closed with kCatalogMismatch instead of
+// being quarantined (quarantining it would destroy the other catalog's data).
+void Faults(const fs::path& base) {
+  const auto catalog = TestCatalog();
+  Snapshot snapshot;
+  // 1. A foreign .tmp left by a dead process is removed by the unconditional
+  //    staging cleanup and its bytes are never adopted.
+  {
+    const auto root = NewRoot(base, L"fault-orphan-temp");
+    WindowsLearningRepository repository(root);
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "orphan-temp baseline");
+    WriteFixture(Leaf(root, L".tmp"), "foreign staging bytes from a dead process");
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk,
+           "foreign staging file is removed, not adopted");
+    ExpectIo(IoStage::kNone, "orphan-temp recovery leaves no io diagnostic");
+    Check(!fs::exists(Leaf(root, L".tmp")), "orphan .tmp consumed by the retry");
+    Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kOk, "orphan-temp read");
+    Check(snapshot.revision == 2 && Count(snapshot, 11) == 2,
+          "orphan .tmp contributes no counts and no revision");
+    Cleanup(root);
+  }
+  // 2. An orphan .v2.tmp does not block a non-legacy transaction (the data path
+  //    publishes through data .tmp only); explicit deletion removes it.
+  {
+    const auto root = NewRoot(base, L"fault-orphan-v2temp");
+    WindowsLearningRepository repository(root);
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "orphan-v2temp baseline");
+    WriteFixture(Leaf(root, L".v2.tmp"), "orphan backup staging bytes");
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk,
+           "orphan backup staging file does not block the data path");
+    Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kOk, "orphan-v2temp read");
+    Check(snapshot.revision == 2 && Count(snapshot, 11) == 2,
+          "orphan backup staging contributes no counts");
+    Check(fs::exists(Leaf(root, L".v2.tmp")),
+          "non-legacy data publication does not touch the backup staging path");
+    Expect(repository.Delete(catalog, true), Status::kOk, "explicit delete removes the orphan backup staging file");
+    Check(!fs::exists(Leaf(root, L".v2.tmp")), "delete clears the orphan backup staging file");
+    Cleanup(root);
+  }
+  // 3. A read-only foreign .tmp cannot be removed: the transaction fails closed
+  //    at the delete stage, the durable store stays byte-identical, and the
+  //    retry succeeds once the attribute is cleared.
+  {
+    const auto root = NewRoot(base, L"fault-readonly-temp");
+    WindowsLearningRepository repository(root);
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "readonly-temp baseline");
+    const auto valid = ReadFixture(Leaf(root, L".dat"));
+    WriteFixture(Leaf(root, L".tmp"), "stuck foreign staging bytes");
+    const DWORD temp_attributes = ::GetFileAttributesW(Leaf(root, L".tmp").c_str());
+    Check(temp_attributes != INVALID_FILE_ATTRIBUTES &&
+              ::SetFileAttributesW(Leaf(root, L".tmp").c_str(),
+                                   temp_attributes | FILE_ATTRIBUTE_READONLY),
+          "read-only orphan staging fixture set");
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kIoError,
+           "undeletable staging file fails the transaction");
+    ExpectIo(IoStage::kDelete, "undeletable staging file reports the delete stage");
+    Check(LastIoFailure().win32_error == ERROR_ACCESS_DENIED,
+          "undeletable staging file preserves the Win32 error code");
+    Check(ReadFixture(Leaf(root, L".dat")) == valid, "failed publication preserves the durable store");
+    Check(fs::exists(Leaf(root, L".tmp")), "undeletable staging file is retained for diagnosis");
+    Check(::SetFileAttributesW(Leaf(root, L".tmp").c_str(), temp_attributes) != FALSE,
+          "read-only orphan staging fixture restored");
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "retry after the staging attribute clears");
+    ExpectIo(IoStage::kNone, "retry after staging cleanup leaves no io diagnostic");
+    Check(!fs::exists(Leaf(root, L".tmp")), "cleared retry consumed the orphan staging file");
+    Cleanup(root);
+  }
+  // 4. An exclusively held .dat blocks the transaction at the open stage with
+  //    kBusy, preserves the old bytes, and the retried Record lands exactly one
+  //    revision (no double-count after a failed transaction).
+  {
+    const auto root = NewRoot(base, L"fault-open-sharing");
+    WindowsLearningRepository repository(root);
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "open-sharing baseline");
+    const auto valid = ReadFixture(Leaf(root, L".dat"));
+    Handle exclusive(::CreateFileW(Leaf(root, L".dat").c_str(), GENERIC_READ, 0, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    Check(exclusive.valid(), "exclusive target handle acquired");
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kBusy,
+           "exclusive target handle blocks the store open");
+    ExpectIo(IoStage::kOpen, "blocked store open reports the open stage");
+    Check(LastIoFailure().win32_error == ERROR_SHARING_VIOLATION ||
+              LastIoFailure().win32_error == ERROR_LOCK_VIOLATION,
+          "blocked store open preserves the Win32 error code");
+    Check(!fs::exists(Leaf(root, L".tmp")), "blocked open leaves no staging file");
+    std::string observed(valid.size(), '\0');
+    DWORD observed_utf8_bytes = 0;
+    Check(::ReadFile(exclusive.get(), observed.data(),
+            static_cast<DWORD>(observed.size()), &observed_utf8_bytes, nullptr) &&
+        observed_utf8_bytes == valid.size() && observed == valid,
+        "failed open preserves the durable bytes");
+    exclusive.Reset();
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "retry after the exclusive handle closes");
+    Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kOk, "open-sharing retry read");
+    Check(snapshot.revision == 2 && Count(snapshot, 11) == 2,
+          "a failed open transaction double-counts nothing on retry");
+    Cleanup(root);
+  }
+  // 5. A handle that does not share delete blocks the atomic replacement; the
+  //    retried Record still lands exactly one revision.
+  {
+    const auto root = NewRoot(base, L"fault-replace-sharing");
+    WindowsLearningRepository repository(root);
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "replace-sharing baseline");
+    const auto valid = ReadFixture(Leaf(root, L".dat"));
+    Handle no_delete(::CreateFileW(Leaf(root, L".dat").c_str(), GENERIC_READ,
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    Check(no_delete.valid(), "no-delete target handle acquired");
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kBusy,
+           "no-delete target handle blocks replacement");
+    ExpectIo(IoStage::kReplace, "blocked replacement reports the replace stage");
+    Check(ReadFixture(Leaf(root, L".dat")) == valid, "blocked replacement preserves the old snapshot");
+    no_delete.Reset();
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "retry after the replace conflict closes");
+    Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kOk, "replace-sharing retry read");
+    Check(snapshot.revision == 2 && Count(snapshot, 11) == 2,
+          "a failed replacement double-counts nothing on retry");
+    Check(!fs::exists(Leaf(root, L".tmp")), "recovered replacement leaves no staging file");
+    Cleanup(root);
+  }
+  // 6. A process killed while its staged .tmp exists leaves an orphan stage and
+  //    an acquirable lock; the next successful transaction removes the orphan,
+  //    publishes exactly one revision, and quarantines nothing.
+  {
+    const auto root = NewRoot(base, L"fault-kill-midtransaction");
+    WindowsLearningRepository repository(root);
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "kill baseline");
+    const auto baseline_revision = 1ull;
+    const auto valid = ReadFixture(Leaf(root, L".dat"));
+    const auto unique = std::to_wstring(::GetCurrentProcessId()) + L"-" +
+        std::to_wstring(::GetTickCount64());
+    const auto ready_name = L"Local\\EpoCanvaLearningTest-faultready-" + unique;
+    Handle ready(::CreateEventW(nullptr, TRUE, FALSE, ready_name.c_str()));
+    Check(ready.valid(), "fault point event created");
+    auto child = Spawn({L"--fault-child", root.native(), ready_name});
+    Check(child.valid() && ::WaitForSingleObject(ready.get(), 15000) == WAIT_OBJECT_0,
+          "child reached the staged .tmp fault point");
+    Check(fs::exists(Leaf(root, L".tmp")), "child holds a staged .tmp at the fault point");
+    Check(::TerminateProcess(child.get(), 90) != FALSE, "child killed at the fault point");
+    (void)::WaitForSingleObject(child.get(), 15000);
+    Check(fs::exists(Leaf(root, L".tmp")), "killed child leaves the orphan stage behind");
+    Handle acquire_lock(::CreateFileW(Leaf(root, L".lock").c_str(), GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    OVERLAPPED byte_zero = {};
+    Check(acquire_lock.valid() &&
+              ::LockFileEx(acquire_lock.get(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                           0, 1, 0, &byte_zero),
+          "process death released the stable transaction lock");
+    acquire_lock.Reset();
+    Check(ReadFixture(Leaf(root, L".dat")) == valid, "killed transaction preserved the previous store");
+    Check(LatestCorrupt(root).empty(), "no quarantine was created for a live store");
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk,
+           "next transaction removes the orphan stage and publishes");
+    Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kOk, "post-kill recovery read");
+    Check(snapshot.revision == baseline_revision + 1 && Count(snapshot, 11) == baseline_revision + 1,
+          "recovery lands exactly one new revision");
+    Check(!fs::exists(Leaf(root, L".tmp")), "recovery consumed the orphan stage");
+    Check(LatestCorrupt(root).empty(), "recovery quarantines nothing");
+    Cleanup(root);
+  }
+  // 7. Valid-format v3 bytes carrying a foreign catalog digest fail closed with
+  //    kCatalogMismatch on both read and record, keep the bytes intact, and
+  //    never quarantine the foreign catalog's own data.
+  {
+    const auto root = NewRoot(base, L"fault-foreign-catalog");
+    WindowsLearningRepository repository(root);
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "foreign-catalog baseline");
+    const auto valid = ReadFixture(Leaf(root, L".dat"));
+    const std::string marker = "\ncatalog-sha256\t";
+    const auto marker_utf8_byte = valid.find(marker);
+    Check(marker_utf8_byte != valid.npos, "v3 catalog digest marker located");
+    auto foreign = valid;
+    if (marker_utf8_byte != valid.npos) {
+      const auto digest_utf8_byte = marker_utf8_byte + marker.size();
+      Check(digest_utf8_byte + 64 <= foreign.size(), "v3 catalog digest span located");
+      foreign.replace(digest_utf8_byte, 64, 64, 'b');
+    }
+    WritePrivateFixture(Leaf(root, L".dat"), foreign);
+    Expect(repository.LoadSnapshot(catalog, allow, &snapshot), Status::kCatalogMismatch,
+           "foreign catalog digest fails closed on read");
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kCatalogMismatch,
+           "foreign catalog digest fails closed on record");
+    Check(ReadFixture(Leaf(root, L".dat")) == foreign,
+          "catalog mismatch is nondestructive in both directions");
+    Check(LatestCorrupt(root).empty(), "a valid-format foreign-catalog file is never quarantined");
+    Check(!fs::exists(Leaf(root, L".tmp")), "catalog mismatch writes no staging file");
+    Cleanup(root);
+  }
+}
+
+// Child process for the kill-mid-transaction fault: records once and, inside the
+// privacy callback that first observes its own staged .tmp, signals the fault
+// point and blocks until the parent either kills the process there or releases
+// it for a clean denied exit.
+int FaultChild(const fs::path& root, const std::wstring& ready_name) {
+  WindowsLearningRepository repository(root);
+  bool signaled = false;
+  (void)repository.Record(TestCatalog(), Confirmed(), [&]() -> Access {
+    if (!signaled && fs::exists(Leaf(root, L".tmp"))) {
+      signaled = true;
+      Handle ready(::OpenEventW(EVENT_MODIFY_STATE, FALSE, ready_name.c_str()));
+      if (ready.valid()) (void)::SetEvent(ready.get());
+      Handle release(::CreateEventW(nullptr, TRUE, FALSE,
+                                    (ready_name + L"-release").c_str()));
+      if (release.valid())
+        (void)::WaitForSingleObject(release.get(), 30000);
+      return Access{};  // Unknown: denied after release without the kill.
+    }
+    return Normal();
+  });
+  return signaled ? 0 : 3;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -899,6 +1119,8 @@ int wmain(int argc, wchar_t** argv) {
     return Writer(fs::path(argv[2]), argv[3], std::stoi(argv[4]));
   if (argc == 5 && std::wstring(argv[1]) == L"--lock-child")
     return LockChild(fs::path(argv[2]), argv[3], argv[4]);
+  if (argc == 4 && std::wstring(argv[1]) == L"--fault-child")
+    return FaultChild(fs::path(argv[2]), argv[3]);
   if (argc != 3) return 2;
   const std::wstring mode = argv[1];
   try {
@@ -915,6 +1137,7 @@ int wmain(int argc, wchar_t** argv) {
     else if (mode == L"paths") Paths(base);
     else if (mode == L"symlinks") return Symlinks(base);
     else if (mode == L"concurrency") Concurrency(base);
+    else if (mode == L"faults") Faults(base);
     else return 2;
   } catch (...) {
     Check(false, "test fixture exception");

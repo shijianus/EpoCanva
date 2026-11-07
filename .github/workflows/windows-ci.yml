@@ -1,0 +1,113 @@
+# Minimal Contract Gate CI for EpoCanva.
+#
+# This is the executable part of docs/ci/windows-ci.md section 3.1, enabled on a
+# GitHub-hosted runner. It needs no external Tier 2 build inputs: the manifest
+# freshness gate, the locale/candidate contract tests, the capability matrix
+# validation, the Tier 2 input-lock contract tests, and the Python staging unit
+# tests all run from the committed source tree alone.
+#
+# The backend, windows-product and nightly-stress jobs from the design document
+# are deliberately NOT enabled here. They require the self-hosted runner with the
+# hash-verified immutable input cache (docs/ci/windows-ci.md section 2); enabling
+# them without that cache would produce false failures or, worse, tempt an
+# unverified-input workaround. Enabling them is a separate reviewed change.
+#
+# Privacy: every test here uses synthetic fixtures and committed project data.
+# Nothing in this workflow downloads models, dictionaries or telemetry; the
+# product runtime performs no network I/O, and neither do these jobs.
+name: windows-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, "feat/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract-gate:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Pin checkout bytes to the committed LF endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Locate VS CMake
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $cmake = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
+          if (-not $cmake) { throw "VS CMake not found" }
+          "EPOCANVA_CMAKE=$cmake" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "EPOCANVA_CTEST=$(Join-Path (Split-Path $cmake) 'ctest.exe')" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Whitespace gate
+        run: git diff --check
+
+      - name: Configure root preset
+        run: |
+          & $env:EPOCANVA_CMAKE --preset vs2022-x64-debug
+          if ($LASTEXITCODE -ne 0) { throw "configure failed with exit $LASTEXITCODE" }
+
+      - name: Build contract test binaries
+        run: |
+          & $env:EPOCANVA_CMAKE --build build/vs2022-x64-debug --config Debug `
+            --target epocanva_locale_registry_tests epocanva_candidate_contract_tests `
+            --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "build failed with exit $LASTEXITCODE" }
+
+      - name: Contract CTests
+        run: |
+          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug `
+            -R "^(locale_registry|candidate_contract|capability_matrix|ci_inputs_lock)\." `
+            --no-tests=error --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "contract ctest failed with exit $LASTEXITCODE" }
+
+      - name: Regenerate the backend binding manifest and compare bytes
+        run: |
+          $probe = "build/vs2022-x64-debug/Debug/epocanva_locale_registry_tests.exe"
+          if (-not (Test-Path $probe)) { throw "locale probe not built at $probe" }
+          New-Item -ItemType Directory -Force build/ci/manifest | Out-Null
+          & $probe --manifest build/ci/manifest/backend-bindings.json
+          if ($LASTEXITCODE -ne 0) { throw "manifest export failed with exit $LASTEXITCODE" }
+          git diff --no-index --exit-code `
+            data/locale/backend-bindings.json build/ci/manifest/backend-bindings.json
+          if ($LASTEXITCODE -ne 0) {
+            throw "committed data/locale/backend-bindings.json is stale relative to the C++ registry export"
+          }
+
+      - name: Python staging unit tests
+        run: |
+          python -B -m unittest discover -s tests/backend_resource_staging -p "test_*.py"
+          if ($LASTEXITCODE -ne 0) { throw "staging unit tests failed with exit $LASTEXITCODE" }
+
+      - name: Source tree must stay clean
+        run: |
+          $status = git status --porcelain --untracked-files=all
+          if ($status) { $status; throw "source tree changed during the gate" }
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-gate-logs-${{ github.run_attempt }}
+          path: |
+            build/vs2022-x64-debug/Testing/Temporary/LastTest.log
+            build/vs2022-x64-debug/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore

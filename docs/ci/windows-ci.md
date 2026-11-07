@@ -1,8 +1,30 @@
 # Minimal Windows CI — design and executable workflow
 
-**Status**: design only. No `.github/workflows/` file exists at the time of
-writing, so nothing here is active CI. This document is committed so the design
-can be reviewed before a workflow is enabled.
+**Status**: contract gate **enabled**; backend, product and nightly stress
+remain design-only. `.github/workflows/windows-ci.yml` now exists and implements
+section 3.1 on a GitHub-hosted `windows-latest` runner. It registers only the
+jobs that need no external Tier 2 build inputs. The section 3.2–3.4 jobs require
+the self-hosted runner with the hash-pinned immutable input cache from section 2;
+they are still not enabled, and enabling them is a separate reviewed change.
+
+Deviations of the enabled workflow from the original design text, recorded so
+this document stays the single description of what runs:
+
+- The contract gate runs on the GitHub-hosted runner instead of a
+  self-hosted `epocanva-contract` labelled runner; section 3.1 already allowed
+  "hosted or self-hosted".
+- The contract CTest regex is
+  `^(locale_registry|candidate_contract|capability_matrix|ci_inputs_lock)\.`
+  — it now also runs the E3 capability-matrix validator and the Tier 2
+  input-lock contract tests added by the quality-gate round.
+- The manifest regeneration of section 3.1 step 4 runs explicitly through the
+  built locale probe (`--manifest build/ci/manifest/backend-bindings.json`)
+  plus `git diff --no-index --exit-code`; the `locale_registry.manifest` CTest
+  byte-comparison still runs inside the CTest step as before.
+- There is no `schedule` trigger: the only scheduled job in the design is the
+  self-hosted nightly stress, which is not enabled.
+- The hosted runner sets `core.autocrlf=false`/`core.eol=lf` before checkout;
+  `.gitattributes` `eol=lf` already forces LF, so this is defensive.
 
 ## 1. Constraints that shape the pipeline
 
@@ -152,7 +174,10 @@ text; the existing diagnostics are text-free by construction.
 
 ## 4. Executable workflow
 
-Save as `.github/workflows/windows-ci.yml` only after the design is accepted.
+The contract-gate job is now committed as `.github/workflows/windows-ci.yml`
+(see the status note above for its deviations from the text below). The full
+workflow text below remains the design for the complete pipeline; the backend,
+product and nightly-stress jobs are **not** in the committed file.
 `EPOCANVA_INPUT_CACHE` is a runner-level variable, not a repository secret.
 
 ```yaml

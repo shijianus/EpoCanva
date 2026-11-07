@@ -33,7 +33,7 @@ if(MSVC)
   target_compile_options(epocanva_learning_repository_tests PRIVATE /utf-8 /permissive- /W4 /EHsc)
 endif()
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/run")
-foreach(case persistence privacy revocation errors corruption feedback management acl paths symlinks concurrency)
+foreach(case persistence privacy revocation errors corruption feedback management acl paths symlinks concurrency faults)
   add_test(NAME learning.repository.${case}
     COMMAND epocanva_learning_repository_tests ${case} "${CMAKE_CURRENT_BINARY_DIR}/run")
   set_tests_properties(learning.repository.${case} PROPERTIES
