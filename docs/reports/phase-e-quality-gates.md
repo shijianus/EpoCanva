@@ -97,6 +97,23 @@ The regex now also names `candidate_evaluation\.`, the E6 evaluator suite
 registered in the same round (commit 2); at commit 1 the regex simply matches
 nothing for that group and the gate remains valid.
 
+### 3.5 The hosted runs — both earlier failures were the defects above, plus one more
+
+The push triggers `windows-ci` on the GitHub-hosted runner; the runs were read
+back through the repository's public Actions pages and, for step detail, the
+maintainer's own stored read-only git credential (no `gh` on this machine).
+
+| Run | Commit | Outcome | Cause | Fix |
+| --- | --- | --- | --- | --- |
+| windows-ci #1 | `38b8693` | **failed, 45 s** | the workflow's manifest probe path did not exist (§3.3) — the never-executed step failed on its first real run | commit 1 (`a37849c`) |
+| windows-ci #2 | `a9f2432` | **failed, 51 s** | `ci_inputs_lock.contract` failed: the suite spawns Windows PowerShell 5.1, which on the hosted runner inherits a pwsh 7 `PSModulePath`, so the Utility module behind `Get-FileHash` fails to auto-load and every file digest died with `CommandNotFoundException`; configure, build and the other 10 contract tests passed | commit 4 (`2145cf0`): the verifier computes SHA-256 via `System.Security.Cryptography.SHA256` directly, no module dependency, output format and exit codes unchanged |
+| windows-ci #3 | `2145cf0` | recorded below in §7.3 | — | — |
+
+The verifier fix was verified locally two ways before pushing: the 18-test
+`ci_inputs_lock` suite passes, and the production verifier validated the real
+22 pinned entries under `powershell.exe` with `PSModulePath` pointed at a
+nonexistent directory — the exact failure mode of the hosted runner.
+
 ## 4. Task 0 commands and observed results
 
 ```text
@@ -277,6 +294,19 @@ first time it executed in the product tree (passed, 0.54 s).
   that point), so those runs are the full-suite evidence for commit 2's tree.
 - Commit 3 is documentation only (this file).
 
+### 7.3 Hosted contract gate
+
+| Run | Commit | Result |
+| --- | --- | --- |
+| windows-ci #1 | `38b8693` | failed 45 s — §3.5 (probe path) |
+| windows-ci #2 | `a9f2432` | failed 51 s — §3.5 (`Get-FileHash` under the runner's `PSModulePath`; steps configure/build and 10 of 11 contract tests passed) |
+| windows-ci #3 | `2145cf0` | recorded after the run; see the note below |
+
+This report is committed before run #3 exists; its outcome is recorded in the
+commit message of the push that carries this file and must be reconciled here
+by the next documentation change if it is not green. No claim about run #3 is
+made in advance.
+
 ## 8. Files added or modified this round
 
 **Commit 1 — `fix(ci): make the contract gate run what it claims`**
@@ -305,11 +335,13 @@ deterministic and contain no timestamps, absolute paths or machine names.
 ## 9. Unfinished items, risks, blockers
 
 - **GitHub CLI is not installed** on this machine (`gh: command not found`), so
-  the Draft PR cannot be created from here and remote CI runs cannot be
-  observed via CLI. The push itself will trigger `windows-ci` on GitHub
-  (`push: branches: ["feat/**"]`); the workflow is now verified locally step by
-  step, but its first hosted run must still be watched by someone with `gh` or
-  browser access. This is the round's only blocker for goal 9.
+  the Draft PR cannot be created from here (the brief makes the PR conditional
+  on `gh`). The push itself triggers `windows-ci` on GitHub
+  (`push: branches: ["feat/**"]`); runs were observed through the public
+  Actions pages and, for step-level detail, the maintainer's own stored
+  read-only git credential (§3.5). The PR can be opened from
+  `https://github.com/shijianus/EpoCanva/pull/new/feat/phase-e-quality-gates`
+  once the hosted gate is green.
 - The E6 slice is a **baseline**, not the E4 entry gate: Tier B corpus,
   1,001/500-case minimums, the warm-up latency regime and §9.3–9.7 of the
   design document remain open, and `quality_gate.met` is false on purpose.
