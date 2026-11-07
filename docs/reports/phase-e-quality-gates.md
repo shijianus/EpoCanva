@@ -300,12 +300,7 @@ first time it executed in the product tree (passed, 0.54 s).
 | --- | --- | --- |
 | windows-ci #1 | `38b8693` | failed 45 s — §3.5 (probe path) |
 | windows-ci #2 | `a9f2432` | failed 51 s — §3.5 (`Get-FileHash` under the runner's `PSModulePath`; steps configure/build and 10 of 11 contract tests passed) |
-| windows-ci #3 | `2145cf0` | recorded after the run; see the note below |
-
-This report is committed before run #3 exists; its outcome is recorded in the
-commit message of the push that carries this file and must be reconciled here
-by the next documentation change if it is not green. No claim about run #3 is
-made in advance.
+| windows-ci #3 | `2145cf0` | **success** (run 42336295759): the hosted contract gate is green with all 11 contract tests, the manifest regeneration byte comparison, the Python staging unit tests and the clean-source-tree check |
 
 ## 8. Files added or modified this round
 
