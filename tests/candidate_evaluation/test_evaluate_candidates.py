@@ -12,9 +12,13 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +46,158 @@ BASE_CASE = {
 }
 
 DELETE = object()  # sentinel: remove the key entirely
+
+
+def fixture_git_repo(name: str) -> Path:
+    """Create a real git checkout under build/test-tmp (gitignored) for the
+    source-identity tests; the evaluator's git calls then bind to a fixture
+    whose history this test authored, never to the working repository."""
+    root = REPO_ROOT / "build" / "test-tmp" / f"{name}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    root.mkdir(parents=True)
+    return root
+
+
+def fixture_git(root: Path, *arguments: str) -> str:
+    environment = dict(os.environ,
+                       GIT_CONFIG_GLOBAL=str(root / "gitconfig"),
+                       GIT_CONFIG_SYSTEM=str(root / "gitconfig"))
+    completed = subprocess.run(
+        ["git", "-C", str(root), *arguments], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+        timeout=120, check=False, env=environment)
+    if completed.returncode != 0:
+        raise AssertionError(f"fixture git {' '.join(arguments)} failed: {completed.stderr}")
+    return completed.stdout.strip()
+
+
+def init_fixture_commit(root: Path) -> str:
+    (root / "source.txt").write_bytes(b"fixture source\n")
+    fixture_git(root, "init")
+    fixture_git(root, "add", "source.txt")
+    fixture_git(root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "-m", "fixture")
+    return fixture_git(root, "rev-parse", "HEAD")
+
+
+@unittest.skipUnless(shutil.which("git"), "git is required for the identity fixtures")
+class SourceIdentityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = fixture_git_repo("identity")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def test_clean_repo_binds_the_real_head(self) -> None:
+        head = init_fixture_commit(self.root)
+        source = ev.resolve_source_identity(self.root)
+        self.assertEqual(source["repo_commit"], head)
+        self.assertTrue(source["source_tree_clean"])
+        self.assertEqual(source["source_ref"],
+                         fixture_git(self.root, "symbolic-ref", "--short", "HEAD"))
+        ev.check_source_identity(source, head, "qualification")  # must not raise
+
+    def test_detached_head_records_an_empty_ref_not_a_fabricated_one(self) -> None:
+        init_fixture_commit(self.root)
+        fixture_git(self.root, "checkout", "--detach")
+        source = ev.resolve_source_identity(self.root)
+        self.assertEqual(source["source_ref"], "")
+
+    def test_expected_commit_mismatch_fails_in_both_modes(self) -> None:
+        head = init_fixture_commit(self.root)
+        source = ev.resolve_source_identity(self.root)
+        other = "f" * 40
+        self.assertNotEqual(other, head)
+        for mode in ("baseline", "qualification"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(ev.EvaluationError):
+                    ev.check_source_identity(source, other, mode)
+
+    def test_dirty_tracked_tree_fails_qualification(self) -> None:
+        init_fixture_commit(self.root)
+        (self.root / "source.txt").write_bytes(b"fixture source modified\n")
+        source = ev.resolve_source_identity(self.root)
+        self.assertFalse(source["source_tree_clean"])
+        with self.assertRaises(ev.EvaluationError):
+            ev.check_source_identity(source, source["repo_commit"], "qualification")
+
+    def test_staged_tree_fails_qualification(self) -> None:
+        init_fixture_commit(self.root)
+        (self.root / "source.txt").write_bytes(b"staged change\n")
+        fixture_git(self.root, "add", "source.txt")
+        source = ev.resolve_source_identity(self.root)
+        self.assertFalse(source["source_tree_clean"])
+        with self.assertRaises(ev.EvaluationError):
+            ev.check_source_identity(source, source["repo_commit"], "qualification")
+
+    def test_untracked_file_fails_qualification(self) -> None:
+        init_fixture_commit(self.root)
+        (self.root / "untracked.txt").write_bytes(b"untracked\n")
+        source = ev.resolve_source_identity(self.root)
+        self.assertFalse(source["source_tree_clean"])
+        with self.assertRaises(ev.EvaluationError):
+            ev.check_source_identity(source, source["repo_commit"], "qualification")
+
+    def test_baseline_records_dirtiness_without_failing(self) -> None:
+        init_fixture_commit(self.root)
+        (self.root / "source.txt").write_bytes(b"dirty\n")
+        source = ev.resolve_source_identity(self.root)
+        ev.check_source_identity(source, source["repo_commit"], "baseline")  # no raise
+        self.assertFalse(source["source_tree_clean"])
+
+    def test_non_git_directory_fails(self) -> None:
+        plain = self.root / "plain"
+        plain.mkdir()
+        with self.assertRaises(ev.EvaluationError):
+            ev.resolve_source_identity(plain)
+
+
+MODEL_ROWS = (
+    "epocanva-backend-resources\t1\n"
+    "profile_id\tlanguage\tinput_mode\toutput_mode\tkeyboard_layout\tvariant_id\t"
+    "model_path\tmodel_sha256\tconversion_path\tconversion_sha256\tauxiliary_path\t"
+    "auxiliary_sha256\tabbreviation_path\tabbreviation_sha256\n"
+)
+
+
+def model_row(profile: int, language: int, sha: str) -> str:
+    return (f"{profile}\t{language}\t1\t1\t1\tx\tdata/m.tsv\t{sha}\t-\t-\t-\t-\t-\t-\n")
+
+
+class StagedModelMapTests(unittest.TestCase):
+    def test_shared_models_map_per_language_and_per_profile(self) -> None:
+        sha_en, sha_zh = "a" * 64, "b" * 64
+        index = MODEL_ROWS + model_row(1, 1, sha_en) + model_row(2, 2, sha_zh) \
+            + model_row(6, 2, sha_zh)
+        per_language, by_profile, notes = ev.read_staged_model_maps(index.encode("utf-8"))
+        self.assertEqual(per_language, {"en": sha_en, "zh": sha_zh})
+        self.assertEqual(by_profile, {"1": sha_en, "2": sha_zh, "6": sha_zh})
+        self.assertEqual(notes, {})
+
+    def test_disagreeing_profiles_never_inherit_the_first_hash(self) -> None:
+        first, second = "a" * 64, "b" * 64
+        index = MODEL_ROWS + model_row(1, 1, first) + model_row(11, 1, second)
+        per_language, by_profile, notes = ev.read_staged_model_maps(index.encode("utf-8"))
+        self.assertIsNone(per_language["en"])
+        self.assertEqual(by_profile, {"1": first, "11": second})
+        self.assertIn("en", notes)
+
+    def test_duplicate_profile_id_is_rejected(self) -> None:
+        index = MODEL_ROWS + model_row(1, 1, "a" * 64) + model_row(1, 1, "a" * 64)
+        with self.assertRaises(ev.EvaluationError):
+            ev.read_staged_model_maps(index.encode("utf-8"))
+
+    def test_malformed_model_digest_is_rejected(self) -> None:
+        index = MODEL_ROWS + model_row(1, 1, "ZZ" * 32)
+        with self.assertRaises(ev.EvaluationError):
+            ev.read_staged_model_maps(index.encode("utf-8"))
+
+    def test_malformed_row_is_rejected(self) -> None:
+        index = MODEL_ROWS + "1\t1\ttoofew\n"
+        with self.assertRaises(ev.EvaluationError):
+            ev.read_staged_model_maps(index.encode("utf-8"))
+
+    def test_unknown_language_number_is_rejected(self) -> None:
+        index = MODEL_ROWS + model_row(1, 9, "a" * 64)
+        with self.assertRaises(ev.EvaluationError):
+            ev.read_staged_model_maps(index.encode("utf-8"))
 
 
 def mutated_case(**changes):

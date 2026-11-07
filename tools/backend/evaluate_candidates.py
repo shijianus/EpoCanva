@@ -40,10 +40,88 @@ ALLOWED_CASE_FIELDS = frozenset((
     "attribution", "tags"))
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+# Report schema: bumped to v2 when identity became evaluator-verified (real
+# `git rev-parse HEAD`, tree cleanliness, declared mode) instead of caller-
+# supplied. The corpus manifest format (v1) is unchanged.
+EVALUATOR_SCHEMA_VERSION = "epocanva-candidate-eval-v2"
+# The quality policy names the mandatory gate predicate set (docs/testing/
+# candidate-evaluation-baseline.md section 9 and the quality_gate block of the
+# report). Bump it whenever a predicate is added, tightened, or redefined.
+QUALITY_POLICY_VERSION = "epocanva-candidate-quality-policy-v1"
 
 
 class EvaluationError(ValueError):
     """Invalid, incomplete, or inconsistent evaluation input."""
+
+
+# --- source identity ---------------------------------------------------------
+
+def git_output(repo_root: Path, *arguments: str) -> str:
+    """Run git for repository metadata only; failures are EvaluationErrors.
+
+    The message names the subcommand, never stderr content, so diagnostics
+    stay free of paths and host details beyond the repository root argument.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), *arguments], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", errors="replace", timeout=120, shell=False, check=False)
+    except OSError as exc:
+        raise EvaluationError(f"cannot run git in the repository: {exc}") from exc
+    if completed.returncode != 0:
+        raise EvaluationError(
+            f"git {arguments[0]} failed with status {completed.returncode}")
+    return completed.stdout
+
+
+def resolve_source_identity(repo_root: Path) -> dict[str, Any]:
+    """Bind the evaluation to the real source tree: HEAD, ref, cleanliness.
+
+    repo_commit comes from ``git rev-parse --verify HEAD`` executed by the
+    evaluator itself; it is never taken from a caller. The git toplevel must
+    be exactly the requested root, so a subdirectory or an unrelated tree
+    cannot be passed off as the identity root. source_ref is the branch name
+    when HEAD is symbolic and empty when detached -- an empty value is honest,
+    a fabricated one is forbidden. source_tree_clean uses
+    ``git status --porcelain=v1 -uall``, which covers tracked modifications,
+    staged changes and untracked files in one check.
+    """
+    repo_root = repo_root.resolve()
+    toplevel = Path(git_output(repo_root, "rev-parse", "--show-toplevel").strip()).resolve()
+    if os.path.normcase(str(toplevel)) != os.path.normcase(str(repo_root)):
+        raise EvaluationError(
+            "the identity root is not exactly a git work-tree top level; refusing to "
+            "attribute another tree's commit to this source")
+    head = git_output(repo_root, "rev-parse", "--verify", "HEAD").strip()
+    if not COMMIT_PATTERN.match(head):
+        raise EvaluationError("git rev-parse HEAD did not return a 40-hex commit SHA")
+    try:
+        ref = git_output(repo_root, "symbolic-ref", "--short", "-q", "HEAD").strip()
+    except EvaluationError:
+        ref = ""  # detached HEAD: recorded as empty, never invented
+    status = git_output(repo_root, "status", "--porcelain=v1", "-uall")
+    return {"repo_commit": head, "source_ref": ref, "source_tree_clean": status == ""}
+
+
+def check_source_identity(source: dict[str, Any], expected_commit: str | None,
+                          mode: str) -> None:
+    """Assert the declared expectations against the real source identity.
+
+    An --expected-repo-commit that disagrees with the real HEAD fails in both
+    modes: it is an assertion by the caller, never an override. Qualification
+    additionally demands a clean tree (no tracked, staged or untracked
+    change); baseline records the dirtiness honestly instead of failing.
+    """
+    if expected_commit is not None and source["repo_commit"] != expected_commit:
+        raise EvaluationError(
+            "expected repo commit "
+            f"{expected_commit} does not match the real HEAD {source['repo_commit']}")
+    if mode == "qualification" and not source["source_tree_clean"]:
+        raise EvaluationError(
+            "qualification mode requires a clean source tree "
+            "(tracked, staged and untracked changes are all disallowed)")
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -375,10 +453,70 @@ def ratio(cases: list[dict[str, Any]], values_by_id: dict[str, dict[str, Any]], 
     return optional_ratio(sum(int(values_by_id[case["id"]][key]) for case in measured), len(measured))
 
 
+# --- staged model identity ---------------------------------------------------
+
+LANGUAGE_BY_STAGED_NUMBER = {1: "en", 2: "zh", 3: "fr", 4: "ja", 5: "ko"}
+
+
+def read_staged_model_maps(resources_index: bytes) -> tuple[dict[str, str | None],
+                                                            dict[str, str]]:
+    """Map language -> staged model SHA-256 and profile_id -> model SHA-256.
+
+    The index has one row per profile; same-language profiles share one model
+    file by staging design. That sharing is asserted explicitly, never
+    assumed: a language whose profiles disagree gets a null per-language hash
+    plus a note, and the per-profile map stays the authority. The first
+    profile's hash is never silently adopted for its language.
+    """
+    by_language: dict[str, str] = {}
+    disputed: set[str] = set()
+    by_profile: dict[str, str] = {}
+    for line in resources_index.decode("utf-8").splitlines()[2:]:
+        fields = line.split("\t")
+        if len(fields) != 14:
+            raise EvaluationError("staged resources.tsv has a malformed row")
+        if not fields[0].isdigit() or not fields[1].isdigit():
+            raise EvaluationError("staged resources.tsv has a nonnumeric id column")
+        profile_id, language_number = int(fields[0]), int(fields[1])
+        if profile_id == 0 or str(profile_id) in by_profile:
+            raise EvaluationError(
+                f"staged resources.tsv has a duplicate or zero profile_id {profile_id}")
+        model_sha256 = fields[7]
+        if not SHA256_PATTERN.match(model_sha256):
+            raise EvaluationError(
+                f"staged resources.tsv profile {profile_id} has a malformed model SHA-256")
+        by_profile[str(profile_id)] = model_sha256
+        language = LANGUAGE_BY_STAGED_NUMBER.get(language_number)
+        if language is None:
+            raise EvaluationError(
+                f"staged resources.tsv profile {profile_id} has unknown language number "
+                f"{language_number}")
+        if language in by_language and by_language[language] != model_sha256:
+            disputed.add(language)
+        by_language.setdefault(language, model_sha256)
+    if not by_profile:
+        raise EvaluationError("staged resources.tsv has no profile rows")
+    per_language: dict[str, str | None] = {}
+    for language in LANGUAGES:
+        if language not in by_language:
+            continue
+        if language in disputed:
+            per_language[language] = None
+        else:
+            per_language[language] = by_language[language]
+    notes = {language: "profiles of this language do not share one staged model; "
+                       "see model_sha256_by_profile"
+             for language in sorted(disputed)}
+    return per_language, by_profile, notes
+
+
 # --- report ------------------------------------------------------------------
 
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     repo_root = Path(__file__).resolve().parents[2]
+    source = resolve_source_identity(repo_root)
+    check_source_identity(source, args.expected_repo_commit, args.mode)
+
     bindings_path = Path(args.bindings)
     bindings_bytes = bindings_path.read_bytes()
     bindings_sha256 = sha256_bytes(bindings_bytes)
@@ -391,22 +529,16 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         corpus[language] = validate_cases(language, read_corpus_file(cases_dir / f"{language}.jsonl",
                                                                      language),
                                           bindings, seen_ids)
-    manifest = load_manifest(Path(args.manifest), cases_dir, bindings_sha256,
+    manifest_path = Path(args.manifest)
+    manifest = load_manifest(manifest_path, cases_dir, bindings_sha256,
                              {language: len(corpus[language]) for language in LANGUAGES})
+    corpus_sha256 = {f"{language}.jsonl": sha256_bytes((cases_dir / f"{language}.jsonl").read_bytes())
+                     for language in LANGUAGES}
 
     resources_root = Path(args.resources)
     resources_index = (resources_root / "data" / "backend" / "resources.tsv").read_bytes()
-    model_sha256: dict[str, str] = {}
-    for line in resources_index.decode("utf-8").splitlines()[2:]:
-        fields = line.split("\t")
-        if len(fields) != 14:
-            raise EvaluationError("staged resources.tsv has a malformed row")
-        language_by_number = {1: "en", 2: "zh", 3: "fr", 4: "ja", 5: "ko"}
-        if not fields[1].isdigit():
-            raise EvaluationError("staged resources.tsv has a nonnumeric language column")
-        language = language_by_number.get(int(fields[1]))
-        if language and language not in model_sha256:
-            model_sha256[language] = fields[7]
+    model_sha256, model_sha256_by_profile, model_sha256_notes = read_staged_model_maps(
+        resources_index)
 
     output_path = Path(args.output)
     require_safe_output_path(output_path, repo_root)
@@ -442,6 +574,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             meta, records = read_results(results_path)
             meta["command"] = command
             per_run[language].append((meta, records))
+    harness_sha256s = {runs[0][0]["command"]["harness_sha256_before"]
+                       for runs in per_run.values()}
+    if len(harness_sha256s) != 1:
+        raise EvaluationError("the harness binary changed identity between language runs")
+    harness_sha256 = harness_sha256s.pop()
 
     per_language: dict[str, Any] = {}
     failures: list[dict[str, str]] = []
@@ -519,15 +656,24 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     gate_met = all(per_language[language]["minimum_cases_met"]
                    for language in per_language) and per_language
     report = {
-        "format": "epocanva-candidate-eval-v1",
+        "format": EVALUATOR_SCHEMA_VERSION,
         "corpus": {"id": manifest["corpus_id"], "version": manifest["corpus_version"],
                    "license": manifest["license"]},
         "identity": {
-            "repo_commit": args.repo_commit,
+            "repo_commit": source["repo_commit"],
+            "source_ref": source["source_ref"],
+            "source_tree_clean": source["source_tree_clean"],
+            "mode": args.mode,
+            "evaluator_schema_version": EVALUATOR_SCHEMA_VERSION,
+            "quality_policy_version": QUALITY_POLICY_VERSION,
             "backend_manifest_sha256": bindings_sha256,
+            "manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
+            "corpus_sha256": corpus_sha256,
             "resource_manifest_sha256": sha256_bytes(resources_index),
             "model_sha256": model_sha256,
-            "harness_sha256": per_run[next(iter(per_run))][0][0]["command"]["harness_sha256_before"],
+            "model_sha256_by_profile": model_sha256_by_profile,
+            "model_sha256_notes": model_sha256_notes,
+            "harness_sha256": harness_sha256,
         },
         "per_language": per_language,
         "unverified": unverified,
@@ -579,7 +725,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resources", required=True, help="staged backend resource root")
     parser.add_argument("--harness", required=True, help="epocanva_candidate_eval_cli executable")
     parser.add_argument("--output", required=True, help="report JSON path (under build/)")
-    parser.add_argument("--repo-commit", required=True, help="40-hex commit SHA under test")
+    parser.add_argument("--mode", required=True, choices=("baseline", "qualification"),
+                        help="baseline records an unqualified run; qualification enforces "
+                             "the full gate and a clean tree")
+    parser.add_argument("--expected-repo-commit",
+                        help="optional 40-hex assertion: must equal the real HEAD "
+                             "(never written into the report as identity)")
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS,
                         help="fresh-process harness runs per language (>=1)")
     parser.add_argument("--repeat", type=int, default=DEFAULT_REPEAT,
@@ -593,8 +744,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.runs < 1 or args.repeat < 1 or args.bootstrap_replicates < 100 or args.timeout <= 0:
         parser.error("runs/repeat >= 1, bootstrap replicates >= 100, and a positive timeout are required")
-    if not COMMIT_PATTERN.match(args.repo_commit):
-        parser.error("--repo-commit must be a 40-hex commit SHA")
+    if args.expected_repo_commit is not None and not COMMIT_PATTERN.match(
+            args.expected_repo_commit):
+        parser.error("--expected-repo-commit must be a 40-hex commit SHA")
+    if args.mode == "qualification" and args.expected_repo_commit is None:
+        parser.error("--expected-repo-commit is required in qualification mode")
     try:
         report = evaluate(args)
         save_report(Path(args.output), report)

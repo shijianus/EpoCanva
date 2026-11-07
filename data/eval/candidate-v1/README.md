@@ -63,11 +63,16 @@ python -B tools/backend/evaluate_candidates.py \
   --resources <staged-backend-resource-root> \
   --harness <build>/candidate-evaluation-tests/Release/epocanva_candidate_eval_cli.exe \
   --output build/candidate-eval/report.json \
-  --repo-commit <40-hex commit SHA under test> \
+  --mode baseline \
+  --expected-repo-commit <optional 40-hex assertion against the real HEAD> \
   --rime-dll build/librime-english/rime/install/lib/rime.dll \
   --rime-dll-sha256 <pinned DLL SHA-256> \
   --rime-shared build/backend-chinese-ranked/shared
 ```
+
+The evaluator derives `repo_commit` itself from `git rev-parse --verify HEAD`;
+`--expected-repo-commit` is an assertion that fails the run on mismatch, never
+a source of identity.
 
 The results JSONL files under `build/candidate-eval/runs/` are the only files
 that carry candidate surfaces; the report carries case ids, status names,

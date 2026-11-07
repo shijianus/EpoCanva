@@ -22,9 +22,15 @@ this document stays the single description of what exists:
   Determinism compares the full ordered `(kind, text_utf8, lexeme_ids, input
   begin/end)` list across repeats and across `--runs` fresh processes.
 - The committed `manifest.json` cannot contain the commit under test (it would
-  immediately be stale), so `repo_commit` is supplied to the evaluator per run
-  (`--repo-commit`) and recorded in the report identity, not in the manifest.
-  The manifest keeps the corpus digests, the case counts and the
+  immediately be stale), so the commit is bound at run time by the evaluator
+  itself: it executes `git rev-parse --verify HEAD` and records the result as
+  the report's `identity.repo_commit`. A caller may additionally pass
+  `--expected-repo-commit <sha>`, which is an assertion only — a mismatch is a
+  hard failure and a supplied value is never written into the report as
+  identity. The evaluator also records `source_ref` (empty when detached),
+  `source_tree_clean` (from `git status --porcelain=v1 -uall`), the declared
+  `--mode`, the evaluator schema version and the quality policy version. The
+  manifest keeps the corpus digests, the case counts and the
   `backend_manifest_sha256` freshness pin, which the unit tests enforce.
 - The harness accepts `--rime-dll`, `--rime-dll-sha256`, `--rime-shared` and
   `--work` because the staged backend resources carry no Rime runtime; zh
