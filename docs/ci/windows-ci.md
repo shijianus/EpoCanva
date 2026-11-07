@@ -12,11 +12,28 @@ this document stays the single description of what runs:
 
 - The contract gate runs on the GitHub-hosted runner instead of a
   self-hosted `epocanva-contract` labelled runner; section 3.1 already allowed
-  "hosted or self-hosted".
-- The contract CTest regex is
-  `^(locale_registry|candidate_contract|capability_matrix|ci_inputs_lock)\.`
-  — it now also runs the E3 capability-matrix validator and the Tier 2
-  input-lock contract tests added by the quality-gate round.
+  "hosted or self-hosted". The official gate pins `windows-2022` — the image
+  family the toolchain was verified against — and a `windows-latest` canary
+  job (continue-on-error) watches for image drift without becoming evidence.
+- The contract CTest selection is no longer a regex over a pattern: every
+  contract test carries the `contract-gate` label, the build tree's real
+  inventory (from `ctest --show-only=json-v1`) must equal the version-
+  controlled `tools/ci/contract-tests.json` exactly (missing, duplicate or
+  unregistered names all fail), and only then does `ctest -L contract-gate`
+  execute the suite. The build step compiles the aggregate target
+  `epocanva_contract_gate_tests` instead of a hand-maintained target list.
+- The whitespace gate is no longer the bare `git diff --check` (which examined
+  a clean checkout's working tree and could not fail): it is
+  `tools/ci/check_whitespace.py`, event-aware — `pull_request` compares
+  merge-base(base, head)..head, `push` compares before..after, branch
+  creation falls back to the default-branch merge-base, and any range that
+  cannot be determined fails closed. Checkout uses `fetch-depth: 0` so the
+  comparison objects always exist.
+- Workflow hardening: `actions/checkout` v7.0.1, `actions/setup-python`
+  v7.1.0 and `actions/upload-artifact` v7.0.2 are pinned by full commit SHA;
+  checkout sets `persist-credentials: false`; Python is pinned to 3.14; the
+  job logs CMake/CTest/MSVC/PowerShell/git versions; `permissions`,
+  `timeout-minutes` and same-branch `concurrency` stay minimal.
 - The manifest regeneration of section 3.1 step 4 runs explicitly through the
   built locale probe (`--manifest build/ci/manifest/backend-bindings.json`)
   plus `git diff --no-index --exit-code`; the `locale_registry.manifest` CTest

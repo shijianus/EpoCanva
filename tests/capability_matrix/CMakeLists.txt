@@ -10,4 +10,4 @@ add_test(NAME capability_matrix.contract
     -s "${CMAKE_CURRENT_LIST_DIR}" -p "test_capability_matrix.py" -v)
 set_tests_properties(capability_matrix.contract PROPERTIES
   TIMEOUT 300 ENVIRONMENT "PYTHONIOENCODING=utf-8"
-  LABELS "ci;capability;matrix;negative")
+  LABELS "ci;capability;matrix;negative;contract-gate")

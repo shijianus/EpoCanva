@@ -43,7 +43,7 @@ foreach(_case unit forcefail unknown)
       -P "${_locale_repo}/tests/infrastructure/assert_probe.cmake")
   set_tests_properties(locale_registry.${_case} PROPERTIES
     TIMEOUT 90 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-    LABELS "locale;core;unit")
+    LABELS "locale;core;unit;contract-gate")
 endforeach()
 
 # The committed manifest is generated from BuiltinProfiles(). This gate fails
@@ -58,7 +58,7 @@ add_test(NAME locale_registry.manifest
     -P "${CMAKE_CURRENT_SOURCE_DIR}/assert_manifest.cmake")
 set_tests_properties(locale_registry.manifest PROPERTIES
   TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-  LABELS "locale;core;unit;manifest")
+  LABELS "locale;core;unit;manifest;contract-gate")
 
 add_test(NAME locale_registry.manifest_stale_can_fail
   COMMAND "${CMAKE_COMMAND}"
@@ -68,4 +68,4 @@ add_test(NAME locale_registry.manifest_stale_can_fail
     -P "${CMAKE_CURRENT_SOURCE_DIR}/assert_manifest.cmake")
 set_tests_properties(locale_registry.manifest_stale_can_fail PROPERTIES
   TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-  LABELS "locale;core;unit;manifest;negative")
+  LABELS "locale;core;unit;manifest;negative;contract-gate")

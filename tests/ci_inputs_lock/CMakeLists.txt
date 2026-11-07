@@ -14,4 +14,4 @@ add_test(NAME ci_inputs_lock.contract
     -s "${CMAKE_CURRENT_LIST_DIR}" -p "test_inputs_lock.py" -v)
 set_tests_properties(ci_inputs_lock.contract PROPERTIES
   TIMEOUT 300 ENVIRONMENT "PYTHONIOENCODING=utf-8"
-  LABELS "ci;inputs;contract;negative")
+  LABELS "ci;inputs;contract;negative;contract-gate")

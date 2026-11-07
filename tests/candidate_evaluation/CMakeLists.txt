@@ -25,4 +25,4 @@ add_test(NAME candidate_evaluation.contract
     -s "${CMAKE_CURRENT_LIST_DIR}" -p "test_evaluate_candidates.py" -v)
 set_tests_properties(candidate_evaluation.contract PROPERTIES
   TIMEOUT 300 ENVIRONMENT "PYTHONIOENCODING=utf-8"
-  LABELS "ci;evaluation;contract;negative")
+  LABELS "ci;evaluation;contract;negative;contract-gate")

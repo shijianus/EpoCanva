@@ -44,5 +44,5 @@ foreach(_case unit forcefail unknown)
       -P "${_candidate_repo}/tests/infrastructure/assert_probe.cmake")
   set_tests_properties(candidate_contract.${_case} PROPERTIES
     TIMEOUT 90 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-    LABELS "candidates;core;unit")
+    LABELS "candidates;core;unit;contract-gate")
 endforeach()

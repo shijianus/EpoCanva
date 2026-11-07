@@ -81,11 +81,18 @@ if(EPOCANVA_BUILD_TESTS)
   add_subdirectory(tests/candidate_contract)
   add_subdirectory(tests/capability_matrix)
   add_subdirectory(tests/candidate_evaluation)
+  add_subdirectory(tests/ci_gate)
   add_subdirectory(tests/adaptive_ranking)
   if(WIN32)
     add_subdirectory(tests/ci_inputs_lock)
     add_subdirectory(tests/learning_repository)
   endif()
+  # Aggregate target of every native binary the contract gate needs. The CI
+  # workflow builds this target instead of hand-maintaining a list; a contract
+  # test that needs another native binary must add it here, and the inventory
+  # gate fails until its test is registered and labelled contract-gate.
+  add_custom_target(epocanva_contract_gate_tests
+    DEPENDS epocanva_locale_registry_tests epocanva_candidate_contract_tests)
 endif()
 
 message(STATUS "EpoCanva configure summary")
