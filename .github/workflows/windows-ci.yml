@@ -3,8 +3,9 @@
 # This is the executable part of docs/ci/windows-ci.md section 3.1, enabled on a
 # GitHub-hosted runner. It needs no external Tier 2 build inputs: the manifest
 # freshness gate, the locale/candidate contract tests, the capability matrix
-# validation, the Tier 2 input-lock contract tests, and the Python staging unit
-# tests all run from the committed source tree alone.
+# validation, the Tier 2 input-lock contract tests, the candidate-evaluation
+# evaluator tests, and the Python staging unit tests all run from the committed
+# source tree alone.
 #
 # The backend, windows-product and nightly-stress jobs from the design document
 # are deliberately NOT enabled here. They require the self-hosted runner with the
@@ -75,13 +76,13 @@ jobs:
       - name: Contract CTests
         run: |
           & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug `
-            -R "^(locale_registry|candidate_contract|capability_matrix|ci_inputs_lock)\." `
+            -R "^(locale_registry|candidate_contract|capability_matrix|ci_inputs_lock|candidate_evaluation)\." `
             --no-tests=error --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw "contract ctest failed with exit $LASTEXITCODE" }
 
       - name: Regenerate the backend binding manifest and compare bytes
         run: |
-          $probe = "build/vs2022-x64-debug/Debug/epocanva_locale_registry_tests.exe"
+          $probe = "build/vs2022-x64-debug/tests/locale_registry/Debug/epocanva_locale_registry_tests.exe"
           if (-not (Test-Path $probe)) { throw "locale probe not built at $probe" }
           New-Item -ItemType Directory -Force build/ci/manifest | Out-Null
           & $probe --manifest build/ci/manifest/backend-bindings.json

@@ -198,7 +198,7 @@
       "dimension": "host_acceptance",
       "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
       "language": "zh",
-      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "note": "zhuyin-unverified: locale scheme_implementation is unverified; the locale registry resolves kSchemeNotVerified and no product profile exposes it; no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
       "status": "not_implemented"
     },
     {

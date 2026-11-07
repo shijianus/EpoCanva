@@ -73,9 +73,10 @@ def validate(matrix: dict, bindings: dict, repo_root: Path = REPO_ROOT) -> None:
             raise ValueError(f"unknown dimension {dimension!r}")
         if status not in STATUSES:
             raise ValueError(f"unknown status {status!r}")
-        if (binding_id, dimension) in seen:
-            raise ValueError(f"duplicate (binding_id, dimension) pair: {(binding_id, dimension)}")
-        seen.add((binding_id, dimension))
+        if (language, binding_id, dimension) in seen:
+            raise ValueError(f"duplicate (language, binding_id, dimension) pair: "
+                             f"{(language, binding_id, dimension)}")
+        seen.add((language, binding_id, dimension))
         if binding_id is not None:
             if binding_id not in binding_by_id:
                 raise ValueError(f"binding_id {binding_id} does not exist in the backend binding manifest")
@@ -103,10 +104,10 @@ def validate(matrix: dict, bindings: dict, repo_root: Path = REPO_ROOT) -> None:
             if not evidence_path.is_file():
                 raise ValueError(f"evidence_ref does not exist in the repository: {evidence}")
 
-    expected_pairs = ({(binding_id, dimension) for binding_id in binding_by_id
-                       for dimension in DIMENSIONS} |
-                      {(None, dimension) for dimension in DIMENSIONS
-                       for _ in ENGINE_LESS_LANGUAGES})
+    expected_pairs = ({(binding_by_id[binding_id]["language_tag"], binding_id, dimension)
+                       for binding_id in binding_by_id for dimension in DIMENSIONS} |
+                      {(engine_less, None, dimension) for engine_less in ENGINE_LESS_LANGUAGES
+                       for dimension in DIMENSIONS})
     if seen != expected_pairs:
         raise ValueError("matrix coverage is incomplete: every binding needs all four dimensions "
                          "and each engine-less language needs its language-level rows")
