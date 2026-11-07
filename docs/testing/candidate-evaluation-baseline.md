@@ -1,9 +1,55 @@
-# E6 candidate-menu evaluation baseline — design
+# E6 candidate-menu evaluation baseline — design and minimal slice
 
-**Status**: design only. No evaluator, native harness, corpus or gate is
-implemented in this round. E4 (cross-language fusion) and E5 (detection
-latching) must not start until this baseline exists and passes its own quality
-gate.
+**Status**: the minimal baseline slice is implemented and was run once against
+the real staged resources (see `docs/reports/phase-e-quality-gates.md` for the
+recorded numbers). Committed in this slice: the Tier A synthetic corpus
+(`data/eval/candidate-v1/`, 15 cases whose expectations are pinned by existing
+assertions in `tests/backend/profiles.cc`), the native harness
+(`tests/candidate_evaluation/candidate_eval_cli.cc`), the evaluator
+(`tools/backend/evaluate_candidates.py`) and its unit tests
+(`tests/candidate_evaluation/test_evaluate_candidates.py`, registered as the
+`candidate_evaluation.contract` CTest). NOT implemented: the Tier B external
+corpus, the 1,001/500-case minimums, the warm-up query phase, and every part of
+the §9 E4 entry gate beyond those inputs. E4 (cross-language fusion) and E5
+(detection latching) must not start until the full gate exists and passes.
+
+Deviations of the implemented slice from the design text below, recorded so
+this document stays the single description of what exists:
+
+- The harness emits one JSON object per case with a `repeats` array (one entry
+  per in-process query) rather than one flat object per query; the run's
+  `run_meta` line carries load time, peak working set and the repeat count.
+  Determinism compares the full ordered `(kind, text_utf8, lexeme_ids, input
+  begin/end)` list across repeats and across `--runs` fresh processes.
+- The committed `manifest.json` cannot contain the commit under test (it would
+  immediately be stale), so `repo_commit` is supplied to the evaluator per run
+  (`--repo-commit`) and recorded in the report identity, not in the manifest.
+  The manifest keeps the corpus digests, the case counts and the
+  `backend_manifest_sha256` freshness pin, which the unit tests enforce.
+- The harness accepts `--rime-dll`, `--rime-dll-sha256`, `--rime-shared` and
+  `--work` because the staged backend resources carry no Rime runtime; zh
+  replay requires the reviewed ranked shared data
+  (`build/backend-chinese-ranked/shared`), which the harness copies into an
+  isolated work tree so the staged inputs stay immutable.
+- There is no 20-query warm-up phase; `latency_ms.warm` aggregates every query
+  except the single cold first query of each language, and the report records
+  `warmup_queries: 0` so the numbers are not mistaken for the designed
+  post-warm-up regime.
+- `wrong_language_rate` is structural for this backend: each case runs in its
+  declared profile's session and the v1 ABI carries no per-candidate language,
+  so the value is 0.0 by construction, not a measured claim.
+- Measurement discovered the raw-first contract: every COMPLETION menu pins the
+  raw candidate at ordinal 0 (zh/ja explicitly; en/fr/ko via the lexical
+  service's kOriginal row). `top1`/`top3`/`mrr` are kept exactly as designed
+  over the full menu (their denominator includes the raw row), and the
+  evaluator additionally records `suggestion_top1`/`suggestion_top3`/
+  `suggestion_mrr` over the menu with raw-kind rows excluded, which track
+  suggestion ordering directly. For ko two-set, the "raw" row carries the
+  composed Hangul rather than the typed romanization keys, so `raw_present_rate`
+  is a real per-language property, not a constant.
+- The evaluator refuses a report path inside the repository that is not under
+  `build/`; the runs directory (which carries candidate surfaces) lives beside
+  the report.
 
 ## 1. Purpose and non-goals
 

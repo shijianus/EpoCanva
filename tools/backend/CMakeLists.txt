@@ -22,6 +22,9 @@ add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/prediction_core" prediction-tes
 add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/prediction_abbreviation" abbreviation-tests)
 add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/lexical_service" lexical-tests)
 add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/japanese_decoder" japanese-tests)
+# E6 candidate-evaluation harness: built here because epocanva_backend exists in
+# this project; the same directory also registers its Python evaluator tests.
+add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/candidate_evaluation" candidate-evaluation-tests)
 if(EPOCANVA_BACKEND_WITH_FRENCH_DICTIONARY)
   add_subdirectory("${EPOCANVA_BACKEND_REPO}/tests/french_dictionary" french-dictionary-tests)
 endif()
