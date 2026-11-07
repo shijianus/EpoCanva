@@ -82,6 +82,37 @@ def init_fixture_checkout(root: Path, rel: str) -> str:
     return git("rev-parse", "HEAD")
 
 
+def init_fixture_checkout_with_submodule(root: Path) -> str:
+    """A checkout at third_party/librime containing one real submodule whose
+    working tree carries a new local commit -- the dirty-submodule negative."""
+    import hashlib
+    checkout = root / "third_party" / "librime"
+    child = root / "third_party" / "librime-child"
+    init_fixture_checkout(root, "third_party/librime")
+    init_fixture_checkout(root, "third_party/librime-child")
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=str(root / "gitconfig"),
+               GIT_CONFIG_SYSTEM=str(root / "gitconfig"))
+    def git(*arguments: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(checkout), *arguments], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+            timeout=120, check=False, env=env)
+        if completed.returncode != 0:
+            raise AssertionError(f"fixture git {' '.join(arguments)} failed: {completed.stderr}")
+        return completed.stdout.strip()
+    git("-c", "protocol.file.allow=always", "submodule", "add", "../librime-child", "child")
+    git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "-m", "record submodule")
+    # A new commit inside the parent's submodule clone (not the source repo):
+    # the parent's porcelain reports the moved submodule HEAD and
+    # `git submodule status --recursive` shows the '+' prefix.
+    subprocess.run(["git", "-C", str(checkout / "child"),
+                    "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--allow-empty", "-m", "unpinned child commit"],
+                   check=True, env=env, timeout=60)
+    return git("rev-parse", "HEAD")
+
+
 class CommittedLockTests(unittest.TestCase):
     def setUp(self) -> None:
         self.raw = LOCK_PATH.read_bytes()
@@ -113,14 +144,21 @@ class CommittedLockTests(unittest.TestCase):
         walk(self.lock)
 
     def test_paths_are_repo_relative_and_scoped(self) -> None:
+        # The canonical allowed roots, mirrored from the production verifier
+        # (tools/ci/verify_inputs.ps1). Both must change together.
+        allowed_roots = (
+            "build/backend-chinese-ranked/", "build/backend-data-acquire/",
+            "build/backend-japanese-data/", "build/backend-training/",
+            "build/backend-training-budget/", "build/librime-baseline/",
+            "build/librime-english/", "build/product-data/", "third_party/")
         seen: set[str] = set()
         for entry in self.lock["entries"]:
             path = entry["path"]
             self.assertNotIn("\\", path, f"entry path must use forward slashes: {path}")
             self.assertFalse(path.startswith("/"), f"entry path must be relative: {path}")
             self.assertFalse(Path(path).is_absolute(), f"entry path must be relative: {path}")
-            self.assertTrue(path.startswith(("build/", "third_party/")),
-                            f"Tier 2 entries are build/ or third_party/ scoped: {path}")
+            self.assertTrue(path.startswith(allowed_roots),
+                            f"entry path must sit under a declared allowed root: {path}")
             self.assertNotIn("..", path.split("/"), f"entry path must not traverse: {path}")
             self.assertNotIn(path, seen, f"duplicate entry path: {path}")
             seen.add(path)
@@ -194,9 +232,11 @@ class CommittedLockTests(unittest.TestCase):
 class VerifierBehaviorTests(unittest.TestCase):
     @staticmethod
     def _make_file_tree(root: Path) -> dict:
-        (root / "build").mkdir(parents=True)
-        one = root / "build" / "one.bin"
-        two = root / "build" / "two.bin"
+        # Fixture paths sit under a declared allowed root, exactly like the
+        # committed lock's entries.
+        (root / "build" / "product-data").mkdir(parents=True)
+        one = root / "build" / "product-data" / "one.bin"
+        two = root / "build" / "product-data" / "two.bin"
         one.write_bytes(b"0123456789")
         two.write_bytes(b"abcdef")
         return {"one": one, "two": two}
@@ -207,8 +247,10 @@ class VerifierBehaviorTests(unittest.TestCase):
             files = self._make_file_tree(root)
             import hashlib
             entries = [
-                file_entry("build/one.bin", hashlib.sha256(files["one"].read_bytes()).hexdigest(), 10),
-                file_entry("build/two.bin", hashlib.sha256(files["two"].read_bytes()).hexdigest(), 6),
+                file_entry("build/product-data/one.bin",
+                           hashlib.sha256(files["one"].read_bytes()).hexdigest(), 10),
+                file_entry("build/product-data/two.bin",
+                           hashlib.sha256(files["two"].read_bytes()).hexdigest(), 6),
             ]
             completed = run_verifier(root, write_lock(root, entries))
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
@@ -221,10 +263,10 @@ class VerifierBehaviorTests(unittest.TestCase):
             original = files["one"].read_bytes()
             digest = hashlib.sha256(original).hexdigest()
             files["one"].write_bytes(b"X" + original[1:])
-            entries = [file_entry("build/one.bin", digest, 10)]
+            entries = [file_entry("build/product-data/one.bin", digest, 10)]
             completed = run_verifier(root, write_lock(root, entries))
             self.assertEqual(completed.returncode, 1, completed.stdout)
-            self.assertIn("build/one.bin", completed.stdout)
+            self.assertIn("build/product-data/one.bin", completed.stdout)
             self.assertIn("HASH_MISMATCH", completed.stdout)
 
     def test_wrong_size_fails(self) -> None:
@@ -232,7 +274,7 @@ class VerifierBehaviorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             files = self._make_file_tree(root)
-            entries = [file_entry("build/two.bin",
+            entries = [file_entry("build/product-data/two.bin",
                                   hashlib.sha256(files["two"].read_bytes()).hexdigest(), 999)]
             completed = run_verifier(root, write_lock(root, entries))
             self.assertEqual(completed.returncode, 1, completed.stdout)
@@ -243,13 +285,152 @@ class VerifierBehaviorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             files = self._make_file_tree(root)
-            entries = [file_entry("build/one.bin",
+            entries = [file_entry("build/product-data/one.bin",
                                   hashlib.sha256(files["one"].read_bytes()).hexdigest(), 10),
-                       file_entry("build/absent.bin", "c" * 64, 3)]
+                       file_entry("build/product-data/absent.bin", "c" * 64, 3)]
             completed = run_verifier(root, write_lock(root, entries))
             self.assertEqual(completed.returncode, 1, completed.stdout)
-            self.assertIn("build/absent.bin", completed.stdout)
+            self.assertIn("build/product-data/absent.bin", completed.stdout)
             self.assertIn("MISSING", completed.stdout)
+
+    # --- invalid locks (exit 2) -------------------------------------------------
+
+    def test_absolute_path_is_an_invalid_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entries = [file_entry("C:/evil/one.bin", "a" * 64, 10)]
+            completed = run_verifier(root, write_lock(root, entries))
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("repo-relative", completed.stdout)
+
+    def test_traversal_path_is_an_invalid_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entries = [file_entry("build/../product-data/one.bin", "a" * 64, 10)]
+            completed = run_verifier(root, write_lock(root, entries))
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("..", completed.stdout)
+
+    def test_duplicate_path_is_an_invalid_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entries = [file_entry("build/product-data/one.bin", "a" * 64, 10),
+                       file_entry("build/product-data/one.bin", "b" * 64, 3)]
+            completed = run_verifier(root, write_lock(root, entries))
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("duplicated", completed.stdout)
+
+    def test_nonpositive_or_noninteger_size_is_an_invalid_lock(self) -> None:
+        for bad_size in (0, -5, "ten", 1.5):
+            with self.subTest(size=bad_size):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    entries = [file_entry("build/product-data/one.bin", "a" * 64, bad_size)]
+                    completed = run_verifier(root, write_lock(root, entries))
+                    self.assertEqual(completed.returncode, 2, completed.stdout)
+                    self.assertIn("size_bytes", completed.stdout)
+
+    def test_outside_declared_roots_is_an_invalid_lock(self) -> None:
+        for path in ("build/undeclared/one.bin", "docs/one.bin", "build/one.bin"):
+            with self.subTest(path=path):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    entries = [file_entry(path, "a" * 64, 10)]
+                    completed = run_verifier(root, write_lock(root, entries))
+                    self.assertEqual(completed.returncode, 2, completed.stdout)
+                    self.assertIn("allowed roots", completed.stdout)
+
+    def test_malformed_header_is_an_invalid_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entries = [file_entry("build/product-data/one.bin", "a" * 64, 10)]
+            lock = {"format": 2, "owner": "epocanva-ci-tier2-inputs-lock-v1",
+                    "purpose": "test fixture", "entries": entries}
+            path = root / "inputs.lock.json"
+            path.write_bytes(canonical_bytes(lock))
+            completed = run_verifier(root, path)
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("format must be 1", completed.stdout)
+
+    def test_uppercase_digest_is_an_invalid_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entries = [file_entry("build/product-data/one.bin", "A" * 64, 10)]
+            completed = run_verifier(root, write_lock(root, entries))
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+
+    # --- checkout cleanliness (exit 1) -------------------------------------------
+
+    def test_tracked_modification_fails_the_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._make_file_tree(root)
+            head = init_fixture_checkout(root, "third_party/librime")
+            checkout = root / "third_party" / "librime"
+            (checkout / "placeholder.txt").write_bytes(b"modified in place\n")
+            entries = [commit_entry("third_party/librime", head)]
+            completed = run_verifier(root, write_lock(root, entries))
+            self.assertEqual(completed.returncode, 1, completed.stdout)
+            self.assertIn("DIRTY_CHECKOUT", completed.stdout)
+
+    def test_staged_modification_fails_the_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._make_file_tree(root)
+            head = init_fixture_checkout(root, "third_party/librime")
+            checkout = root / "third_party" / "librime"
+            env = dict(os.environ, GIT_CONFIG_GLOBAL=str(root / "gitconfig"),
+                       GIT_CONFIG_SYSTEM=str(root / "gitconfig"))
+            (checkout / "placeholder.txt").write_bytes(b"staged change\n")
+            subprocess.run(["git", "-C", str(checkout), "add", "placeholder.txt"],
+                           check=True, env=env, timeout=60)
+            entries = [commit_entry("third_party/librime", head)]
+            completed = run_verifier(root, write_lock(root, entries))
+            self.assertEqual(completed.returncode, 1, completed.stdout)
+            self.assertIn("DIRTY_CHECKOUT", completed.stdout)
+
+    def test_untracked_file_fails_the_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._make_file_tree(root)
+            head = init_fixture_checkout(root, "third_party/librime")
+            checkout = root / "third_party" / "librime"
+            (checkout / "untracked.txt").write_bytes(b"untracked\n")
+            entries = [commit_entry("third_party/librime", head)]
+            completed = run_verifier(root, write_lock(root, entries))
+            self.assertEqual(completed.returncode, 1, completed.stdout)
+            self.assertIn("DIRTY_CHECKOUT", completed.stdout)
+
+    def test_dirty_submodule_fails_the_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._make_file_tree(root)
+            head = init_fixture_checkout_with_submodule(root)
+            entries = [commit_entry("third_party/librime", head)]
+            completed = run_verifier(root, write_lock(root, entries))
+            self.assertEqual(completed.returncode, 1, completed.stdout)
+            self.assertIn("DIRTY_CHECKOUT", completed.stdout)
+
+    def test_reparse_escape_fails_the_file_entry(self) -> None:
+        if os.name != "nt":
+            self.skipTest("junction reparse points are a Windows behaviour")
+        import hashlib
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = self._make_file_tree(root)
+            # A junction relocates build/product-data outside the repository.
+            outside = root.parent / f"inputs-lock-outside-{os.getpid()}"
+            outside.mkdir()
+            self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+            (root / "build" / "product-data").rename(outside / "product-data")
+            import _winapi
+            _winapi.CreateJunction(str(outside / "product-data"),
+                                   str(root / "build" / "product-data"))
+            entries = [file_entry("build/product-data/one.bin",
+                                  hashlib.sha256(files["one"].read_bytes()).hexdigest(), 10)]
+            completed = run_verifier(root, write_lock(root, entries))
+            self.assertEqual(completed.returncode, 1, completed.stdout)
+            self.assertIn("REPARSE_ESCAPE", completed.stdout)
 
     def test_pinned_checkout_commit_passes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
