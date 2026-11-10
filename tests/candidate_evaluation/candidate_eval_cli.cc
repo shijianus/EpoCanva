@@ -20,6 +20,7 @@
 // Exit codes: 0 ok; 2 invalid arguments; 3 resource/backend failure;
 // 4 corpus invalid; 5 output write failure.
 #include "epocanva_backend.h"
+#include "engine/backend/test_observation.h"
 #include "platforms/windows/product/product_io.h"
 
 #include <windows.h>
@@ -27,11 +28,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -455,17 +458,97 @@ std::string Json(std::string_view text) {
   return value + '"';
 }
 
+std::string SurfaceFingerprint(std::string_view text) {
+  std::uint64_t hash = UINT64_C(14695981039346656037);
+  for (const unsigned char byte : text) {
+    hash ^= byte;
+    hash *= UINT64_C(1099511628211);
+  }
+  char buffer[17];
+  std::snprintf(buffer, sizeof(buffer), "%016llx", static_cast<unsigned long long>(hash));
+  return buffer;
+}
+
+std::string Utf8BytesHex(std::string_view text) {
+  constexpr char digits[] = "0123456789abcdef";
+  std::string hex;
+  hex.reserve(text.size() * 2);
+  for (const unsigned char byte : text) {
+    hex.push_back(digits[byte >> 4]);
+    hex.push_back(digits[byte & 15u]);
+  }
+  return hex;
+}
+
+bool ArtifactInsideBuild(const fs::path& path) {
+  if (path.empty()) return false;
+  for (const auto& component : path) if (component == "..") return false;
+  std::error_code error;
+  const auto root = fs::weakly_canonical(fs::u8path(EPOCANVA_EVAL_REPO_ROOT) / "build", error);
+  if (error) return false;
+  const auto target = fs::weakly_canonical(path, error);
+  if (error || target == root) return false;
+  auto current = target.begin();
+  for (const auto& component : root) {
+    if (current == target.end() || *current != component) return false;
+    ++current;
+  }
+  return true;
+}
+
+const char* SourceName(epocanva::candidates::Source source) {
+  using Source = epocanva::candidates::Source;
+  switch (source) {
+    case Source::kRaw: return "raw";
+    case Source::kWord: return "word";
+    case Source::kSpelling: return "spelling";
+    case Source::kMorphology: return "morphology";
+    case Source::kExpansion: return "expansion";
+    case Source::kConversion: return "conversion";
+    case Source::kPrediction: return "prediction";
+  }
+  Require(false, "unknown-contract-source", 3);
+  return "";
+}
+
+const char* MatchName(epocanva::candidates::Match match) {
+  using Match = epocanva::candidates::Match;
+  switch (match) {
+    case Match::kRaw: return "raw";
+    case Match::kPrefix: return "prefix";
+    case Match::kFuzzy: return "fuzzy";
+    case Match::kAbbreviation: return "abbreviation";
+    case Match::kContext: return "context";
+    case Match::kConversion: return "conversion";
+  }
+  Require(false, "unknown-contract-match", 3);
+  return "";
+}
+
+const char* CommitName(epocanva::candidates::Commit commit) {
+  using Commit = epocanva::candidates::Commit;
+  switch (commit) {
+    case Commit::kInsert: return "insert";
+    case Commit::kReplaceInput: return "replace_input";
+  }
+  Require(false, "unknown-contract-commit", 3);
+  return "";
+}
+
 struct RepeatRow {
   std::uint32_t kind = 0;
   std::string text_utf8;
   std::vector<std::uint64_t> lexeme_ids;
   std::uint64_t input_begin_utf8_byte = 0;
   std::uint64_t input_end_utf8_byte = 0;
+  epocanva::backend::testing::CandidateObservation observation;
 };
 
 struct RepeatResult {
   std::uint64_t latency_ns = 0;
   bool search_complete = false;
+  std::string snapshot_raw_utf8;
+  std::string preedit_utf8;
   std::vector<RepeatRow> candidates;
 };
 
@@ -494,6 +577,8 @@ int Run(int argc, char** argv) {
   fs::path resources_root, cases_path, output_path, rime_dll, rime_shared, work_root;
   std::string language_arg, rime_dll_sha256, rime_version = kDefaultRimeVersion;
   std::uint32_t repeat = 2;
+  std::uint32_t warmup_queries = 0;
+  bool has_warmup_queries = false;
   bool load_only = false;
   for (int ordinal = 1; ordinal < argc; ++ordinal) {
     const std::string_view argument = argv[ordinal];
@@ -515,6 +600,14 @@ int Run(int argc, char** argv) {
       const std::uint64_t parsed = std::stoull(raw);
       Require(parsed >= 1 && parsed <= kMaxRepeat, "argument-repeat", 2);
       repeat = static_cast<std::uint32_t>(parsed);
+    } else if (argument == "--warmup-queries") {
+      const std::string raw = value();
+      Require(!raw.empty() && raw.size() <= 6 &&
+                  std::all_of(raw.begin(), raw.end(), [](char byte) {
+                    return byte >= '0' && byte <= '9';
+                  }), "argument-warmup-queries", 2);
+      warmup_queries = static_cast<std::uint32_t>(std::stoul(raw));
+      has_warmup_queries = true;
     } else if (argument == "--load-only") load_only = true;
     else if (argument == "--rime-dll") rime_dll = fs::u8path(value());
     else if (argument == "--rime-dll-sha256") rime_dll_sha256 = value();
@@ -526,6 +619,12 @@ int Run(int argc, char** argv) {
   Require(!resources_root.empty() && !output_path.empty() && !language_arg.empty() &&
               (!cases_path.empty() || load_only),
           "argument-required", 2);
+  // The evaluator reads the single policy file and passes its value. Requiring
+  // it explicitly prevents a second hardcoded policy default in this harness.
+  Require(has_warmup_queries || load_only, "argument-warmup-required", 2);
+  Require(ArtifactInsideBuild(output_path) &&
+              (work_root.empty() || ArtifactInsideBuild(work_root)),
+          "artifact-outside-build", 2);
   // The backend's LocalResource loader pins absolute drive paths only, and the
   // engine options require absolute paths; resolve every argument against the
   // current directory so a relative invocation is still a correct one.
@@ -721,12 +820,7 @@ int Run(int argc, char** argv) {
 
   std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
   Require(output.is_open(), "output-open", 5);
-  output << "{\"run_meta\":{\"language\":" << Json(language_arg)
-         << ",\"repeat\":" << repeat
-         << ",\"case_count\":" << cases.size()
-         << ",\"load_ms\":" << load_ms
-         << ",\"peak_working_set_bytes\":" << peak_working_set_bytes
-         << ",\"resource_profile_count\":" << staged.size() << "}}\n";
+  output << std::setprecision(17);
 
   std::uint64_t context_target = 1000;
   for (const auto& parsed : cases) {
@@ -769,7 +863,9 @@ int Run(int argc, char** argv) {
       Require(context_status == EPOCANVA_OK, "set-context", 3);
     }
 
-    for (std::uint32_t repeat_ordinal = 0; repeat_ordinal < repeat; ++repeat_ordinal) {
+    for (std::uint32_t query_ordinal = 0; query_ordinal < warmup_queries + repeat;
+         ++query_ordinal) {
+      const bool is_warmup = query_ordinal < warmup_queries;
       const epocanva_status input_status =
           epocanva_backend_set_input(session, &request, View(parsed.raw_input));
       Require(input_status == EPOCANVA_OK, "set-input", 3);
@@ -790,10 +886,11 @@ int Run(int argc, char** argv) {
               query_end - query_begin).count());
       if (query_status == EPOCANVA_BACKEND_UNAVAILABLE) {
         result.status = "unavailable";
-        result.repeats.push_back(std::move(repeat_result));
+        if (!is_warmup) result.repeats.push_back(std::move(repeat_result));
         break;
       }
       Require(query_status == EPOCANVA_OK, "query", 3);
+      if (is_warmup) continue;
 
       epocanva_backend_profile_snapshot snapshot =
           Init<epocanva_backend_profile_snapshot>(EPOCANVA_BACKEND_PROFILE_ABI_VERSION);
@@ -810,6 +907,8 @@ int Run(int argc, char** argv) {
                                                       snapshot_bytes.size());
       Require(status == EPOCANVA_OK, "snapshot-copy", 3);
       repeat_result.search_complete = snapshot.snapshot.search_complete != 0;
+      repeat_result.snapshot_raw_utf8 = Slice(snapshot.snapshot.raw_input, snapshot_bytes);
+      repeat_result.preedit_utf8 = Slice(snapshot.snapshot.preedit, snapshot_bytes);
       Require(snapshot.snapshot.candidate_count <= kMaxCandidates, "candidate-bound", 3);
       for (std::uint32_t candidate_ordinal = 0;
            candidate_ordinal < snapshot.snapshot.candidate_count; ++candidate_ordinal) {
@@ -836,6 +935,22 @@ int Run(int argc, char** argv) {
                               candidate.lexeme_ids + candidate.lexeme_count);
         row.input_begin_utf8_byte = candidate.input_begin_utf8_byte;
         row.input_end_utf8_byte = candidate.input_end_utf8_byte;
+        status = epocanva::backend::testing::ReadCandidateObservation(
+            session, &request, snapshot.snapshot.snapshot_token, candidate_ordinal,
+            &row.observation);
+        Require(status == EPOCANVA_OK, "internal-observation", 3);
+        // A second read from the same snapshot must describe the very same
+        // published row. The adapter does not manufacture missing metadata.
+        const auto& contract = row.observation.contract;
+        std::string contract_reason;
+        Require(epocanva::candidates::Validate(contract, &contract_reason) &&
+                    contract.text_utf8 == row.text_utf8 &&
+                    contract.identity.lexeme_ids == row.lexeme_ids &&
+                    static_cast<std::uint32_t>(contract.source) == row.kind &&
+                    contract.score == candidate.score &&
+                    contract.input_begin_utf8_byte == row.input_begin_utf8_byte &&
+                    contract.input_end_utf8_byte == row.input_end_utf8_byte,
+                "internal-observation-public-consistency", 3);
         repeat_result.candidates.push_back(std::move(row));
       }
       result.repeats.push_back(std::move(repeat_result));
@@ -845,6 +960,7 @@ int Run(int argc, char** argv) {
     // One JSON object per case; candidate surfaces appear only in this file.
     output << "{\"case_id\":" << Json(result.id)
            << ",\"profile_id\":" << result.profile_id
+           << ",\"raw_input_utf8_hex\":" << Json(Utf8BytesHex(parsed.raw_input))
            << ",\"status\":" << Json(result.status) << ",\"repeats\":[";
     for (std::size_t repeat_ordinal = 0; repeat_ordinal < result.repeats.size();
          ++repeat_ordinal) {
@@ -852,6 +968,8 @@ int Run(int argc, char** argv) {
       if (repeat_ordinal != 0) output << ',';
       output << "{\"latency_ns\":" << repeat_result.latency_ns
              << ",\"search_complete\":" << (repeat_result.search_complete ? "true" : "false")
+             << ",\"snapshot_raw_utf8\":" << Json(repeat_result.snapshot_raw_utf8)
+             << ",\"preedit_utf8\":" << Json(repeat_result.preedit_utf8)
              << ",\"candidates\":[";
       for (std::size_t ordinal = 0; ordinal < repeat_result.candidates.size(); ++ordinal) {
         const auto& row = repeat_result.candidates[ordinal];
@@ -862,14 +980,36 @@ int Run(int argc, char** argv) {
           if (id_ordinal != 0) output << ',';
           output << row.lexeme_ids[id_ordinal];
         }
+        const auto& contract = row.observation.contract;
         output << "],\"input_begin_utf8_byte\":" << row.input_begin_utf8_byte
-               << ",\"input_end_utf8_byte\":" << row.input_end_utf8_byte << '}';
+               << ",\"input_end_utf8_byte\":" << row.input_end_utf8_byte
+               << ",\"score\":" << contract.score
+               << ",\"surface_fnv1a64\":" << Json(SurfaceFingerprint(row.text_utf8))
+               << ",\"producer_insertion_ordinal\":" << row.observation.producer_insertion_ordinal
+               << ",\"stable_id\":" << Json(contract.stable_id)
+               << ",\"language_tag\":" << Json(contract.identity.language_tag)
+               << ",\"scheme_id\":" << Json(contract.identity.scheme_id)
+               << ",\"source\":" << Json(SourceName(contract.source))
+               << ",\"match\":" << Json(MatchName(contract.match))
+               << ",\"commit\":" << Json(CommitName(contract.commit))
+               << ",\"learnable\":" << (contract.learnable ? "true" : "false") << '}';
       }
       output << "]}";
     }
     output << "]}\n";
     Require(output.good(), "output-write", 5);
   }
+  if (GetProcessMemoryInfo(GetCurrentProcess(), &memory, sizeof(memory))) {
+    peak_working_set_bytes = static_cast<std::uint64_t>(memory.PeakWorkingSetSize);
+  }
+  output << "{\"run_meta\":{\"result_schema\":\"epocanva-candidate-results-v3\""
+         << ",\"schema_version\":3,\"warmup_queries\":" << warmup_queries
+         << ",\"warmup_scope\":\"per_case\",\"language\":" << Json(language_arg)
+         << ",\"repeat\":" << repeat
+         << ",\"case_count\":" << cases.size()
+         << ",\"load_ms\":" << load_ms
+         << ",\"peak_working_set_bytes\":" << peak_working_set_bytes
+         << ",\"resource_profile_count\":" << staged.size() << "}}\n";
   output.flush();
   Require(output.good(), "output-write", 5);
   std::cout << "evaluated_cases=" << cases.size() << " repeat=" << repeat << '\n';
@@ -879,7 +1019,7 @@ int Run(int argc, char** argv) {
 int usage() {
   std::cerr << "usage: candidate_eval_cli --resources <staged-root> --cases <corpus.jsonl>\n"
             << "                         --language <en|zh|fr|ja|ko> --output <results.jsonl>\n"
-            << "                         [--repeat 2] [--load-only]\n"
+            << "                         --warmup-queries <policy-value> [--repeat 2] [--load-only]\n"
             << "                         [--rime-dll <path> --rime-dll-sha256 <hex>\n"
             << "                          --rime-shared <dir> --rime-version 1.17.0\n"
             << "                          --work <dir>]\n";

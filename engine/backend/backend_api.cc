@@ -1,4 +1,7 @@
 #include "epocanva_backend.h"
+#ifdef EPOCANVA_BACKEND_TEST_OBSERVATION
+#include "test_observation.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -345,9 +348,13 @@ void MergeCandidate(std::vector<flow::Candidate>* candidates, flow::Candidate ca
   const auto same = std::find_if(candidates->begin(), candidates->end(), [&](const auto& value) {
     return value.kind != EPOCANVA_BACKEND_RAW && value.text_utf8 == candidate.text_utf8;
   });
-  if (same == candidates->end()) candidates->push_back(std::move(candidate));
+  if (same == candidates->end()) {
+    candidate.producer_insertion_ordinal = static_cast<std::uint32_t>(candidates->size());
+    candidates->push_back(std::move(candidate));
+  }
   else {
     const bool exact = same->exact_expansion || candidate.exact_expansion;
+    candidate.producer_insertion_ordinal = same->producer_insertion_ordinal;
     if (candidate.score > same->score || (candidate.score == same->score && candidate.lexeme_ids < same->lexeme_ids))
       *same = std::move(candidate);
     same->exact_expansion = exact;
@@ -774,6 +781,10 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
       const auto* counts =
           personal.unigrams.empty() && personal.bigrams.empty() ? nullptr : &personal;
       std::vector<flow::Candidate> candidates;
+      auto append_candidate = [&candidates](flow::Candidate candidate) {
+        candidate.producer_insertion_ordinal = static_cast<std::uint32_t>(candidates.size());
+        candidates.push_back(std::move(candidate));
+      };
       bool complete = true;
       session.rime_ordinals.clear();
       if (query->query_kind != EPOCANVA_BACKEND_COMPLETION) {
@@ -803,14 +814,14 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
           candidate.kind = EPOCANVA_BACKEND_PREDICTION; candidate.text_utf8 = Join(row.tokens_utf8, session.language);
           candidate.lexeme_ids = row.lexeme_ids; candidate.score = row.log_probability;
           candidate.input_end_utf8_byte = session.raw.size();
-          candidates.push_back(std::move(candidate));
+          append_candidate(std::move(candidate));
         }
       } else if (session.language == EPOCANVA_BACKEND_ZH) {
         epocanva_snapshot snapshot{}; std::string bytes;
         status = RimeState(session, &snapshot, &bytes); if (status != EPOCANVA_OK) return status;
         if (!session.raw.empty()) {
           flow::Candidate original; original.text_utf8 = session.raw; original.input_end_utf8_byte = session.raw.size();
-          candidates.push_back(std::move(original)); session.rime_ordinals.push_back(UINT32_MAX);
+          append_candidate(std::move(original)); session.rime_ordinals.push_back(UINT32_MAX);
         }
         for (std::uint32_t ordinal = 0; ordinal < snapshot.candidate_count_on_page && candidates.size() < query->max_candidates; ++ordinal) {
           auto wanted = Init<epocanva_candidate_request>(); wanted.context = session.rime_context;
@@ -831,7 +842,7 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
           candidate.score = -0.05 * static_cast<double>(ordinal) + context_score;
           candidate.input_end_utf8_byte = session.raw.size();
           // Rime menu text can inform transient ranking, not learning identity.
-          candidates.push_back(std::move(candidate)); session.rime_ordinals.push_back(ordinal);
+          append_candidate(std::move(candidate)); session.rime_ordinals.push_back(ordinal);
         }
         if (session.resource->pinyin_initialism && !session.raw.empty()) {
           const auto initials = session.resource->pinyin_initialism->Query(
@@ -848,7 +859,7 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
             candidate.lexeme_ids = row.lexeme_ids;
             candidate.score = row.log_score;
             candidate.input_end_utf8_byte = session.raw.size();
-            candidates.push_back(std::move(candidate));
+            append_candidate(std::move(candidate));
             session.rime_ordinals.push_back(UINT32_MAX);
           }
           // The initialism decoder is bounded (beam/character caps) and does not
@@ -870,13 +881,13 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
       } else if (session.language == EPOCANVA_BACKEND_JA) {
         if (!session.raw.empty()) {
           flow::Candidate original; original.text_utf8=session.raw; original.input_end_utf8_byte=session.raw.size();
-          candidates.push_back(std::move(original));
+          append_candidate(std::move(original));
           flow::Candidate kana; kana.kind=EPOCANVA_BACKEND_CONVERSION;
           kana.text_utf8=KanaScript(JapaneseReading(session), session.profile.output_mode == EPOCANVA_BACKEND_OUTPUT_KATAKANA ||
               (!session.profile.id && session.mode == EPOCANVA_BACKEND_KATAKANA));
           kana.input_end_utf8_byte=session.raw.size();
           kana.score = CandidateModelScore(session, {}, context, counts) - 1.0;
-          if (kana.text_utf8 != session.raw && candidates.size()<query->max_candidates) candidates.push_back(std::move(kana));
+          if (kana.text_utf8 != session.raw && candidates.size()<query->max_candidates) append_candidate(std::move(kana));
         }
         complete = false;
         if(session.resource->japanese && !session.preedit.empty() &&
@@ -897,7 +908,7 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
             if(!known||candidate.lexeme_ids.size()>8)candidate.lexeme_ids.clear();
             candidate.score = -static_cast<double>(row.cost) / 1000.0 +
                 CandidateModelScore(session, candidate.lexeme_ids, context, counts);
-            complete=complete&&row.complete;candidates.push_back(std::move(candidate));
+            complete=complete&&row.complete;append_candidate(std::move(candidate));
           }
           const auto first = session.raw.empty() ? candidates.begin() : candidates.begin() + 1;
           std::stable_sort(first, candidates.end(), [](const auto& a, const auto& b) { return a.score > b.score; });
@@ -919,7 +930,7 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
                 [&](auto id){return !id || !session.resource->model->Find(id);})) candidate.lexeme_ids.clear();
           if (!candidate.lexeme_ids.empty())
             candidate.score += CandidateModelScore(session, candidate.lexeme_ids, context, counts);
-          candidates.push_back(std::move(candidate));
+          append_candidate(std::move(candidate));
         }
         if ((lexical.status == lex::QueryStatus::kOk || lexical.status == lex::QueryStatus::kEmptyInput) &&
             !session.preedit.empty()) {
@@ -1154,3 +1165,29 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_ack_commit(
     return Result(result.status);
   });
 }
+#ifdef EPOCANVA_BACKEND_TEST_OBSERVATION
+namespace epocanva::backend::testing {
+epocanva_status ReadCandidateObservation(
+    epocanva_backend_session_handle handle,
+    const epocanva_backend_request* request, std::uint64_t snapshot_token,
+    std::uint32_t candidate_ordinal, CandidateObservation* out) noexcept {
+  return Guard([&]() -> epocanva_status {
+    if (out == nullptr) return EPOCANVA_INVALID_ARGUMENT;
+    *out = {};
+    return With(handle, request, [&](Session& session, const learn::Access& access) {
+      flow::Snapshot snapshot;
+      const auto result = Result(session.flow->ReadSnapshot(access, &snapshot));
+      if (result != EPOCANVA_OK) return result;
+      if (!snapshot_token || snapshot.token != snapshot_token)
+        return static_cast<epocanva_status>(EPOCANVA_STALE_SNAPSHOT);
+      if (candidate_ordinal >= snapshot.candidates.size())
+        return static_cast<epocanva_status>(EPOCANVA_OUT_OF_RANGE);
+      const auto& row = snapshot.candidates[candidate_ordinal];
+      out->contract = row.contract;
+      out->producer_insertion_ordinal = row.producer_insertion_ordinal;
+      return static_cast<epocanva_status>(EPOCANVA_OK);
+    });
+  });
+}
+}  // namespace epocanva::backend::testing
+#endif

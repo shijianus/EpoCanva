@@ -414,6 +414,47 @@ void StaticLoad() {
   CHECK(fs::is_empty(pair.aff.parent_path()));
 }
 
+// Pause at an existing native trace boundary to model thread descheduling.
+// The callback discards every trace byte: it neither logs nor stores content.
+// Unlike CPU saturation, this deterministically crosses the upstream 250 ms
+// cutoff while keeping the dictionary, input and candidate algorithm equal.
+struct PauseState {
+  bool paused = false;
+};
+void PauseOnce(void* context, int, const char*) {
+  auto* state = static_cast<PauseState*>(context);
+  if (!state->paused) {
+    state->paused = true;
+    Sleep(350);
+  }
+}
+void DeterminismScheduledPause() {
+  const auto native = Reference();
+  // Uppercase enters the native final spelling-verification path, whose
+  // existing trace callback is observable without modifying upstream code.
+  const auto expected = native->suggest("FRANCAIS");
+  CHECK(!expected.empty());
+  for (int query_ordinal = 0; query_ordinal < 8; ++query_ordinal) {
+    PauseState state;
+    native->set_trace_callback(PauseOnce, &state);
+    const auto actual = native->suggest("FRANCAIS");
+    native->set_trace_callback(nullptr, nullptr);
+    CHECK(state.paused);
+    CHECK(actual == expected);
+  }
+}
+void DeterminismRepeatedQuery() {
+  const auto dictionary = LoadProduction();
+  const auto expected = dictionary->Suggest("francais", fr::kMaxResults);
+  CHECK(expected.status == fr::Status::kOk);
+  CHECK(!expected.values_utf8.empty());
+  for (int query_ordinal = 0; query_ordinal < 8; ++query_ordinal) {
+    const auto actual = dictionary->Suggest("francais", fr::kMaxResults);
+    CHECK(actual.status == expected.status);
+    CHECK(actual.values_utf8 == expected.values_utf8);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -432,6 +473,8 @@ int main(int argc, char** argv) {
     else if (mode == "complex_rules") ComplexRules();
     else if (mode == "concurrency") Concurrency();
     else if (mode == "static_load") StaticLoad();
+    else if (mode == "determinism_scheduled_pause") DeterminismScheduledPause();
+    else if (mode == "determinism_repeated_query") DeterminismRepeatedQuery();
     else if (mode == "force_failure") CHECK(false);
     else { std::cout << "INVALID MODE\n"; return 2; }
     std::cout << "RESULT PASS\n";

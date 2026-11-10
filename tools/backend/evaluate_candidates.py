@@ -26,14 +26,18 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-LANGUAGES = ("en", "zh", "fr", "ja", "ko")
+from candidate_quality_policy import (POLICY_PATH, PolicyError, load_policy,
+                                      validate_tier_b_lock)
+
+POLICY = load_policy()
+LANGUAGES = tuple(POLICY["languages"])
 SCHEMES = ("latin", "pinyin", "zhuyin", "romaji", "kana", "two_set", "katakana")
 KIND_RAW = 0
 DEFAULT_BOOTSTRAPS = 10_000
 DEFAULT_SEED = 20261107
-DEFAULT_RUNS = 2
-DEFAULT_REPEAT = 2
-GATE_MINIMUM_CASES = {"en": 1001, "zh": 1001, "fr": 1001, "ja": 1001, "ko": 500}
+DEFAULT_RUNS = POLICY["qualification"]["runs"]
+DEFAULT_REPEAT = POLICY["qualification"]["repeat"]
+GATE_MINIMUM_CASES = POLICY["minimum_cases"]
 ALLOWED_CASE_FIELDS = frozenset((
     "id", "language", "scheme", "profile_id", "raw_input", "preedit", "context",
     "expected", "expected_languages", "group_id", "split", "source", "license",
@@ -44,11 +48,12 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 # Report schema: bumped to v2 when identity became evaluator-verified (real
 # `git rev-parse HEAD`, tree cleanliness, declared mode) instead of caller-
 # supplied. The corpus manifest format (v1) is unchanged.
-EVALUATOR_SCHEMA_VERSION = "epocanva-candidate-eval-v2"
+EVALUATOR_SCHEMA_VERSION = "epocanva-candidate-eval-v3"
+RESULT_SCHEMA_VERSION = "epocanva-candidate-results-v3"
 # The quality policy names the mandatory gate predicate set (docs/testing/
 # candidate-evaluation-baseline.md section 9 and the quality_gate block of the
 # report). Bump it whenever a predicate is added, tightened, or redefined.
-QUALITY_POLICY_VERSION = "epocanva-candidate-quality-policy-v1"
+QUALITY_POLICY_VERSION = POLICY["format"]
 
 
 class EvaluationError(ValueError):
@@ -313,12 +318,18 @@ def load_manifest(path: Path, cases_dir: Path, bindings_sha256: str,
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise EvaluationError(f"corpus manifest unreadable: {exc}") from exc
-    if manifest.get("format") != "epocanva-candidate-eval-manifest-v1":
-        raise EvaluationError("corpus manifest format is not epocanva-candidate-eval-manifest-v1")
-    if manifest.get("corpus_id") != "candidate-v1" or manifest.get("corpus_version") != 1:
-        raise EvaluationError("corpus manifest identity mismatch")
-    if manifest.get("license") != "AGPL-3.0-only":
-        raise EvaluationError("corpus manifest license is not the committed Tier A licence")
+    if manifest.get("format") == "epocanva-candidate-eval-manifest-v1":
+        if manifest.get("corpus_id") != "candidate-v1" or manifest.get("corpus_version") != 1:
+            raise EvaluationError("corpus manifest identity mismatch")
+        if manifest.get("license") != "AGPL-3.0-only":
+            raise EvaluationError("corpus manifest license is not the committed Tier A licence")
+    elif manifest.get("format") == "epocanva-candidate-eval-manifest-v2":
+        if (manifest.get("tier") != "B" or not isinstance(manifest.get("corpus_id"), str) or
+                type(manifest.get("corpus_version")) is not int or manifest["corpus_version"] < 1 or
+                not isinstance(manifest.get("license"), str) or not manifest["license"]):
+            raise EvaluationError("Tier B manifest identity or licence is missing")
+    else:
+        raise EvaluationError("unsupported corpus manifest schema")
     if manifest.get("harness_version") != 1:
         raise EvaluationError("corpus manifest harness_version mismatch")
     if manifest.get("backend_manifest_sha256") != bindings_sha256:
@@ -384,6 +395,52 @@ def run_harness(executable: Path, argv: list[str], output_path: Path, timeout: f
 LEGAL_CANDIDATE_KINDS = frozenset(range(0, 7))
 LEGAL_CASE_STATUSES = frozenset(("ok", "unavailable", "incomplete"))
 MAX_LEXEME_ID = 2 ** 64 - 1
+SOURCES_BY_KIND = ("raw", "word", "spelling", "morphology", "expansion", "conversion", "prediction")
+MATCH_BY_SOURCE = {"raw": "raw", "word": "prefix", "spelling": "fuzzy", "morphology": "prefix",
+                   "expansion": "abbreviation", "conversion": "conversion", "prediction": "context"}
+# Contract scheme names follow the ABI input mode, rather than the user-facing
+# scheme in the profile manifest (native Hangul uses LATIN mode).
+SCHEME_BY_INPUT_MODE = {1: "latin", 2: "pinyin", 3: "zhuyin", 4: "romaji",
+                        5: "katakana", 6: "two_set", 7: "kana"}
+
+
+def validate_observed_contract(row: dict[str, Any], where: str) -> None:
+    """Validate serialized internal records, never infer candidate language."""
+    language = row.get("language_tag")
+    if language not in LANGUAGES:
+        raise EvaluationError(f"{where} language_tag is missing, illegal, or unknown")
+    scheme = row.get("scheme_id")
+    if scheme not in SCHEMES:
+        raise EvaluationError(f"{where} scheme_id is missing or unknown")
+    stable_id = row.get("stable_id")
+    prefix = f"cand:v1:{language}:{scheme}:"
+    if not isinstance(stable_id, str) or not stable_id.startswith(prefix):
+        raise EvaluationError(f"{where} stable_id disagrees with observed language/scheme")
+    identity = stable_id[len(prefix):]
+    ids = row["lexeme_ids"]
+    if ids:
+        if identity != "lex:" + "+".join(str(item) for item in ids):
+            raise EvaluationError(f"{where} stable_id disagrees with admitted lexeme identity")
+    elif not re.fullmatch(r"text:[0-9a-f]{16}", identity):
+        raise EvaluationError(f"{where} stable_id has no valid text-scoped identity")
+    source = row.get("source")
+    if source != SOURCES_BY_KIND[row["kind"]]:
+        raise EvaluationError(f"{where} source disagrees with candidate kind")
+    if row.get("match") != MATCH_BY_SOURCE[source]:
+        raise EvaluationError(f"{where} match disagrees with candidate source")
+    if row.get("commit") != ("insert" if source == "prediction" else "replace_input"):
+        raise EvaluationError(f"{where} commit disagrees with candidate source")
+    if type(row.get("learnable")) is not bool or row["learnable"] != (source != "raw" and bool(ids)):
+        raise EvaluationError(f"{where} learnable disagrees with candidate source/identity")
+    if source == "raw" and ids:
+        raise EvaluationError(f"{where} raw cannot have admitted learning IDs")
+    if type(row.get("score")) not in (int, float) or not math.isfinite(row["score"]):
+        raise EvaluationError(f"{where} score must be finite ranking points")
+    if type(row.get("producer_insertion_ordinal")) is not int or row["producer_insertion_ordinal"] < 0:
+        raise EvaluationError(f"{where} producer_insertion_ordinal must be a nonnegative record ordinal")
+    fingerprint = row.get("surface_fnv1a64")
+    if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{16}", fingerprint):
+        raise EvaluationError(f"{where} surface_fnv1a64 must be 16 lowercase hexadecimal digits")
 
 
 def validate_result_record(record: dict[str, Any], where: str) -> None:
@@ -412,12 +469,13 @@ def validate_result_record(record: dict[str, Any], where: str) -> None:
         candidates = repeat.get("candidates")
         if not isinstance(candidates, list):
             raise EvaluationError(f"{repeat_where} candidates must be an array")
+        producer_ordinals: set[int] = set()
         for row_ordinal, row in enumerate(candidates):
             row_where = f"{repeat_where} candidate {row_ordinal}"
             if not isinstance(row, dict):
                 raise EvaluationError(f"{row_where} must be an object")
             rank = row.get("rank")
-            if rank != row_ordinal:
+            if type(rank) is not int or rank != row_ordinal:
                 raise EvaluationError(
                     f"{row_where} rank {rank!r} is not the contiguous ordinal {row_ordinal}")
             kind = row.get("kind")
@@ -433,7 +491,7 @@ def validate_result_record(record: dict[str, Any], where: str) -> None:
             lexeme_ids = row.get("lexeme_ids")
             if not isinstance(lexeme_ids, list) or any(
                     not isinstance(item, int) or isinstance(item, bool)
-                    or item < 0 or item > MAX_LEXEME_ID for item in lexeme_ids):
+                    or item <= 0 or item > MAX_LEXEME_ID for item in lexeme_ids) or len(lexeme_ids) > 8:
                 raise EvaluationError(f"{row_where} lexeme_ids must be uint64 values")
             begin = row.get("input_begin_utf8_byte")
             end = row.get("input_end_utf8_byte")
@@ -442,9 +500,15 @@ def validate_result_record(record: dict[str, Any], where: str) -> None:
                     raise EvaluationError(f"{row_where} {name} must be a nonnegative byte offset")
             if begin > end:
                 raise EvaluationError(f"{row_where} input byte range is inverted")
+            validate_observed_contract(row, row_where)
+            producer_ordinal = row["producer_insertion_ordinal"]
+            if producer_ordinal in producer_ordinals:
+                raise EvaluationError(f"{row_where} repeats a producer insertion ordinal")
+            producer_ordinals.add(producer_ordinal)
 
 
-def read_results(path: Path, *, language: str, repeat: int, case_count: int) -> tuple[
+def read_results(path: Path, *, language: str, repeat: int, case_count: int,
+                 warmup_queries: int | None = None) -> tuple[
         dict[str, Any], dict[str, list[dict[str, Any]]]]:
     meta: dict[str, Any] | None = None
     cases: dict[str, list[dict[str, Any]]] = {}
@@ -458,6 +522,8 @@ def read_results(path: Path, *, language: str, repeat: int, case_count: int) -> 
             record = json.loads(line)
         except json.JSONDecodeError as exc:
             raise EvaluationError(f"{path.name} line {line_number} is not JSON") from exc
+        if not isinstance(record, dict):
+            raise EvaluationError(f"{path.name} line {line_number} must be an object")
         if "run_meta" in record:
             if meta is not None or len(record) != 1:
                 raise EvaluationError(f"{path.name} line {line_number} has a malformed run_meta line")
@@ -470,8 +536,18 @@ def read_results(path: Path, *, language: str, repeat: int, case_count: int) -> 
             raise EvaluationError(f"{path.name} line {line_number} repeats case {case_id!r}")
         validate_result_record(record, f"{path.name} line {line_number} ({case_id})")
         cases[case_id] = record
-    if meta is None:
+    if not isinstance(meta, dict):
         raise EvaluationError(f"{path.name} has no run_meta line")
+    if meta.get("result_schema") != RESULT_SCHEMA_VERSION or meta.get("schema_version") != 3:
+        raise EvaluationError(f"{path.name} requires {RESULT_SCHEMA_VERSION}; historical results must be rerun, "
+                              "never migrated by synthesizing language attribution")
+    if type(meta.get("warmup_queries")) is not int or meta["warmup_queries"] < 0:
+        raise EvaluationError(f"{path.name} run_meta warmup_queries is missing or invalid")
+    if warmup_queries is not None and meta["warmup_queries"] != warmup_queries:
+        raise EvaluationError(f"{path.name} warmup_queries disagrees with requested protocol")
+    for key in ("load_ms", "peak_working_set_bytes"):
+        if type(meta.get(key)) not in (float, int) or not math.isfinite(meta[key]) or meta[key] < 0:
+            raise EvaluationError(f"{path.name} run_meta {key} must be finite and nonnegative")
     if meta.get("language") != language:
         raise EvaluationError(
             f"{path.name} run_meta language {meta.get('language')!r} does not match {language!r}")
@@ -486,7 +562,8 @@ def read_results(path: Path, *, language: str, repeat: int, case_count: int) -> 
 
 
 def validate_records_against_corpus(records: dict[str, list[dict[str, Any]]],
-                                    cases: list[dict[str, Any]], source_name: str) -> None:
+                                    cases: list[dict[str, Any]], source_name: str,
+                                    bindings: dict[int, dict[str, Any]] | None = None) -> None:
     """Cross-check one run's records against the corpus definition.
 
     Every expected case must appear exactly once (duplicates are already
@@ -512,6 +589,17 @@ def validate_records_against_corpus(records: dict[str, list[dict[str, Any]]],
         raw_bytes = len(case["raw_input"].encode("utf-8"))
         for repeat in record["repeats"]:
             for ordinal, row in enumerate(repeat.get("candidates", [])):
+                if row.get("language_tag") != case["language"]:
+                    raise EvaluationError(f"{source_name} case {case_id} candidate {ordinal} language conflicts "
+                                          "with the bound monolingual profile")
+                if bindings is not None:
+                    binding = bindings[case["profile_id"]]
+                    if row.get("scheme_id") != SCHEME_BY_INPUT_MODE[binding["input_mode_value"]]:
+                        raise EvaluationError(f"{source_name} case {case_id} candidate {ordinal} scheme conflicts "
+                                              "with the bound profile input mode")
+                if case["language"] in ("en", "fr") and row.get("source") == "conversion":
+                    raise EvaluationError(f"{source_name} case {case_id} candidate {ordinal} source conflicts "
+                                          "with the bound Latin profile")
                 begin = row["input_begin_utf8_byte"]
                 end = row["input_end_utf8_byte"]
                 if end > raw_bytes:
@@ -523,8 +611,17 @@ def validate_records_against_corpus(records: dict[str, list[dict[str, Any]]],
 def menu_signature(repeat: dict[str, Any]) -> tuple:
     return tuple(
         (row.get("kind"), row.get("text_utf8"), tuple(row.get("lexeme_ids", [])),
-         row.get("input_begin_utf8_byte"), row.get("input_end_utf8_byte"))
+         row.get("input_begin_utf8_byte"), row.get("input_end_utf8_byte"),
+         row.get("stable_id"), row.get("language_tag"), row.get("scheme_id"), row.get("source"),
+         row.get("match"), row.get("commit"), row.get("learnable"), row.get("score"))
         for row in repeat.get("candidates", []))
+
+
+def determinism_rates(signatures: list[list[tuple]], expected_repeat: int) -> tuple[bool, bool, bool]:
+    lengths_ok = bool(signatures) and all(len(repeats) == expected_repeat for repeats in signatures)
+    within = lengths_ok and all(all(menu == run[0] for menu in run) for run in signatures)
+    across = within and all(run[0] == signatures[0][0] for run in signatures)
+    return lengths_ok, within, across
 
 
 # --- metrics -----------------------------------------------------------------
@@ -559,10 +656,8 @@ def metric_values(case: dict[str, Any], record: dict[str, Any]) -> dict[str, Any
         "raw_present": 1.0 if raw_match else 0.0,
         "raw_first": 1.0 if raw_match and raw_rows and raw_rows[0] is rows[0] else 0.0,
         "empty_menu": 1.0 if not rows else 0.0,
-        # wrong_language is deliberately absent: the public v1 candidate ABI
-        # carries no per-candidate language attribution, so no honest per-case
-        # value exists. The report records wrong_language_rate as null with an
-        # explicit not_observable status; it must never surface as 0.0.
+        "wrong_language_candidates": sum(row["language_tag"] not in case["expected_languages"] for row in rows),
+        "observed_language_candidates": len(rows),
         "latency_ms": first.get("latency_ns", 0) / 1e6,
     }
     return values
@@ -687,17 +782,20 @@ GATE_PREDICATES = (
     "latency_memory_recorded",
     "privacy_and_abi_status",
     "wrong_language_observable",
+    "wrong_language_rate",
+    "tier_b_corpus",
+    "performance_regression",
+    "absolute_quality_thresholds",
 )
-WRONG_LANGUAGE_REASON = ("the public v1 candidate ABI carries no per-candidate language "
-                         "attribution, so wrong-language behaviour is not observable at "
-                         "this ABI; it is reported as null, never as 0.0, and no Unicode "
-                         "script heuristic substitutes for a measurement")
+WRONG_LANGUAGE_REASON = "candidate language attribution must come from the observed internal candidate record"
 
 
 def evaluate_quality_gate(*, per_language: dict[str, Any], failures: list[dict[str, str]],
                           expected_case_ids: dict[str, set[str]],
                           observed_case_ids: dict[str, set[str]],
-                          protocol: dict[str, Any]) -> dict[str, Any]:
+                          protocol: dict[str, Any], policy: dict[str, Any] = POLICY,
+                          corpus_evidence: dict[str, Any] | None = None,
+                          regression: dict[str, Any] | None = None) -> dict[str, Any]:
     """Derive the fail-closed quality_gate block from measured report data.
 
     Statuses: "failed" when a mandatory predicate measurably fails,
@@ -717,22 +815,27 @@ def evaluate_quality_gate(*, per_language: dict[str, Any], failures: list[dict[s
             not_evaluated.append({"predicate": name, "reason": reason})
 
     # minimum_samples -----------------------------------------------------------
-    shortfalls = [f"{language}: {values['cases']}/{GATE_MINIMUM_CASES[language]} cases"
-                  for language, values in per_language.items()
-                  if values["cases"] < GATE_MINIMUM_CASES[language]]
+    limits = policy["thresholds"]
+    minimums = policy["minimum_cases"]
+    shortfalls = [f"{language}: {per_language.get(language, {}).get('cases', 0)}/{minimums[language]} cases"
+                  for language in policy["languages"]
+                  if per_language.get(language, {}).get("cases", 0) < minimums[language]]
     record("minimum_samples", "failed" if shortfalls else "passed",
            "; ".join(shortfalls))
 
     # exact_process_and_repeat_protocol ----------------------------------------
     protocol_problems = []
-    for language, observed in protocol.items():
-        if observed["fresh_runs"] != observed["fresh_runs_expected"]:
-            protocol_problems.append(f"{language}: {observed['fresh_runs']} fresh runs, "
-                                     f"expected {observed['fresh_runs_expected']}")
-        if observed["repeat_counts"] != [observed["repeat_expected"]]:
+    for language in policy["languages"]:
+        observed = protocol.get(language, {})
+        if observed.get("fresh_runs") != policy["qualification"]["runs"]:
+            protocol_problems.append(f"{language}: {observed.get('fresh_runs')} fresh runs, "
+                                     f"expected {policy['qualification']['runs']}")
+        if observed.get("repeat_counts") != [policy["qualification"]["repeat"]]:
             protocol_problems.append(
-                f"{language}: repeat counts {observed['repeat_counts']}, "
-                f"expected exactly [{observed['repeat_expected']}]")
+                f"{language}: repeat counts {observed.get('repeat_counts')}, "
+                f"expected exactly [{policy['qualification']['repeat']}]")
+        if observed.get("warmup_counts") != [policy["qualification"]["warmup_queries"]]:
+            protocol_problems.append(f"{language}: warmup query count disagrees with policy")
     record("exact_process_and_repeat_protocol",
            "failed" if protocol_problems else "passed", "; ".join(protocol_problems))
 
@@ -761,13 +864,13 @@ def evaluate_quality_gate(*, per_language: dict[str, Any], failures: list[dict[s
             rate = values.get(key)
             if rate is None:
                 unevaluable.append(language)
-            elif rate < 1.0:
+            elif rate < limits["deterministic_case_rate_min"]:
                 problems.append(f"{language}: {rate:.3f}")
         record(name, "failed" if problems else ("not_evaluable" if unevaluable else "passed"),
                "; ".join(problems + [f"{language}: no measured cases" for language in unevaluable]))
     empty_problems = [f"{language}: empty_menu_rate {values['empty_menu_rate']}"
                       for language, values in per_language.items()
-                      if values["empty_menu_rate"] is not None and values["empty_menu_rate"] != 0.0]
+                      if values["empty_menu_rate"] is not None and values["empty_menu_rate"] > limits["empty_menu_rate_max"]]
     empty_unevaluable = [language for language, values in per_language.items()
                          if values["empty_menu_rate"] is None]
     record("empty_menu_rate_zero",
@@ -780,7 +883,7 @@ def evaluate_quality_gate(*, per_language: dict[str, Any], failures: list[dict[s
             rate = values[key]
             if rate is None:
                 raw_unevaluable.append(f"{language}: {key} not measurable")
-            elif rate < 1.0:
+            elif rate < limits[key + "_min"]:
                 raw_problems.append(f"{language}: {key} {rate:.3f}")
     record("raw_contract", "failed" if raw_problems else ("not_evaluable" if raw_unevaluable else "passed"),
            "; ".join(raw_problems + raw_unevaluable))
@@ -825,7 +928,29 @@ def evaluate_quality_gate(*, per_language: dict[str, Any], failures: list[dict[s
            "surfaces confined to build/ artifacts; learning disabled; no network I/O path")
 
     # wrong language observability -------------------------------------------------
-    record("wrong_language_observable", "not_evaluable", WRONG_LANGUAGE_REASON)
+    unobservable = [language for language in policy["languages"]
+                   if per_language.get(language, {}).get("wrong_language_rate") is None or
+                   per_language.get(language, {}).get("wrong_language_observability", {}).get("status") != "observable"]
+    record("wrong_language_observable", "failed" if unobservable else "passed",
+           "not_observable: " + ", ".join(unobservable) if unobservable else "")
+    wrong = [f"{language}: wrong_language_rate {values['wrong_language_rate']}"
+             for language, values in per_language.items()
+             if values.get("wrong_language_rate") is not None and
+             values["wrong_language_rate"] > limits["wrong_language_rate_max"]]
+    record("wrong_language_rate", "failed" if wrong else ("not_evaluable" if unobservable else "passed"),
+           "; ".join(wrong) if wrong else (WRONG_LANGUAGE_REASON if unobservable else ""))
+    corpus_evidence = corpus_evidence or {"status": "not_evaluable", "reason": "no approved Tier B corpus lock"}
+    record("tier_b_corpus", corpus_evidence["status"], corpus_evidence.get("reason", ""))
+    regression = regression or {"status": "not_evaluable", "reason": "no comparable measured baseline supplied"}
+    record("performance_regression", regression["status"], regression.get("reason", ""))
+    absolute = policy["absolute_quality"]
+    if absolute["decision"] == "pending_product_owner":
+        record("absolute_quality_thresholds", "not_evaluable", "Top1, Top3 and MRR absolute gates await product-owner decision")
+    else:
+        quality_failures = [f"{language}: {key} below approved threshold"
+                            for language, values in per_language.items() for key in ("top1", "top3", "mrr")
+                            if values.get(key) is None or values[key] < absolute[key + "_min"]]
+        record("absolute_quality_thresholds", "failed" if quality_failures else "passed", "; ".join(quality_failures))
 
     if any(entry["status"] == "failed" for entry in predicates.values()):
         status = "failed"
@@ -834,8 +959,8 @@ def evaluate_quality_gate(*, per_language: dict[str, Any], failures: list[dict[s
     else:
         status = "passed"
     return {
-        "policy_version": QUALITY_POLICY_VERSION,
-        "minimum_cases": GATE_MINIMUM_CASES,
+        "policy_version": policy["format"],
+        "minimum_cases": minimums,
         "status": status,
         "met": status == "passed",
         "claim": {"passed": "gate-met", "failed": "gate-failed",
@@ -847,6 +972,48 @@ def evaluate_quality_gate(*, per_language: dict[str, Any], failures: list[dict[s
 
 
 # --- report ------------------------------------------------------------------
+
+def compare_baseline(per_language: dict[str, Any], identity: dict[str, Any],
+                     baseline: dict[str, Any] | None, policy: dict[str, Any] = POLICY) -> dict[str, Any]:
+    if baseline is None:
+        return {"status": "not_evaluable", "reason": "no comparable measured baseline supplied", "per_language": {}}
+    if (baseline.get("format") != EVALUATOR_SCHEMA_VERSION or
+            baseline.get("identity", {}).get("quality_policy_version") != policy["format"]):
+        raise EvaluationError("historical baseline schema/policy cannot establish observability or performance; rerun it")
+    for key in ("corpus_sha256", "backend_manifest_sha256", "resource_manifest_sha256", "model_sha256_by_profile"):
+        if baseline.get("identity", {}).get(key) != identity.get(key):
+            raise EvaluationError(f"baseline {key} does not match the measured inputs")
+    comparisons = {}
+    failures = []
+    for language in policy["languages"]:
+        current = per_language.get(language)
+        previous = baseline.get("per_language", {}).get(language)
+        if not isinstance(current, dict) or not isinstance(previous, dict):
+            raise EvaluationError(f"baseline/current language measurements missing for {language}")
+        if (previous.get("latency_ms", {}).get("warmup_queries") != policy["qualification"]["warmup_queries"] or
+                current.get("latency_ms", {}).get("warmup_queries") != policy["qualification"]["warmup_queries"]):
+            raise EvaluationError(f"baseline/current warmup protocol mismatch for {language}")
+        comparisons[language] = {}
+        for key, old, new in (
+                ("warm_p95_ms", previous.get("latency_ms", {}).get("warm", {}).get("p95"),
+                 current.get("latency_ms", {}).get("warm", {}).get("p95")),
+                ("peak_working_set_bytes", previous.get("peak_working_set_bytes"), current.get("peak_working_set_bytes"))):
+            if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in (old, new)):
+                raise EvaluationError(f"baseline/current {key} missing or invalid for {language}")
+            bounds = policy["regression"][key]
+            increment = max(old * bounds["relative_increment_max"], bounds["absolute_increment_max"])
+            passed = new <= old + increment
+            comparisons[language][key] = {"baseline": old, "current": new, "delta": new - old,
+                                           "allowed_increment": increment, "passed": passed}
+            if not passed:
+                failures.append(f"{language}: {key} regression exceeds policy")
+        comparisons[language]["quality_metrics"] = {
+            key: {"baseline": previous.get(key), "current": current.get(key),
+                  "delta": current[key] - previous[key] if current.get(key) is not None and previous.get(key) is not None else None,
+                  "baseline_ci95": previous.get("ci95", {}).get(key), "current_ci95": current.get("ci95", {}).get(key)}
+            for key in ("top1", "top3", "mrr")}
+    return {"status": "failed" if failures else "passed", "reason": "; ".join(failures), "per_language": comparisons}
+
 
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     repo_root = Path(__file__).resolve().parents[2]
@@ -868,6 +1035,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     manifest_path = Path(args.manifest)
     manifest = load_manifest(manifest_path, cases_dir, bindings_sha256,
                              {language: len(corpus[language]) for language in LANGUAGES})
+    corpus_evidence = validate_tier_b_lock(
+        POLICY_PATH.parent / POLICY["tier_b_lock"], policy=POLICY, cases_dir=cases_dir,
+        corpus=corpus, manifest_path=manifest_path, repo_root=repo_root)
+    if corpus_evidence["status"] == "passed" and manifest.get("tier") != "B":
+        raise EvaluationError("approved Tier B lock requires an explicit Tier B manifest")
     corpus_sha256 = {f"{language}.jsonl": sha256_bytes((cases_dir / f"{language}.jsonl").read_bytes())
                      for language in LANGUAGES}
 
@@ -903,13 +1075,13 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             argv = ["--resources", str(resources_root),
                     "--cases", str(cases_dir / f"{language}.jsonl"),
                     "--language", language, "--output", str(results_path),
-                    "--repeat", str(args.repeat)]
+                    "--repeat", str(args.repeat), "--warmup-queries", str(args.warmup_queries)]
             if rime_argv and language == "zh":
                 argv += rime_argv
             command = run_harness(Path(args.harness), argv, results_path, args.timeout)
             meta, records = read_results(results_path, language=language, repeat=args.repeat,
-                                         case_count=len(corpus[language]))
-            validate_records_against_corpus(records, corpus[language], results_path.name)
+                                         case_count=len(corpus[language]), warmup_queries=args.warmup_queries)
+            validate_records_against_corpus(records, corpus[language], results_path.name, bindings)
             meta["command"] = command
             per_run[language].append((meta, records))
     harness_sha256s = {runs[0][0]["command"]["harness_sha256_before"]
@@ -938,6 +1110,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "fresh_runs_expected": args.runs,
             "repeat_counts": sorted({meta.get("repeat") for meta, _ in runs}),
             "repeat_expected": args.repeat,
+            "warmup_counts": sorted({meta["warmup_queries"] for meta, _ in runs}),
         }
 
         values_by_id: dict[str, dict[str, Any]] = {}
@@ -945,6 +1118,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         fresh_process_rates: list[float] = []
         latencies_warm: list[float] = []
         cold_latency: float | None = None
+        wrong_candidates = 0
+        observed_candidates = 0
         for case in verified_cases:
             case_id = case["id"]
             records = [records_by_id.get(case_id) for _, records_by_id in runs]
@@ -958,9 +1133,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 continue
             signatures = [[menu_signature(repeat) for repeat in record.get("repeats", [])]
                           for record in records]
-            lengths_ok = all(len(repeats) == args.repeat for repeats in signatures)
-            within = lengths_ok and all(sigs == signatures[0] for sigs in signatures)
-            across = within and all(sigs == signatures[0] for sigs in signatures)
+            lengths_ok, within, across = determinism_rates(signatures, args.repeat)
             in_process_rates.append(1.0 if within else 0.0)
             fresh_process_rates.append(1.0 if across else 0.0)
             if not lengths_ok:
@@ -973,11 +1146,13 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             values_by_id[case_id] = metric_values(case, records[0])
             for run_ordinal, record in enumerate(records):
                 for repeat_ordinal, repeat in enumerate(record.get("repeats", [])):
+                    observed_candidates += len(repeat["candidates"])
+                    wrong_candidates += sum(row["language_tag"] not in case["expected_languages"]
+                                            for row in repeat["candidates"])
                     latency = repeat.get("latency_ns", 0) / 1e6
+                    latencies_warm.append(latency)
                     if run_ordinal == 0 and case is verified_cases[0] and repeat_ordinal == 0:
                         cold_latency = latency
-                    else:
-                        latencies_warm.append(latency)
 
         language_values: dict[str, Any] = {
             "cases": len(verified_cases),
@@ -988,27 +1163,27 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "raw_present_rate": ratio(verified_cases, values_by_id, "raw_present"),
             "raw_first_rate": ratio(verified_cases, values_by_id, "raw_first"),
             "empty_menu_rate": ratio(verified_cases, values_by_id, "empty_menu"),
-            # The v1 candidate ABI exposes no per-candidate language, so no
-            # honest wrong-language measurement exists; null + not_observable,
-            # never 0.0 and never a Unicode script heuristic.
-            "wrong_language_rate": None,
+            "wrong_language_rate": optional_ratio(wrong_candidates, observed_candidates),
             "wrong_language_observability": {
-                "status": "not_observable",
-                "reason": ("the public v1 candidate ABI carries no per-candidate language "
-                           "attribution; the case runs in its declared profile's session"),
+                "status": "observable" if observed_candidates else "not_observable",
+                "basis": "actual internal candidate language_tag compared with case expected_languages",
+                "wrong_candidates": wrong_candidates, "observed_candidates": observed_candidates,
             },
             "in_process_repeat_deterministic_rate": (sum(in_process_rates) / len(in_process_rates)
                                                      if in_process_rates else None),
             "cross_process_deterministic_rate": (sum(fresh_process_rates) / len(fresh_process_rates)
                                                  if fresh_process_rates else None),
+            "deterministic_case_rate": (sum(fresh_process_rates) / len(fresh_process_rates)
+                                         if fresh_process_rates else None),
             "latency_ms": {"cold": cold_latency,
                            "warm": {"p50": percentile(latencies_warm, 0.50) if latencies_warm else None,
                                     "p95": percentile(latencies_warm, 0.95) if latencies_warm else None,
                                     "p99": percentile(latencies_warm, 0.99) if latencies_warm else None,
                                     "queries": len(latencies_warm)},
-                           "warmup_queries": 0},
+                           "warmup_queries": args.warmup_queries,
+                           "cold_note": "first measured query after explicit warmup; original cold query latency is not inferred"},
             "resource_load_ms": runs[0][0].get("load_ms"),
-            "peak_working_set_bytes": runs[0][0].get("peak_working_set_bytes"),
+            "peak_working_set_bytes": max(meta["peak_working_set_bytes"] for meta, _ in runs),
         }
         schemes: dict[str, Any] = {}
         for scheme in sorted({case["scheme"] for case in verified_cases}):
@@ -1020,15 +1195,10 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             language_values["schemes"] = schemes
         per_language[language] = language_values
 
-    quality_gate = evaluate_quality_gate(
-        per_language=per_language, failures=failures,
-        expected_case_ids={language: {case["id"] for case in corpus[language]}
-                           for language in per_language},
-        observed_case_ids=observed_case_ids, protocol=protocol)
     report = {
         "format": EVALUATOR_SCHEMA_VERSION,
         "corpus": {"id": manifest["corpus_id"], "version": manifest["corpus_version"],
-                   "license": manifest["license"]},
+                   "license": manifest["license"], "evidence": corpus_evidence},
         "identity": {
             "repo_commit": source["repo_commit"],
             "source_ref": source["source_ref"],
@@ -1036,6 +1206,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "mode": args.mode,
             "evaluator_schema_version": EVALUATOR_SCHEMA_VERSION,
             "quality_policy_version": QUALITY_POLICY_VERSION,
+            "quality_policy_sha256": sha256_bytes(POLICY_PATH.read_bytes()),
+            "run_result_schema": RESULT_SCHEMA_VERSION,
             "backend_manifest_sha256": bindings_sha256,
             "manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
             "corpus_sha256": corpus_sha256,
@@ -1049,13 +1221,21 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "unverified": unverified,
         "failures": failures,
         "determinism": {"repeats_per_case": args.repeat, "fresh_runs": args.runs,
-                        "method": "full ordered (kind, text_utf8, lexeme_ids, input range) list equality"},
-        "quality_gate": quality_gate,
+                        "method": "full ordered candidate identity, source, score, text and byte range equality; transient tokens excluded"},
         "metrics_note": (
             "The backend contract pins the raw candidate at ordinal 0 for completion queries, "
             "so top1/top3/mrr measure target position under that contract; the suggestion_* "
             "variants exclude raw-kind rows and track suggestion ordering directly."),
     }
+    baseline_path = getattr(args, "baseline_report", None)
+    baseline = json.loads(Path(baseline_path).read_text(encoding="utf-8")) if baseline_path else None
+    regression = compare_baseline(per_language, report["identity"], baseline)
+    report["regression"] = regression
+    report["quality_gate"] = evaluate_quality_gate(
+        per_language=per_language, failures=failures,
+        expected_case_ids={language: {case["id"] for case in corpus[language]} for language in LANGUAGES},
+        observed_case_ids=observed_case_ids, protocol=protocol, corpus_evidence=corpus_evidence,
+        regression=regression)
     return report
 
 
@@ -1120,6 +1300,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="fresh-process harness runs per language (>=1)")
     parser.add_argument("--repeat", type=int, default=DEFAULT_REPEAT,
                         help="in-process repeats per case (>=1)")
+    parser.add_argument("--warmup-queries", type=int, default=POLICY["qualification"]["warmup_queries"],
+                        help="unmeasured queries per case, default from the unique quality policy")
+    parser.add_argument("--baseline-report", help="comparable v3 baseline report for performance and quality deltas")
     parser.add_argument("--bootstrap-replicates", type=int, default=DEFAULT_BOOTSTRAPS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--timeout", type=float, default=3600.0)
@@ -1127,7 +1310,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rime-dll-sha256", help="expected rime.dll SHA-256")
     parser.add_argument("--rime-shared", help="reviewed ranked Chinese shared-data directory")
     args = parser.parse_args(argv)
-    if args.runs < 1 or args.repeat < 1 or args.bootstrap_replicates < 100 or args.timeout <= 0:
+    if args.runs < 1 or args.repeat < 1 or args.warmup_queries < 0 or args.bootstrap_replicates < 100 or args.timeout <= 0:
         parser.error("runs/repeat >= 1, bootstrap replicates >= 100, and a positive timeout are required")
     if args.expected_repo_commit is not None and not COMMIT_PATTERN.match(
             args.expected_repo_commit):
@@ -1156,7 +1339,7 @@ def main(argv: list[str] | None = None) -> int:
         # predicate is a nonzero exit, after the report is written as evidence.
         if args.mode == "qualification" and status != "passed":
             return 1
-    except (OSError, EvaluationError, UnicodeError) as exc:
+    except (OSError, EvaluationError, PolicyError, UnicodeError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

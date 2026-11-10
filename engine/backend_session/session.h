@@ -30,6 +30,9 @@ struct Candidate {
   std::size_t input_begin_utf8_byte = 0;
   std::size_t input_end_utf8_byte = 0;
   bool exact_expansion = false;
+  // Zero-based candidate record ordinal at collection, before sorting. Internal
+  // diagnostics only; never encoded in a public token or persisted as identity.
+  std::uint32_t producer_insertion_ordinal = 0;
   // Unified identity/contract for this candidate. Populated by the backend
   // adapter; the ABI still reads the v1 fields above unchanged.
   candidates::Record contract;

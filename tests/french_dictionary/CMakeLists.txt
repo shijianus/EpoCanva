@@ -35,7 +35,8 @@ set_target_properties(epocanva_french_dictionary_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 
 foreach(_case production_load accents plurals conjugation native_parity protection
-              bounds availability failures complex_rules concurrency static_load)
+              bounds availability failures complex_rules concurrency static_load
+              determinism_scheduled_pause determinism_repeated_query)
   add_test(NAME french.dictionary.${_case}
     COMMAND "${CMAKE_COMMAND}" "-DPROBE=$<TARGET_FILE:epocanva_french_dictionary_tests>"
       "-DMODE=${_case}" -DEXPECTED_EXIT=0

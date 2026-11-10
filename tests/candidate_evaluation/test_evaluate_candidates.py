@@ -11,6 +11,7 @@
 # inputs, and its real run is recorded in the phase report.
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -29,6 +30,8 @@ import evaluate_candidates as ev  # noqa: E402
 BINDINGS_PATH = REPO_ROOT / "data" / "locale" / "backend-bindings.json"
 CASES_DIR = REPO_ROOT / "data" / "eval" / "candidate-v1" / "cases"
 MANIFEST_PATH = REPO_ROOT / "data" / "eval" / "candidate-v1" / "manifest.json"
+TEST_TMP_ROOT = REPO_ROOT / "build" / "test-tmp" / "candidate-evaluation"
+TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 BASE_CASE = {
     "id": "en-prefix-hel-0001",
@@ -247,7 +250,7 @@ class ValidatorTests(unittest.TestCase):
         stale = dict(manifest)
         stale["corpus_sha256"] = dict(manifest["corpus_sha256"])
         stale["corpus_sha256"]["en.jsonl"] = "0" * 64
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             root = Path(temporary)
             stale_path = root / "manifest.json"
             stale_path.write_text(json.dumps(stale), encoding="utf-8")
@@ -308,21 +311,21 @@ class ValidatorTests(unittest.TestCase):
 
 class CorpusFileTests(unittest.TestCase):
     def test_rejects_bom(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.jsonl"
             path.write_bytes(b"\xef\xbb\xbf" + json.dumps(BASE_CASE).encode("utf-8") + b"\n")
             with self.assertRaises(ev.EvaluationError):
                 ev.read_corpus_file(path, "en")
 
     def test_rejects_crlf(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.jsonl"
             path.write_bytes(json.dumps(BASE_CASE).encode("utf-8") + b"\r\n")
             with self.assertRaises(ev.EvaluationError):
                 ev.read_corpus_file(path, "en")
 
     def test_rejects_blank_line(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.jsonl"
             payload = json.dumps(BASE_CASE).encode("utf-8")
             path.write_bytes(payload + b"\n\n")
@@ -330,21 +333,21 @@ class CorpusFileTests(unittest.TestCase):
                 ev.read_corpus_file(path, "en")
 
     def test_rejects_non_json_line(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.jsonl"
             path.write_bytes(b"not json\n")
             with self.assertRaises(ev.EvaluationError):
                 ev.read_corpus_file(path, "en")
 
     def test_rejects_non_object_line(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.jsonl"
             path.write_bytes(b"[1,2]\n")
             with self.assertRaises(ev.EvaluationError):
                 ev.read_corpus_file(path, "en")
 
     def test_trailing_newline_and_last_record_accepted(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.jsonl"
             path.write_bytes(json.dumps(BASE_CASE).encode("utf-8") + b"\n")
             records = ev.read_corpus_file(path, "en")
@@ -354,7 +357,7 @@ class CorpusFileTests(unittest.TestCase):
         # Integration negative: the escape is real raw JSON bytes ("\u0068"),
         # exactly what json.loads would silently decode and the native parser
         # would reject; the evaluator must reject it before decoding.
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.jsonl"
             payload = json.dumps(BASE_CASE).encode("utf-8").replace(b'"hel"', b'"\\u0068"')
             self.assertIn(b'"\\u0068"', payload)  # the fixture is what it claims
@@ -365,7 +368,7 @@ class CorpusFileTests(unittest.TestCase):
     def test_escaped_backslash_before_u_is_not_an_escape(self):
         # "\\u0068" in raw bytes is an escaped backslash followed by 'u'; it
         # decodes to a literal backslash-u text and must not false-positive.
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.jsonl"
             payload = json.dumps(BASE_CASE).encode("utf-8").replace(b'"hel"', b'"\\\\u0068"')
             self.assertIn(b'"\\\\u0068"', payload)
@@ -424,13 +427,22 @@ METRIC_CASE = mutated_case(raw_input="goo", expected=["good", "goodness"])
 
 
 def repeat(rows, latency_ns=1_000_000, complete=True):
+    for ordinal, candidate in enumerate(rows):
+        candidate["producer_insertion_ordinal"] = ordinal
     return {"latency_ns": latency_ns, "search_complete": complete,
             "candidates": rows}
 
 
 def row(kind, text, ids=(), begin=0, end=3):
     return {"rank": 0, "kind": kind, "text_utf8": text, "lexeme_ids": list(ids),
-            "input_begin_utf8_byte": begin, "input_end_utf8_byte": end}
+            "input_begin_utf8_byte": begin, "input_end_utf8_byte": end,
+            "stable_id": "cand:v1:en:latin:" + ("lex:" + "+".join(map(str, ids)) if ids else "text:0000000000000001"),
+            "language_tag": "en", "scheme_id": "latin",
+            "source": ev.SOURCES_BY_KIND[kind] if 0 <= kind < len(ev.SOURCES_BY_KIND) else "invalid",
+            "match": ev.MATCH_BY_SOURCE.get(ev.SOURCES_BY_KIND[kind], "raw") if 0 <= kind < len(ev.SOURCES_BY_KIND) else "invalid",
+            "commit": "insert" if kind == 6 else "replace_input",
+            "learnable": kind != 0 and bool(ids), "score": 1.0,
+            "surface_fnv1a64": "0000000000000001"}
 
 
 class MetricVectorTests(unittest.TestCase):
@@ -449,7 +461,8 @@ class MetricVectorTests(unittest.TestCase):
         self.assertEqual(values["raw_present"], 1.0)
         self.assertEqual(values["raw_first"], 1.0)
         self.assertEqual(values["empty_menu"], 0.0)
-        self.assertNotIn("wrong_language", values)  # never claimed as 0.0
+        self.assertEqual(values["wrong_language_candidates"], 0)
+        self.assertEqual(values["observed_language_candidates"], 3)
         self.assertEqual(values["latency_ms"], 1.0)
 
     def test_missed_target_vector(self):
@@ -488,8 +501,8 @@ def gate_language(**overrides):
     """A per-language block for gate tests: every mandatory predicate healthy
     except wrong_language (structurally not observable at this ABI)."""
     values = {
-        "cases": 1001,
-        "measured_cases": 1001,
+        "cases": ev.GATE_MINIMUM_CASES["en"],
+        "measured_cases": ev.GATE_MINIMUM_CASES["en"],
         "minimum_cases_met": True,
         "top1": 0.5, "top3": 0.6, "mrr": 0.4,
         "suggestion_top1": 0.5, "suggestion_top3": 0.6, "suggestion_mrr": 0.4,
@@ -497,12 +510,13 @@ def gate_language(**overrides):
         "raw_present_rate": 1.0,
         "raw_first_rate": 1.0,
         "empty_menu_rate": 0.0,
-        "wrong_language_rate": None,
+        "wrong_language_rate": 0.0,
+        "wrong_language_observability": {"status": "observable"},
         "in_process_repeat_deterministic_rate": 1.0,
         "cross_process_deterministic_rate": 1.0,
         "latency_ms": {"cold": 1.0,
                        "warm": {"p50": 1.0, "p95": 2.0, "p99": 3.0, "queries": 10},
-                       "warmup_queries": 0},
+                       "warmup_queries": ev.POLICY["qualification"]["warmup_queries"]},
         "resource_load_ms": 5.0,
         "peak_working_set_bytes": 1000,
     }
@@ -510,13 +524,17 @@ def gate_language(**overrides):
     return values
 
 
-HEALTHY_PROTOCOL = {"en": {"fresh_runs": 2, "fresh_runs_expected": 2,
-                           "repeat_counts": [2], "repeat_expected": 2}}
-HEALTHY_IDS = {"en": {"en-a", "en-b"}}
+HEALTHY_PROTOCOL = {language: {"fresh_runs": ev.DEFAULT_RUNS,
+                                     "fresh_runs_expected": ev.DEFAULT_RUNS,
+                                     "repeat_counts": [ev.DEFAULT_REPEAT],
+                                     "repeat_expected": ev.DEFAULT_REPEAT,
+                                     "warmup_counts": [ev.POLICY["qualification"]["warmup_queries"]]}
+                    for language in ev.LANGUAGES}
+HEALTHY_IDS = {language: {language + "-a", language + "-b"} for language in ev.LANGUAGES}
 
 
 def healthy_gate(**overrides):
-    per_language = {"en": gate_language(**overrides)}
+    per_language = {language: gate_language(**overrides) for language in ev.LANGUAGES}
     return ev.evaluate_quality_gate(
         per_language=per_language, failures=[],
         expected_case_ids=HEALTHY_IDS, observed_case_ids=HEALTHY_IDS,
@@ -527,14 +545,15 @@ class QualityGateTests(unittest.TestCase):
     """The fail-closed gate semantics: unmet or unevaluated mandatory
     predicates can never produce met == true (policy v1)."""
 
-    def test_everything_measured_still_cannot_pass_at_this_abi(self):
+    def test_everything_measured_still_cannot_pass_without_tier_b_and_product_decisions(self):
         # wrong_language_observable is not evaluable on the v1 candidate ABI,
         # so the honest ceiling of policy v1 is not_evaluable, never passed.
         gate = healthy_gate()
         self.assertEqual(gate["status"], "not_evaluable")
         self.assertFalse(gate["met"])
-        self.assertIn("wrong_language_observable",
+        self.assertIn("absolute_quality_thresholds",
                       [entry["predicate"] for entry in gate["not_evaluated_predicates"]])
+        self.assertEqual(gate["predicates"]["wrong_language_observable"]["status"], "passed")
         self.assertEqual(gate["unmet_reasons"], [])
 
     def test_single_validation_failure_blocks_passed(self):
@@ -709,7 +728,8 @@ class ResultsReaderTests(unittest.TestCase):
                       record_overrides: dict | None = None,
                       meta: dict | None = None) -> None:
         base_meta = {"language": "en", "repeat": 2, "case_count": 1, "load_ms": 1.0,
-                     "peak_working_set_bytes": 2}
+                     "peak_working_set_bytes": 2, "result_schema": ev.RESULT_SCHEMA_VERSION,
+                     "schema_version": 3, "warmup_queries": ev.POLICY["qualification"]["warmup_queries"]}
         if meta is None:
             meta = dict(base_meta)
             meta.update(meta_overrides or {})
@@ -727,7 +747,7 @@ class ResultsReaderTests(unittest.TestCase):
         return ev.read_results(path, **expectations)
 
     def test_read_results_round_trip(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.run0.jsonl"
             self.write_results(path)
             read_meta, records = self.read(path)
@@ -735,21 +755,21 @@ class ResultsReaderTests(unittest.TestCase):
             self.assertIn("en-a", records)
 
     def test_read_results_rejects_wrong_file_name_language(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "zh.run0.jsonl"
             self.write_results(path)
             with self.assertRaises(ev.EvaluationError):
                 self.read(path)
 
     def test_read_results_rejects_missing_meta(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.run0.jsonl"
             path.write_text(json.dumps({"case_id": "en-a"}) + "\n", encoding="utf-8")
             with self.assertRaises(ev.EvaluationError):
                 self.read(path)
 
     def test_read_results_rejects_duplicate_case(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.run0.jsonl"
             line = json.dumps({"case_id": "en-a", "status": "ok", "repeats": []})
             path.write_text(json.dumps({"run_meta": {"language": "en", "repeat": 2,
@@ -759,7 +779,7 @@ class ResultsReaderTests(unittest.TestCase):
                 self.read(path)
 
     def test_meta_mismatches_are_fatal(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             for name, overrides, kwargs in (
                     ("language", {"language": "fr"}, {}),
                     ("repeat", {"repeat": 3}, {}),
@@ -800,14 +820,14 @@ class ResultsReaderTests(unittest.TestCase):
         ]
         for name, record_overrides in bad_rows:
             with self.subTest(rule=name):
-                with tempfile.TemporaryDirectory() as temporary:
+                with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
                     path = Path(temporary) / "en.run0.jsonl"
                     self.write_results(path, record_overrides=record_overrides)
                     with self.assertRaises(ev.EvaluationError):
                         self.read(path)
 
     def test_rank_and_kind_are_accepted_when_correct(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             path = Path(temporary) / "en.run0.jsonl"
             rows = [dict(row(0, "goo"), rank=0), dict(row(1, "good", ids=[11]), rank=1)]
             self.write_results(path, record_overrides={
@@ -816,13 +836,12 @@ class ResultsReaderTests(unittest.TestCase):
 
 
 class CorpusCrossCheckTests(unittest.TestCase):
-    CORPUS_CASE = {"id": "en-a", "profile_id": 1, "raw_input": "goo"}
+    CORPUS_CASE = {"id": "en-a", "profile_id": 1, "raw_input": "goo", "language": "en"}
 
     def records(self, case: dict) -> dict:
         return {case["id"]: {"profile_id": case["profile_id"], "status": "ok", "repeats": [
             {"latency_ns": 1, "search_complete": True,
-             "candidates": [dict(rank=0, kind=0, text_utf8="goo", lexeme_ids=[],
-                                  input_begin_utf8_byte=0, input_end_utf8_byte=3)]}]}}
+             "candidates": [row(0, "goo")]}]}}
         # raw_input "goo" is exactly 3 UTF-8 bytes
 
     def test_matching_records_pass(self):
@@ -855,7 +874,7 @@ class CorpusCrossCheckTests(unittest.TestCase):
 class ReportWriterTests(unittest.TestCase):
     def test_report_bytes_are_deterministic(self):
         report = {"b": 1, "a": {"c": "你"}, "d": [1, 2]}
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
             first = Path(temporary) / "first.json"
             second = Path(temporary) / "second.json"
             ev.save_report(first, report)
