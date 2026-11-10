@@ -64,6 +64,7 @@ set(EPOCANVA_EN_BUILD_STANDALONE ON)
 add_subdirectory(engine/languages/en)
 add_subdirectory(engine/locale)
 add_subdirectory(engine/candidates)
+add_subdirectory(engine/fusion)
 add_subdirectory(engine/language_packages)
 add_subdirectory(engine/data_store)
 add_subdirectory(engine/ranking)
@@ -79,6 +80,7 @@ if(EPOCANVA_BUILD_TESTS)
   add_subdirectory(tests/language_packages)
   add_subdirectory(tests/locale_registry)
   add_subdirectory(tests/candidate_contract)
+  add_subdirectory(tests/fusion)
   add_subdirectory(tests/capability_matrix)
   add_subdirectory(tests/candidate_evaluation)
   add_subdirectory(tests/ci_gate)
@@ -92,7 +94,8 @@ if(EPOCANVA_BUILD_TESTS)
   # test that needs another native binary must add it here, and the inventory
   # gate fails until its test is registered and labelled contract-gate.
   add_custom_target(epocanva_contract_gate_tests
-    DEPENDS epocanva_locale_registry_tests epocanva_candidate_contract_tests)
+    DEPENDS epocanva_locale_registry_tests epocanva_candidate_contract_tests
+      epocanva_fusion_tests)
 endif()
 
 message(STATUS "EpoCanva configure summary")

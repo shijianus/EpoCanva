@@ -19,6 +19,7 @@
 
 #include "engine/backend_session/session.h"
 #include "engine/candidates/candidate_contract.h"
+#include "engine/fusion/fusion_merger.h"
 #include "engine/lexical_service/lexical_service.h"
 #include "engine/prediction/model.h"
 #include "engine/prediction/abbreviation.h"
@@ -43,6 +44,7 @@ namespace flow = epocanva::backend_session;
 namespace learn = epocanva::learning;
 namespace rk = epocanva::ranking;
 namespace cand = epocanva::candidates;
+namespace fus = epocanva::fusion;
 constexpr std::size_t kMaxInputBytes = 4096;
 const char* Language(std::uint32_t language) {
   switch (language) {
@@ -176,6 +178,13 @@ struct Session {
   epocanva_context rime_context{};
   std::uint64_t rime_snapshot = 0;
   std::vector<std::uint32_t> rime_ordinals;
+  // Session-owned detection latch (E5). One AdaptiveRanker per session so the
+  // confirmed-detection hysteresis persists across queries; the explicit user
+  // language always outranks it. Reset wherever the session's input state is
+  // reset (see the Reset call sites in this file). Detection observations come
+  // only from the input pipeline's script routing below — never a script guess
+  // on candidate text, never persisted, never sent anywhere.
+  rk::AdaptiveRanker detection;
 };
 struct Registry {
   std::mutex mutex;
@@ -266,6 +275,17 @@ epocanva_status Compose(Session& session, const std::string& raw, const learn::A
   flow::Commit pending;
   if (session.flow->ReadCommit(access, &pending) == flow::Status::kOk) return EPOCANVA_BUSY;
   std::string preedit = raw;
+  // Detection observation (E5): the routed composition branch IS the per-
+  // keystroke observation — kana/kana-conversion input observes "ja", Hangul
+  // composition observes "ko", and Rime-piped pinyin observes "zh". Latin
+  // sessions observe nothing (no signal to count). The observation only feeds
+  // the session latch; the user's explicit language always outranks it, and
+  // nothing is persisted or reported anywhere.
+  const char* observed = nullptr;
+  if (session.language == EPOCANVA_BACKEND_JA) observed = "ja";
+  else if (session.language == EPOCANVA_BACKEND_KO) observed = "ko";
+  else if (session.language == EPOCANVA_BACKEND_ZH) observed = "zh";
+  if (observed != nullptr) session.detection.ObserveDetection(observed);
   if (session.language == EPOCANVA_BACKEND_JA && session.mode == EPOCANVA_BACKEND_KANA) {
     for (std::size_t byte = 0; byte < raw.size();) {
       if (raw[byte] == ' ') { ++byte; continue; }
@@ -377,10 +397,15 @@ rk::SourceKind RankSource(std::uint32_t kind) {
 // candidate within that order; they cannot displace the raw candidate, which is kept out
 // of the ranking pass and prepended unchanged. A missing/corrupt/empty preference set is
 // a no-op, so the model-free path is unchanged.
+//
+// The ranker is the session-owned one (detection latch included) rather than a
+// fresh per-query instance: the latch must persist across queries inside a
+// session or the hysteresis could never trigger. Owner-thread-only is already
+// guaranteed by the session's thread checks.
 void ApplyPersonalRanking(Session& session,
                           const std::vector<learn::PreferenceRecord>& preferences,
                           std::vector<flow::Candidate>* candidates) {
-  if (preferences.empty() || candidates == nullptr || candidates->size() < 2) return;
+  if (candidates == nullptr || candidates->size() < 2) return;
   if (session.raw.size() > rk::kMaxInputKeyUtf8Bytes) return;
   const char* language = Language(session.language);
   if (language == nullptr) return;
@@ -403,7 +428,8 @@ void ApplyPersonalRanking(Session& session,
     value.manual = row.manual;
     (void)learning.SetPreference(language, row.candidate_id, value);
   }
-  if (learning.size() == 0) return;
+  // Preferences are optional: the session ranker still runs so its detection
+  // latch stays current even with an empty preference set.
 
   std::vector<rk::Proposal> proposals;
   proposals.reserve(remaining);
@@ -443,8 +469,7 @@ void ApplyPersonalRanking(Session& session,
   request.weights.source = 0.0;
   request.weights.language = 0.0;
   request.learning_enabled = true;  // read existing preferences even while recording is paused
-  rk::AdaptiveRanker ranker;
-  const rk::RankResult result = ranker.Rank(request, &learning);
+  const rk::RankResult result = session.detection.Rank(request, &learning);
   if (result.status != rk::RankStatus::kOk || result.ordered.size() != remaining) return;
 
   std::vector<flow::Candidate> ordered;
@@ -755,6 +780,9 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_cancel(
     status = Result(session.flow->Reset(Access(request->context, request->learning_enabled)));
     if (status != EPOCANVA_OK) return status;
     session.raw.clear(); session.preedit.clear(); session.japanese.Cancel(); session.korean.Cancel();
+    // An explicit cancel clears the detection latch with the rest of the
+    // input state: a stale latch must not leak into the next composition.
+    session.detection.ResetDetection();
     if (session.rime) return RimeReset(session);
     return EPOCANVA_OK;
   });
@@ -1032,6 +1060,47 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
         std::string reason;
         if (!cand::Validate(record, &reason)) return EPOCANVA_BACKEND_UNAVAILABLE;
         candidate.contract = std::move(record);
+      }
+      // Cross-source fusion (E4). The merger re-validates every contract (fail
+      // closed on any missing field), never adds uncalibrated score scales —
+      // policy v1 orders the fallback band by producer ordinal — and keeps the
+      // raw tier first. A merge failure is a programming error upstream, not an
+      // empty menu, so the query is refused.
+      {
+        std::vector<cand::Record> records;
+        std::vector<std::uint32_t> ordinals;
+        std::vector<bool> exact_flags;
+        records.reserve(candidates.size());
+        ordinals.reserve(candidates.size());
+        exact_flags.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+          records.push_back(candidate.contract);
+          ordinals.push_back(candidate.producer_insertion_ordinal);
+          exact_flags.push_back(candidate.exact_expansion);
+        }
+        const auto merged = fus::Merge(records, ordinals, exact_flags);
+        if (merged.status != fus::MergeStatus::kOk)
+          return EPOCANVA_BACKEND_UNAVAILABLE;
+        if (merged.merged.size() != candidates.size()) {
+          // Rows folded away by dedup: rebuild the published list, preserving
+          // each survivor's provenance[0] (the identity actually published).
+          std::vector<flow::Candidate> fused;
+          fused.reserve(merged.merged.size());
+          for (const auto& row : merged.merged) {
+            auto found = std::find_if(candidates.begin(), candidates.end(),
+                [&](const flow::Candidate& candidate) {
+                  return candidate.producer_insertion_ordinal ==
+                             row.provenance.front().producer_insertion_ordinal;
+                });
+            if (found == candidates.end()) return EPOCANVA_BACKEND_UNAVAILABLE;
+            fused.push_back(std::move(*found));
+            fused.back().exact_expansion = row.exact_expansion;
+          }
+          candidates = std::move(fused);
+        } else {
+          for (std::size_t ordinal = 0; ordinal < candidates.size(); ++ordinal)
+            candidates[ordinal].exact_expansion = merged.merged[ordinal].exact_expansion;
+        }
       }
       return Result(session.flow->Publish(std::move(candidates),complete,access));
     });
