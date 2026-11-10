@@ -36,6 +36,7 @@ set(_ranking_cases
   rejected_events
   clear
   mixed_language
+  detection_latch
   bounds
   spelling)
 foreach(_case IN LISTS _ranking_cases)

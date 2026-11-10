@@ -571,6 +571,111 @@ void MixedLanguageTests() {
   Check(ranker.effective_detected_language().empty(), "reset clears the latch");
 }
 
+// E5 detection-latch requirements, one case each:
+//   threshold: only N consecutive identical observations switch;
+//   low confidence: fewer than N observations never switch, even interleaved;
+//   manual override: the explicit user language wins at near-equal score while
+//     a latch is active, and the ranker admits the latched language only as an
+//     alternative, never as a replacement;
+//   boundary: ResetDetection clears pending state so a stale streak cannot
+//     complete after a profile switch.
+void DetectionLatchTests() {
+  { // Threshold: exactly N consecutive observations latch; N-1 never does.
+    rk::AdaptiveRanker ranker(3);
+    ranker.ObserveDetection("fr");
+    ranker.ObserveDetection("fr");
+    Check(ranker.effective_detected_language().empty(), "two of three never latch");
+    ranker.ObserveDetection("en");  // breaks the streak
+    ranker.ObserveDetection("fr");
+    ranker.ObserveDetection("fr");
+    Check(ranker.effective_detected_language().empty(),
+          "streak broken by a different observation does not latch");
+    ranker.ObserveDetection("fr");
+    Check(ranker.effective_detected_language() == "fr",
+          "three consecutive after the break latch");
+  }
+  { // Low confidence: alternating weak signals keep the latch empty forever.
+    rk::AdaptiveRanker ranker(3);
+    for (int round = 0; round < 10; ++round) {
+      ranker.ObserveDetection("fr");
+      ranker.ObserveDetection("zh");
+      ranker.ObserveDetection("es");
+      Check(ranker.effective_detected_language().empty(),
+            "flapping weak signals never latch");
+    }
+  }
+  { // Manual override: the explicit language wins at near-equal strength even
+    // with a zh latch active; the latched language only admits the foreign row
+    // into the menu.
+    rk::AdaptiveRanker ranker(3);
+    ranker.ObserveDetection("zh");
+    ranker.ObserveDetection("zh");
+    ranker.ObserveDetection("zh");
+    Check(ranker.effective_detected_language() == "zh", "precondition: zh latched");
+    rk::RankRequest request;
+    request.user_language = "en";
+    request.input_key_utf8 = "hao";
+    request.proposals = {
+        MakeProposal(u8"好", "zh", "zh_hao", 0.55),
+        MakeProposal("hold", "en", "en_hold", 0.50),
+    };
+    const rk::RankResult result = ranker.Rank(request, nullptr);
+    Check(result.status == rk::RankStatus::kOk, "manual-override rank ok");
+    Check(result.ordered.size() == 2, "latch admits the foreign proposal");
+    Check(SameText(request, result, 0, "hold"),
+          "explicit user language beats the latched language at near-equal score");
+    // A much stronger foreign candidate may surface, but the user's own text
+    // (tier 0) never moves.
+    rk::RankRequest strong;
+    strong.user_language = "en";
+    strong.input_key_utf8 = "hao";
+    strong.proposals = {
+        MakeProposal(u8"好", "zh", "zh_hao", 1.0),
+        MakeProposal("hao", "en", "en_hao", 0.0),
+    };
+    const rk::RankResult tiered = ranker.Rank(strong, nullptr);
+    Check(SameText(strong, tiered, 0, "hao"),
+          "raw user text stays first under a strong latched-language row");
+  }
+  { // Boundary: a partial streak is discarded on reset; the post-switch state
+    // cannot complete the old streak.
+    rk::AdaptiveRanker ranker(3);
+    ranker.ObserveDetection("ja");
+    ranker.ObserveDetection("ja");
+    ranker.ResetDetection();
+    ranker.ObserveDetection("ja");
+    Check(ranker.effective_detected_language().empty(),
+          "post-reset single observation does not latch");
+    ranker.ObserveDetection("ja");
+    ranker.ObserveDetection("ja");
+    Check(ranker.effective_detected_language() == "ja",
+          "a fresh full streak latches after reset");
+  }
+  { // Ranker-level same-surface rule is documented as text-bytes-based
+    // ("Two proposals with identical bytes are treated as the same candidate
+    // regardless of source or language", adaptive_ranker.h). The language-
+    // scoped distinct identity is the fusion layer's stable_id contract, pinned
+    // in tests/fusion. Without a latched detection the foreign twin is dropped
+    // before dedup, so the surviving row is the user-language one.
+    rk::AdaptiveRanker ranker;
+    rk::RankRequest request;
+    request.user_language = "fr";
+    request.input_key_utf8 = "par";
+    request.proposals = {
+        MakeProposal("paris", "en", "en_paris", 0.60),
+        MakeProposal("paris", "fr", "fr_paris", 0.60),
+    };
+    const rk::RankResult result = ranker.Rank(request, nullptr);
+    Check(result.status == rk::RankStatus::kOk && result.ordered.size() == 1,
+          "identical bytes surface one row without a latch");
+    Check(result.dropped_foreign_language == 1,
+          "the foreign twin is dropped as unrelated language");
+    const auto& survivor = request.proposals[result.ordered[0].proposal_ordinal];
+    Check(survivor.language == "fr",
+          "the user-language row is the survivor");
+  }
+}
+
 void BoundsTests() {
   rk::AdaptiveRanker ranker;
 
@@ -715,6 +820,7 @@ const Case kCases[] = {
     {"rejected_events", RejectionTests},
     {"clear", ClearTests},
     {"mixed_language", MixedLanguageTests},
+    {"detection_latch", DetectionLatchTests},
     {"bounds", BoundsTests},
     {"spelling", SpellingTests},
 };

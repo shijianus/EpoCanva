@@ -35,7 +35,19 @@ if(TARGET epocanva_backend)
     EPOCANVA_BACKEND_TEST_OBSERVATION=1)
   set_target_properties(epocanva_backend_evaluation PROPERTIES CXX_EXTENSIONS OFF)
   add_executable(epocanva_candidate_eval_cli candidate_eval_cli.cc)
-  target_link_libraries(epocanva_candidate_eval_cli PRIVATE epocanva_backend_evaluation psapi)
+  # The evaluation lib mirrors epocanva_backend's link closure explicitly:
+  # MSBuild does not propagate a static library's project references into the
+  # consuming executable's link, so the CLI lists the same dependency libraries
+  # the production backend links. Keep this list in step with
+  # engine/backend/CMakeLists.txt.
+  target_link_libraries(epocanva_candidate_eval_cli PRIVATE epocanva_backend_evaluation
+    epocanva_fusion epocanva_engine_api epocanva_candidates epocanva_backend_session
+    epocanva_prediction_core epocanva_prediction_abbreviation epocanva_lexical_service
+    epocanva_windows_learning_repository epocanva_adaptive_ranking
+    epocanva_ja_composition_core epocanva_ko_composition_core epocanva_zh_pinyin_core
+    epocanva_japanese_decoder
+    "$<TARGET_NAME_IF_EXISTS:epocanva_french_dictionary>"
+    psapi bcrypt)
   target_include_directories(epocanva_candidate_eval_cli PRIVATE "${_eval_repo}"
     "${_eval_repo}/engine/include")
   target_compile_features(epocanva_candidate_eval_cli PRIVATE cxx_std_17)
