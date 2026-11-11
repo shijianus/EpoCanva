@@ -22,7 +22,14 @@ namespace product {
 namespace {
 
 constexpr wchar_t kStateHeader[] = L"epocanva-deployed-state 1";
-constexpr DWORD kStartLockTimeoutMs = 60000;
+// A second activation can arrive while the first is compiling the multilingual
+// deployment under the same per-user start lock. Measured cold compiles on this
+// repository's OneDrive-synced volume are 9-10 s quietly and 96 s while the volume is
+// saturated; the previous 60 s bound turned that storage stall into a failed start in
+// the second process. The wait runs on the background start thread, never on the TSF
+// STA, so a longer bound costs a parked thread, not a stalled host edit thread. A lock
+// that is genuinely never released still fails at this bound.
+constexpr DWORD kStartLockTimeoutMs = 180000;
 
 std::mutex g_mutex;
 bool g_paths_ready = false;

@@ -97,30 +97,68 @@ external storage stall on the OneDrive-synced volume, the same class of provider
 interference measured for the learning store in §3. The test's 90 s readiness budget
 was below the measured worst-case cold start.
 
-### 2.4 Fix
+### 2.4 First fix, and the second full-suite run that showed it was too narrow
+
+The first fix gave only `RunSettingsTimingCase`'s first session a 180 s budget. The
+next clean full product run passed that case in 8.70 s but failed two other sink cases
+with the same shape:
+
+```text
+214 sink_multi                    ***Failed 61.83 sec
+  [readiness-timeout] elapsed_ms=60000 ... engine=1 estate=2 eatt=0 bound=0 perm=2
+  [multi] session B error: the session never became ready
+
+219 sink_multilingual_prediction  ***Failed 110.69 sec
+  [readiness-timeout] elapsed_ms=20000 ... engine=1 estate=2 eatt=0 bound=0 perm=2
+  FAIL prediction: zh pinyin initials: engine path ready
+```
+
+Both cases call `PrepareUserRoot` (which removes the user root) per case, so every one
+of their first sessions is a cold deployment. `sink_multi` starts two sessions
+concurrently and both must survive the same cold deploy; the second session had a
+60 s budget. The multilingual-prediction cases each had a 20 s budget. Both passed
+5/5 when run alone (4.4-4.6 s) and failed only in the saturated full-suite context,
+which is the same 96 s storage stall described in §2.3.
+
+### 2.5 Fix
 
 `tests/windows/tsf_product/product_sink_tests.cc`:
 
-- `kColdStartReadinessBudgetMs = 180000` is used **only** for the first session of
-  `RunSettingsTimingCase`; the warm-session budget stays at 90 s. A start that never
-  completes still fails, and the case still asserts the deployment marker, the
-  compiled schema, the settings digest and the restarted engine's document.
+- `kEngineReadinessBudgetMs` is now 180000 and is used by every **positive**
+  first-session readiness wait (the previous 20 s/30 s/60 s literals were replaced by
+  the constant). Short negative/latency probes (200 ms, 10 s, 15 s) are unchanged.
+  A start that never completes still fails at 180 s, and every case keeps its own
+  assertions about the deployment marker, compiled schema, menus and host text.
 - `ReadyToType` now prints the counters that define readiness when it times out
   (`elapsed_ms`, `have_counters`, `last_probe_eaten`, then the usual text-free
   counters), so the next occurrence names the blocking field instead of leaving only
   "not ready".
 
-This is a registered test budget, not a silent pass: the value and its measurements
-are written in the source comment and here, and the check remains falsifiable.
+`platforms/windows/product/product_engine_config.cc`:
 
-### 2.5 Verification
+- `kStartLockTimeoutMs` is now 180000 instead of 60000. A second process activating
+  while the first is deploying waits on the per-user start lock; with a 96 s
+  deployment, the 60 s bound made the second process report a failed start. The wait
+  is on the background start thread, never the TSF STA. The header comment in
+  `product_engine_bootstrap.h` and `docs/windows/tsf-keyboard-input-contract.md` were
+  updated so they do not keep claiming 60 s.
+
+These are registered budgets with their measurements in source and here, not a silent
+pass. The same tests still fail if the engine never becomes ready.
+
+### 2.6 Verification
 
 ```text
 ctest --test-dir build/windows-product -C Release -R '^product\.integration\.sink_'
   -> exit 0; 21/21 passed (sink_raw 127.39 s, settings_timing 8.70 s)
+ctest --test-dir build/windows-product -C Release -R '^product\.integration\.sink_multi$'
+  -> exit 0; 5/5 consecutive runs passed (4.37-4.64 s)
 ctest --preset vs2022-x64-debug --output-on-failure --no-tests=error
   -> exit 0; 94/94 passed, 1 explicit skip (learning.repository.symlinks)
 ```
+
+The next clean full-suite result is recorded by the build receipt and CTest XML for
+the exact candidate; this report does not predict it.
 
 ---
 

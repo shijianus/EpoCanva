@@ -2,7 +2,7 @@
 //
 // WHY THIS EXISTS. The synchronous activation path ran EngineStartTransaction::Prepare and
 // EngineHostBroker::Acquire on the activating STA. Both can wait on a cross-process named
-// mutex and on the shared engine lock for up to 60 seconds, and Acquire itself waits for a
+// mutex and on the shared engine lock for up to 180 seconds, and Acquire itself waits for a
 // schema deployment. A TSF host calls Activate and OnKeyDown on its UI thread; that thread
 // must never absorb such a wait.
 //

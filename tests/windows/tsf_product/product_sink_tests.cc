@@ -61,17 +61,18 @@ int g_failures = 0;
 // thread waits until deadline + margin, so it cannot time out while the worker
 // is still legitimately inside the same bounded readiness phase. Join and
 // cleanup waits have their own separate bounds.
-constexpr DWORD kEngineReadinessBudgetMs = 90000;
-// The settings-timing case starts from a freshly removed user root, so the first
-// activation must compile the whole multilingual deployment (terra table, pinyin and
-// zhuyin prisms) before the engine can answer. Measured on this repository's
-// OneDrive-synced volume: a warm restart is 62-79 ms, a cold compile is 9-10 s, and the
-// same cold compile was observed at 96 s while the sink suite saturated the sync volume
-// (the deployment state file was written 96 s after settings.ini). That is a storage
-// stall, not a permanent start failure, so this one phase gets a larger budget; the
-// warm-session budget above stays unchanged and a start that never completes still
-// fails. See docs/reports/phase-e-nondeterminism-20261112.md for the measurement.
-constexpr DWORD kColdStartReadinessBudgetMs = 180000;
+//
+// Every positive wait below follows a case-local PrepareUserRoot, which removes the
+// user root, so the first activation must compile the deployment (terra table, pinyin
+// and zhuyin prisms) before the engine can answer. Measured on this repository's
+// OneDrive-synced volume: a warm session is 62-79 ms, a quiet cold compile is 9-10 s,
+// and the same cold compile was observed at 96 s while the sink suite saturated the
+// sync volume (deployed-state was written 96 s after settings.ini). That is a storage
+// stall, not a permanent start failure, so the budget covers the measured cold start;
+// a start that never completes still fails. See
+// docs/reports/phase-e-nondeterminism-20261112.md for the measurement and the three
+// sink cases (settings_timing, multi, multilingual_prediction) this budget covers.
+constexpr DWORD kEngineReadinessBudgetMs = 180000;
 constexpr DWORD kReadinessSignalMarginMs = 10000;
 constexpr DWORD kEngineIdleBudgetMs = 30000;
 constexpr DWORD kSessionReleaseBudgetMs = 30000;
@@ -1195,7 +1196,7 @@ bool SendTextWhenReady(InputRoute* route, const std::wstring& text,
   // two sections; that pass-through is not what these sections test, so wait for readiness
   // again instead of sending into an unbound window.
   if (expect_eaten &&
-      !ReadyToType(*route->host, route->sink, route->context, 60000)) {
+      !ReadyToType(*route->host, route->sink, route->context, kEngineReadinessBudgetMs)) {
     *error = "the engine path did not become ready";
     return false;
   }
@@ -1537,7 +1538,7 @@ bool RunRawInputCases(const Paths& paths) {
   auto* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "raw: the product controller bound and resolved permission");
   const std::string engine_failure = SeamEngineFailure(seam);
   const std::string engine_detail = engine_failure.empty() ? std::string() : ": " + engine_failure;
@@ -1767,7 +1768,7 @@ bool RunExternalEditCase(const Paths& paths) {
   auto* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "external edit: ready to type");
   std::string error;
   ReferenceDoc reference;
@@ -1867,7 +1868,7 @@ void RunSessionWorker(const std::filesystem::path& stage, const std::wstring& wo
   ReferenceDoc reference;
   bool space_eaten = true;
   result->counters.pumps = ~0ull;
-  if (!ReadyToType(*host, product.sink, context, 60000, &result->counters)) {
+  if (!ReadyToType(*host, product.sink, context, kEngineReadinessBudgetMs, &result->counters)) {
     result->error = "the session never became ready";
   } else if (!SendTextHost(&route, word, &result->error)) {
     result->error = "the session did not keep its word with the host";
@@ -2051,7 +2052,7 @@ bool RunFocusSwitchCase(const Paths& paths) {
   }
   auto* sink = test_case.product.sink;
   ITfContext* parent_context = test_case.doc->context();
-  LocalCheck(ReadyToType(*test_case.host, sink, parent_context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, parent_context, kEngineReadinessBudgetMs),
              "focus: the parent context is ready");
   std::string error;
   InputRoute parent_route{test_case.host, test_case.doc, sink, parent_context};
@@ -2090,7 +2091,7 @@ bool RunFocusSwitchCase(const Paths& paths) {
   LocalCheck(child != nullptr, "focus: a child context is pushed");
   if (child != nullptr) {
     PumpSlice(*test_case.host, 300);
-    LocalCheck(ReadyToType(*test_case.host, sink, child->context(), 60000),
+    LocalCheck(ReadyToType(*test_case.host, sink, child->context(), kEngineReadinessBudgetMs),
                "focus: the child context is bound");
     error.clear();
     InputRoute child_route{test_case.host, child, sink, child->context()};
@@ -2165,7 +2166,7 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
     return false;
   }
   LocalCheck(ReadyToType(*held.host, held.product.sink, held.doc->context(),
-                         kColdStartReadinessBudgetMs),
+                         kEngineReadinessBudgetMs),
              "timing: the first session is ready");
   const std::string first_digest = SettingsDigestForTest(user_root);
   const std::string before = ReadNarrow(state);
@@ -2428,7 +2429,7 @@ bool RunContextualAbbreviationCase(const std::filesystem::path& stage,
     SeamCounters counters;
     std::string error;
     bool ok = ReadyToType(*test_case.host, test_case.product.sink,
-                          test_case.doc->context(), 20000, &counters);
+                          test_case.doc->context(), kEngineReadinessBudgetMs, &counters);
     LocalCheck(ok, label + ": engine path ready");
     if (ok) {
       ok = SendTextHost(&route, raw, &error);
@@ -2523,7 +2524,7 @@ bool RunNextWordWordOnlyCase(const std::filesystem::path& stage,
   SeamCounters counters;
   std::string error;
   bool ok = ReadyToType(*test_case.host, test_case.product.sink,
-                        test_case.doc->context(), 20000, &counters);
+                        test_case.doc->context(), kEngineReadinessBudgetMs, &counters);
   LocalCheck(ok, "prediction: next-word word-only engine path ready");
   if (ok) {
     ok = SendTextHost(&route, L"good morning ", &error);
@@ -2643,7 +2644,7 @@ bool RunPredictionAndLanguageCases(const std::filesystem::path& stage,
     std::string error;
     SeamCounters counters;
     LocalCheck(ReadyToType(*test_case.host, test_case.product.sink,
-                           test_case.doc->context(), 20000, &counters),
+                           test_case.doc->context(), kEngineReadinessBudgetMs, &counters),
                label + ": engine path ready");
     if (test.initial_text != nullptr) {
       LocalCheck(test_case.doc->text_utf16() == test.initial_text,
@@ -2752,7 +2753,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
 
   // 1. The host owns the literal text. Enter with no explicit selection is host input, not
   // an automatic acceptance of the suggestion.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "candidate: the engine path is ready");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the first token stays with the host: " + error);
@@ -2777,7 +2778,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
 
   // 2. Arrow navigation selects an explicit row; Enter accepts that row through the
   // validated replacement path.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "candidate: ready for arrow navigation");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the second token stays with the host: " + error);
@@ -2805,7 +2806,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
              "candidate: the selected completion replaced the token exactly once");
 
   // 3. Space is host input even while a completion is selected.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "candidate: ready for the Space contract");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the third token stays with the host: " + error);
@@ -2825,7 +2826,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
              "candidate: Space inserted the host's space, not the selected completion");
 
   // 4. Escape dismisses the menu and cancels only the enhancement; the typed token stays.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "candidate: ready for Escape");
   LocalCheck(SendTextHost(&route, L"wor", &error),
              "candidate: the Escape token stays with the host: " + error);
@@ -2848,7 +2849,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
   reference.HostInsert(L" ");
 
   // 5. Stale selection: a click drawn from an older menu must not commit into the newer one.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "candidate: ready for the stale-selection case");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the stale-selection token stays with the host: " + error);
@@ -2961,7 +2962,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
 
   // 6. A genuinely external edit (not one of our passed-through keys) ends the suggestion
   // stream; a selection from before it must write nothing.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "candidate: ready for the external-edit case");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the external-edit token stays with the host: " + error);
@@ -3013,7 +3014,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
 
   // 7. Spelling suggestions are labelled distinctly, and the literal row stays index 0.
   const bool spelling_ready =
-      ReadyToType(*test_case.host, sink, context, 60000);
+      ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs);
   if (!spelling_ready) {
     SeamCounters blocked = {};
     (void)seam.query(&blocked);
@@ -3098,7 +3099,7 @@ void DumpReadyState(const SeamCounters& c, const char* label) {
 bool RequireReady(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
                   const char* label) {
   SeamCounters counters = {};
-  const bool ready = ReadyToType(host, sink, context, 60000, &counters);
+  const bool ready = ReadyToType(host, sink, context, kEngineReadinessBudgetMs, &counters);
   LocalCheck(ready, label);
   if (!ready) {
     DumpReadyState(counters, label);
@@ -3157,7 +3158,7 @@ bool RunReplacementFaultCase(const std::filesystem::path& stage,
   SeamCounters counters = {};
   const TfClientId app_client = test_case.host->client_id();
 
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "faults: the engine path is ready");
 
   // A. The same token text exists earlier in the document. The menu is drawn for the last
@@ -3415,7 +3416,7 @@ bool RunReplacementFaultCase(const std::filesystem::path& stage,
       test_case.host->CreateChildContext(test_case.doc, recover_options, &error);
   LocalCheck(recovered != nullptr, "faults E: recovery child context: " + error);
   if (recovered != nullptr) {
-    LocalCheck(ReadyToType(*test_case.host, sink, recovered->context(), 60000),
+    LocalCheck(ReadyToType(*test_case.host, sink, recovered->context(), kEngineReadinessBudgetMs),
                "faults E: the new context is bound and suggestible");
     InputRoute recovered_route{test_case.host, recovered, sink, recovered->context()};
     ReferenceDoc recovered_reference;
@@ -3462,7 +3463,7 @@ bool RunSuggestionResyncCase(const std::filesystem::path& stage,
   std::string error;
   SeamCounters counters = {};
   LocalCheck(seam.usable(), "resync: controlled seam available");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "resync: the engine path is ready");
 
   // One long token, sent without pumping, overflows the bounded suggestion queue and makes
@@ -3558,7 +3559,7 @@ bool RunContinuousCase(const std::filesystem::path& stage,
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
   std::string error;
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "continuous: ready exactly once before the whole burst");
 
   // One readiness check above covers the whole run. Words are never checked for readiness
@@ -3628,7 +3629,7 @@ bool RunCapacityCase(const std::filesystem::path& stage,
   std::string error;
   SeamCounters counters = {};
   ReferenceDoc reference;
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "capacity: the engine path is ready");
 
   // A real deferred document lock: the product's asynchronous requests are not granted
@@ -3702,7 +3703,7 @@ bool RunCapacityCase(const std::filesystem::path& stage,
   CheckDocExact(test_case.doc->text_utf16(), reference.text,
                 "capacity: the same session kept the complete original text");
 
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "capacity: the engine suggestion path is ready again in this session");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "capacity: a fresh token stays with the host: " + error);
@@ -3742,7 +3743,7 @@ bool RunCapacityContinueCase(const std::filesystem::path& stage,
   SeamCounters counters = {};
   ReferenceDoc reference;
   CrashPhase("capacity-continue: waiting for the engine path");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "capacity-continue: the engine path is ready");
 
   // 1. The original failure shape: a real held lock, a long burst, then immediate
@@ -3787,7 +3788,7 @@ bool RunCapacityContinueCase(const std::filesystem::path& stage,
   // 2. The engine path recovers in the same session; a fresh token produces a real menu and
   // an explicit replacement.
   CrashPhase("capacity-continue: waiting for the engine path to recover");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "capacity-continue: the same session recovered");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "capacity-continue: the fresh token stays with the host: " + error);
@@ -4031,7 +4032,7 @@ bool RunDegradedKeysCase(const std::filesystem::path& stage,
   std::string error;
   SeamCounters counters = {};
   ReferenceDoc reference;
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "degraded-keys: the engine path is ready");
 
   // Phase A: a real backlog plus a held write authorization. Ordinary text and BackSpace
@@ -4062,7 +4063,7 @@ bool RunDegradedKeysCase(const std::filesystem::path& stage,
   LocalCheck(counters.internal_text_losses == 0,
              "degraded-keys: zero internal text losses after the backlog");
   CheckNoSuppressedText(route, "degraded-keys backlog");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "degraded-keys: the engine path is ready after the backlog");
 
   // Phase B: Enter is host input. Its default newline is the host's, and no original
@@ -4081,7 +4082,7 @@ bool RunDegradedKeysCase(const std::filesystem::path& stage,
   (void)test_case.host->ReleaseHeldGrantMessages();
   CheckDocExact(test_case.doc->text_utf16(), reference.text,
                 "degraded-keys: Enter kept the host's complete text and newline");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "degraded-keys: the engine path is ready after Enter");
 
   // Phase C: Escape dismisses the suggestion menu without removing the typed token.
@@ -4144,7 +4145,7 @@ bool RunDegradedKeysCase(const std::filesystem::path& stage,
   if (child != nullptr) {
     PumpSlice(*test_case.host, 500);
     ITfContext* child_context = child->context();
-    LocalCheck(ReadyToType(*test_case.host, sink, child_context, 30000),
+    LocalCheck(ReadyToType(*test_case.host, sink, child_context, kEngineReadinessBudgetMs),
                "degraded-keys: the child context became the bound target");
     InputRoute child_route{test_case.host, child, sink, child_context};
     LocalCheck(SendTextHost(&child_route, L"z", &error),
@@ -4187,7 +4188,7 @@ bool RunUnloadContractCase(const std::filesystem::path& stage,
   InputRoute route{test_case.host, test_case.doc, sink, context};
   std::string error;
   SeamCounters counters = {};
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "unload-contract: the engine path is ready");
 
   const auto can_unload = reinterpret_cast<CanUnloadNowFn>(
@@ -4610,7 +4611,7 @@ bool RunColdTokenCase(const std::filesystem::path& stage,
   reference.HostInsert(L" ");
   CheckDocExact(test_case.doc->text_utf16(), reference.text,
                 "token: the whole token is contiguous in the document");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "token: the engine is ready for the next token");
   LocalCheck(SendTextHost(&route, L"de", &error),
              "token: a fresh token stays with the host: " + error);
@@ -4641,7 +4642,7 @@ bool RunPressureCase(const std::filesystem::path& stage,
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
   ProductSeam seam = test_case.seam;
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "pressure: the engine path is ready");
   ReferenceDoc reference;
   std::string error;
@@ -4680,7 +4681,7 @@ bool RunPressureCase(const std::filesystem::path& stage,
   CheckDocExact(test_case.doc->text_utf16(), after_burst,
                 "pressure: no late duplicate edit changed the document");
 
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "pressure: the engine is ready after the backlog");
   LocalCheck(SendTextHost(&route, L"tail", &error),
              "pressure: the next token stays with the host: " + error);
@@ -4695,7 +4696,7 @@ bool RunPressureCase(const std::filesystem::path& stage,
 
   // Phase B -- sustained typing with a stalled write authorization, group by group. The
   // document must remain exact after every group.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 30000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "pressure: ready for the sustained phase");
   std::wstring sustained;
   for (int repeat = 0; repeat < 10; ++repeat) {

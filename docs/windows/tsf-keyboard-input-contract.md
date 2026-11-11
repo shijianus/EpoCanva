@@ -27,7 +27,7 @@ W2-C 的根规则只有一条：**普通原文永远由宿主承载；引擎只�
 它**不 join** 仍在进行的引擎启动，也不在 STA 上释放可能阻塞的租约（租约释放被移到
 持有模块引用的后台线程）。`DllMain` 仍只保存 HINSTANCE。
 
-启动等待（命名互斥量/共享锁最长 60 s，以及 `Acquire` 内的部署）只在后台启动线程发生；
+启动等待（命名互斥量/共享锁最长 180 s，以及 `Acquire` 内的部署）只在后台启动线程发生；
 `Activate`、`OnKeyDown`、`Deactivate` 与卸载检查都不承受它。失败由
 `EngineBootstrapState::kFailed` 与 `ControllerDiagnostics::engine_state/failure` 报告，
 下一次激活可重试；`DllCanUnloadNow` 在启动线程退出前保持 `S_FALSE`。
