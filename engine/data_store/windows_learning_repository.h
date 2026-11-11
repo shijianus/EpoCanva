@@ -60,6 +60,11 @@ using PrivacyCallback = std::function<Access()>;
 // Calls are independent transactions; neither counts nor permission are cached.
 // Nonblocking cross-process exclusive locks return kBusy, never wait for a host
 // edit thread. A caller may retry a kBusy result with a still-current context.
+// The one internal exception is the final atomic replace-rename: a measured
+// external-provider transient (ERROR_ACCESS_DENIED on an otherwise writable
+// target, observed only on a synced volume) is retried a bounded number of times
+// inside the transaction. It never converts a permanent denial into success, and
+// it never retries a sharing/lock violation, which still surfaces as kBusy.
 // File names encode the catalog namespace, not arbitrary schema paths. Catalog
 // identity is also checked inside the bounded (kMaxStoreBytes UTF-8 bytes) file.
 class WindowsLearningRepository {

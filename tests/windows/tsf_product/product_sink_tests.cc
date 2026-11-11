@@ -62,6 +62,16 @@ int g_failures = 0;
 // is still legitimately inside the same bounded readiness phase. Join and
 // cleanup waits have their own separate bounds.
 constexpr DWORD kEngineReadinessBudgetMs = 90000;
+// The settings-timing case starts from a freshly removed user root, so the first
+// activation must compile the whole multilingual deployment (terra table, pinyin and
+// zhuyin prisms) before the engine can answer. Measured on this repository's
+// OneDrive-synced volume: a warm restart is 62-79 ms, a cold compile is 9-10 s, and the
+// same cold compile was observed at 96 s while the sink suite saturated the sync volume
+// (the deployment state file was written 96 s after settings.ini). That is a storage
+// stall, not a permanent start failure, so this one phase gets a larger budget; the
+// warm-session budget above stays unchanged and a start that never completes still
+// fails. See docs/reports/phase-e-nondeterminism-20261112.md for the measurement.
+constexpr DWORD kColdStartReadinessBudgetMs = 180000;
 constexpr DWORD kReadinessSignalMarginMs = 10000;
 constexpr DWORD kEngineIdleBudgetMs = 30000;
 constexpr DWORD kSessionReleaseBudgetMs = 30000;
@@ -968,6 +978,7 @@ struct InputRoute {
 
 bool ReadyToType(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
                  DWORD timeout_ms, SeamCounters* last_observed = nullptr);
+void PrintSeamCounters(const SeamCounters& counters, const char* label);
 
 // Independent reference edit model. It is written from the documented default English
 // behaviour (raw characters preserved, Space commits and inserts one space) and never calls
@@ -1273,6 +1284,15 @@ bool ReadyToType(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
     BOOL probe = FALSE;
     (void)sink->OnTestKeyDown(context, vk, KeyLparam(vk, true, false), &probe);
     if (::GetTickCount64() >= deadline) {
+      // A timeout here means the product never reached its idle, engine-attached state. Print
+      // the counters that define readiness so a failure names the blocking field instead of
+      // leaving only "not ready"; every branch is product state, no keystroke text is logged.
+      SeamCounters timeout_counters = {};
+      const bool timeout_counters_ok = QuerySeamForSink(sink, &timeout_counters);
+      std::cout << "  [readiness-timeout] elapsed_ms=" << timeout_ms
+                << " have_counters=" << (timeout_counters_ok ? 1 : 0)
+                << " last_probe_eaten=" << (probe ? 1 : 0) << std::endl;
+      PrintSeamCounters(timeout_counters, "readiness-timeout");
       return false;
     }
     PumpSlice(host, 20);
@@ -2145,7 +2165,7 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
     return false;
   }
   LocalCheck(ReadyToType(*held.host, held.product.sink, held.doc->context(),
-                         kEngineReadinessBudgetMs),
+                         kColdStartReadinessBudgetMs),
              "timing: the first session is ready");
   const std::string first_digest = SettingsDigestForTest(user_root);
   const std::string before = ReadNarrow(state);

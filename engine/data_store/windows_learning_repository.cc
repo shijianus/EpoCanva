@@ -133,6 +133,25 @@ Status FileError(DWORD error) {
   return Status::kIoError;
 }
 
+// Bounded retry budget for the single atomic replace. Do not extend this to any
+// other filesystem step.
+//
+// Measured, not assumed (2026-11-11, this repository): with the store on a
+// OneDrive-synced volume, `SetFileInformationByHandle(..., FileRenameInfoEx)` with
+// FILE_RENAME_FLAG_REPLACE_IF_EXISTS returns ERROR_ACCESS_DENIED on roughly 1 in
+// 300 otherwise identical publications, while a non-synced local volume recorded
+// 0 failures in 3,000. In every observed case the durable store was intact, the
+// staging name was already gone, and an immediate retry of the identical
+// transaction succeeded — i.e. an external sync/cloud filter holds a transient
+// handle on the target name. The product stores user data under %LOCALAPPDATA%;
+// this budget only stops an external provider's transient window from becoming a
+// spurious learning failure. It never turns a permanent denial into success: a
+// target that is genuinely undeletable (a no-delete sharing handle, a read-only
+// file, a reparse point) still fails after the budget, with the same stage and
+// Win32 code as before.
+constexpr int kReplaceAttempts = 4;
+constexpr DWORD kReplaceRetryDelayMs = 2;
+
 // Last failed filesystem step on this thread. The repository never logs paths,
 // text or IDs; a caller can report the stage and Win32 code without user data.
 thread_local IoFailure g_last_io_failure{};
@@ -730,11 +749,26 @@ class Transaction {
     rename->RootDirectory = nullptr;
     rename->FileNameLength = static_cast<DWORD>(path_utf16_bytes);
     std::memcpy(rename->FileName, target.data(), path_utf16_bytes);
-    status = gate_.Check();  // no filesystem work between this query and publication
-    if (status != Status::kOk) return status;
-    if (!::SetFileInformationByHandle(temporary.get(), FileRenameInfoEx, rename,
-                                     static_cast<DWORD>(rename_bytes)))
-      return FailLast(IoStage::kReplace);
+    // A transient external handle (cloud/sync filter, indexer) can make the
+    // replacement return ERROR_ACCESS_DENIED even though the target is writable;
+    // see kReplaceAttempts for the measured evidence. Only that specific code is
+    // retried: a sharing/lock violation stays a nonblocking kBusy for the caller,
+    // and any other error fails on the first attempt. Every attempt re-queries the
+    // permission gate immediately beforehand, and the final failure keeps its stage
+    // and Win32 code, so a permanent denial reports the same diagnostic as before.
+    DWORD rename_error = 0;
+    bool renamed = false;
+    for (int attempt = 0; attempt < kReplaceAttempts && !renamed; ++attempt) {
+      if (attempt != 0) ::Sleep(kReplaceRetryDelayMs);
+      status = gate_.Check();  // no filesystem work between this query and publication
+      if (status != Status::kOk) return status;
+      renamed = ::SetFileInformationByHandle(temporary.get(), FileRenameInfoEx, rename,
+                                            static_cast<DWORD>(rename_bytes)) != FALSE;
+      if (renamed) break;
+      rename_error = ::GetLastError();
+      if (rename_error != ERROR_ACCESS_DENIED) break;
+    }
+    if (!renamed) return Fail(IoStage::kReplace, rename_error);
     cleanup.published = true;
     return Status::kOk;
   }

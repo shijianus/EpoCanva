@@ -29,8 +29,17 @@ void Check(bool value, const char* label) {
 void Expect(Status actual, Status expected, const char* label) {
   if (actual != expected) {
     ++failures;
-    std::fprintf(stderr, "FAIL %s (got %s, expected %s)\n", label,
-                 StatusName(actual), StatusName(expected));
+    if (actual == Status::kIoError) {
+      // A failed filesystem step keeps only its stage and Win32 code; print them so a
+      // flaky failure names the operation instead of leaving an opaque io-error.
+      const IoFailure failure = LastIoFailure();
+      std::fprintf(stderr, "FAIL %s (got %s, expected %s, io stage=%s win32=%u)\n", label,
+                   StatusName(actual), StatusName(expected), IoStageName(failure.stage),
+                   failure.win32_error);
+    } else {
+      std::fprintf(stderr, "FAIL %s (got %s, expected %s)\n", label,
+                   StatusName(actual), StatusName(expected));
+    }
   }
 }
 void ExpectIo(IoStage expected, const char* label) {
