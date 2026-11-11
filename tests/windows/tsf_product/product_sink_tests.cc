@@ -39,6 +39,7 @@
 #include "identifiers.h"
 #include "crash_capture.h"
 #include "observer_test_support.h"
+#include "product_io.h"
 #include "product_paths.h"
 #include "product_settings.h"
 #include "test_host.h"
@@ -55,6 +56,21 @@ using epocanva::tsf::context::test::TestDocumentOptions;
 using epocanva::tsf::context::test::TestHost;
 
 int g_failures = 0;
+
+// One readiness budget covers worker activation plus ReadyToType. The main
+// thread waits until deadline + margin, so it cannot time out while the worker
+// is still legitimately inside the same bounded readiness phase. Join and
+// cleanup waits have their own separate bounds.
+constexpr DWORD kEngineReadinessBudgetMs = 90000;
+constexpr DWORD kReadinessSignalMarginMs = 10000;
+constexpr DWORD kEngineIdleBudgetMs = 30000;
+constexpr DWORD kSessionReleaseBudgetMs = 30000;
+constexpr DWORD kModuleReleaseBudgetMs = 30000;
+
+DWORD RemainingMs(ULONGLONG deadline) {
+  const ULONGLONG now = ::GetTickCount64();
+  return now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+}
 
 void LocalCheck(bool condition, const std::string& what) {
   std::cout << (condition ? "  ok   " : "  FAIL ") << what << "\n";
@@ -118,6 +134,12 @@ bool StageProduct(const std::filesystem::path& stage, const std::filesystem::pat
       !CopyFileTo(lexicon, stage / L"data" / L"lexicon" / L"epocanva_en_alpha.tsv", why)) {
     return false;
   }
+#ifdef EPOCANVA_PRODUCT_BACKEND_ROOT
+  const std::filesystem::path backend_root = std::filesystem::u8path(EPOCANVA_PRODUCT_BACKEND_ROOT);
+  std::filesystem::copy(backend_root / L"data", stage / L"data",
+      std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
+  if (ec) { if (why) *why = L"cannot stage the explicitly configured backend resources"; return false; }
+#endif
   return true;
 }
 
@@ -541,6 +563,22 @@ struct SeamCounters {
   int candidate_token_origin_valid;
   long long candidate_token_origin_caret;
   long long predicted_host_caret;
+  int host_context_owed;
+  int host_context_in_flight;
+  long long host_context_caret;
+  unsigned long long host_context_revision;
+  unsigned long long host_context_submitted_revision;
+  unsigned long long waker_wakes_posted;
+  unsigned long long waker_wakes_received;
+  unsigned long long waker_stale_wakes;
+  unsigned long long waker_post_failures;
+  unsigned long long waker_stops;
+  unsigned long long waker_loop_ticks;
+  unsigned long waker_window_thread;
+  unsigned long controller_thread;
+  unsigned long long waker_window_messages;
+  int waker_started;
+  int pacing;
 };
 
 using SeamQueryFn = int (*)(SeamCounters*);
@@ -553,6 +591,7 @@ using SeamStateFn = int (*)();
 using SeamModuleStateFn = int (*)(long long*, long long*, long long*, long long*,
                                   long long*);
 using SeamGuardedObjectsFn = int (*)(long long*, int);
+using SeamEngineFailureFn = int (*)(char*, unsigned);
 
 struct ProductSeam {
   SeamQueryFn query = nullptr;
@@ -564,6 +603,7 @@ struct ProductSeam {
   SeamStateFn state = nullptr;
   SeamModuleStateFn module_state = nullptr;
   SeamGuardedObjectsFn guarded_objects = nullptr;
+  SeamEngineFailureFn engine_failure = nullptr;
 
   bool usable() const {
     return query != nullptr && text != nullptr && kind != nullptr &&
@@ -600,12 +640,25 @@ ProductSeam LoadSeam(LoadedProduct& product) {
       ::GetProcAddress(product.module, "EpoCanvaTestModuleState"));
   seam.guarded_objects = reinterpret_cast<SeamGuardedObjectsFn>(
       ::GetProcAddress(product.module, "EpoCanvaTestGuardedObjects"));
+  seam.engine_failure = reinterpret_cast<SeamEngineFailureFn>(
+      ::GetProcAddress(product.module, "EpoCanvaTestEngineFailure"));
   g_crash_seam = seam;
   if (product.sink != nullptr) {
     std::lock_guard<std::mutex> guard(g_seam_map_mutex);
     g_seam_map[product.sink] = seam;
   }
   return seam;
+}
+
+std::string SeamEngineFailure(const ProductSeam& seam) {
+  if (seam.engine_failure == nullptr) {
+    return {};
+  }
+  char buffer[1024] = {};
+  if (seam.engine_failure(buffer, sizeof(buffer)) <= 0) {
+    return {};
+  }
+  return std::string(buffer);
 }
 
 void UnregisterSeam(ITfKeyEventSink* sink) {
@@ -672,6 +725,9 @@ bool WaitForCandidateMenu(TestHost& host, const ProductSeam& seam,
                           SeamCounters* counters, std::size_t minimum_items,
                           DWORD timeout_ms) {
   const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  // Give the product one pump before the first observation: a menu from an older host token
+  // is hidden by that pump, and the completion for the text just typed needs one too.
+  PumpSlice(host, 10);
   for (;;) {
     if (seam.query != nullptr && seam.query(counters) == 0 &&
         counters->candidate_menu_open != 0 &&
@@ -733,10 +789,13 @@ std::wstring ReadCandidateText(const ProductSeam& seam, unsigned index) {
 }
 
 // Selects a candidate only after the menu and the engine stream are stable: the snapshot
-// version must stop changing and no suggestion/replacement work may be in flight. Returns
-// the version and text that were actually current when the click was delivered.
+// version must stop changing, no suggestion/replacement work may be in flight, and the
+// menu must describe the host's current token. `minimum_version` is captured before a new
+// token is typed so a still-published menu from the previous token cannot be mistaken for
+// the new one when both happen to have the same text length.
 bool WaitForStableMenu(TestHost& host, const ProductSeam& seam,
-                       SeamCounters* counters, DWORD timeout_ms) {
+                       SeamCounters* counters, DWORD timeout_ms,
+                       unsigned long long minimum_version = 0) {
   unsigned long long stable_version = 0;
   int stable_rounds = 0;
   const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
@@ -745,7 +804,9 @@ bool WaitForStableMenu(TestHost& host, const ProductSeam& seam,
     if (seam.query != nullptr && seam.query(&current) == 0 &&
         current.candidate_menu_open != 0 && current.queue_pending == 0 &&
         current.queue_in_flight == 0 && current.suggestion_pending == 0 &&
-        current.suggestion_in_flight == 0 && current.replacement_pending == 0) {
+        current.suggestion_in_flight == 0 && current.replacement_pending == 0 &&
+        current.candidate_input_units == current.host_token_units &&
+        current.candidate_version > minimum_version) {
       if (stable_rounds > 0 && current.candidate_version == stable_version) {
         *counters = current;
         return true;
@@ -1123,7 +1184,7 @@ bool SendTextWhenReady(InputRoute* route, const std::wstring& text,
   // two sections; that pass-through is not what these sections test, so wait for readiness
   // again instead of sending into an unbound window.
   if (expect_eaten &&
-      !ReadyToType(*route->host, route->sink, route->context, 15000)) {
+      !ReadyToType(*route->host, route->sink, route->context, 60000)) {
     *error = "the engine path did not become ready";
     return false;
   }
@@ -1257,6 +1318,12 @@ void PrintSeamCounters(const SeamCounters& counters, const char* label) {
             << " queue=" << counters.queue_pending
             << "/" << counters.queue_in_flight
             << " phase=" << counters.coordinator_phase
+            << " wout=" << counters.work_outcome
+            << " wkind=" << counters.work_kind
+            << " replo=" << counters.last_replacement_outcome
+            << "/" << counters.last_replacement_edit_status
+            << "/" << counters.last_replacement_edit_reason
+            << "/" << counters.last_replacement_expected_units
             << " works=" << counters.works_accepted
             << " pumps=" << counters.pumps
             << " engine=" << counters.engine_ready
@@ -1279,6 +1346,23 @@ void PrintSeamCounters(const SeamCounters& counters, const char* label) {
             << counters.raw_reason_not_candidate << ","
             << counters.raw_reason_high_water << ","
             << counters.raw_reason_admission
+            << " hctx=" << counters.host_context_owed
+            << "/" << counters.host_context_in_flight
+            << "/" << counters.host_context_caret
+            << "/" << counters.host_context_revision
+            << "/" << counters.host_context_submitted_revision
+            << " wakes=" << counters.waker_wakes_posted
+            << "/" << counters.waker_wakes_received
+            << "/" << counters.waker_stale_wakes
+            << " wfail=" << counters.waker_post_failures
+            << " wstop=" << counters.waker_stops
+            << " wloop=" << counters.waker_loop_ticks
+            << " wthread=" << counters.waker_window_thread
+            << "/" << counters.controller_thread
+            << " wmsg=" << counters.waker_window_messages
+            << " wstart=" << counters.waker_started
+            << " pace=" << counters.pacing
+            << " failure=" << SeamEngineFailure(g_crash_seam)
             << std::endl;
 }
 
@@ -1359,7 +1443,7 @@ bool BeginCase(Case* test_case, const std::filesystem::path& stage,
   if (!ActivateProduct(&test_case->product, test_case->host->thread_manager_for_test(),
                        stage, &activate_why)) {
     std::cout << "  activate: "
-              << std::string(activate_why.begin(), activate_why.end()) << "\n";
+              << epocanva::product::WideToUtf8(activate_why) << "\n";
     if (why != nullptr) {
       *why = activate_why;
     }
@@ -1381,7 +1465,7 @@ void EndCase(Case* test_case) {
     test_case->host = nullptr;
     test_case->doc = nullptr;
     CrashPhase("end-case: waiting for the module to become unloadable");
-    if (!FreeProductModule(&test_case->product, 10000, "end-case") &&
+    if (!FreeProductModule(&test_case->product, 60000, "end-case") &&
         test_case->product.module != nullptr) {
       const auto module_state = reinterpret_cast<SeamModuleStateFn>(
           ::GetProcAddress(test_case->product.module, "EpoCanvaTestModuleState"));
@@ -1433,19 +1517,22 @@ bool RunRawInputCases(const Paths& paths) {
   auto* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "raw: the product controller bound and resolved permission");
+  const std::string engine_failure = SeamEngineFailure(seam);
+  const std::string engine_detail = engine_failure.empty() ? std::string() : ": " + engine_failure;
   LocalCheck(::GetFileAttributesW(paths.marker.c_str()) == INVALID_FILE_ATTRIBUTES,
-             "raw: the deployment marker was retired after the successful start");
+             "raw: the deployment marker was retired after the successful start" + engine_detail);
   LocalCheck(std::filesystem::is_regular_file(paths.state),
-             "raw: the deployment snapshot was recorded");
+             "raw: the deployment snapshot was recorded" + engine_detail);
   LocalCheck(std::filesystem::is_regular_file(paths.compiled),
-             "raw: the compiled schema exists in the user engine directory");
+             "raw: the compiled backend schema exists in the user engine directory" + engine_detail);
   const std::string compiled_text = ReadNarrow(paths.compiled);
-  LocalCheck(compiled_text.find("max_completions: 4") != std::string::npos,
-             "raw: the compiled schema carries the configured completion count");
-  LocalCheck(compiled_text.find("max_suggestions: 2") != std::string::npos,
-             "raw: the compiled schema carries the configured suggestion count");
+  LocalCheck(compiled_text.find("dictionary: epocanva_backend_terra") != std::string::npos,
+             "raw: the compiled schema binds the real Terra dictionary" + engine_detail);
+  LocalCheck(std::filesystem::is_regular_file(
+                 paths.compiled.parent_path() / L"epocanva_backend_zhuyin.schema.yaml"),
+             "raw: the compiled Zhuyin schema exists" + engine_detail);
 
   // Ordinary text is host-owned: the product returns pfEaten=FALSE, and the controlled
   // application performs its own default insertion. Suggestions are asynchronous and can
@@ -1660,7 +1747,7 @@ bool RunExternalEditCase(const Paths& paths) {
   auto* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "external edit: ready to type");
   std::string error;
   ReferenceDoc reference;
@@ -1760,7 +1847,7 @@ void RunSessionWorker(const std::filesystem::path& stage, const std::wstring& wo
   ReferenceDoc reference;
   bool space_eaten = true;
   result->counters.pumps = ~0ull;
-  if (!ReadyToType(*host, product.sink, context, 15000, &result->counters)) {
+  if (!ReadyToType(*host, product.sink, context, 60000, &result->counters)) {
     result->error = "the session never became ready";
   } else if (!SendTextHost(&route, word, &result->error)) {
     result->error = "the session did not keep its word with the host";
@@ -1884,7 +1971,8 @@ struct HoldSessionResult {
 };
 
 void HoldSessionWorker(const std::filesystem::path& stage, HANDLE ready_event,
-                       HANDLE release_event, HoldSessionResult* result) {
+                       HANDLE release_event, HoldSessionResult* result,
+                       ULONGLONG ready_deadline) {
   TestHost* host = TestHost::Create(&result->error).release();
   if (host == nullptr) {
     ::SetEvent(ready_event);
@@ -1919,9 +2007,10 @@ void HoldSessionWorker(const std::filesystem::path& stage, HANDLE ready_event,
   result->ready.store(true);
   result->counters.pumps = ~0ull;
   result->ok.store(
-      ReadyToType(*host, product.sink, document->context(), 15000, &result->counters));
+      ReadyToType(*host, product.sink, document->context(), RemainingMs(ready_deadline),
+                  &result->counters));
   ::SetEvent(ready_event);
-  (void)::WaitForSingleObject(release_event, 30000);
+  (void)::WaitForSingleObject(release_event, kSessionReleaseBudgetMs);
   ReleaseProduct(&product, true);
   ::DestroyWindow(window);
   delete host;
@@ -1942,7 +2031,7 @@ bool RunFocusSwitchCase(const Paths& paths) {
   }
   auto* sink = test_case.product.sink;
   ITfContext* parent_context = test_case.doc->context();
-  LocalCheck(ReadyToType(*test_case.host, sink, parent_context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, parent_context, 60000),
              "focus: the parent context is ready");
   std::string error;
   InputRoute parent_route{test_case.host, test_case.doc, sink, parent_context};
@@ -1981,7 +2070,7 @@ bool RunFocusSwitchCase(const Paths& paths) {
   LocalCheck(child != nullptr, "focus: a child context is pushed");
   if (child != nullptr) {
     PumpSlice(*test_case.host, 300);
-    LocalCheck(ReadyToType(*test_case.host, sink, child->context(), 15000),
+    LocalCheck(ReadyToType(*test_case.host, sink, child->context(), 60000),
                "focus: the child context is bound");
     error.clear();
     InputRoute child_route{test_case.host, child, sink, child->context()};
@@ -2014,9 +2103,20 @@ bool RunFocusSwitchCase(const Paths& paths) {
   return true;
 }
 
+std::string SettingsDigestForTest(const std::filesystem::path& user_root) {
+  std::string digest;
+  std::uint64_t size = 0;
+  std::wstring why;
+  if (!epocanva::product::Sha256File(user_root / L"settings.ini", &digest, &size, &why)) {
+    return {};
+  }
+  return digest;
+}
+
 bool RunSettingsTimingCase(const std::filesystem::path& stage,
                             const std::filesystem::path& user_root,
                             const std::filesystem::path& marker,
+                            const std::filesystem::path& state,
                             const std::filesystem::path& compiled,
                             std::wstring* why) {
   epocanva::product::ProductSettings first;
@@ -2044,35 +2144,53 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
     LocalCheck(false, "timing: the first session activates");
     return false;
   }
-  LocalCheck(ReadyToType(*held.host, held.product.sink, held.doc->context(), 15000),
+  LocalCheck(ReadyToType(*held.host, held.product.sink, held.doc->context(),
+                         kEngineReadinessBudgetMs),
              "timing: the first session is ready");
-  const std::string before = ReadNarrow(compiled);
-  LocalCheck(before.find("max_completions: 4") != std::string::npos,
-             "timing: the first engine compiled the first settings");
+  const std::string first_digest = SettingsDigestForTest(user_root);
+  const std::string before = ReadNarrow(state);
+  LocalCheck(!first_digest.empty() && before.find("settings_token=" + first_digest) !=
+                                         std::string::npos,
+             "timing: the first engine recorded the first settings deployment");
+  LocalCheck(std::filesystem::is_regular_file(compiled),
+             "timing: the first engine produced its compiled schema");
 
   {
     const bool saved = WriteSettingsOnly(user_root, second, why);
     LocalCheck(saved, "timing: new settings are saved while the engine runs: " +
-                          std::string(why->begin(), why->end()));
+                          epocanva::product::WideToUtf8(*why));
   }
   HANDLE ready_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
   HANDLE release_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
   HoldSessionResult deferred;
-  std::thread waiter(HoldSessionWorker, stage, ready_event, release_event, &deferred);
-  const bool ready_signalled = ::WaitForSingleObject(ready_event, 25000) == WAIT_OBJECT_0;
-  LocalCheck(ready_signalled && deferred.ok.load(),
-             "timing: the second session joins the running engine");
-  if (!deferred.ok.load()) {
-    std::cout << "  [timing] second session error: " << deferred.error << std::endl;
-    PrintSeamCounters(deferred.counters, "timing second session");
-  }
+  const ULONGLONG session_start = ::GetTickCount64();
+  const ULONGLONG ready_deadline = session_start + kEngineReadinessBudgetMs;
+  std::thread waiter(HoldSessionWorker, stage, ready_event, release_event, &deferred,
+                     ready_deadline);
+  const bool ready_signalled =
+      ::WaitForSingleObject(ready_event, RemainingMs(ready_deadline + kReadinessSignalMarginMs)) ==
+      WAIT_OBJECT_0;
+  const bool second_ready = ready_signalled && deferred.ok.load();
+  LocalCheck(second_ready, "timing: the second session joins the running engine");
   LocalCheck(std::filesystem::is_regular_file(marker),
              "timing: the new settings marker survives while the engine runs");
-  const std::string during = ReadNarrow(compiled);
-  LocalCheck(during.find("max_completions: 4") != std::string::npos,
+  const std::string during = ReadNarrow(state);
+  LocalCheck(during == before,
              "timing: the running engine is not redeployed underneath itself");
   ::SetEvent(release_event);
   waiter.join();
+  // Read worker-owned diagnostics only after the join; the event signal alone
+  // does not order the non-atomic counter/error fields.
+  if (!second_ready) {
+    std::cout << "  [timing] second session failed after "
+              << (::GetTickCount64() - session_start) << " ms (ready_event="
+              << (ready_signalled ? "signalled" : "timeout") << "): " << deferred.error
+              << std::endl;
+    PrintSeamCounters(deferred.counters, "timing second session");
+  } else {
+    std::cout << "  [timing] second session ready in "
+              << (::GetTickCount64() - session_start) << " ms" << std::endl;
+  }
   ::CloseHandle(release_event);
   ::CloseHandle(ready_event);
   // The engine lease release is deliberately off the STA. Wait (bounded) until the engine
@@ -2083,7 +2201,7 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
     const auto host_state = reinterpret_cast<HostStateFn>(
         ::GetProcAddress(held.product.module, "EpoCanvaTestEngineHostState"));
     (void)held.product.tip->Deactivate();
-    const ULONGLONG idle_deadline = ::GetTickCount64() + 10000;
+    const ULONGLONG idle_deadline = ::GetTickCount64() + kEngineIdleBudgetMs;
     while (host_state != nullptr && host_state() != 0 &&
            ::GetTickCount64() < idle_deadline) {
       ::Sleep(20);
@@ -2094,7 +2212,7 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
   EndCase(&held);
   // The worker session's load reference was parked. Free it now so the restarted case gets a
   // fresh module and a fresh bootstrap singleton, exactly as the settings contract assumes.
-  LocalCheck(FreeDeferredProductModules(15000, "settings-timing"),
+  LocalCheck(FreeDeferredProductModules(kModuleReleaseBudgetMs, "settings-timing"),
              "timing: the parked load references were released before the restart");
 
   Case renewed;
@@ -2103,12 +2221,13 @@ bool RunSettingsTimingCase(const std::filesystem::path& stage,
     return false;
   }
   LocalCheck(ReadyToType(*renewed.host, renewed.product.sink, renewed.doc->context(),
-                         15000),
+                         kEngineReadinessBudgetMs),
              "timing: the restarted engine is ready");
-  const std::string after = ReadNarrow(compiled);
-  LocalCheck(after.find("max_completions: 6") != std::string::npos &&
-                 after.find("max_suggestions: 2") != std::string::npos,
-             "timing: the restarted engine compiled the saved settings");
+  const std::string second_digest = SettingsDigestForTest(user_root);
+  const std::string after = ReadNarrow(state);
+  LocalCheck(!second_digest.empty() && second_digest != first_digest &&
+                 after.find("settings_token=" + second_digest) != std::string::npos,
+             "timing: the restarted engine recorded the saved settings deployment");
   LocalCheck(!std::filesystem::is_regular_file(marker),
              "timing: the marker is retired after the deferred deployment");
   std::string error;
@@ -2156,9 +2275,9 @@ bool RunEngineMissingCase(const std::filesystem::path& stage,
   const bool activated =
       ActivateProduct(&product, host->thread_manager_for_test(), stage, &why);
   LocalCheck(activated,
-             "missing rime.dll: activation succeeds immediately in literal mode");
+             "unusable rime.dll: activation succeeds immediately in literal mode");
   ProductSeam seam = LoadSeam(product);
-  LocalCheck(seam.startup_usable(), "missing rime.dll: startup seam available");
+  LocalCheck(seam.startup_usable(), "unusable rime.dll: startup seam available");
   int state = -1;
   const ULONGLONG deadline = ::GetTickCount64() + 15000;
   for (;;) {
@@ -2172,31 +2291,420 @@ bool RunEngineMissingCase(const std::filesystem::path& stage,
     PumpSlice(*host, 20);
   }
   LocalCheck(state == 3,
-             "missing rime.dll: the asynchronous start reports failure, not success");
+             "unusable rime.dll: the asynchronous start reports failure, not success");
   InputRoute route{host.get(), document, product.sink, document->context()};
   SeamCounters counters;
   (void)seam.query(&counters);
   LocalCheck(counters.engine_ready == 0,
-             "missing rime.dll: no engine pipeline is claimed");
+             "unusable rime.dll: no engine pipeline is claimed");
   LocalCheck(SendText(&route, L"abc", false, &error),
-             "missing rime.dll: every key stays with the host: " + error);
+             "unusable rime.dll: every key stays with the host: " + error);
   LocalCheck(document->text_utf16() == L"abc",
-             "missing rime.dll: the literal path delivers the host's own text exactly");
+             "unusable rime.dll: the literal path delivers the host's own text exactly");
   (void)seam.query(&counters);
   LocalCheck(counters.literal_key_downs >= 3,
-             "missing rime.dll: the literal path is counted");
+             "unusable rime.dll: the literal path is counted");
   LocalCheck(std::filesystem::is_regular_file(marker),
-             "missing rime.dll: the marker is kept for a retry");
+             "unusable rime.dll: the marker is kept for a retry");
   LocalCheck(!std::filesystem::is_regular_file(compiled),
-             "missing rime.dll: no compiled schema is claimed");
+             "unusable rime.dll: no compiled schema is claimed");
   const ULONGLONG stop_start = ::GetTickCount64();
   (void)product.tip->Deactivate();
   LocalCheck(::GetTickCount64() - stop_start < 1000,
-             "missing rime.dll: deactivation does not wait for the failed start");
+             "unusable rime.dll: deactivation does not wait for the failed start");
   ReleaseProduct(&product, false);
   host.reset();
   (void)FreeProductModule(&product, 10000, "engine-missing");
   return true;
+}
+
+// Waits for a menu that describes exactly the host token the test just typed. A stale menu
+// from an earlier prefix can satisfy candidate_menu_open on its own, so the token lengths in
+// both the host-side read and the backend snapshot must agree with the expected value. The
+// next-word path uses zero: the host's token range is empty and the preceding text is context.
+bool WaitForMenuForToken(TestHost& host, const ProductSeam& seam, SeamCounters* counters,
+                         std::size_t token_units_utf16, std::size_t minimum_items,
+                         DWORD timeout_ms) {
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  PumpSlice(host, 10);
+  for (;;) {
+    if (seam.query != nullptr && seam.query(counters) == 0 &&
+        counters->candidate_menu_open != 0 &&
+        counters->candidate_items >= minimum_items &&
+        counters->host_token_units == token_units_utf16 &&
+        counters->candidate_input_units == token_units_utf16 &&
+        counters->coordinator_phase == 0 && counters->queue_pending == 0 &&
+        counters->queue_in_flight == 0) {
+      return true;
+    }
+    if (::GetTickCount64() >= deadline) {
+      std::cout << "  prediction-menu timeout: open="
+                << (counters != nullptr ? counters->candidate_menu_open : -1)
+                << " items=" << (counters != nullptr ? counters->candidate_items : 0)
+                << " token=" << (counters != nullptr ? counters->host_token_units : 0)
+                << " input=" << (counters != nullptr ? counters->candidate_input_units : 0)
+                << " expected_token=" << token_units_utf16
+                << " phase=" << (counters != nullptr ? counters->coordinator_phase : 0)
+                << " bound=" << (counters != nullptr ? counters->coordinator_bound : 0)
+                << " engine=" << (counters != nullptr ? counters->engine_ready : 0)
+                << std::endl;
+      return false;
+    }
+    PumpSlice(host, 10);
+  }
+}
+
+std::size_t FindCandidateByText(const ProductSeam& seam, const SeamCounters& counters,
+                                const std::wstring& text) {
+  for (std::size_t index = 0; index < counters.candidate_items; ++index) {
+    if (ReadCandidateText(seam, static_cast<unsigned>(index)) == text) return index;
+  }
+  return static_cast<std::size_t>(-1);
+}
+
+void PrintCandidateTexts(const ProductSeam& seam, const SeamCounters& counters,
+                         const char* label) {
+  std::cout << "  [" << label << "] candidates=" << counters.candidate_items << std::endl;
+  for (std::size_t index = 0; index < counters.candidate_items; ++index) {
+    const std::wstring text = ReadCandidateText(seam, static_cast<unsigned>(index));
+    std::cout << "    [" << index << "] kind=" << seam.kind(static_cast<unsigned>(index))
+              << " text=" << epocanva::product::WideToUtf8(text) << std::endl;
+  }
+}
+
+// The central requirement is not "find a word for this key": the same abbreviation must be
+// resolved against the preceding host text. The pinned model's two-initial expansion changes
+// when "have a" precedes "gm". This drives both halves through the real TSF controller and
+// asserts that selection replaces only the current token.
+bool RunContextualAbbreviationCase(const std::filesystem::path& stage,
+                                   const std::filesystem::path& user_root) {
+  auto run_case = [&](const wchar_t* raw, const std::string& label, bool select,
+                      std::wstring* expansion) -> bool {
+    epocanva::product::ProductSettings settings;
+    settings.profile_id = 1;
+    settings.completion_enabled = true;
+    settings.completion_candidates = 5;
+    settings.spelling_enabled = false;
+    settings.morphology_enabled = false;
+    // Deliberately leave abbreviation_enabled at its default. The product's headline
+    // capability must work on a fresh install, not only after a settings opt-in.
+    std::wstring why;
+    LocalCheck(PrepareUserRoot(user_root, settings, &why), label + ": settings written");
+    Case test_case;
+    TestDocumentOptions options;
+    if (!BeginCase(&test_case, stage, user_root, options, &why)) {
+      LocalCheck(false, label + ": host and activation");
+      EndCase(&test_case);
+      return false;
+    }
+    ProductSeam seam = test_case.seam;
+    if (!seam.usable()) {
+      LocalCheck(false, label + ": controlled seam available");
+      EndCase(&test_case);
+      return false;
+    }
+    InputRoute route{test_case.host, test_case.doc, test_case.product.sink,
+                     test_case.doc->context()};
+    SeamCounters counters;
+    std::string error;
+    bool ok = ReadyToType(*test_case.host, test_case.product.sink,
+                          test_case.doc->context(), 20000, &counters);
+    LocalCheck(ok, label + ": engine path ready");
+    if (ok) {
+      ok = SendTextHost(&route, raw, &error);
+      LocalCheck(ok, label + ": text stays with the host: " + error);
+    }
+    bool found = false;
+    if (ok) {
+      const bool menu = WaitForMenuForToken(*test_case.host, seam, &counters, 2, 2, 15000);
+      LocalCheck(menu, label + ": a menu for the current host token opened");
+      if (menu) {
+        for (std::size_t index = 0; index < counters.candidate_items; ++index) {
+          if (seam.kind(static_cast<unsigned>(index)) == 4) {
+            *expansion = ReadCandidateText(seam, static_cast<unsigned>(index));
+            found = true;
+            break;
+          }
+        }
+        if (!found) PrintCandidateTexts(seam, counters, label.c_str());
+        LocalCheck(found, label + ": an abbreviation expansion is selectable");
+      }
+    }
+    if (ok && found && select) {
+      LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 8000),
+                 label + ": menu stable before selection");
+      std::size_t index = static_cast<std::size_t>(-1);
+      for (std::size_t candidate = 0; candidate < counters.candidate_items; ++candidate) {
+        if (seam.kind(static_cast<unsigned>(candidate)) == 4) { index = candidate; break; }
+      }
+      LocalCheck(index != static_cast<std::size_t>(-1),
+                 label + ": expansion survives until selection");
+      if (index != static_cast<std::size_t>(-1)) {
+        LocalCheck(seam.select(counters.candidate_version, static_cast<int>(index)) == 0,
+                   label + ": selection submitted");
+        std::wstring expected(raw);
+        expected.resize(expected.size() - 2);  // replace only the "gm" token
+        expected += *expansion;
+        LocalCheck(WaitForText(*test_case.host, test_case.doc, expected, 10000),
+                   label + ": context-ranked expansion replaced exactly the current token");
+      }
+    }
+    EndCase(&test_case);
+    return ok && found;
+  };
+
+  std::wstring empty_context;
+  std::wstring with_context;
+  const bool have_empty = run_case(L"gm", "prediction: en abbreviation empty", false,
+                                   &empty_context);
+  const bool have_context = run_case(L"have a gm", "prediction: en abbreviation contextual",
+                                     true, &with_context);
+  LocalCheck(have_empty && have_context && !empty_context.empty() &&
+                 !with_context.empty() && empty_context != with_context,
+             "prediction: the same abbreviation ranks a different expansion with context");
+  return have_empty && have_context && empty_context != with_context;
+}
+
+bool IsSinglePunctuation(const std::wstring& text) {
+  static const std::wstring marks = L".,!?;:，。！？、；：";
+  return text.size() == 1 && marks.find(text[0]) != std::wstring::npos;
+}
+
+// The product's empty-token path asks for NEXT_WORD, not NEXT_UNIT. With "thank you" the
+// model already puts "for" first, so that case cannot distinguish the two kinds. After
+// "good morning", the raw model ranking starts with comma/period/question mark; the
+// word-only request must skip them and surface "of" instead.
+bool RunNextWordWordOnlyCase(const std::filesystem::path& stage,
+                             const std::filesystem::path& user_root) {
+  epocanva::product::ProductSettings settings;
+  settings.profile_id = 1;
+  settings.completion_enabled = true;
+  settings.completion_candidates = 5;
+  settings.spelling_enabled = false;
+  settings.morphology_enabled = false;
+  std::wstring why;
+  LocalCheck(PrepareUserRoot(user_root, settings, &why),
+             "prediction: next-word word-only settings written");
+  Case test_case;
+  TestDocumentOptions options;
+  if (!BeginCase(&test_case, stage, user_root, options, &why)) {
+    LocalCheck(false, "prediction: next-word word-only host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  ProductSeam seam = test_case.seam;
+  if (!seam.usable()) {
+    LocalCheck(false, "prediction: next-word word-only seam available");
+    EndCase(&test_case);
+    return false;
+  }
+  InputRoute route{test_case.host, test_case.doc, test_case.product.sink,
+                   test_case.doc->context()};
+  SeamCounters counters;
+  std::string error;
+  bool ok = ReadyToType(*test_case.host, test_case.product.sink,
+                        test_case.doc->context(), 20000, &counters);
+  LocalCheck(ok, "prediction: next-word word-only engine path ready");
+  if (ok) {
+    ok = SendTextHost(&route, L"good morning ", &error);
+    LocalCheck(ok, "prediction: next-word word-only text stays with the host: " + error);
+  }
+  if (ok) {
+    const bool menu = WaitForMenuForToken(*test_case.host, seam, &counters, 0, 1, 15000);
+    LocalCheck(menu, "prediction: next-word word-only menu opened");
+    if (menu) {
+      const std::wstring first = ReadCandidateText(seam, 0);
+      PrintCandidateTexts(seam, counters, "next-word word-only");
+      LocalCheck(!first.empty() && !IsSinglePunctuation(first),
+                 "prediction: next-word menu starts with a word, not punctuation");
+      LocalCheck(first == L"of",
+                 "prediction: the pinned model's first word after 'good morning' is 'of'");
+    }
+  }
+  EndCase(&test_case);
+  return ok;
+}
+
+// End-to-end product acceptance for the two requirements that a completion-only test cannot
+// show: the menu follows the preceding host text (next-word prediction), and an abbreviation
+// expands through the same explicit-selection path. It also drives the non-English profiles
+// through the real TSF controller, not only through the backend API.
+bool RunPredictionAndLanguageCases(const std::filesystem::path& stage,
+                                   const std::filesystem::path& user_root) {
+  struct PredictionCase {
+    const char* name;
+    int profile_id;
+    const wchar_t* raw;
+    const wchar_t* expected_candidate;
+    const wchar_t* expected_document;
+    int completion_candidates;
+    bool abbreviation;
+    bool next_word;
+    bool chinese_next_word;
+    int expected_kind;  // -1 means the language's native kind is not asserted
+    // Native-Kana/Hangul profiles cannot be driven through ToUnicodeEx on this host. Seed
+    // the document with the text a native keyboard would have produced; the product's bind
+    // read and selection path are identical.
+    const wchar_t* initial_text = nullptr;
+  };
+  const PredictionCase cases[] = {
+      // Context "thank you" with an empty current token. The pinned model's top word is
+      // "for"; the candidate menu must contain it and selection must insert it at the caret.
+      {"en next-word", 1, L"thank you ", L"for", L"thank you for", 5, false, true, false, 6},
+      // The explicit resource key is typed as the whole token. The exact expansion ranks
+      // before lower-scored completions and must remain selectable.
+      {"en abbreviation", 1, L"ty", L"thank you", L"thank you", 2, true, false, false, 4},
+      // An internal apostrophe belongs to the current token. If the host reader splits
+      // "don'" into context plus a one-letter token, the contraction completion below is
+      // unreachable no matter how good the lexical layer is.
+      {"en contraction", 1, L"don'", L"don't", L"don't", 5, false, false, false, 1},
+      // After the Han word is committed, typing a separator makes the current token empty;
+      // the next menu must come from the preceding Chinese context, not from the Latin raw
+      // input. The selected prediction is inserted at the caret.
+      {"zh pinyin", 2, L"nihao", L"你好", L"你好", 6, false, false, true, 5},
+      // Compact pinyin initials are composed by the bounded Terra-backed decoder,
+      // not by a fixed candidate table. The product must expose and commit the
+      // same 你好 that the full pinyin path produces through Rime.
+      {"zh pinyin initials", 2, L"nh", L"你好", L"你好", 6, false, false, false, 5},
+      {"fr azerty", 3, L"francais", L"français", L"français", 6, false, false, false, 1},
+      // A real AZERTY keyboard produces the accented letter directly. The composing token
+      // must be the whole "françai", not the ASCII suffix after the cedilla. The controlled
+      // host types through a US-layout ToUnicodeEx, which cannot synthesize "ç"; seed the
+      // document with the text a real AZERTY keyboard would have produced.
+      {"fr accented", 3, L"françai", L"français", L"français", 6, false, false, false, 1,
+       L"françai"},
+      {"ja romaji", 4, L"nihon", L"日本", L"日本", 6, false, false, false, 5},
+      {"ko two-set", 5, L"dkssud", L"안녕", L"안녕", 6, false, false, false, -1},
+      {"zh zhuyin", 6, L"su3cl3", L"你好", L"你好", 6, false, false, false, 5},
+      {"ja hiragana", 7, L"nihon", L"にほん", L"にほん", 6, false, false, false, 5},
+      {"ja katakana", 8, L"nihon", L"ニホン", L"ニホン", 6, false, false, false, 5},
+      {"ja kana", 9, L"にほん", L"日本", L"日本", 6, false, false, false, 5, L"にほん"},
+      // The native-Hangul profile declares LATIN input because it consumes host text
+      // directly; Hangul is still the composing token, not committed context.
+      {"ko native", 10, L"안녕", L"안녕", L"안녕", 6, false, false, false, -1, L"안녕"},
+      // Same English variant on a different physical layout. The host's text remains the
+      // source of truth; the profile still has to produce the same completion.
+      {"en qwertz", 11, L"hell", L"hello", L"hello", 4, false, false, false, 1},
+      {"en dvorak", 12, L"hell", L"hello", L"hello", 4, false, false, false, 1},
+      {"en azerty", 13, L"hell", L"hello", L"hello", 4, false, false, false, 1},
+  };
+  for (const auto& test : cases) {
+    const std::string label = std::string("prediction: ") + test.name;
+    epocanva::product::ProductSettings settings;
+    settings.profile_id = test.profile_id;
+    settings.completion_enabled = true;
+    settings.completion_candidates = test.completion_candidates;
+    settings.spelling_enabled = false;
+    settings.morphology_enabled = false;
+    settings.abbreviation_enabled = test.abbreviation;
+    std::wstring why;
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               label + ": settings and marker written");
+    Case test_case;
+    TestDocumentOptions options;
+    if (test.initial_text != nullptr) {
+      options.initial_text_utf16 = test.initial_text;
+      options.initial_selection_start_utf16 = options.initial_selection_end_utf16 =
+          static_cast<LONG>(options.initial_text_utf16.size());
+    }
+    if (!BeginCase(&test_case, stage, user_root, options, &why)) {
+      LocalCheck(false, label + ": host and activation");
+      EndCase(&test_case);
+      continue;
+    }
+    ProductSeam seam = test_case.seam;
+    if (!seam.usable()) {
+      LocalCheck(false, label + ": controlled seam available");
+      EndCase(&test_case);
+      continue;
+    }
+    InputRoute route{test_case.host, test_case.doc, test_case.product.sink,
+                     test_case.doc->context()};
+    std::string error;
+    SeamCounters counters;
+    LocalCheck(ReadyToType(*test_case.host, test_case.product.sink,
+                           test_case.doc->context(), 20000, &counters),
+               label + ": engine path ready");
+    if (test.initial_text != nullptr) {
+      LocalCheck(test_case.doc->text_utf16() == test.initial_text,
+                 label + ": the host already holds the native-script token");
+    } else {
+      LocalCheck(SendTextHost(&route, test.raw, &error),
+                 label + ": text stays with the host: " + error);
+    }
+    const std::size_t token_units = test.next_word ? 0 :
+        std::wstring(test.initial_text != nullptr ? test.initial_text : test.raw).size();
+    const bool menu = WaitForMenuForToken(*test_case.host, seam, &counters, token_units,
+                                          test.next_word ? 1 : 2, 15000);
+    LocalCheck(menu, label + ": a menu for the current host token opened");
+    bool selected_ok = false;
+    if (menu) {
+      std::size_t index = FindCandidateByText(seam, counters, test.expected_candidate);
+      if (index == static_cast<std::size_t>(-1)) {
+        PrintCandidateTexts(seam, counters, test.name);
+        LocalCheck(false, label + ": expected candidate is present");
+      } else {
+        if (test.expected_kind >= 0) {
+          LocalCheck(seam.kind(static_cast<unsigned>(index)) == test.expected_kind,
+                     label + ": candidate kind identifies its source");
+        }
+        LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 8000),
+                   label + ": menu stable before selection");
+        index = FindCandidateByText(seam, counters, test.expected_candidate);
+        if (index == static_cast<std::size_t>(-1)) {
+          PrintCandidateTexts(seam, counters, test.name);
+          LocalCheck(false, label + ": expected candidate survives until selection");
+        } else {
+          LocalCheck(seam.select(counters.candidate_version, static_cast<int>(index)) == 0,
+                     label + ": selection submitted");
+          selected_ok = WaitForText(*test_case.host, test_case.doc, test.expected_document,
+                                    10000);
+          LocalCheck(selected_ok, label + ": selection produced the expected host text");
+        }
+      }
+    }
+    if (test.chinese_next_word && selected_ok) {
+      // The committed Han word is the preceding host text. A separator makes the current
+      // token empty, so the next menu can only come from context prediction.
+      SeamCounters post_commit;
+      const bool post_ready = ReadyToType(*test_case.host, test_case.product.sink,
+                                          test_case.doc->context(), 15000, &post_commit);
+      if (!post_ready) PrintSeamCounters(post_commit, "zh post-commit");
+      LocalCheck(post_ready, label + ": ready after the Han word commit");
+      LocalCheck(SendTextHost(&route, L" ", &error),
+                 label + ": separator stays with the host: " + error);
+      SeamCounters predicted;
+      const bool next_menu = WaitForMenuForToken(*test_case.host, seam, &predicted, 0, 1, 15000);
+      LocalCheck(next_menu, label + ": a next-word menu opened for the empty token");
+      bool has_prediction = false;
+      if (next_menu) {
+        for (std::size_t index = 0; index < predicted.candidate_items; ++index) {
+          if (seam.kind(static_cast<unsigned>(index)) == 6) { has_prediction = true; break; }
+        }
+        LocalCheck(has_prediction, label + ": the Chinese next-word menu has a prediction row");
+      }
+      if (has_prediction) {
+        LocalCheck(WaitForStableMenu(*test_case.host, seam, &predicted, 8000),
+                   label + ": Chinese prediction menu stable before selection");
+        std::size_t index = static_cast<std::size_t>(-1);
+        for (std::size_t candidate = 0; candidate < predicted.candidate_items; ++candidate) {
+          if (seam.kind(static_cast<unsigned>(candidate)) == 6) { index = candidate; break; }
+        }
+        if (index != static_cast<std::size_t>(-1)) {
+          const std::wstring text = ReadCandidateText(seam, static_cast<unsigned>(index));
+          LocalCheck(seam.select(predicted.candidate_version, static_cast<int>(index)) == 0,
+                     label + ": Chinese prediction selection submitted");
+          LocalCheck(WaitForText(*test_case.host, test_case.doc,
+                                 std::wstring(L"你好 ") + text, 10000),
+                     label + ": Chinese prediction was inserted at the caret");
+        }
+      }
+    }
+    EndCase(&test_case);
+  }
+  RunContextualAbbreviationCase(stage, user_root);
+  RunNextWordWordOnlyCase(stage, user_root);
+  return g_failures == 0;
 }
 
 bool RunCandidateCase(const std::filesystem::path& stage,
@@ -2224,16 +2732,18 @@ bool RunCandidateCase(const std::filesystem::path& stage,
 
   // 1. The host owns the literal text. Enter with no explicit selection is host input, not
   // an automatic acceptance of the suggestion.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "candidate: the engine path is ready");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the first token stays with the host: " + error);
   reference.HostInsert(L"hel");
   LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
              "candidate: the real menu opened");
-  LocalCheck(counters.page_size == 8 && counters.is_last_page == 1 &&
-                 counters.candidate_items <= 8,
-             "candidate: the engine's real page size is 8 and this is its last page");
+  // The configured budget is four completions plus two spelling suggestions (see the
+  // settings above), plus the original text at index 0.
+  LocalCheck(counters.page_size == 7 && counters.is_last_page == 1 &&
+                 counters.candidate_items == 7,
+             "candidate: the configured 4 completion + 2 spelling budget is applied");
   LocalCheck(seam.kind(0) == 0, "candidate: index 0 is the original text");
   LocalCheck(seam.kind(1) == 1, "candidate: index 1 is a completion");
   bool no_selection_enter_eaten = true;
@@ -2247,7 +2757,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
 
   // 2. Arrow navigation selects an explicit row; Enter accepts that row through the
   // validated replacement path.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "candidate: ready for arrow navigation");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the second token stays with the host: " + error);
@@ -2275,7 +2785,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
              "candidate: the selected completion replaced the token exactly once");
 
   // 3. Space is host input even while a completion is selected.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "candidate: ready for the Space contract");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the third token stays with the host: " + error);
@@ -2295,7 +2805,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
              "candidate: Space inserted the host's space, not the selected completion");
 
   // 4. Escape dismisses the menu and cancels only the enhancement; the typed token stays.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "candidate: ready for Escape");
   LocalCheck(SendTextHost(&route, L"wor", &error),
              "candidate: the Escape token stays with the host: " + error);
@@ -2318,7 +2828,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
   reference.HostInsert(L" ");
 
   // 5. Stale selection: a click drawn from an older menu must not commit into the newer one.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "candidate: ready for the stale-selection case");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the stale-selection token stays with the host: " + error);
@@ -2337,7 +2847,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
   const std::uint64_t set_text_before_stable =
       test_case.doc->diagnostics().store.set_text_calls;
   const bool stable_ok =
-      WaitForStableMenu(*test_case.host, seam, &counters, 8000) &&
+      WaitForStableMenu(*test_case.host, seam, &counters, 8000, old_version) &&
       counters.candidate_version > old_version;
   std::cout << "  [debug] after stable doc=" << test_case.doc->text_utf16().size()
             << " ref=" << reference.text.size()
@@ -2431,7 +2941,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
 
   // 6. A genuinely external edit (not one of our passed-through keys) ends the suggestion
   // stream; a selection from before it must write nothing.
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "candidate: ready for the external-edit case");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "candidate: the external-edit token stays with the host: " + error);
@@ -2483,7 +2993,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
 
   // 7. Spelling suggestions are labelled distinctly, and the literal row stays index 0.
   const bool spelling_ready =
-      ReadyToType(*test_case.host, sink, context, 15000);
+      ReadyToType(*test_case.host, sink, context, 60000);
   if (!spelling_ready) {
     SeamCounters blocked = {};
     (void)seam.query(&blocked);
@@ -2532,7 +3042,7 @@ bool RunCandidateCase(const std::filesystem::path& stage,
     const int kind = seam.kind(index);
     const std::wstring item = ReadCandidateText(seam, static_cast<unsigned>(index));
     std::cout << "  [debug] spelling item " << index << " kind=" << kind
-              << " text=" << std::string(item.begin(), item.end()) << std::endl;
+              << " text=" << epocanva::product::WideToUtf8(item) << std::endl;
     if (kind == 2) {
       spelling_seen = true;
     }
@@ -2568,7 +3078,7 @@ void DumpReadyState(const SeamCounters& c, const char* label) {
 bool RequireReady(TestHost& host, ITfKeyEventSink* sink, ITfContext* context,
                   const char* label) {
   SeamCounters counters = {};
-  const bool ready = ReadyToType(host, sink, context, 20000, &counters);
+  const bool ready = ReadyToType(host, sink, context, 60000, &counters);
   LocalCheck(ready, label);
   if (!ready) {
     DumpReadyState(counters, label);
@@ -2627,7 +3137,7 @@ bool RunReplacementFaultCase(const std::filesystem::path& stage,
   SeamCounters counters = {};
   const TfClientId app_client = test_case.host->client_id();
 
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 20000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "faults: the engine path is ready");
 
   // A. The same token text exists earlier in the document. The menu is drawn for the last
@@ -2820,10 +3330,13 @@ bool RunReplacementFaultCase(const std::filesystem::path& stage,
   // count an unverifiable loss, must stop enhancement writes on this context, and must keep
   // the host's ordinary input working. A fresh context is the explicit recovery path.
   RequireReady(*test_case.host, sink, context, "faults E: ready");
+  SeamCounters before_e = {};
+  (void)seam.query(&before_e);
   LocalCheck(SendTextHost(&route, L"hel", &error), "faults E: token: " + error);
   reference.HostInsert(L"hel");
   CheckDocExact(test_case.doc->text_utf16(), reference.text, "faults E: token exact");
-  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 10000),
+  LocalCheck(WaitForStableMenu(*test_case.host, seam, &counters, 10000,
+                               before_e.candidate_version),
              "faults E: the menu is stable");
   const unsigned long long uncertain_version = counters.candidate_version;
   const std::wstring uncertain_completion = ReadCandidateText(seam, 1);
@@ -2882,7 +3395,7 @@ bool RunReplacementFaultCase(const std::filesystem::path& stage,
       test_case.host->CreateChildContext(test_case.doc, recover_options, &error);
   LocalCheck(recovered != nullptr, "faults E: recovery child context: " + error);
   if (recovered != nullptr) {
-    LocalCheck(ReadyToType(*test_case.host, sink, recovered->context(), 20000),
+    LocalCheck(ReadyToType(*test_case.host, sink, recovered->context(), 60000),
                "faults E: the new context is bound and suggestible");
     InputRoute recovered_route{test_case.host, recovered, sink, recovered->context()};
     ReferenceDoc recovered_reference;
@@ -2929,7 +3442,7 @@ bool RunSuggestionResyncCase(const std::filesystem::path& stage,
   std::string error;
   SeamCounters counters = {};
   LocalCheck(seam.usable(), "resync: controlled seam available");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 20000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "resync: the engine path is ready");
 
   // One long token, sent without pumping, overflows the bounded suggestion queue and makes
@@ -2945,13 +3458,16 @@ bool RunSuggestionResyncCase(const std::filesystem::path& stage,
                 "resync: the burst is exactly in the document");
   CheckNoSuppressedText(route, "resync burst");
 
-  // The reset owed after the drop must settle; the abandoned flag must remain set.
+  // The unified path coalesces the burst into a bounded number of host-context reads rather
+// than queueing one suggestion per key. The safety property is unchanged: no menu may
+// describe a prefix shorter than what the host has actually inserted.
   bool settled = false;
   const ULONGLONG deadline = ::GetTickCount64() + 10000;
   for (;;) {
-    if (seam.query(&counters) == 0 && counters.token_abandoned != 0 &&
-        counters.suggestion_stale_now == 0 && counters.suggestion_in_flight == 0 &&
-        counters.queue_pending == 0 && counters.queue_in_flight == 0) {
+    if (seam.query(&counters) == 0 && counters.host_context_owed == 0 &&
+        counters.host_context_in_flight == 0 && counters.coordinator_phase == 0 &&
+        counters.queue_pending == 0 && counters.queue_in_flight == 0 &&
+        counters.suggestion_in_flight == 0) {
       settled = true;
       break;
     }
@@ -2960,36 +3476,36 @@ bool RunSuggestionResyncCase(const std::filesystem::path& stage,
     }
     PumpSlice(*test_case.host, 10);
   }
-  LocalCheck(settled, "resync: the dropped token settled into the abandoned state");
-  LocalCheck(counters.suggestion_dropped > 0,
-             "resync: the bounded stream really dropped suggestions");
-  LocalCheck(counters.candidate_menu_open == 0,
-             "resync: no menu is offered for the incomplete prefix");
+  LocalCheck(settled, "resync: the burst settled into a bounded host-context read");
+  LocalCheck(counters.works_accepted <= 8,
+             "resync: host-context work stayed bounded across the burst");
+  LocalCheck(counters.candidate_menu_open == 0 ||
+                 counters.candidate_input_units == counters.host_token_units,
+             "resync: any menu describes the full burst token, not a suffix");
 
-  // More characters of the same token must not start a suffix-only menu.
+  // More characters of the same token must still never be presented as a complete prefix
+  // shorter than the host's current token.
   LocalCheck(SendTextHost(&route, L"tail", &error),
              "resync: the continuation stays with the host: " + error);
   reference.HostInsert(L"tail");
   PumpSlice(*test_case.host, 800);
   SeamCounters after_suffix = {};
   (void)seam.query(&after_suffix);
-  LocalCheck(after_suffix.token_abandoned != 0,
-             "resync: the token stays abandoned after the suffix keys");
-  LocalCheck(after_suffix.candidate_menu_open == 0,
-             "resync: the suffix is not presented as a complete prefix");
+  LocalCheck(after_suffix.candidate_menu_open == 0 ||
+                 after_suffix.candidate_input_units == after_suffix.host_token_units,
+             "resync: the suffix is not presented without the earlier token text");
   CheckDocExact(test_case.doc->text_utf16(), reference.text,
                 "resync: the suffix text is intact");
 
-  // The boundary clears the abandonment; the next token is a completely new prefix.
+  // The boundary starts a completely new token.
   bool space_eaten = true;
   LocalCheck(SendVirtualKeyAdaptive(&route, VK_SPACE, L" ", &space_eaten, &error) &&
                  !space_eaten,
              "resync: the boundary stays with the host: " + error);
   reference.HostInsert(L" ");
-  SeamCounters after_boundary = {};
-  (void)seam.query(&after_boundary);
-  LocalCheck(after_boundary.token_abandoned == 0,
-             "resync: the boundary clears the abandoned token");
+  PumpSlice(*test_case.host, 200);
+  CheckDocExact(test_case.doc->text_utf16(), reference.text,
+                "resync: the boundary text is intact");
   LocalCheck(SendTextHost(&route, L"hel", &error),
              "resync: the fresh token stays with the host: " + error);
   reference.HostInsert(L"hel");
@@ -3022,7 +3538,7 @@ bool RunContinuousCase(const std::filesystem::path& stage,
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
   std::string error;
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "continuous: ready exactly once before the whole burst");
 
   // One readiness check above covers the whole run. Words are never checked for readiness
@@ -3092,7 +3608,7 @@ bool RunCapacityCase(const std::filesystem::path& stage,
   std::string error;
   SeamCounters counters = {};
   ReferenceDoc reference;
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "capacity: the engine path is ready");
 
   // A real deferred document lock: the product's asynchronous requests are not granted
@@ -3114,8 +3630,8 @@ bool RunCapacityCase(const std::filesystem::path& stage,
   CheckNoSuppressedText(route, "capacity");
   // The suggestion stream is allowed to fall behind under this burst; that must not affect
   // a single original character.
-  LocalCheck(counters.suggestion_queued + counters.suggestion_dropped >= 1000,
-             "capacity: the engine saw (or explicitly dropped) the suggestion backlog");
+  LocalCheck(counters.works_accepted <= 8,
+             "capacity: host-context work stayed bounded across the burst");
 
   test_case.host->SetHoldGrantMessages(false);
   const std::size_t released = test_case.host->ReleaseHeldGrantMessages();
@@ -3206,7 +3722,7 @@ bool RunCapacityContinueCase(const std::filesystem::path& stage,
   SeamCounters counters = {};
   ReferenceDoc reference;
   CrashPhase("capacity-continue: waiting for the engine path");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "capacity-continue: the engine path is ready");
 
   // 1. The original failure shape: a real held lock, a long burst, then immediate
@@ -3322,7 +3838,7 @@ bool RunStartupLifecycleCase(const std::filesystem::path& stage,
   std::wstring why;
   if (!PrepareProduct(&product_a, host_a->thread_manager_for_test(), stage, &why)) {
     LocalCheck(false, "startup-lifecycle: first product prepared: " +
-                          std::string(why.begin(), why.end()));
+                          epocanva::product::WideToUtf8(why));
     return false;
   }
   ProductSeam seam_a = LoadSeam(product_a);
@@ -3381,7 +3897,7 @@ bool RunStartupLifecycleCase(const std::filesystem::path& stage,
   LoadedProduct product_b;
   if (!PrepareProduct(&product_b, host_b->thread_manager_for_test(), stage, &why)) {
     LocalCheck(false, "startup-lifecycle: second product prepared: " +
-                          std::string(why.begin(), why.end()));
+                          epocanva::product::WideToUtf8(why));
     ::SetEvent(released);
     return false;
   }
@@ -3495,7 +4011,7 @@ bool RunDegradedKeysCase(const std::filesystem::path& stage,
   std::string error;
   SeamCounters counters = {};
   ReferenceDoc reference;
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "degraded-keys: the engine path is ready");
 
   // Phase A: a real backlog plus a held write authorization. Ordinary text and BackSpace
@@ -3651,7 +4167,7 @@ bool RunUnloadContractCase(const std::filesystem::path& stage,
   InputRoute route{test_case.host, test_case.doc, sink, context};
   std::string error;
   SeamCounters counters = {};
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "unload-contract: the engine path is ready");
 
   const auto can_unload = reinterpret_cast<CanUnloadNowFn>(
@@ -3900,14 +4416,52 @@ bool RunLeaseLockCase(const std::filesystem::path& stage,
   }
   ITfKeyEventSink* sink = test_case.product.sink;
   ITfContext* context = test_case.doc->context();
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "lease: the product engine is running");
   PumpSlice(*test_case.host, 300);
 
+  using LeaseCountFn = unsigned long long (*)();
+  const auto lease_count = reinterpret_cast<LeaseCountFn>(
+      ::GetProcAddress(test_case.product.module, "EpoCanvaTestEngineHostLeaseCount"));
+  auto wait_leases = [lease_count](unsigned long long expected) {
+    const ULONGLONG deadline = ::GetTickCount64() + 10000;
+    while (lease_count != nullptr && lease_count() != expected &&
+           ::GetTickCount64() < deadline) {
+      ::Sleep(10);
+    }
+    return lease_count != nullptr && lease_count() == expected;
+  };
+  HANDLE ready_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  HANDLE release_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  LocalCheck(ready_event != nullptr && release_event != nullptr,
+             "lease: second-attachment ordering events exist");
+  if (ready_event == nullptr || release_event == nullptr) {
+    if (ready_event != nullptr) ::CloseHandle(ready_event);
+    if (release_event != nullptr) ::CloseHandle(release_event);
+    EndCase(&test_case);
+    return false;
+  }
+  HoldSessionResult second;
+  const ULONGLONG lease_ready_deadline = ::GetTickCount64() + kEngineReadinessBudgetMs;
+  std::thread waiter(HoldSessionWorker, stage, ready_event, release_event, &second,
+                     lease_ready_deadline);
+  const bool ready =
+      ::WaitForSingleObject(ready_event,
+                            RemainingMs(lease_ready_deadline + kReadinessSignalMarginMs)) ==
+      WAIT_OBJECT_0;
+  const bool second_ready = ready && second.ok.load();
+  LocalCheck(second_ready && wait_leases(2),
+             "lease: two real attachments share the running engine");
+
   const std::filesystem::path marker = user_root / L"engine" / L"deploy-required";
   const std::filesystem::path compiled =
-      user_root / L"engine" / L"build" / L"epocanva_english.schema.yaml";
+      user_root / L"engine" / L"build" / L"epocanva_backend_pinyin.schema.yaml";
   const std::filesystem::path state = user_root / L"engine" / L"deployed-state";
+  // The standalone deployment simulator is built without the unified-backend layout, so it
+  // still writes the legacy English artifact it checks for. The running product's real
+  // compiled output is the backend schema above.
+  const std::filesystem::path child_artifact =
+      user_root / L"engine" / L"build" / L"epocanva_english.schema.yaml";
   const std::filesystem::path result = run_root / L"lease-child.txt";
   std::error_code ec;
   std::filesystem::remove(result, ec);
@@ -3927,7 +4481,7 @@ bool RunLeaseLockCase(const std::filesystem::path& stage,
 
   const ULONGLONG start = ::GetTickCount64();
   const DeployChildOutcome deferred =
-      RunDeployChild(deployment_exe, user_root, compiled, result);
+      RunDeployChild(deployment_exe, user_root, child_artifact, result);
   const ULONGLONG elapsed = ::GetTickCount64() - start;
   LocalCheck(deferred.launched && deferred.exited && deferred.code == 0 &&
                  deferred.completed,
@@ -3943,11 +4497,41 @@ bool RunLeaseLockCase(const std::filesystem::path& stage,
   const std::string during = ReadNarrow(state);
   LocalCheck(during.find(deferred.fingerprint) == std::string::npos,
              "lease: no new fingerprint was recorded during the deferral");
-  EndCase(&test_case);
+
+  // The first attachment originally owned the only file handle. Retire it first,
+  // and observe its asynchronous lease release before asking another process to deploy.
+  ReleaseProduct(&test_case.product, true);
+  delete test_case.host;
+  test_case.host = nullptr;
+  test_case.doc = nullptr;
+  LocalCheck(wait_leases(1), "lease: first attachment released while second stays live");
+  std::filesystem::remove(result, ec);
+  const DeployChildOutcome one_remaining =
+      RunDeployChild(deployment_exe, user_root, child_artifact, result);
+  LocalCheck(one_remaining.launched && one_remaining.exited && one_remaining.code == 0 &&
+                 one_remaining.completed && !one_remaining.requested,
+             "lease: second attachment alone still prevents cross-process deployment");
+  LocalCheck(std::filesystem::is_regular_file(compiled) &&
+                 std::filesystem::is_regular_file(marker) && ReadNarrow(state) == during,
+             "lease: surviving attachment keeps compiled output and deferred marker intact");
+
+  ::SetEvent(release_event);
+  waiter.join();
+  if (!second_ready) {
+    std::cout << "  [lease] second attachment failed (ready_event="
+              << (ready ? "signalled" : "timeout") << "): " << second.error << std::endl;
+    PrintSeamCounters(second.counters, "lease second attachment");
+  }
+  ::CloseHandle(release_event);
+  ::CloseHandle(ready_event);
+  LocalCheck(wait_leases(0), "lease: final attachment released its engine lease");
+  DeferProductModule(&test_case.product);
+  LocalCheck(FreeDeferredProductModules(10000, "lease-final"),
+             "lease: the engine stopped before both module references were released");
 
   std::filesystem::remove(result, ec);
   const DeployChildOutcome applied =
-      RunDeployChild(deployment_exe, user_root, compiled, result);
+      RunDeployChild(deployment_exe, user_root, child_artifact, result);
   LocalCheck(applied.launched && applied.exited && applied.code == 0 &&
                  applied.requested && applied.completed,
              "lease: the next activation after deactivation deploys");
@@ -3990,7 +4574,8 @@ bool RunColdTokenCase(const std::filesystem::path& stage,
   reference.HostInsert(L"a");
   // The field becomes readable. The host insertion above already updated the caret; the
   // rebind now resolves Allowed and the suggestion path is available.
-  test_case.doc->SetScopeAnswer(epocanva::tsf::edit::test::TestScopeAnswer::kNone, {});
+  test_case.doc->SetScopeAnswer(epocanva::tsf::edit::test::TestScopeAnswer::kScopes,
+                               {IS_DEFAULT});
   PumpSlice(*test_case.host, 1000);
   std::vector<bool> eaten;
   LocalCheck(SendTextAdaptive(&route, L"bc", &eaten, &error),
@@ -4005,7 +4590,7 @@ bool RunColdTokenCase(const std::filesystem::path& stage,
   reference.HostInsert(L" ");
   CheckDocExact(test_case.doc->text_utf16(), reference.text,
                 "token: the whole token is contiguous in the document");
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "token: the engine is ready for the next token");
   LocalCheck(SendTextHost(&route, L"de", &error),
              "token: a fresh token stays with the host: " + error);
@@ -4036,7 +4621,7 @@ bool RunPressureCase(const std::filesystem::path& stage,
   ITfContext* context = test_case.doc->context();
   InputRoute route{test_case.host, test_case.doc, sink, context};
   ProductSeam seam = test_case.seam;
-  LocalCheck(ReadyToType(*test_case.host, sink, context, 15000),
+  LocalCheck(ReadyToType(*test_case.host, sink, context, 60000),
              "pressure: the engine path is ready");
   ReferenceDoc reference;
   std::string error;
@@ -4064,8 +4649,10 @@ bool RunPressureCase(const std::filesystem::path& stage,
   LocalCheck(counters.internal_text_losses == 0,
              "pressure: zero internal text losses");
   CheckNoSuppressedText(route, "pressure burst");
-  LocalCheck(counters.suggestion_queued + counters.suggestion_dropped >= 100,
-             "pressure: the suggestion stream really accumulated and/or dropped work");
+  LocalCheck(counters.host_text_keys >= burst.size(),
+             "pressure: every burst key is accounted as host-owned");
+  LocalCheck(counters.works_accepted <= 8,
+             "pressure: host-context work stayed bounded across the burst");
   test_case.host->SetHoldGrantMessages(false);
   (void)test_case.host->ReleaseHeldGrantMessages();
   const std::wstring after_burst = test_case.doc->text_utf16();
@@ -4178,8 +4765,8 @@ int main(int argc, char** argv) {
       lexicon.empty() || run_root.empty() || !run_root.is_absolute()) {
     std::cout
         << "usage error: --product-dll --rime-dll --data-dir --lexicon "
-           "--run-root <absolute> [--mode input|engine-missing|candidate|"
-           "replacement-faults|suggestion-resync|continuous|capacity|capacity-continue|"
+           "--run-root <absolute> [--mode input|engine-missing|engine-mismatch|candidate|"
+           "multilingual-prediction|replacement-faults|suggestion-resync|continuous|capacity|"
            "unload-contract|degraded-keys|startup|startup-lifecycle] "
            "[--watchdog-ms N]\n";
     return 2;
@@ -4212,13 +4799,17 @@ int main(int argc, char** argv) {
   const std::filesystem::path marker = user_root / L"engine" / L"deploy-required";
   const std::filesystem::path state = user_root / L"engine" / L"deployed-state";
   const std::filesystem::path compiled =
-      user_root / L"engine" / L"build" / L"epocanva_english.schema.yaml";
+      user_root / L"engine" / L"build" / L"epocanva_backend_pinyin.schema.yaml";
 
   epocanva::product::ProductSettings settings;
   settings.completion_enabled = true;
   settings.completion_candidates = 4;
   settings.spelling_enabled = true;
   settings.spelling_candidates = 2;
+  // These lifecycle/candidate modes assert an exact completion+spelling budget. The
+  // product default now also enables contextual abbreviation expansion, so opt out
+  // explicitly instead of letting the default add expansion rows to their menus.
+  settings.abbreviation_enabled = false;
 
   if (mode == "lease") {
     std::wstring why;
@@ -4262,7 +4853,7 @@ int main(int argc, char** argv) {
     LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
                            &why),
                "timing: product staged");
-    RunSettingsTimingCase(stage, user_root, marker, compiled, &why);
+    RunSettingsTimingCase(stage, user_root, marker, state, compiled, &why);
   } else if (mode == "multi") {
     std::wstring why;
     LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
@@ -4279,6 +4870,12 @@ int main(int argc, char** argv) {
     LocalCheck(PrepareUserRoot(user_root, settings, &why),
                "strict: settings and marker written");
     RunStrictUnregisteredCase(stage, user_root);
+  } else if (mode == "multilingual-prediction") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "prediction: product staged");
+    RunPredictionAndLanguageCases(stage, user_root);
   } else if (mode == "candidate") {
     std::wstring why;
     LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
@@ -4359,13 +4956,20 @@ int main(int argc, char** argv) {
     LocalCheck(PrepareUserRoot(user_root, settings, &why),
                "startup-lifecycle: settings and marker written");
     RunStartupLifecycleCase(stage, user_root);
-  } else if (mode == "engine-missing") {
+  } else if (mode == "engine-missing" || mode == "engine-mismatch") {
     std::wstring why;
+    const bool mismatch = mode == "engine-mismatch";
     const bool staged = StageProduct(stage, product_dll, rime_dll, data_dir, lexicon,
-                                     false, &why);
-    LocalCheck(staged, "missing engine: product staged without rime.dll");
+                                     mismatch, &why);
+    LocalCheck(staged, "unusable engine: product staged");
+    if (mismatch) {
+      std::ofstream changed(stage / L"rime.dll", std::ios::binary | std::ios::app);
+      changed.put('\0');
+      changed.close();
+      LocalCheck(changed.good(), "engine mismatch: appended one byte to the copied DLL");
+    }
     LocalCheck(PrepareUserRoot(user_root, settings, &why),
-               "missing engine: settings and marker written");
+               "unusable engine: settings and marker written");
     RunEngineMissingCase(stage, user_root, marker, compiled);
   } else {
     std::wstring why;

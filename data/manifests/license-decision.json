@@ -1,0 +1,26 @@
+{
+  "format": 1,
+  "record_id": "user-license-and-acceptance-2026-11-02",
+  "record_kind": "user-instruction-scope",
+  "decision_source": "Explicit user instruction for phase 1: AGPL-3.0-only; internal unsigned acceptance first.",
+  "project_license": "AGPL-3.0-only",
+  "project_scope": "EpoCanva-owned source and build/control scripts; third-party code and word-list data retain their own terms and notices.",
+  "acceptance_profile": "internal-unsigned",
+  "distribution_policy": "internal-only",
+  "public_distribution": "not-authorized-by-this-record",
+  "lexicon_jurisdictions": "not-decided-by-this-record",
+  "signature_claim": "none",
+  "license_text": {
+    "path": "LICENSE",
+    "source_url": "https://www.gnu.org/licenses/agpl-3.0.txt",
+    "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+    "bytes": 34523,
+    "verification": "Fetched twice over HTTPS from GNU with HTTP 200; byte comparison and SHA-256 agreed. Verbatim full text, including application guidance. No upstream signature or independent published checksum was asserted."
+  },
+  "limits": [
+    "This records the user's license selection and acceptance profile, not an artifact-specific owner/legal release approval.",
+    "No public-distribution, word-list jurisdiction, host-test, installer-test or signature record is created by this decision.",
+    "Internal unsigned acceptance omits only the signing requirement; functional, data-integrity, corresponding-source, real-host and installation acceptance remain mandatory.",
+    "Release-process restrictions do not add restrictions to recipients' rights under AGPL-3.0-only."
+  ]
+}

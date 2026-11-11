@@ -50,6 +50,7 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+enable_testing()
 
 if(NOT MSVC)
   message(FATAL_ERROR
@@ -63,6 +64,11 @@ if(NOT CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
 endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+if(EPOCANVA_BUILD_PRODUCT)
+  get_filename_component(_product_repo_root "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+  add_compile_options(/experimental:deterministic "/pathmap:${_product_repo_root}=EpoCanva")
+  add_link_options("/PDBALTPATH:epocanva.pdb")
+endif()
 
 set(_bridge_definitions
   _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
@@ -148,6 +154,9 @@ target_link_libraries(epocanva_engine_keyboard_adapters
 set(EPOCANVA_RIME_DLL
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/librime-english/rime/install/lib/rime.dll"
     CACHE FILEPATH "Absolute path of the ENGLISH rime.dll the tests must load")
+# Normalize build-owned path expressions before passing them to the strict runtime
+# boundary. Runtime callers themselves may not submit dot/parent components.
+get_filename_component(EPOCANVA_RIME_DLL "${EPOCANVA_RIME_DLL}" ABSOLUTE)
 if(NOT EXISTS "${EPOCANVA_RIME_DLL}")
   message(FATAL_ERROR
     "EPOCANVA_RIME_DLL does not exist: ${EPOCANVA_RIME_DLL}\n"
@@ -159,6 +168,9 @@ set(EPOCANVA_BASELINE_RIME_DLL
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/librime-baseline/rime/install/lib/rime.dll"
     CACHE FILEPATH
   "Optional unmodified rime.dll used to prove the missing-module failure; empty/absent skips")
+if(NOT EPOCANVA_BASELINE_RIME_DLL STREQUAL "")
+  get_filename_component(EPOCANVA_BASELINE_RIME_DLL "${EPOCANVA_BASELINE_RIME_DLL}" ABSOLUTE)
+endif()
 if(EXISTS "${EPOCANVA_BASELINE_RIME_DLL}")
   set(_bridge_baseline_dll "${EPOCANVA_BASELINE_RIME_DLL}")
   message(STATUS "  baseline rime.dll    : ${_bridge_baseline_dll}")
@@ -257,6 +269,31 @@ endif()
 # The product DLL reuses the same TSF sources and the already built executor; the EXE
 # links only the product state/diagnostics libraries and Win32.
 if(EPOCANVA_BUILD_PRODUCT)
+  if(NOT TARGET epocanva_strict)
+    add_library(epocanva_strict INTERFACE)
+    target_compile_features(epocanva_strict INTERFACE cxx_std_17)
+    target_compile_options(epocanva_strict INTERFACE ${_bridge_options})
+    target_compile_definitions(epocanva_strict INTERFACE ${_bridge_definitions})
+  endif()
+  set(EPOCANVA_EN_BUILD_STANDALONE ON)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../engine/languages/en"
+                   "${CMAKE_CURRENT_BINARY_DIR}/english_core")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/english_core"
+                   "${CMAKE_CURRENT_BINARY_DIR}/english_core_tests")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/learning_core"
+                   "${CMAKE_CURRENT_BINARY_DIR}/learning_core_tests")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/learning_repository"
+                   "${CMAKE_CURRENT_BINARY_DIR}/learning_repository_tests")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/engine_abi"
+                   "${CMAKE_CURRENT_BINARY_DIR}/engine_abi_tests")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/chinese_core"
+                   "${CMAKE_CURRENT_BINARY_DIR}/chinese_core_tests")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/french_core"
+                   "${CMAKE_CURRENT_BINARY_DIR}/french_core_tests")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/composition_core"
+                   "${CMAKE_CURRENT_BINARY_DIR}/composition_core_tests")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/language_packages"
+                   "${CMAKE_CURRENT_BINARY_DIR}/language_packages_tests")
   add_subdirectory(
     "${CMAKE_CURRENT_SOURCE_DIR}/../product"
     "${CMAKE_CURRENT_BINARY_DIR}/product")

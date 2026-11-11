@@ -62,11 +62,40 @@ endif()
 # engine/languages/en/CMakeLists.txt is the single definition of that source list.
 set(EPOCANVA_EN_BUILD_STANDALONE ON)
 add_subdirectory(engine/languages/en)
+add_subdirectory(engine/locale)
+add_subdirectory(engine/candidates)
+add_subdirectory(engine/fusion)
+add_subdirectory(engine/language_packages)
+add_subdirectory(engine/data_store)
+add_subdirectory(engine/ranking)
 
 if(EPOCANVA_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests/infrastructure)
   add_subdirectory(tests/english_core)
+  add_subdirectory(tests/learning_core)
+  add_subdirectory(tests/chinese_core)
+  add_subdirectory(tests/french_core)
+  add_subdirectory(tests/composition_core)
+  add_subdirectory(tests/language_packages)
+  add_subdirectory(tests/locale_registry)
+  add_subdirectory(tests/candidate_contract)
+  add_subdirectory(tests/fusion)
+  add_subdirectory(tests/capability_matrix)
+  add_subdirectory(tests/candidate_evaluation)
+  add_subdirectory(tests/ci_gate)
+  add_subdirectory(tests/adaptive_ranking)
+  if(WIN32)
+    add_subdirectory(tests/ci_inputs_lock)
+    add_subdirectory(tests/learning_repository)
+  endif()
+  # Aggregate target of every native binary the contract gate needs. The CI
+  # workflow builds this target instead of hand-maintaining a list; a contract
+  # test that needs another native binary must add it here, and the inventory
+  # gate fails until its test is registered and labelled contract-gate.
+  add_custom_target(epocanva_contract_gate_tests
+    DEPENDS epocanva_locale_registry_tests epocanva_candidate_contract_tests
+      epocanva_fusion_tests)
 endif()
 
 message(STATUS "EpoCanva configure summary")

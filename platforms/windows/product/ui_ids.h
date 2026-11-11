@@ -7,15 +7,19 @@ namespace ui {
 
 inline constexpr wchar_t kSettingsWindowClass[] = L"EpoCanvaSettingsWindow";
 inline constexpr wchar_t kSettingsWindowTitle[] =
-    L"EpoCanva English Alpha - Settings";
+    L"EpoCanva Multilingual Alpha - Settings";
 
 enum ControlId : int {
   kSummary = 1001,
   kStatusEdit = 1002,
+  kProfileChoice = 1003,
   kCompletionEnabled = 1010,
   kCompletionCount = 1011,
   kSpellingEnabled = 1020,
   kSpellingCount = 1021,
+  kMorphologyEnabled = 1022,
+  kAbbreviationEnabled = 1023,
+  kTwoEditSpellingEnabled = 1024,
   kCandidateDisplayHost = 1025,
   kCandidateDisplayAlwaysSelf = 1026,
   kOpenInstall = 1030,
@@ -28,6 +32,9 @@ enum ControlId : int {
   kPathUser = 1061,
   kPathSettings = 1062,
   kPathEngine = 1063,
+  kLearningEnabled = 1070,
+  kClearLearning = 1071,
+  kPathLearning = 1072,
 };
 
 }  // namespace ui

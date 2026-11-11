@@ -22,6 +22,11 @@ using ::epocanva::tsf::EngineLeaseStatus;
 
 }  // namespace
 
+struct ProductEngineLeaseLock {
+  ~ProductEngineLeaseLock() { ReleaseEngineLeaseLock(handle); }
+  void* handle = nullptr;
+};
+
 ProductEngineBootstrap::StartOutcome ProductEngineBootstrap::DefaultStartImpl() {
   StartOutcome outcome;
   std::wstring why;
@@ -49,15 +54,18 @@ ProductEngineBootstrap::StartOutcome ProductEngineBootstrap::DefaultStartImpl() 
     outcome.why = L"the engine started but the deployment did not complete: " + why;
     return outcome;
   }
-  void* lease_lock = transaction.TakeLeaseLock();
-  if (lease_lock == nullptr) {
+  // Allocate ownership before transferring the handle. If allocation throws,
+  // lease unwinding stops the engine before the transaction releases its lock.
+  auto lock_owner = std::make_shared<ProductEngineLeaseLock>();
+  auto attachment = std::make_shared<ProductEngineAttachment>();
+  lock_owner->handle = transaction.TakeLeaseLock();
+  if (lock_owner->handle == nullptr) {
     (void)lease.Release();
     outcome.why = L"the engine started without a user lease lock";
     return outcome;
   }
-  auto attachment = std::make_shared<ProductEngineAttachment>();
   attachment->lease_ = std::move(lease);
-  attachment->lease_lock_ = lease_lock;
+  attachment->lease_lock_ = std::move(lock_owner);
   outcome.ok = true;
   outcome.attachment = std::move(attachment);
   return outcome;
@@ -81,17 +89,14 @@ ProductEngineAttachment::ProductEngineAttachment() = default;
 ProductEngineAttachment::~ProductEngineAttachment() { Release(); }
 
 ProductEngineAttachment::ProductEngineAttachment(ProductEngineAttachment&& other) noexcept
-    : lease_(std::move(other.lease_)), lease_lock_(other.lease_lock_) {
-  other.lease_lock_ = nullptr;
-}
+    : lease_(std::move(other.lease_)), lease_lock_(std::move(other.lease_lock_)) {}
 
 ProductEngineAttachment& ProductEngineAttachment::operator=(
     ProductEngineAttachment&& other) noexcept {
   if (this != &other) {
     Release();
     lease_ = std::move(other.lease_);
-    lease_lock_ = other.lease_lock_;
-    other.lease_lock_ = nullptr;
+    lease_lock_ = std::move(other.lease_lock_);
   }
   return *this;
 }
@@ -106,10 +111,9 @@ void ProductEngineAttachment::Release() {
   if (lease_.valid()) {
     (void)lease_.Release();
   }
-  if (lease_lock_ != nullptr) {
-    ::CloseHandle(static_cast<HANDLE>(lease_lock_));
-    lease_lock_ = nullptr;
-  }
+  // The last owner runs only after the last lease's stop/join has returned.
+  // Earlier attachments cannot release the remaining attachments' file lock.
+  lease_lock_.reset();
 }
 
 void ReleaseAttachmentAsync(std::shared_ptr<ProductEngineAttachment> attachment) {
@@ -138,6 +142,7 @@ struct ProductEngineBootstrap::Impl {
   bool starting = false;
   bool engine_running = false;
   std::shared_ptr<ProductEngineAttachment> pending;
+  std::weak_ptr<ProductEngineLeaseLock> runtime_lock;
   std::unordered_map<std::uint64_t, std::function<void()>> waiters;
   std::uint64_t next_waiter = 1;
   std::uint64_t attempts = 0;
@@ -165,6 +170,8 @@ struct ProductEngineBootstrap::Impl {
         state = EngineBootstrapState::kReady;
         failure.clear();
         pending = std::move(outcome.attachment);
+        runtime_lock = pending != nullptr ? pending->lease_lock_
+                                          : std::weak_ptr<ProductEngineLeaseLock>{};
         engine_running = outcome.engine_running || pending != nullptr;
       } else {
         state = EngineBootstrapState::kFailed;
@@ -294,6 +301,19 @@ bool ProductEngineBootstrap::AcquireRunning(
     return false;
   }
   attachment->reset();
+  // Take a strong reference before consulting/acquiring the engine lease. A first
+  // attachment can leave concurrently; this reference keeps its shared lock alive.
+  std::shared_ptr<ProductEngineLeaseLock> lock_owner;
+  {
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    lock_owner = impl_->runtime_lock.lock();
+  }
+  if (!lock_owner) {
+    if (why != nullptr) {
+      *why = L"the running engine has no shared deployment lock owner";
+    }
+    return false;
+  }
   EngineHostConfig config;
   if (!::epocanva::tsf::GetEngineHostConfig(&config) ||
       !EngineHostBroker::Instance().IsRunningFor(config)) {
@@ -313,6 +333,7 @@ bool ProductEngineBootstrap::AcquireRunning(
   }
   auto taken = std::make_shared<ProductEngineAttachment>();
   taken->lease_ = std::move(lease);
+  taken->lease_lock_ = std::move(lock_owner);
   *attachment = std::move(taken);
   return true;
 }

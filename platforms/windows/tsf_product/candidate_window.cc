@@ -379,9 +379,11 @@ void CandidateWindow::DrawRow(HDC dc, const RECT& row, std::size_t index) const 
     case coordinator::CandidateKind::kSpelling:
       kind = L"SPELL";
       break;
-    case coordinator::CandidateKind::kCompletion:
-      kind = L"COMP";
-      break;
+    case coordinator::CandidateKind::kCompletion: kind = L"COMP"; break;
+    case coordinator::CandidateKind::kMorphology: kind = L"FORM"; break;
+    case coordinator::CandidateKind::kExpansion: kind = L"EXP"; break;
+    case coordinator::CandidateKind::kConversion: kind = L"CONV"; break;
+    case coordinator::CandidateKind::kPrediction: kind = L"NEXT"; break;
   }
   if (!chosen) {
     COLORREF color = ::GetSysColor(COLOR_GRAYTEXT);

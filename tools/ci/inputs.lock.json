@@ -1,0 +1,182 @@
+{
+  "entries": [
+    {
+      "kind": "file",
+      "path": "build/backend-training-budget/en/model.tsv",
+      "pin_provenance": "tests/backend/profiles.cc kModels full-file pin; docs/reports/backend-prediction-development.md budget model list",
+      "role": "en production model, budget training set",
+      "sha256": "51717a82412b7f82abd4bf81a77cd3dc39c0392e184f211c4cad2fe31021a2ad",
+      "size_bytes": 7769038
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-training-budget/zh/model.tsv",
+      "pin_provenance": "tests/backend/profiles.cc kModels full-file pin; docs/reports/backend-prediction-development.md budget model list",
+      "role": "zh production model, budget training set",
+      "sha256": "cce13364b25a56940fa1546e738a1571fcd04ed45ee8e91f2ed4ba8ecaa25998",
+      "size_bytes": 5395290
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-training-budget/fr/model.tsv",
+      "pin_provenance": "tests/backend/profiles.cc kModels full-file pin; docs/reports/backend-prediction-development.md budget model list",
+      "role": "fr production model, budget training set",
+      "sha256": "e5d6550dcf0da3fb1fefbf8bb7ddd6618dcd6bf3bfd0e2bc50f8c7cbe056b792",
+      "size_bytes": 8851447
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-training-budget/ja/model.tsv",
+      "pin_provenance": "tests/backend/profiles.cc kModels full-file pin; docs/reports/backend-prediction-development.md budget model list",
+      "role": "ja production model, budget training set",
+      "sha256": "b40382f5e977d01c40a3feb9d735ffdb72698610b9a41f53a9a55045303c0c77",
+      "size_bytes": 8204922
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-training-budget/ko/model.tsv",
+      "pin_provenance": "tests/backend/profiles.cc kModels full-file pin; docs/reports/backend-prediction-development.md budget model list",
+      "role": "ko production model, budget training set",
+      "sha256": "4bb6010cc7145d42361f07e616ceeef3117f1ea7c7a229794442030bd0aa3c31",
+      "size_bytes": 1156513
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-training/en/model.tsv",
+      "pin_provenance": "first committed full-file pin (this contract): computed from the local tools/backend/train_ngram.py preparation closure; no independent committed pin existed before tools/ci/inputs.lock.json; consumed as the default model directory of backend.headless.real_five_language_api",
+      "role": "en production model, default training set",
+      "sha256": "5838adf9e27fa8efd84232d3c628e475e291de5892632837e12a21f395979a06",
+      "size_bytes": 32675763
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-training/zh/model.tsv",
+      "pin_provenance": "first committed full-file pin (this contract): computed from the local tools/backend/train_ngram.py preparation closure; no independent committed pin existed before tools/ci/inputs.lock.json; consumed as the default model directory of backend.headless.real_five_language_api",
+      "role": "zh production model, default training set",
+      "sha256": "a69cb115e1da9d1cb4419ba3bd8af3613eedb2bf4b1ab9e8f82f5fb79f9332cb",
+      "size_bytes": 22838395
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-training/fr/model.tsv",
+      "pin_provenance": "first committed full-file pin (this contract): computed from the local tools/backend/train_ngram.py preparation closure; no independent committed pin existed before tools/ci/inputs.lock.json; consumed as the default model directory of backend.headless.real_five_language_api",
+      "role": "fr production model, default training set",
+      "sha256": "95f8c19e54ec124991e5e5054c11b67e36a0f67b93618e726d93572257a4d7ff",
+      "size_bytes": 36171961
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-training/ja/model.tsv",
+      "pin_provenance": "first committed full-file pin (this contract): computed from the local tools/backend/train_ngram.py preparation closure; no independent committed pin existed before tools/ci/inputs.lock.json; consumed as the default model directory of backend.headless.real_five_language_api",
+      "role": "ja production model, default training set",
+      "sha256": "c7825371000d8b02023601d42b05d4f421d9472ff5d83138f0c6c4177312b872",
+      "size_bytes": 31602980
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-training/ko/model.tsv",
+      "pin_provenance": "first committed full-file pin (this contract): computed from the local tools/backend/train_ngram.py preparation closure; no independent committed pin existed before tools/ci/inputs.lock.json; consumed as the default model directory of backend.headless.real_five_language_api",
+      "role": "ko production model, default training set",
+      "sha256": "9193286d4b03dd14e3f88057a1772def1d7b057f4de1f0f1e52eef9d1b028f92",
+      "size_bytes": 4308741
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-chinese-ranked/shared/default.yaml",
+      "pin_provenance": "tests/backend/profiles.cc kChinese pins; build/backend-chinese-ranked/manifest.json",
+      "role": "Rime shared default configuration",
+      "sha256": "b51f10d546611893483c7c916ff7a213a6f3cbcebdba7f6e30dabdca34b806fa",
+      "size_bytes": 145
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-chinese-ranked/shared/epocanva_backend_pinyin.schema.yaml",
+      "pin_provenance": "tests/backend/profiles.cc kChinese pins; build/backend-chinese-ranked/manifest.json",
+      "role": "project pinyin schema deployed into the isolated Rime shared data",
+      "sha256": "6a6a0ed33acc892fe04e94e132ff2cfdd21140cf565b14a5af9a126e9ea2b8e4",
+      "size_bytes": 671
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-chinese-ranked/shared/epocanva_backend_terra.dict.yaml",
+      "pin_provenance": "tests/backend/profiles.cc kChinese pins; build/backend-chinese-ranked/manifest.json",
+      "role": "Terra dictionary; Rime conversion and the bounded compact-pinyin initialism source",
+      "sha256": "f316163a376ef3041d9c512d6de86b57110c20528f084cf8fb9fe1ffd2640ad7",
+      "size_bytes": 1995718
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-chinese-ranked/shared/epocanva_backend_zhuyin.schema.yaml",
+      "pin_provenance": "tests/backend/profiles.cc kChinese pins; build/backend-chinese-ranked/manifest.json",
+      "role": "project zhuyin schema (scheme stays unverified in the locale registry)",
+      "sha256": "926f445115860cf099eb7802f802e51014761d44bc86906094ad918a91fbf170",
+      "size_bytes": 1071
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-chinese-ranked/shared/zhuyin.yaml",
+      "pin_provenance": "tests/backend/profiles.cc kChinese pins; build/backend-chinese-ranked/manifest.json",
+      "role": "zhuyin helper configuration",
+      "sha256": "77931ab77952fdb2535f8addebc0918453e0220a50ca176380971203f14c48be",
+      "size_bytes": 1132
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-data-acquire/zh-fr/upstream/french/fr_FR/fr.aff",
+      "pin_provenance": "tests/backend/profiles.cc full-file pin; data/manifests/backend-zh-fr.sources.json",
+      "role": "French Hunspell affix file",
+      "sha256": "c176610cd5dc4846806a65ddd029f422d87978bf58f224aa44222662a16a2de5",
+      "size_bytes": 199870
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-data-acquire/zh-fr/upstream/french/fr_FR/fr.dic",
+      "pin_provenance": "tests/backend/profiles.cc full-file pin; data/manifests/backend-zh-fr.sources.json",
+      "role": "French Hunspell word list",
+      "sha256": "b78a868e31dd6e373b6c3217969afb898a9acde828a5e7ef97308da42218c88c",
+      "size_bytes": 1236490
+    },
+    {
+      "kind": "file",
+      "path": "build/backend-japanese-data/lexicon.bin",
+      "pin_provenance": "tests/backend/profiles.cc kJapaneseSha; build/backend-japanese-data/lexicon.manifest.json",
+      "role": "Japanese Mozc-data-driven decoder lexicon",
+      "sha256": "e0308bb1e09e33915a40ca487ca3c27081d9564876f655a23fb332e2d6b3d011",
+      "size_bytes": 73919277
+    },
+    {
+      "kind": "file",
+      "path": "build/product-data/epocanva_en_alpha.tsv",
+      "pin_provenance": "generated by tools/data/build_product_lexicon.py from the pinned ESDB checkout; provenance sidecar build/product-data/epocanva_en_alpha.provenance.txt; first committed full-file pin",
+      "role": "internal-alpha English product lexicon (test/verification data, not a production corpus frequency table)",
+      "sha256": "6e46587d8029d8c9cf17b20d33983d051caa6e5e70a3da6573707d25400aae6b",
+      "size_bytes": 502333
+    },
+    {
+      "kind": "file",
+      "path": "build/librime-english/rime/install/lib/rime.dll",
+      "pin_provenance": "build/librime-english/engine-build-receipt.json rime_sha256; re-verified at configure time by tests/backend/CMakeLists.txt file(SHA256)",
+      "role": "project-built librime runtime used by backend/product tests and the internal package",
+      "sha256": "0e202bb871bd7d7b272feb461ef7db0f501187a51ca4f70dc8b8ce8967eecd2f",
+      "size_bytes": 2833920
+    },
+    {
+      "kind": "file",
+      "path": "build/librime-baseline/rime/install/lib/rime.dll",
+      "pin_provenance": "baseline control built by tools/build_librime_baseline.ps1; consumed by the product configure as EPOCANVA_BASELINE_RIME_DLL; first committed full-file pin",
+      "role": "unmodified upstream-build control runtime for the missing-module failure path",
+      "sha256": "fc855ff327fd66ba54acf0fb60781e0f087c44afab355ae0d2d36016dae63d71",
+      "size_bytes": 2663424
+    },
+    {
+      "commit": "33e78140250125871856cdc5b42ddc6a5fcd3cd4",
+      "kind": "commit",
+      "path": "third_party/librime",
+      "pin_provenance": "third_party/sources.lock.json librime package commit pin; docs/build/bootstrap.md",
+      "role": "pinned librime upstream checkout (byte-clean, never edited in place)"
+    }
+  ],
+  "format": 1,
+  "owner": "epocanva-ci-tier2-inputs-lock-v1",
+  "purpose": "Verifiable identity contract for the untracked, externally provisioned Tier 2 build inputs listed in docs/testing/clean-worktree-verification.md section 1. Every file entry pins one exact byte sequence; the commit entry pins the upstream checkout revision. tools/ci/verify_inputs.ps1 checks a local tree against this file and fails closed. This contract verifies inputs; it never downloads, fetches or fabricates them. A cache refresh is an explicit maintainer action with a reviewed provenance change."
+}

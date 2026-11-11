@@ -9,6 +9,27 @@
 # WILL_FAIL would accept any non-zero exit, including "the test binary did not
 # start", so the force-fail case names the exit code it expects instead.
 
+# Standalone entry point for a core-only build: no root project, Rime or platform
+# targets. All artifacts remain in the caller's build/<preset> directory.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  cmake_minimum_required(VERSION 3.25)
+  project(EpoCanvaEnglishCore LANGUAGES CXX)
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  set(CMAKE_CXX_EXTENSIONS OFF)
+  set(EPOCANVA_EN_BUILD_STANDALONE ON)
+  enable_testing()
+  add_library(epocanva_strict INTERFACE)
+  if(MSVC)
+    target_compile_options(epocanva_strict INTERFACE /utf-8 /permissive- /Zc:__cplusplus /W4 /EHsc)
+  else()
+    target_compile_options(epocanva_strict INTERFACE -Wall -Wextra -Wpedantic)
+  endif()
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../engine/languages/en"
+                   "${CMAKE_CURRENT_BINARY_DIR}/en-core")
+endif()
+get_filename_component(EPOCANVA_EN_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+
 # --- the test binary ------------------------------------------------------------
 add_executable(epocanva_english_core_tests main.cc)
 target_link_libraries(epocanva_english_core_tests PRIVATE epocanva_en_core)
@@ -23,7 +44,7 @@ if(NOT TARGET epocanva_english_core_tests)
 endif()
 
 set(EPOCANVA_ASSERT_PROBE_SCRIPT
-    "${CMAKE_SOURCE_DIR}/tests/infrastructure/assert_probe.cmake")
+    "${EPOCANVA_EN_REPO_ROOT}/tests/infrastructure/assert_probe.cmake")
 if(NOT EXISTS "${EPOCANVA_ASSERT_PROBE_SCRIPT}")
   message(FATAL_ERROR "missing test wrapper: ${EPOCANVA_ASSERT_PROBE_SCRIPT}")
 endif()
@@ -87,8 +108,47 @@ set_tests_properties(
     LABELS "english;core;unit"
 )
 
-# WORKING_DIRECTORY must exist before execute_process runs in it.
-file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/run")
+# WORKING_DIRECTORY and all legacy temporary fixtures stay under the build tree.
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/run" "${CMAKE_CURRENT_BINARY_DIR}/scratch")
+set_tests_properties(
+  english.core.lexicon_and_completion_unit_tests
+  english.core.unit_suite_can_fail
+  english.core.rejects_unknown_arguments
+  PROPERTIES ENVIRONMENT
+    "TMP=${CMAKE_CURRENT_BINARY_DIR}/scratch;TEMP=${CMAKE_CURRENT_BINARY_DIR}/scratch;TMPDIR=${CMAKE_CURRENT_BINARY_DIR}/scratch")
+
+# Extended English algorithms have a separate executable and assertion channel.
+add_executable(epocanva_english_language_support_tests language_support_tests.cc)
+target_link_libraries(epocanva_english_language_support_tests PRIVATE epocanva_en_core)
+set_target_properties(epocanva_english_language_support_tests PROPERTIES FOLDER "epocanva")
+foreach(_case IN ITEMS unit forcefail bad_args)
+  if(_case STREQUAL "unit")
+    set(_mode --unit)
+    set(_exit 0)
+    set(_marker TRUE)
+  elseif(_case STREQUAL "forcefail")
+    set(_mode --forcefail)
+    set(_exit 1)
+    set(_marker FALSE)
+  else()
+    set(_mode --not-a-real-mode)
+    set(_exit 2)
+    set(_marker FALSE)
+  endif()
+  add_test(NAME english.core.language_support_${_case}
+    COMMAND ${CMAKE_COMMAND}
+      -DPROBE=$<TARGET_FILE:epocanva_english_language_support_tests>
+      -DCASE=language-support-${_case}
+      -DPROBE_ARG1=${_mode}
+      -DEXPECTED_EXIT=${_exit}
+      -DEXPECT_MARKER=${_marker}
+      "-DMARKER=RESULT PASS"
+      -DTIMEOUT_SECONDS=60
+      -P ${EPOCANVA_ASSERT_PROBE_SCRIPT})
+  set_tests_properties(english.core.language_support_${_case} PROPERTIES
+    TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/run"
+    LABELS "english;core;unit;language-support")
+endforeach()
 
 # 4. P2.6 section 9, the core half of the spelling cost trial: --pilot-bench loads the
 #    generated 42,356-row pilot list and measures the one-edit pass per input class,
@@ -106,7 +166,7 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
   set(_pilot_bench_lexicon "${EPOCANVA_ENGLISH_PILOT_LEXICON}")
 else()
   set(_pilot_bench_lexicon
-      "${CMAKE_SOURCE_DIR}/build/english-pilot/epocanva_en_pilot.tsv")
+      "${EPOCANVA_EN_REPO_ROOT}/build/english-pilot/epocanva_en_pilot.tsv")
 endif()
 if(EXISTS "${_pilot_bench_lexicon}")
   add_test(
@@ -129,6 +189,19 @@ if(EXISTS "${_pilot_bench_lexicon}")
       WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/run"
       LABELS "english;core;pilot;performance"
   )
+  set_tests_properties(english.core.spelling_cost_trial_on_pilot_lexicon PROPERTIES
+    ENVIRONMENT "TMP=${CMAKE_CURRENT_BINARY_DIR}/scratch;TEMP=${CMAKE_CURRENT_BINARY_DIR}/scratch;TMPDIR=${CMAKE_CURRENT_BINARY_DIR}/scratch")
+  add_test(NAME english.core.language_support_pilot_budget
+    COMMAND ${CMAKE_COMMAND}
+      -DPROBE=$<TARGET_FILE:epocanva_english_language_support_tests>
+      -DCASE=language-support-pilot
+      -DPROBE_ARG1=--pilot-budget
+      "-DPROBE_ARG2=${_pilot_bench_lexicon}"
+      -DEXPECTED_EXIT=0 -DEXPECT_MARKER=TRUE "-DMARKER=RESULT PASS"
+      -DTIMEOUT_SECONDS=240 -P ${EPOCANVA_ASSERT_PROBE_SCRIPT})
+  set_tests_properties(english.core.language_support_pilot_budget PROPERTIES
+    TIMEOUT 300 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/run"
+    LABELS "english;core;pilot;language-support;performance")
   message(STATUS "english.core: pilot cost trial registered against ${_pilot_bench_lexicon}")
 else()
   message(STATUS

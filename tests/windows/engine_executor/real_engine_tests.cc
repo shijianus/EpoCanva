@@ -989,7 +989,10 @@ void RunStartupFailureMode(const Options& options) {
   {
     RuntimeOptions runtime = BaseOptions(options, shared_dir, user_dir, log_dir);
     runtime.rime_dll_path = options.run_root / "missing" / "rime.dll";
-    EngineExecutor executor(ExecutorOptions{runtime, 4});
+    ExecutorOptions startup_options;
+    startup_options.runtime = runtime;
+    startup_options.capacity = 4;
+    EngineExecutor executor(startup_options);
     const StartStatus started = executor.Start();
     Check(started == StartStatus::kRuntimeStartFailed,
           "startup-failure: a missing DLL fails Start",
@@ -1015,7 +1018,10 @@ void RunStartupFailureMode(const Options& options) {
   {
     RuntimeOptions runtime = BaseOptions(options, shared_dir, user_dir, log_dir);
     runtime.rime_dll_path = std::filesystem::path("rime.dll");
-    EngineExecutor executor(ExecutorOptions{runtime, 4});
+    ExecutorOptions startup_options;
+    startup_options.runtime = runtime;
+    startup_options.capacity = 4;
+    EngineExecutor executor(startup_options);
     const StartStatus started = executor.Start();
     Check(started == StartStatus::kRuntimeStartFailed,
           "startup-failure: a relative DLL path fails Start",
@@ -1030,7 +1036,10 @@ void RunStartupFailureMode(const Options& options) {
       std::filesystem::is_regular_file(options.baseline_dll)) {
     RuntimeOptions runtime = BaseOptions(options, shared_dir, user_dir, log_dir);
     runtime.rime_dll_path = options.baseline_dll;
-    EngineExecutor executor(ExecutorOptions{runtime, 4});
+    ExecutorOptions startup_options;
+    startup_options.runtime = runtime;
+    startup_options.capacity = 4;
+    EngineExecutor executor(startup_options);
     const StartStatus started = executor.Start();
     Check(started == StartStatus::kRuntimeStartFailed,
           "startup-failure: the baseline DLL fails Start",
@@ -1052,7 +1061,10 @@ void RunStartupFailureMode(const Options& options) {
     (void)executor.StopAndJoin();
 
     RuntimeOptions good = BaseOptions(options, shared_dir, user_dir, log_dir);
-    EngineExecutor recovery(ExecutorOptions{good, 4});
+    ExecutorOptions recovery_options;
+    recovery_options.runtime = good;
+    recovery_options.capacity = 4;
+    EngineExecutor recovery(recovery_options);
     const StartStatus recovered = recovery.Start();
     Check(recovered == StartStatus::kOk,
           "startup-failure: a valid executor starts after the failed initialization",

@@ -24,9 +24,11 @@ std::unordered_map<HWND, Registration> g_registry;
 
 std::atomic<std::uint64_t> g_stale_wakes{0};
 std::atomic<std::uint64_t> g_unregistered_wakes{0};
+std::atomic<std::uint64_t> g_window_messages{0};
 
 LRESULT CALLBACK WakeWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   if (message == kWakeMessage) {
+    g_window_messages.fetch_add(1);
     StaWakeTarget* target = nullptr;
     std::uint64_t generation = 0;
     StaResultWaker* owner = nullptr;
@@ -175,6 +177,10 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
   }
   ::SetWindowLongPtrW(window_, GWLP_USERDATA,
                       reinterpret_cast<LONG_PTR>(this));
+  {
+    // The return value is the owning thread; the out parameter is the process id.
+    window_thread_id_.store(::GetWindowThreadProcessId(window_, nullptr));
+  }
 
   target_ = target;
   module_ = module;
@@ -195,6 +201,7 @@ bool StaResultWaker::Start(StaWakeTarget* target, HANDLE executor_event,
                                   wake_generation] {
       bool retry = false;
       for (;;) {
+        loop_ticks_.fetch_add(1);
         const bool paced = paced_.load();
         // The result event is installed after Start when the engine is attached
         // asynchronously; re-read it on every wait so no thread restart is needed.
@@ -350,6 +357,9 @@ StaWakerDiagnostics StaResultWaker::Snapshot() const {
   diagnostics.stale_wakes_ignored = g_stale_wakes.load();
   diagnostics.wakes_without_registration = g_unregistered_wakes.load();
   diagnostics.stops = stops_.load();
+  diagnostics.loop_ticks = loop_ticks_.load();
+  diagnostics.window_thread_id = window_thread_id_;
+  diagnostics.window_messages = g_window_messages.load();
   return diagnostics;
 }
 

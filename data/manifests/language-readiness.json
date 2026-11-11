@@ -1,0 +1,36 @@
+{
+  "format": 1,
+  "required_languages": ["en", "zh", "fr", "ja", "ko"],
+  "languages": [
+    {
+      "id": "en",
+      "status": "blocked",
+      "data_status": "incomplete",
+      "reason": "Real corpus models, contextual abbreviation and prefix completion are available; unified TSF suggestion replacement is being verified. Product personal learning, full English acceptance and current installed-host evidence remain incomplete."
+    },
+    {
+      "id": "zh",
+      "status": "blocked",
+      "data_status": "absent",
+      "reason": "Pinned real Pinyin/Zhuyin data and transient context ranking exist in the local verification bundle, not in an accepted formal distribution. Word/phrase prediction quality, script variants, inline TSF composition, trusted learning metadata and installed-host acceptance remain incomplete."
+    },
+    {
+      "id": "fr",
+      "status": "blocked",
+      "data_status": "absent",
+      "reason": "Real Hunspell resources, corpus prediction and contextual abbreviations are locally staged with provenance; full morphology, physical-layout and installed-host acceptance plus formal packaging are incomplete."
+    },
+    {
+      "id": "ja",
+      "status": "blocked",
+      "data_status": "absent",
+      "reason": "Real Mozc lexical/POS data and Romaji/native-Kana output profiles are locally staged. Partial confirmation, native-quality segmentation, Kana-only next-word resources, inline TSF composition and installed-host/formal-package acceptance remain incomplete."
+    },
+    {
+      "id": "ko",
+      "status": "blocked",
+      "data_status": "absent",
+      "reason": "Two-set/native-Hangul profiles and corpus candidates exist in the local verification bundle. Native-quality endings/spacing, inline TSF composition, installed-host keyboard acceptance and formal packaging remain incomplete."
+    }
+  ]
+}

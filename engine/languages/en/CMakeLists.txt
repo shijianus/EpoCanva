@@ -20,14 +20,18 @@ set(EPOCANVA_EN_CORE_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/english_token.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/english_space_policy.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/spelling_suggester.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/prefix_completer.cc")
+  "${CMAKE_CURRENT_SOURCE_DIR}/prefix_completer.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/morphology_rules.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/language_support.cc")
 set(EPOCANVA_EN_CORE_HEADERS
   "${CMAKE_CURRENT_SOURCE_DIR}/english_lexicon.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/english_case.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/english_token.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/english_space_policy.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/spelling_suggester.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/prefix_completer.h")
+  "${CMAKE_CURRENT_SOURCE_DIR}/prefix_completer.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/morphology_rules.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/language_support.h")
 
 foreach(_epocanva_en_needed ${EPOCANVA_EN_CORE_SOURCES} ${EPOCANVA_EN_CORE_HEADERS})
   if(NOT EXISTS "${_epocanva_en_needed}")
@@ -53,6 +57,9 @@ else()
 endif()
 set_target_properties(epocanva_en_core_objs PROPERTIES
   POSITION_INDEPENDENT_CODE ON
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS OFF
   FOLDER "epocanva")
 
 # Convention the hook reads: each core/component directory names the object
@@ -67,7 +74,8 @@ if(EPOCANVA_EN_BUILD_STANDALONE)
   if(TARGET epocanva_strict)
     target_link_libraries(epocanva_en_core PUBLIC epocanva_strict)
   endif()
-  set_target_properties(epocanva_en_core PROPERTIES FOLDER "epocanva")
+  set_target_properties(epocanva_en_core PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF FOLDER "epocanva")
   message(STATUS "EpoCanva English core: standalone static library epocanva_en_core")
 endif()
 

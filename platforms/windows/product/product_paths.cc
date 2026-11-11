@@ -6,6 +6,9 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+#include <atomic>
+
+#include "../local_path/local_path.h"
 
 #ifndef EPOCANVA_PRODUCT_VERSION
 #define EPOCANVA_PRODUCT_VERSION "0.2.6-w3b"
@@ -20,6 +23,45 @@ namespace {
 
 std::mutex g_override_mutex;
 std::filesystem::path g_override_root;
+namespace local = ::epocanva::windows::local_path;
+
+bool PathFailure(std::wstring* why) {
+  if (why != nullptr) *why = L"a product root is not a safe unaliased local disk path";
+  return false;
+}
+
+bool PrepareUserPaths(const ProductPaths& paths, std::vector<local::PreparedPath>* prepared,
+                      std::wstring* why) {
+  // Validate every input before any create/open, including manually built ProductPaths.
+  for (const auto& path : {paths.user_root, paths.engine_user_dir, paths.log_dir}) {
+    local::PreparedPath item;
+    if (!local::Prepare(path, &item)) return PathFailure(why);
+    prepared->push_back(std::move(item));
+  }
+  const auto& root = (*prepared)[0].physical;
+  if ((*prepared)[1].physical != root / L"engine" ||
+      (*prepared)[2].physical != root / L"logs") return PathFailure(why);
+  return true;
+}
+
+bool CreateUserPaths(const ProductPaths& paths, std::vector<local::PinnedPath>* pins,
+                     std::wstring* why) {
+  std::vector<local::PreparedPath> prepared;
+  if (!PrepareUserPaths(paths, &prepared, why)) return false;
+  // Pin all existing ancestors before creating anything. In particular a bad
+  // logs/engine junction must not leave a newly created sibling behind.
+  for (const auto& item : prepared) {
+    local::PinnedPath pin;
+    if (!pin.Open(item, true, true)) return PathFailure(why);
+    pins->push_back(std::move(pin));
+  }
+  for (const auto& item : prepared) {
+    local::PinnedPath pin;
+    if (!pin.CreateDirectories(item)) return PathFailure(why);
+    pins->push_back(std::move(pin));
+  }
+  return true;
+}
 
 std::wstring AsciiToWide(const char* text) {
   std::wstring out;
@@ -78,7 +120,7 @@ bool ReadEnvironmentRoot(std::filesystem::path* root, std::wstring* why) {
 
 bool KnownFolderUserRoot(std::filesystem::path* root, std::wstring* why) {
   PWSTR raw = nullptr;
-  const HRESULT hr = ::SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT,
+  const HRESULT hr = ::SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY,
                                             nullptr, &raw);
   if (FAILED(hr) || raw == nullptr) {
     if (raw != nullptr) {
@@ -112,6 +154,8 @@ bool ResolveProductPaths(HMODULE module, ProductPaths* paths, std::wstring* why)
     }
     return false;
   }
+  std::wstring ignored;
+  if (why == nullptr) why = &ignored;
   ProductPaths resolved;
   resolved.module_path = ModulePath(module, why);
   if (resolved.module_path.empty()) {
@@ -142,15 +186,20 @@ bool ResolveProductPaths(HMODULE module, ProductPaths* paths, std::wstring* why)
   if (user_root.empty() && !KnownFolderUserRoot(&user_root, why)) {
     return false;
   }
-  if (!user_root.is_absolute()) {
-    if (why != nullptr) {
-      *why = L"the user data root must be absolute";
-    }
-    return false;
-  }
-  resolved.user_root = user_root;
+  local::PreparedPath module_path;
+  local::PreparedPath user_path;
+  if (!local::Prepare(resolved.module_path, &module_path) ||
+      !local::Prepare(user_root, &user_path)) return PathFailure(why);
+  local::PinnedPath module_pin;
+  local::PinnedPath user_pin;
+  if (!module_pin.Open(module_path, false) || !user_pin.Open(user_path, true, true))
+    return PathFailure(why);
+  // This resolver creates nothing. Writable operations re-pin immediately before
+  // use; a copied ProductPaths is a layout, not a permanent security capability.
+  resolved.user_root = user_path.display;
   resolved.engine_user_dir = resolved.user_root / L"engine";
   resolved.log_dir = resolved.user_root / L"logs";
+  resolved.learning_dir = resolved.user_root / L"learning-v2";
   resolved.settings_file = resolved.user_root / L"settings.ini";
   resolved.schema_patch_file =
       resolved.engine_user_dir / L"epocanva_english.custom.yaml";
@@ -167,54 +216,34 @@ bool ResolveProductPaths(HMODULE module, ProductPaths* paths, std::wstring* why)
 }
 
 bool EnsureUserDirectories(const ProductPaths& paths, std::wstring* why) {
-  std::error_code ec;
-  for (const std::filesystem::path& dir :
-       {paths.user_root, paths.engine_user_dir, paths.log_dir}) {
-    std::filesystem::create_directories(dir, ec);
-    if (ec) {
-      if (why != nullptr) {
-        *why = L"cannot create user directory " + dir.wstring() + L" (error " +
-               std::to_wstring(ec.value()) + L")";
-      }
-      return false;
-    }
-  }
-  return true;
+  std::vector<local::PinnedPath> pins;
+  return CreateUserPaths(paths, &pins, why);
 }
 
 bool ProbeUserDataWritable(const ProductPaths& paths, std::wstring* why) {
-  if (!EnsureUserDirectories(paths, why)) {
-    return false;
+  std::vector<local::PinnedPath> pins;
+  if (!CreateUserPaths(paths, &pins, why)) return false;
+  // Keep all directory pins through the write. CREATE_NEW never opens a hostile
+  // existing leaf; DELETE_ON_CLOSE removes our handle, not a re-resolved pathname.
+  static std::atomic<unsigned long long> sequence{0};
+  HANDLE file = INVALID_HANDLE_VALUE;
+  for (int attempt = 0; attempt < 16; ++attempt) {
+    const auto leaf = L"epocanva-probe-" + std::to_wstring(::GetCurrentProcessId()) +
+        L"-" + std::to_wstring(::GetTickCount64()) + L"-" +
+        std::to_wstring(sequence.fetch_add(1)) + L".tmp";
+    const auto temp = pins[3].path() / leaf;  // the fully created user root
+    file = ::CreateFileW(temp.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT |
+        FILE_FLAG_OPEN_NO_RECALL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) break;
+    if (::GetLastError() != ERROR_FILE_EXISTS && ::GetLastError() != ERROR_ALREADY_EXISTS) break;
   }
-  wchar_t temp[MAX_PATH] = {};
-  if (::GetTempFileNameW(paths.user_root.c_str(), L"epc", 0, temp) == 0) {
-    if (why != nullptr) {
-      *why = L"GetTempFileNameW failed in the user data root with error " +
-             std::to_wstring(::GetLastError());
-    }
-    return false;
-  }
-  const HANDLE file = ::CreateFileW(temp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                    FILE_ATTRIBUTE_TEMPORARY, nullptr);
-  if (file == INVALID_HANDLE_VALUE) {
-    if (why != nullptr) {
-      *why = L"cannot open a probe file in the user data root (error " +
-             std::to_wstring(::GetLastError()) + L")";
-    }
-    ::DeleteFileW(temp);
-    return false;
-  }
-  DWORD written = 0;
+  if (file == INVALID_HANDLE_VALUE) return PathFailure(why);
+  DWORD written_bytes = 0;
   const char byte = 'E';
-  const BOOL ok = ::WriteFile(file, &byte, 1, &written, nullptr);
+  const BOOL ok = ::WriteFile(file, &byte, 1, &written_bytes, nullptr);
   ::CloseHandle(file);
-  ::DeleteFileW(temp);
-  if (!ok || written != 1) {
-    if (why != nullptr) {
-      *why = L"the user data root is not writable";
-    }
-    return false;
-  }
+  if (!ok || written_bytes != 1) return PathFailure(why);
   return true;
 }
 

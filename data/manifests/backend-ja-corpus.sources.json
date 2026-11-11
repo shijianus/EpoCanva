@@ -1,0 +1,155 @@
+{
+  "format": 1,
+  "kind": "backend-ja-corpus-source-closure",
+  "scope": "Development-time local source acquisition for Japanese Kana-to-Kanji resource review and bounded multilingual n-gram training/evaluation. Not a product packaging or public-release approval.",
+  "acquired_at_utc": "2026-11-02",
+  "acquisition_root": "build/backend-data-acquire/ja-corpus",
+  "limits": {
+    "maximum_bytes": 500000000,
+    "measured_acquisition_tree_bytes": 218770940,
+    "includes_api_metadata_and_source_evidence": true,
+    "includes_derived_corpus_outputs": false,
+    "training_performed_by_this_acquisition": false
+  },
+  "mozc": {
+    "repository": "https://github.com/google/mozc",
+    "revision_prefix_resolved": "e5f149",
+    "revision": "e5f1494923a0a624d01f19c50d57bbdfa03ea5ba",
+    "revision_api_url": "https://api.github.com/repos/google/mozc/commits/e5f1494923a0a624d01f19c50d57bbdfa03ea5ba",
+    "revision_date": "2026-10-28T14:46:45Z",
+    "signature_status": "unsigned; GitHub API verification.reason=unsigned. Commit identity is pinned, not cryptographically authenticated.",
+    "commit_api_snapshot": {
+      "path": "build/backend-data-acquire/ja-corpus/metadata/mozc-commit-api.json",
+      "bytes": 13945,
+      "sha256": "be61dd27cf1f383ab6b46c688c81f2b753357af03fdd4e075b3c7f2008cd28b1"
+    },
+    "tree_api_snapshot": {
+      "path": "build/backend-data-acquire/ja-corpus/metadata/mozc-tree-api.json",
+      "bytes": 454070,
+      "sha256": "9165c0929a7c1ebb59feb63f1ebf7771e8ab4837303694e5a7811aef1ac24fc8"
+    },
+    "dictionary_path_prefix": "src/data/dictionary_oss/",
+    "dictionary_license_evidence": {
+      "upstream_root_license_path": "build/backend-data-acquire/ja-corpus/mozc/LICENSE",
+      "upstream_root_license_bytes": 5734,
+      "upstream_root_license_sha256": "44cdd923b91ea9199293abecc2762c70c87dbf1e581c027a94c416368d1a648c",
+      "dictionary_notice_path": "build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/README.txt",
+      "dictionary_notice_bytes": 5750,
+      "dictionary_notice_sha256": "6b1de66bc6fa30e0b45dc45b8c8f6c57bd78aff923c261a3efffac8eb86f7bac",
+      "classification": "Mixed upstream data notices; do not label the complete dictionary SPDX-only. README.txt identifies mecab-ipadic-2.7.0-20070801 as the base vocabulary and states a large portion originates from ICOT Free Software. It reproduces NAIST permission and disclaimer, ICOT no-warranty conditions, and an Okinawa Dictionary public-domain notice. Preserve both Mozc LICENSE and dictionary README notice with any redistributed dictionary data.",
+      "scope_caveat": "Mozc README says its open-source dictionary excludes the large Web-corpus vocabulary set and Japanese postal-code dictionary. It describes vocabulary as basically the IPAdic vocabulary plus Okinawa named entities, manually added entries and Katakana/compound additions; this is not Google's production Google Japanese Input dictionary."
+    },
+    "payload": [
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary00.txt","upstream_path":"src/data/dictionary_oss/dictionary00.txt","bytes":7157174,"sha256":"9e07ce292932c4fff327ed8cb06274c09acca556bd8bdf7c7ef1f6173eae3b61"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary01.txt","upstream_path":"src/data/dictionary_oss/dictionary01.txt","bytes":6428663,"sha256":"836fd5fd8399510de0d8ef7b33be913cca6bbaee7b712cc8045fba03f4c75a89"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary02.txt","upstream_path":"src/data/dictionary_oss/dictionary02.txt","bytes":6480134,"sha256":"93943858d0cfd092b849a78def6901eaf228177e1ac5663544e865a3a1e45a9e"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary03.txt","upstream_path":"src/data/dictionary_oss/dictionary03.txt","bytes":7434257,"sha256":"cb9f1b0b4a7550d682d86244a021cd17e0b15366328819e69135b5f183a1a24b"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary04.txt","upstream_path":"src/data/dictionary_oss/dictionary04.txt","bytes":5399172,"sha256":"9fdc4e3948d03463de13ab5782adffbc11dd06e934cb80138c5920029cd3d2f6"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary05.txt","upstream_path":"src/data/dictionary_oss/dictionary05.txt","bytes":5316454,"sha256":"199e3b0f050b691823ae7ba943090d437f51af6436b27c5f3dc69cafa12000e4"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary06.txt","upstream_path":"src/data/dictionary_oss/dictionary06.txt","bytes":5373350,"sha256":"b95b14f7770ae2a824bc8e9fad8b03c1bc45c504f93a36554b8b56daa0368d2a"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary07.txt","upstream_path":"src/data/dictionary_oss/dictionary07.txt","bytes":5315756,"sha256":"7f53649b529d4c8c495d3a8dd9c4d489dfe7696080f7423107ff01331174be48"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary08.txt","upstream_path":"src/data/dictionary_oss/dictionary08.txt","bytes":4887114,"sha256":"50a31bb5fc1646721b00be371a5695dffab1292bda143e1e59cc70cbbdd8643f"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary09.txt","upstream_path":"src/data/dictionary_oss/dictionary09.txt","bytes":6690572,"sha256":"4e5fcd4cbfbf11395166a37b506f547fc54d20edc0884f5184ecd3fc705f0d9a"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/connection_single_column.txt","upstream_path":"src/data/dictionary_oss/connection_single_column.txt","bytes":36428642,"sha256":"68823a1f6617372ccb89afdbcb334d7a0bcfa82c9c5dda03fc1f80f1cab5c48e"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/id.def","upstream_path":"src/data/dictionary_oss/id.def","bytes":151747,"sha256":"07a05a268c3783b7e02b36e4aa591555a2dd19a1f3c93891576740761c154f2d"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/reading_correction.tsv","upstream_path":"src/data/dictionary_oss/reading_correction.tsv","bytes":29590,"sha256":"08066c2af7e6d3eba0ff7b1a9e10d876436b639d036680d1f7f91a8306ec22d7"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/suffix.txt","upstream_path":"src/data/dictionary_oss/suffix.txt","bytes":39893,"sha256":"37ace4c057615a10c2e06e19e57010916390b0709f0156d1ee17ce82f3272dd9"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/dictionary_filter.tsv","upstream_path":"src/data/dictionary_oss/dictionary_filter.tsv","bytes":183,"sha256":"802f2c76516bf1bbb30cd501cc343abf59aa179d3f98917297d961fb9921a2fb"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/suggestion_filter.txt","upstream_path":"src/data/dictionary_oss/suggestion_filter.txt","bytes":118,"sha256":"2c8fccb65be739cadfa3524921584e84914c96b9977bd1d42834d79700eaa6b5"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/collocation.txt","upstream_path":"src/data/dictionary_oss/collocation.txt","bytes":679,"sha256":"45fe60749f79e44bd7255b771522e963fd9d2a54005e4b2cf19d5e8204253812"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/collocation_suppression.txt","upstream_path":"src/data/dictionary_oss/collocation_suppression.txt","bytes":20,"sha256":"678d1b9627d7ed39bc269b6379ccc924e2bea27e3270e62b010dababd77fb300"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/BUILD.bazel","upstream_path":"src/data/dictionary_oss/BUILD.bazel","bytes":4647,"sha256":"411798574c90f625c21fc1e0d5856f05df0233631a59a9ada06c5cf1e65c978d"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/dictionary_oss/README.md","upstream_path":"src/data/dictionary_oss/README.md","bytes":1516,"sha256":"a05a67759c983e5e53d7634f2f5ed71531233e51b2cea0f8c404dfed3323c129"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/rules/pos_matcher_rule.def","upstream_path":"src/data/rules/pos_matcher_rule.def","bytes":5496,"sha256":"e6097a6ead67c4d92ec03c2a16b787d352f60a4980cd2b5be60ce52de8adb815"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/rules/segmenter.def","upstream_path":"src/data/rules/segmenter.def","bytes":10128,"sha256":"faf14ec987a12e36c796b35b4f84e210c6a780f5ae52bddc7f80accc58861b21"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/rules/special_pos.def","upstream_path":"src/data/rules/special_pos.def","bytes":1899,"sha256":"73aa97256be4f9fc5529a7280c7e753b6efdb2151d3f249e5defeac7d4c4f291"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/rules/third_party_pos_map.def","upstream_path":"src/data/rules/third_party_pos_map.def","bytes":9444,"sha256":"8ff49b05546718c4c11688be83e6b1deb1cca12fe53ddf2575e6414121e0f5f9"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/rules/user_pos.def","upstream_path":"src/data/rules/user_pos.def","bytes":4713,"sha256":"9fcd9a655bdd60d6521cab690ca4cb044b41a417a8b5c6993e21059aa1b389a2"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/rules/user_segment_history_pos_group.def","upstream_path":"src/data/rules/user_segment_history_pos_group.def","bytes":3228,"sha256":"36005af377aacf9da795b9f86cf63b08bf16ce76f203e17eca9c6538e5a06a43"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/single_kanji/variant_rule.txt","upstream_path":"src/data/single_kanji/variant_rule.txt","bytes":9050,"sha256":"d8b0f3194eebde623709e76f642c7479f7a5b0611cfeea2fd99a6eef15eeed27"},
+      {"path":"build/backend-data-acquire/ja-corpus/mozc/src/data/single_kanji/README.md","upstream_path":"src/data/single_kanji/README.md","bytes":1053,"sha256":"d17fdf3601ec902da922c50f12f12d59ba3cc92cf8e9b667caa988c1a0fa6d1e"}
+    ],
+    "format_evidence": {
+      "dictionary_example": "ああると\\t1851\\t1851\\t7129\\tアアルト",
+      "dictionary_columns": ["reading_hiragana", "left_id", "right_id", "word_cost", "surface_form"],
+      "pos_id_lines": 2672,
+      "connection_first_line_columns": 2672,
+      "connection_total_lines": 7139585,
+      "connection_row_formula": "array_index = 0-based data-line ordinal after first-line column-count header; rid = array_index // 2672; lid = array_index % 2672; value at matrix[rid][lid].",
+      "transition_orientation": "previous node right_id (rid) selects row; current node left_id (lid) selects column.",
+      "verified_upstream_sources": [
+        {"path":"src/data_manager/gen_connection_data.py","lines":"76-93","sha256":"f08f36e886b96401ba8232b930245752721ddb9748874df898365d44787215f1"},
+        {"path":"src/data_manager/connection_file_reader.cc","lines":"42-67","sha256":"4025c02a07d1cd53c5661cb1ad33f4983ac8c4d7d646564af4d3442c1caf4d28"},
+        {"path":"src/converter/nbest_generator.cc","lines":"747-755","sha256":"84cf1f8e22d19b40f90bc62c4a934b350373abd28a68408c87f79a6e853e9374"},
+        {"path":"src/converter/connector.cc","lines":"342-353","sha256":"ea96ccfa139f2648928b84a11acd9dad89ffa3c8bab105029f47d911c24b04e3"}
+      ],
+      "dictionary_row_count_by_shard": {"dictionary00.txt":128908,"dictionary01.txt":128908,"dictionary02.txt":128908,"dictionary03.txt":128908,"dictionary04.txt":128908,"dictionary05.txt":128908,"dictionary06.txt":128908,"dictionary07.txt":128908,"dictionary08.txt":128908,"dictionary09.txt":128904},
+      "dictionary_rows_total": 1289076,
+      "id_def_rows": 2672,
+      "connection_cost_value_rows_excluding_header": 7139584,
+      "connection_rows_times_columns": 2672
+    }
+  },
+  "tatoeba": {
+    "source": "Tatoeba community sentence exports",
+    "snapshot_last_modified_utc": "Individual per-language source Last-Modified values are recorded on each snapshot; sentences_base has its own timestamp.",
+    "export_schema": {
+      "sentences_detailed_fields": ["sentence_id", "language_code", "text", "username", "date_added", "date_last_modified"],
+      "sentences_base_fields": ["sentence_id", "base_sentence_id"],
+      "base_semantics": "0 = original sentence; positive value = sentence ID it was translated from; \\N = unknown (rare).",
+      "attribution_retained": ["author username", "sentence URL", "license URL"]
+    },
+    "license": {
+      "spdx": "CC-BY-2.0-FR",
+      "license_url": "https://creativecommons.org/licenses/by/2.0/fr/",
+      "official_terms_url": "https://tatoeba.org/en/terms-of-use#section-6",
+      "official_statement": "Tatoeba terms §6.2 states text sentences use default CC BY 2.0 FR and author name must be cited; §6.5 states reusers are responsible for preserving license and attribution.",
+      "notes": "Each detailed sentence is attributed by username in the export. Tatoeba warns the data can include invalid/unreviewed or problematic content and contributors may have submitted text they do not own; snapshot attribution is preserved but does not independently verify authorship or rights."
+    },
+    "snapshots": [
+      {"language":"en","provider_code":"eng","path":"build/backend-data-acquire/ja-corpus/corpora/eng_sentences_detailed.tsv.bz2","url":"https://downloads.tatoeba.org/exports/per_language/eng/eng_sentences_detailed.tsv.bz2","bytes":34969370,"sha256":"7d8a98a1322c63eb62199b0e928efc5b9afbf8f4bb9bc4b60ebde1ea99a30cda","last_modified_utc":"2026-10-31T06:39:48Z","source_rows":2040024},
+      {"language":"zh","provider_code":"cmn","path":"build/backend-data-acquire/ja-corpus/corpora/cmn_sentences_detailed.tsv.bz2","url":"https://downloads.tatoeba.org/exports/per_language/cmn/cmn_sentences_detailed.tsv.bz2","bytes":1727096,"sha256":"374dc649bd61ed5597c58ad9f098edb831e7bbe4ea0831f82947bec1fe5c8bb8","last_modified_utc":"2026-10-31T06:39:48Z","source_rows":89248,"note":"Mandarin ISO 639-3 code cmn; tested zho URL returned HTTP 404. These are Tatoeba Mandarin sentences under CC-BY-2.0-FR, not CC-CEDICT dictionary data."},
+      {"language":"fr","provider_code":"fra","path":"build/backend-data-acquire/ja-corpus/corpora/fra_sentences_detailed.tsv.bz2","url":"https://downloads.tatoeba.org/exports/per_language/fra/fra_sentences_detailed.tsv.bz2","bytes":14881247,"sha256":"b7505263052e796a052ef32fc907d22056e07fffed153988d141a728bee77126","last_modified_utc":"2026-10-31T06:39:48Z","source_rows":729625},
+      {"language":"ja","provider_code":"jpn","path":"build/backend-data-acquire/ja-corpus/corpora/jpn_sentences_detailed.tsv.bz2","url":"https://downloads.tatoeba.org/exports/per_language/jpn/jpn_sentences_detailed.tsv.bz2","bytes":4462456,"sha256":"ef4b273dec34a6d4c3be746189c5dd2fafe88e614aa059ec59c6897cd57a9b42","last_modified_utc":"2026-10-31T06:39:48Z","source_rows":248947},
+      {"language":"ko","provider_code":"kor","path":"build/backend-data-acquire/ja-corpus/corpora/kor_sentences_detailed.tsv.bz2","url":"https://downloads.tatoeba.org/exports/per_language/kor/kor_sentences_detailed.tsv.bz2","bytes":305992,"sha256":"708a62bf6f003c29e4dae11d554052fbbf6e22adff5518d7b80f09aaed9eb5eb","last_modified_utc":"2026-10-31T06:39:48Z","source_rows":15947}
+    ],
+    "grouping_export": {
+      "path":"build/backend-data-acquire/ja-corpus/corpora/sentences_base.tar.bz2",
+      "member":"sentences_base.csv",
+      "url":"https://downloads.tatoeba.org/exports/sentences_base.tar.bz2",
+      "bytes":63963906,
+      "sha256":"a7b2c9cf5e188a294e56581e7e95c216c38b18e13da53f7ff3cb36d242a7a2f3",
+      "last_modified_utc":"2026-10-31T06:37:57Z",
+      "rows":13628386,
+      "limitations":"Unknown \\N base rows cannot receive a resolved family and are excluded by the importer; root-family grouping only captures recorded base ancestry, not every linked or semantically overlapping sentence."
+    },
+    "official_evidence_snapshots": [
+      {"path":"build/backend-data-acquire/ja-corpus/metadata/tatoeba-downloads-2026-11-02.html","bytes":316939,"sha256":"7182bddbe203ba3b2c1c4981f819f460d34cbaa84e716887ebdfa16471d66e93"},
+      {"path":"build/backend-data-acquire/ja-corpus/metadata/tatoeba-terms-of-use-2026-11-02.html","bytes":88405,"sha256":"8609cb91f5ef3f8c74afd46a90e0d443678fd10846f91d1104581ffbc16e2493"},
+      {"path":"build/backend-data-acquire/ja-corpus/metadata/cc-by-2.0-fr.html","bytes":34827,"sha256":"496dc52cc69678e8476a49aec012451f040af5acb1b61c9cf69f3668b804a0ba"}
+    ],
+    "rejected_url_probe": {"url":"https://downloads.tatoeba.org/exports/per_language/zho/zho_sentences.tsv.bz2","result":"HTTP 404; correct acquired Mandarin path is provider code cmn."}
+  },
+  "derived_bounded_corpus": {
+    "path":"build/backend-corpus-prepared/manifest.json",
+    "sha256":"3cbaa06deb221aeb146a6e98d8ffe8736bb20ab3ba14f5b185edc16f7d2c6c0d",
+    "selection":"Deterministic per-language SHA-256 rank from sentence ID, bounded at 100000 eligible records; only records with attribution author and resolved base family retained.",
+    "grouping_limit":"Recorded base ancestry groups are held together when downstream training splits by document_id; semantic duplicates or other link relations not represented by base ancestry are not guaranteed disjoint.",
+    "outputs": [
+      {"language":"en","path":"build/backend-corpus-prepared/en.jsonl","rows":100000,"bytes":36606865,"sha256":"8691c35fd674a95e954635c8e9495ffc875c9a9c38f9d70dcdb2e269ccb7a141","source_rows":2040024,"unresolved_base":183137,"no_author":44402},
+      {"language":"zh","path":"build/backend-corpus-prepared/zh.jsonl","rows":47871,"bytes":17546799,"sha256":"193d354b0bc4735cf219fe8afdb1875aff0a6fd92ad53da5da6aea9dbd6e3eb1","source_rows":89248,"unresolved_base":41377,"no_author":0,"note":"below the 100000 cap due to finite eligible source rows"},
+      {"language":"fr","path":"build/backend-corpus-prepared/fr.jsonl","rows":100000,"bytes":37200609,"sha256":"74c4f517de748dad21b607a58811016ab582a714ac8d9905700d1dd23ba849fd","source_rows":729625,"unresolved_base":135444,"no_author":373},
+      {"language":"ja","path":"build/backend-corpus-prepared/ja.jsonl","rows":79937,"bytes":30656069,"sha256":"5317de185b993872d932f23cc884989dfee41f6eefba6868bc5629fb16b0889b","source_rows":248947,"unresolved_base":68900,"no_author":100110},
+      {"language":"ko","path":"build/backend-corpus-prepared/ko.jsonl","rows":10598,"bytes":3919930,"sha256":"9229858d2f1fb725930f019300d7aea8e9641cb433349dcdfea50a4746adb9fc","source_rows":15947,"unresolved_base":5120,"no_author":229,"note":"below the 100000 cap due to finite eligible source rows; small-data quality limits apply"}
+    ],
+    "schema": {"required_fields":["id","language","text","source","license","attribution","document_id"],"attribution_fields":["author","sentence_url","license_url"],"document_id":"tatoeba-base-<root sentence ID>"},
+    "training": "No training was performed by this acquisition agent. Any model built later must retain provenance and satisfy applicable attribution and licensing obligations; quality and public-distribution clearance are separate gates."
+  },
+  "not_acquired_or_not_claimed": [
+    "CC-CEDICT dictionary data (the Mandarin corpus here is Tatoeba sentences only)",
+    "Google Japanese Input private Web-corpus lexicon",
+    "Tatoeba audio or text without author attribution",
+    "Tatoeba data under CC0 not present in the selected CC-BY sentence exports",
+    "A public-release or product-packaging license conclusion"
+  ]
+}

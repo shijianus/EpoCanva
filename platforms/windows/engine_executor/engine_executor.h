@@ -53,15 +53,18 @@
 #ifndef EPOCANVA_WINDOWS_ENGINE_EXECUTOR_ENGINE_EXECUTOR_H_
 #define EPOCANVA_WINDOWS_ENGINE_EXECUTOR_ENGINE_EXECUTOR_H_
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include <windows.h>
 
+#include "backend_config.h"
 #include "engine_update.h"
 #include "input_controller.h"
 #include "key_event.h"
@@ -106,6 +109,7 @@ struct ExecutorOptions {
   RuntimeOptions runtime;
   // Total accepted requests that may be queued, executing, or completed-but-unconsumed.
   std::size_t capacity = 32;
+  UnifiedBackendConfig backend;
 };
 
 // Why Start returned. kAlreadyStarted covers any second Start, including after failure: this
@@ -146,6 +150,8 @@ enum class CommandKind {
   kAcceptCandidate,
   kRefreshState,
   kCloseClient,
+  kCreateProfileClient,
+  kBackendWork,
 };
 
 // Terminal status of one accepted command. This is deliberately separate from the P3.4
@@ -192,9 +198,60 @@ struct CloseClientOutcome {
   SessionCloseStatus session_status = SessionCloseStatus::kOk;
 };
 
+struct ProfileClientOutcome {
+  ClientId client;
+  std::uint32_t profile_id = 0;
+  epocanva_status backend_status = EPOCANVA_INVALID_ARGUMENT;
+  std::string diagnostic;
+};
+
+struct BackendSnapshotOutcome {
+  epocanva_status backend_status = EPOCANVA_INVALID_ARGUMENT;
+  std::uint64_t snapshot_token = 0;
+  std::uint32_t profile_id = 0;
+  std::uint32_t output_mode = 0;
+  std::uint32_t keyboard_layout = 0;
+  std::uint32_t unit_kind = 0;
+  std::string raw_utf8;
+  std::string preedit_utf8;
+  std::vector<std::string> candidate_text_utf8;
+  std::vector<std::uint32_t> candidate_kind;
+  std::vector<std::uint64_t> candidate_tokens;
+  std::vector<std::uint32_t> candidate_lexeme_counts;
+  std::vector<std::uint64_t> candidate_input_begin_utf8_byte;
+  std::vector<std::uint64_t> candidate_input_end_utf8_byte;
+  std::uint32_t search_complete = 0;
+  std::uint32_t language = 0;
+  std::uint32_t input_mode = 0;
+};
+
+struct BackendCommitOutcome {
+  epocanva_status backend_status = EPOCANVA_NO_COMMIT;
+  std::uint64_t commit_token = 0;
+  std::string text_utf8;
+  std::string remaining_preedit_utf8;
+  bool awaiting_ack = false;
+};
+
+struct BackendAckOutcome {
+  epocanva_status backend_status = EPOCANVA_INVALID_ARGUMENT;
+  std::uint32_t consumed = 0;
+  std::uint32_t learned = 0;
+  std::uint32_t context_advanced = 0;
+  std::uint32_t persistence_status = 0;
+};
+
+struct BackendWorkOutcome {
+  epocanva_status backend_status = EPOCANVA_INVALID_ARGUMENT;
+  BackendSnapshotOutcome snapshot;
+  BackendCommitOutcome commit;
+  BackendAckOutcome acknowledgement;
+};
+
 using CommandPayload =
     std::variant<CreateClientOutcome, EvaluateOutcome, DispatchCommandOutcome,
-                 CandidateCommandOutcome, RefreshOutcome, CloseClientOutcome>;
+                 CandidateCommandOutcome, RefreshOutcome, CloseClientOutcome,
+                 ProfileClientOutcome, BackendWorkOutcome>;
 
 struct CommandResult {
   RequestId request;
@@ -303,6 +360,15 @@ class EngineExecutor {
                                   RequestId* request);
   SubmitStatus TryRefreshState(ClientId client, RequestId* request);
   SubmitStatus TryCloseClient(ClientId client, RequestId* request);
+  SubmitStatus TryCreateProfileClient(std::uint32_t profile_id,
+                                      const BackendAccess& access,
+                                      RequestId* request, ClientId* client);
+  SubmitStatus TryBackendWork(ClientId client, const BackendWork& work,
+                              RequestId* request);
+  bool unified_backend() const;
+  std::uint32_t active_profile_id() const;
+  // Active immutable profile metadata, copied from the start configuration.
+  BackendProfileConfig active_profile() const;
 
   // Waiting is read-only: a timeout does not cancel, retry, or mark anything consumed.
   WaitStatus WaitForResult(RequestId request, std::chrono::milliseconds timeout);

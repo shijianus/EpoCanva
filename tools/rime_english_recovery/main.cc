@@ -16,6 +16,7 @@
 #include "acceptance_tests.h"
 #include "case_tests.h"
 #include "completion_tests.h"
+#include "extended_tests.h"
 #include "lexicon_failure_tests.h"
 #include "pilot_tests.h"
 #include "recovery_test_support.h"
@@ -74,6 +75,16 @@ constexpr ModeEntry kModes[] = {
     {Mode::kAcceptanceSemantics, epocanva::recovery::RunAcceptanceSemanticsMode},
     {Mode::kAcceptanceSelfCheckFail,
      epocanva::recovery::RunAcceptanceSelfCheckFailMode},
+    {Mode::kExtendedDefaults, epocanva::recovery::RunExtendedDefaultsMode},
+    {Mode::kExtendedMorphology, epocanva::recovery::RunExtendedMorphologyMode},
+    {Mode::kExtendedAbbreviation, epocanva::recovery::RunExtendedAbbreviationMode},
+    {Mode::kExtendedSpelling, epocanva::recovery::RunExtendedSpellingMode},
+    {Mode::kExtendedFrequency, epocanva::recovery::RunExtendedFrequencyMode},
+    {Mode::kExtendedProtection, epocanva::recovery::RunExtendedProtectionMode},
+    {Mode::kExtendedCommit, epocanva::recovery::RunExtendedCommitMode},
+    {Mode::kExtendedMalformedFrequency,
+     epocanva::recovery::RunExtendedMalformedFrequencyMode},
+    {Mode::kExtendedSelfCheckFail, epocanva::recovery::RunExtendedSelfCheckFailMode},
 };
 
 ModeFn FindMode(Mode mode) {
@@ -104,7 +115,10 @@ int main(int argc, char** argv) {
         "spelling-lexicon-unavailable|spelling-ranking-self-check-fail|"
         "spelling-label-self-check-fail|spelling-toggle-ab|"
         "spelling-toggle-self-check-fail|acceptance-semantics|"
-        "acceptance-self-check-fail]\n"
+        "acceptance-self-check-fail|extended-defaults|extended-morphology|"
+        "extended-abbreviation|extended-spelling|extended-frequency|"
+        "extended-protection|extended-commit|extended-malformed-frequency|"
+        "extended-self-check-fail]\n"
         "       the four pilot modes additionally require --pilot-lexicon <absolute path "
         "to the generated word list> and accept it and nothing else\n");
     epocanva::recovery::Fail(epocanva::recovery::kUsage, "arguments", error);

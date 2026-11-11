@@ -46,3 +46,10 @@ CMakeLists.txt text eol=lf
 /build/ -diff
 *.min.js -diff
 *.lock -diff
+
+# Verbatim third-party licence texts keep their upstream bytes, trailing
+# whitespace included: data/manifests/product-dependencies.json pins the
+# licence sha256 and byte count, so rewriting the text would break the pin and
+# stop the retained notice from being a faithful copy. The whitespace gate
+# therefore does not apply to them; no other file is exempt.
+data/product/licenses/*.txt -whitespace

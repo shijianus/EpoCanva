@@ -13,8 +13,10 @@
 // Whether TSF honours a per-user TIP registration is not established here; the report
 // records it as unverified until a real per-user round is run.
 //
-// SAFETY. Every write is read back. Any failure rolls back everything this call created or
-// changed. A CLSID that belongs to another product (no EpoCanva marker and an
+// SAFETY. Registration reads back the required values and category keys. On failure it
+// attempts to restore the snapshot, including removing a newly created category container;
+// pre-existing containers are preserved. rolled_back is true only if all restoration calls
+// succeed. A CLSID that belongs to another product (no EpoCanva marker and an
 // InprocServer32 that is not epocanva_tsf.dll) is refused before the first write.
 //
 // THIRD PARTY REACHABILITY. `RegistryOps` is the only seam: the product uses the Win32
@@ -67,6 +69,8 @@ class RegistryOps {
                          bool* exists, std::wstring* why) = 0;
   virtual bool CreateKey(RegistrationScope scope, const std::wstring& subkey,
                          bool* created, std::wstring* why) = 0;
+  // Non-recursive, like RegDeleteKeyExW: a key with subkeys cannot be deleted.
+  // A leaf key's values are deleted with it. An absent key succeeds with removed=false.
   virtual bool DeleteKey(RegistrationScope scope, const std::wstring& subkey,
                          bool* removed, std::wstring* why) = 0;
   virtual bool WriteString(RegistrationScope scope, const std::wstring& subkey,
@@ -121,8 +125,9 @@ RegistrationResult RegisterTextServiceInScope(RegistrationScope scope,
 RegistrationResult RegisterTextServiceAuto(const std::wstring& module_path,
                                            RegistryOps* ops);
 
-// Removes this product's registration from both scopes. Foreign keys are left untouched
-// and reported; absence is success.
+// Removes this product's registration from both scopes. Foreign registrations are left
+// untouched and reported; absence is success. Shared category/CLSID containers are removed
+// only when no values or subkeys remain. Unregistration is not transactional.
 RegistrationResult UnregisterTextService(RegistryOps* ops);
 
 const wchar_t* RegistrationClsidText();

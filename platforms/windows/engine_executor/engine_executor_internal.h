@@ -18,6 +18,7 @@ namespace windows {
 namespace engine {
 
 std::unique_ptr<EngineBackend> MakeRealEngineBackend();
+std::unique_ptr<EngineBackend> MakeUnifiedEngineBackend(UnifiedBackendConfig config);
 
 class EngineExecutorTestFactory {
  public:

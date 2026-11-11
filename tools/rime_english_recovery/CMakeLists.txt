@@ -96,6 +96,9 @@ set(EpoCanva_Assert_Script
 set(EpoCanva_English_Spelling_Fixture_Dir
     "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_spelling" CACHE PATH
   "Directory holding the spelling fixture's default.yaml, schema and 16-row word list")
+set(EpoCanva_English_Extended_Fixture_Dir
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/fixtures/english_extended" CACHE PATH
+  "Test-only extended schema, word list and independent synthetic frequency data")
 
 # --- the pilot switch: OFF by default, and OFF means the data is never mentioned -------
 # EPOCANVA_ENGLISH_PILOT_LEXICON is empty in the normal configure, and with it empty this
@@ -157,6 +160,13 @@ epocanva_locate_engine(BASELINE Baseline_Rime_Prefix Base)
 # --- versioned inputs must exist, or the build fails at configure time ----------
 foreach(_f
         "${EpoCanva_English_Header_Dir}/english_diagnostics.h"
+        "${EpoCanva_English_Header_Dir}/english_extended_config.h"
+        "${EpoCanva_English_Extended_Fixture_Dir}/default.yaml"
+        "${EpoCanva_English_Extended_Fixture_Dir}/epocanva_extended_english.schema.yaml"
+        "${EpoCanva_English_Extended_Fixture_Dir}/lexicon.tsv"
+        "${EpoCanva_English_Extended_Fixture_Dir}/frequency.tsv"
+        "${CMAKE_CURRENT_SOURCE_DIR}/extended_tests.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/extended_tests.cc"
         "${EpoCanva_English_Fixture_Dir}/default.yaml"
         "${EpoCanva_English_Fixture_Dir}/epocanva_test_english.schema.yaml"
         "${EpoCanva_English_Fixture_Dir}/lexicon.tsv"
@@ -296,6 +306,7 @@ set(_SOURCES
   spelling_negative_tests.cc
   spelling_toggle_tests.cc
   acceptance_tests.cc
+  extended_tests.cc
   pilot_sha256.cc
   pilot_reference.cc
   pilot_tests.cc)
@@ -823,6 +834,97 @@ epocanva_add_sha256_case(
   MARKER_POLICY forbid
   LABEL     sha256-self-check-fail)
 
+# --------------------------------------------------------------- extended cases --
+# Additive to all 29/35 existing registrations, never a replacement for the old
+# counter/fixture expectations. No generated pilot/corpus data is needed. Names
+# are literal and precede the pilot block so the formal PowerShell source-name
+# checker sees each as unconditional without a second registration mechanism.
+epocanva_add_case(
+  NAME      recovery.extended.default_off_and_legacy_order
+  MODE      extended-defaults
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  LABEL     extended-defaults)
+epocanva_add_case(
+  NAME      recovery.extended.morphology_opt_in_and_attestation
+  MODE      extended-morphology
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  LABEL     extended-morphology)
+epocanva_add_case(
+  NAME      recovery.extended.abbreviation_and_contraction_opt_in
+  MODE      extended-abbreviation
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  LABEL     extended-abbreviation)
+epocanva_add_case(
+  NAME      recovery.extended.two_edit_spelling_opt_in_and_dedup
+  MODE      extended-spelling
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  LABEL     extended-spelling)
+epocanva_add_case(
+  NAME      recovery.extended.segmentation_and_independent_frequency
+  MODE      extended-frequency
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  LABEL     extended-frequency)
+epocanva_add_case(
+  NAME      recovery.extended.raw_protection_and_total_menu_budget
+  MODE      extended-protection
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  LABEL     extended-protection)
+epocanva_add_case(
+  NAME      recovery.extended.explicit_selection_and_commit
+  MODE      extended-commit
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  LABEL     extended-commit)
+epocanva_add_case(
+  NAME      recovery.extended.malformed_frequency_fails_closed
+  MODE      extended-malformed-frequency
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 0
+  MARKER    "RESULT PASS"
+  LABEL     extended-malformed-frequency)
+epocanva_add_case(
+  NAME      recovery.extended.suite_can_fail_on_raw_replacement
+  MODE      extended-self-check-fail
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 14
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     extended-self-check-fail)
+epocanva_add_case(
+  NAME      recovery.extended.positive_mode_fails_on_baseline_engine
+  BASELINE_EXE TRUE
+  MODE      extended-abbreviation
+  FIXTURE_DIR "${EpoCanva_English_Extended_Fixture_Dir}"
+  EXPECTED_EXIT 20
+  MARKER    "RESULT PASS"
+  MARKER_POLICY forbid
+  LABEL     extended-on-baseline)
+set_tests_properties(
+  recovery.extended.default_off_and_legacy_order
+  recovery.extended.morphology_opt_in_and_attestation
+  recovery.extended.abbreviation_and_contraction_opt_in
+  recovery.extended.two_edit_spelling_opt_in_and_dedup
+  recovery.extended.segmentation_and_independent_frequency
+  recovery.extended.raw_protection_and_total_menu_budget
+  recovery.extended.explicit_selection_and_commit
+  recovery.extended.malformed_frequency_fails_closed
+  recovery.extended.suite_can_fail_on_raw_replacement
+  recovery.extended.positive_mode_fails_on_baseline_engine
+  PROPERTIES TIMEOUT 180 LABELS "librime;english;recovery;extended")
+
 # ------------------------------------------------------------------ pilot cases --
 # Registered ONLY when EPOCANVA_ENGLISH_PILOT_LEXICON names a generated file that has
 # already passed the configure-time identity check above. With the option empty, none of
@@ -988,6 +1090,8 @@ message(STATUS "  baseline prefix      : ${Baseline_Rime_Prefix}")
 message(STATUS "  diagnostics header   : ${EpoCanva_English_Header_Dir}")
 message(STATUS "  fixture dir          : ${EpoCanva_English_Fixture_Dir}")
 message(STATUS "  spelling fixture dir : ${EpoCanva_English_Spelling_Fixture_Dir}")
+message(STATUS "  extended fixture dir : ${EpoCanva_English_Extended_Fixture_Dir}")
+message(STATUS "  extended cases       : 10 additive actual-engine cases; test-only frequency")
 message(STATUS "  assert wrapper       : ${EpoCanva_Assert_Script}")
 message(STATUS "  run root             : ${_run_root}")
 message(STATUS "  digest backend       : Windows CNG (bcrypt) through pilot_sha256.cc; bcrypt "
@@ -1004,13 +1108,11 @@ if(EPOCANVA_ENGLISH_PILOT_LEXICON)
                  "compiled in")
   message(STATUS "  pilot cases          : 6 registered (4 engine modes + 1 data check + "
                  "1 real-list digest)")
-  message(STATUS "  ctest total          : 35 = 17 pre-spelling engine cases + 7 spelling "
-                 "engine cases + 2 acceptance engine cases (Enter/Space semantics + "
-                 "falsification control) + 4 pilot engine cases + 1 pilot data check + "
-                 "4 helper cases")
+  message(STATUS "  ctest total          : 45 = 35 unchanged legacy/pilot/helper cases "
+                 "+ 10 extended engine cases")
 else()
   message(STATUS "  pilot lexicon        : not configured -- no pilot case is registered, "
                  "no generated data is required, no manifest is read")
-  message(STATUS "  ctest total          : 29 = 26 engine cases (17 pre-spelling + 7 "
-                 "spelling + 2 acceptance) + 3 helper cases")
+  message(STATUS "  ctest total          : 39 = 29 unchanged legacy/helper cases "
+                 "+ 10 extended engine cases")
 endif()

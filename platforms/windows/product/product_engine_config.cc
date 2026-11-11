@@ -11,9 +11,11 @@
 
 #include "engine_host.h"
 #include "product_io.h"
+#include "product_learning.h"
 #include "product_paths.h"
 #include "product_settings.h"
 #include "product_display_preference.h"
+#include "product_backend_resources.h"
 
 namespace epocanva {
 namespace product {
@@ -69,6 +71,14 @@ bool HashRequiredFile(const std::filesystem::path& path, std::string* digest,
 // store user content.
 bool ComputeFingerprint(const ProductPaths& paths, const std::string& settings_token,
                         std::string* fingerprint, std::wstring* why) {
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  std::string manifest, binary;
+  if (!HashRequiredFile(paths.data_dir / L"backend" / L"resources.tsv", &manifest, why) ||
+      !HashRequiredFile(paths.rime_dll, &binary, why)) return false;
+  if (binary != EPOCANVA_PRODUCT_RIME_SHA256) { if (why) *why = L"engine binary identity mismatch"; return false; }
+  const std::string input = std::string("backend-v2") + settings_token + manifest + binary;
+  return Sha256(input.data(), input.size(), fingerprint, why);
+#endif
   std::string schema;
   std::string default_config;
   std::string custom = "missing";
@@ -88,6 +98,14 @@ bool ComputeFingerprint(const ProductPaths& paths, const std::string& settings_t
   if (!HashPresentFile(paths.rime_dll, &rime, why)) {
     return false;
   }
+#ifdef EPOCANVA_TSF_PRODUCT_LAYOUT
+  if (rime != EPOCANVA_PRODUCT_RIME_SHA256) {
+    if (why != nullptr) {
+      *why = L"the engine binary does not match this product build";
+    }
+    return false;
+  }
+#endif
   std::string text = "format=1\n";
   text += "settings=" + (settings_token.empty() ? std::string("-") : settings_token) + "\n";
   text += "schema=" + schema + "\ndefault=" + default_config + "\ncustom=" + custom +
@@ -165,6 +183,10 @@ bool WriteDeployedState(const ProductPaths& paths, const std::string& fingerprin
 
 bool CompiledArtifactPresent(const ProductPaths& paths) {
   std::error_code ec;
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  return std::filesystem::is_regular_file(paths.engine_user_dir / L"build/epocanva_backend_pinyin.schema.yaml", ec) &&
+      std::filesystem::is_regular_file(paths.engine_user_dir / L"build/epocanva_backend_zhuyin.schema.yaml", ec);
+#endif
   for (const std::filesystem::path& candidate :
        {paths.compiled_schema_file, paths.compiled_schema_binary}) {
     if (!std::filesystem::is_regular_file(candidate, ec) || ec) {
@@ -245,13 +267,30 @@ void CloseLockFile(void** file) {
   if (*file == nullptr) {
     return;
   }
-  OVERLAPPED overlapped = {};
-  (void)::UnlockFileEx(static_cast<HANDLE>(*file), 0, 1, 0, &overlapped);
-  ::CloseHandle(static_cast<HANDLE>(*file));
+  ReleaseEngineLeaseLock(*file);
   *file = nullptr;
 }
 
 }  // namespace
+
+void ReleaseEngineLeaseLock(void* lock) noexcept {
+  if (lock == nullptr) {
+    return;
+  }
+  try {
+    epocanva::tsf::EngineHostDiagnostics diagnostics;
+    epocanva::tsf::EngineHostBroker::Instance().Snapshot(&diagnostics);
+    if (diagnostics.cleanup_failed || diagnostics.abandoned ||
+        diagnostics.state == epocanva::tsf::EngineHostState::kFailed) {
+      // Deliberate process-lifetime retention: the engine may still use the files.
+      // The broker's failed/abandoned diagnostic explains why restart is refused.
+      return;
+    }
+  } catch (...) {
+    return;  // an unreadable cleanup state is not evidence that the lock is safe to drop
+  }
+  ::CloseHandle(static_cast<HANDLE>(lock));  // also releases this handle's file locks
+}
 
 bool ApplyProductEngineConfig(HMODULE module, std::wstring* why) {
   std::lock_guard<std::mutex> guard(g_mutex);
@@ -387,7 +426,41 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
   const bool state_matched = state_present && state.fingerprint == fingerprint;
   const bool artifact_present = CompiledArtifactPresent(paths);
 
-  const epocanva::tsf::EngineHostConfig base = BaseConfig(paths);
+  epocanva::tsf::EngineHostConfig base = BaseConfig(paths);
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+  if (!LoadBackendResources(paths, &base.backend, why)) { ReleaseStartLock(&mutex_); return false; }
+  // Existing preferences are read for ranking even while recording is paused. A durable
+  // write additionally needs learning_writes_trusted, which stays false until a real
+  // field-permission lock covers the queued worker path. Avoid per-query filesystem work
+  // when the store does not exist; a store created later is picked up at the next start.
+  if (LocalLearningDataPresent(paths)) base.backend.learning_root = paths.user_root;
+  base.backend.learning_writes_trusted = ProductLearningWritesPermitted();
+  base.backend.learning_recording_enabled =
+      display_settings.settings.learning_recording_enabled &&
+      base.backend.learning_writes_trusted;
+  base.backend.active_profile_id = static_cast<std::uint32_t>(display_settings.settings.profile_id);
+  base.backend.completion_enabled = display_settings.settings.completion_enabled;
+  base.backend.spelling_enabled = display_settings.settings.spelling_enabled;
+  base.backend.morphology_enabled = display_settings.settings.morphology_enabled;
+  base.backend.abbreviation_enabled = display_settings.settings.abbreviation_enabled;
+  {
+    // The unified backend exposes one ranked candidate list. Reserve room for each enabled
+    // kind so a per-kind user limit is not silently reduced to the other kind's budget. One
+    // extra record is the original raw text, which completion queries put at index 0.
+    std::uint32_t wanted = 1;
+    if (display_settings.settings.completion_enabled)
+      wanted += static_cast<std::uint32_t>(display_settings.settings.completion_candidates);
+    if (display_settings.settings.spelling_enabled)
+      wanted += static_cast<std::uint32_t>(display_settings.settings.spelling_candidates);
+    if (display_settings.settings.morphology_enabled) wanted += 7;
+    if (display_settings.settings.abbreviation_enabled) wanted += 8;
+    base.backend.max_candidates = wanted > 64 ? 64 : wanted;
+  }
+  bool profile_found = false;
+  for (const auto& resource : base.backend.profiles)
+    profile_found = profile_found || resource.profile.profile_id == base.backend.active_profile_id;
+  if (!profile_found) return fail(why, L"selected profile is not supplied by the resource manifest");
+#endif
   const bool running = epocanva::tsf::EngineHostBroker::Instance().IsRunningFor(base);
   const bool snapshot_current = state_matched && artifact_present;
   const bool deployment_needed = !snapshot_current;
@@ -435,7 +508,12 @@ bool EngineStartTransaction::Prepare(std::wstring* why) {
   if (can_deploy) {
     epocanva::tsf::EngineHostDeployment deployment;
     deployment.config_file = paths.default_config;
+#ifdef EPOCANVA_TSF_PRODUCT_CONTROLLER
+    deployment.schema_files.push_back(paths.data_dir / L"epocanva_backend_pinyin.schema.yaml");
+    deployment.schema_files.push_back(paths.data_dir / L"epocanva_backend_zhuyin.schema.yaml");
+#else
     deployment.schema_files.push_back(paths.schema_file);
+#endif
     config.deployment = std::move(deployment);
   }
   if (!config.valid() || !epocanva::tsf::SetEngineHostConfig(config)) {
@@ -502,7 +580,8 @@ bool EngineStartTransaction::Complete(std::wstring* why) {
   if (deployment_requested_ || !deferred_while_running_) {
     // Drop the one-shot request from the stored configuration. The broker has already
     // cleared it from the running environment; this keeps later acquisitions matching.
-    (void)epocanva::tsf::SetEngineHostConfig(BaseConfig(paths));
+    auto active = config_; active.deployment.reset();
+    (void)epocanva::tsf::SetEngineHostConfig(active);
   }
 
   if (exclusive_) {
@@ -521,9 +600,8 @@ bool EngineStartTransaction::Complete(std::wstring* why) {
 
   ReleaseStartLock(&mutex_);
   prepared_ = false;
-  if (!deployment_ok) {
-    CloseLockFile(&lock_file_);
-  }
+  // On failure the caller must release its engine lease before Abort/destruction
+  // considers dropping the file lock. Cleanup may fail and require retaining it.
   return deployment_ok;
 }
 

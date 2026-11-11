@@ -1,12 +1,14 @@
 // EpoCanva P2.6-recovery -- implementation of the shared integration-test harness.
 // See recovery_test_support.h for what this observes and the units it asserts in.
 #include "recovery_test_support.h"
+#include "extended_tests.h"
 
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <utility>
 
 namespace epocanva {
 namespace recovery {
@@ -911,6 +913,23 @@ bool ModeFromName(const std::string& name, Mode* out) {
     *out = Mode::kAcceptanceSelfCheckFail;
     return true;
   }
+  const std::pair<const char*, Mode> extended_modes[] = {
+      {"extended-defaults", Mode::kExtendedDefaults},
+      {"extended-morphology", Mode::kExtendedMorphology},
+      {"extended-abbreviation", Mode::kExtendedAbbreviation},
+      {"extended-spelling", Mode::kExtendedSpelling},
+      {"extended-frequency", Mode::kExtendedFrequency},
+      {"extended-protection", Mode::kExtendedProtection},
+      {"extended-commit", Mode::kExtendedCommit},
+      {"extended-malformed-frequency", Mode::kExtendedMalformedFrequency},
+      {"extended-self-check-fail", Mode::kExtendedSelfCheckFail},
+  };
+  for (const auto& entry : extended_modes) {
+    if (name == entry.first) {
+      *out = entry.second;
+      return true;
+    }
+  }
   return false;
 }
 
@@ -970,6 +989,24 @@ const char* ModeName(Mode mode) {
       return "acceptance-semantics";
     case Mode::kAcceptanceSelfCheckFail:
       return "acceptance-self-check-fail";
+    case Mode::kExtendedDefaults:
+      return "extended-defaults";
+    case Mode::kExtendedMorphology:
+      return "extended-morphology";
+    case Mode::kExtendedAbbreviation:
+      return "extended-abbreviation";
+    case Mode::kExtendedSpelling:
+      return "extended-spelling";
+    case Mode::kExtendedFrequency:
+      return "extended-frequency";
+    case Mode::kExtendedProtection:
+      return "extended-protection";
+    case Mode::kExtendedCommit:
+      return "extended-commit";
+    case Mode::kExtendedMalformedFrequency:
+      return "extended-malformed-frequency";
+    case Mode::kExtendedSelfCheckFail:
+      return "extended-self-check-fail";
   }
   return "?";
 }
@@ -1470,6 +1507,16 @@ StagePlan PlanForMode(Mode mode) {
     case Mode::kSpellingToggleAb:
     case Mode::kSpellingToggleSelfCheckFail:
       return StagePlan::kSpellingToggleFixture;
+    case Mode::kExtendedDefaults:
+    case Mode::kExtendedMorphology:
+    case Mode::kExtendedAbbreviation:
+    case Mode::kExtendedSpelling:
+    case Mode::kExtendedFrequency:
+    case Mode::kExtendedProtection:
+    case Mode::kExtendedCommit:
+    case Mode::kExtendedMalformedFrequency:
+    case Mode::kExtendedSelfCheckFail:
+      return StagePlan::kExtendedFixture;
     default:
       return StagePlan::kHandWrittenFixture;
   }
@@ -1590,6 +1637,9 @@ ExitCode RunHarness(const Options& opt, ModeFn mode_fn) {
       break;
     case StagePlan::kSpellingToggleFixture:
       rc = StageSpellingToggleFixture(opt, h.shared_dir, &h.schema_source);
+      break;
+    case StagePlan::kExtendedFixture:
+      rc = StageExtendedFixture(opt, h.shared_dir, &h.schema_source);
       break;
     case StagePlan::kNothing:
       rc = kOk;  // the mode asserts an identity refusal, so nothing may be staged

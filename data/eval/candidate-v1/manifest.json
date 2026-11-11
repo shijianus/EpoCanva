@@ -1,0 +1,22 @@
+{
+  "backend_manifest_sha256": "0b638426074914fec728319a949f4fb3b9c8aec2b449ec95a99fb276411809ce",
+  "case_count": {
+    "en": 2,
+    "fr": 3,
+    "ja": 4,
+    "ko": 2,
+    "zh": 4
+  },
+  "corpus_id": "candidate-v1",
+  "corpus_sha256": {
+    "en.jsonl": "479879484b6a26527d7981c4cdf83a4cf7fd89dbbbfdd091e29155a28d486d24",
+    "fr.jsonl": "cfa4432659a02d02ddd128117399309d73b363f1eede5d064c4f47990476ea3b",
+    "ja.jsonl": "d8dd1215ae510f374aaa53652a87b5d1f5462e7c911aaad4a47989b73f0666a7",
+    "ko.jsonl": "90f9de7d4c83ba65e41806cd6662ab2d2ecc2981a1f47ba3165869b2358042d7",
+    "zh.jsonl": "950ab3aaae827deb19dc0f7d1cb1d6476e86a8b76c85ae4d55839b54374fce3a"
+  },
+  "corpus_version": 1,
+  "format": "epocanva-candidate-eval-manifest-v1",
+  "harness_version": 1,
+  "license": "AGPL-3.0-only"
+}

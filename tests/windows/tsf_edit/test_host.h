@@ -73,9 +73,10 @@ struct TestDocumentOptions {
   // query-failure shape in the InputScope read (the selection the property is read over
   // is unavailable), distinct from absent metadata.
   bool refuse_selection_reads = false;
-  // InputScope metadata the document's store publishes through the real attribute path.
-  TestScopeAnswer scope_answer = TestScopeAnswer::kNone;
-  std::vector<long> input_scopes;
+  // Ordinary test documents publish IS_DEFAULT explicitly. kNone is reserved for
+  // absence tests: msctf may surface it as E_FAIL, which must remain Unknown.
+  TestScopeAnswer scope_answer = TestScopeAnswer::kScopes;
+  std::vector<long> input_scopes{0L};
 };
 
 struct TestDocumentDiagnostics {

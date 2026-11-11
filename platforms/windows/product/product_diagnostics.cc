@@ -22,7 +22,7 @@ struct RequiredFile {
   const wchar_t* label;
 };
 
-constexpr std::array<RequiredFile, 8> kRequiredFiles = {{
+constexpr std::array<RequiredFile, 10> kRequiredFiles = {{
     {"EpoCanva.exe", L"Application"},
     {"epocanva_tsf.dll", L"Text service DLL"},
     {"rime.dll", L"English engine"},
@@ -30,16 +30,19 @@ constexpr std::array<RequiredFile, 8> kRequiredFiles = {{
     {"data/epocanva_english.schema.yaml", L"English schema"},
     {"data/lexicon/epocanva_en_alpha.tsv", L"English lexicon"},
     {"NOTICE.txt", L"Notices"},
+    {"LICENSE", L"Project licence"},
+    {"license-decision.json", L"Licence decision scope"},
     {"VERSION.txt", L"Version file"},
 }};
 
 constexpr const char* kCapabilities =
-    "English natural keyboard input through a TSF key sink, prefix completion, "
-    "one-edit spelling suggestions and a native candidate window (8 per page, arrow "
-    "selection, validated acceptance). W3-B adds DllRegisterServer/DllUnregisterServer "
-    "for this product's own CLSID and TSF categories and a candidate_display fallback "
-    "setting. No installer, learning, other languages or system-wide input in this "
-    "build until registration is explicitly run.";
+    "Host-owned TSF text service with five offline language profiles (en/zh/fr/ja/ko), "
+    "13 resource profiles across US QWERTY, French AZERTY, German QWERTZ and Dvorak, "
+    "context-ranked prefix completion, word-only next-word prediction, abbreviation and "
+    "contraction expansion (default on), compact pinyin initial decoding, opt-in spelling "
+    "and word-form suggestions, and a native candidate window. Host text is preserved and "
+    "an explicit selection replaces the current token; this is not inline CJK composition. "
+    "No installer, persistent learning or system-wide input until registration is explicitly run.";
 
 struct WindowsVersion {
   DWORD major = 0;
@@ -260,7 +263,9 @@ bool CollectProductStatusForPaths(const ProductPaths& paths, ProductStatus* stat
   if (collected.manifest_ok) {
     collected.manifest_files = static_cast<int>(manifest.files.size());
     std::wstring verify_why;
-    if (!VerifyProductManifest(paths.product_root, manifest, &verifications,
+    if (!ValidateProductPayloadPolicy(manifest, &verify_why) ||
+        !VerifyProductFileSet(paths.product_root, manifest, &verify_why) ||
+        !VerifyProductManifest(paths.product_root, manifest, &verifications,
                                &collected.manifest_failures, &verify_why)) {
       collected.manifest_ok = false;
       collected.manifest_issue = verify_why;
@@ -268,13 +273,12 @@ bool CollectProductStatusForPaths(const ProductPaths& paths, ProductStatus* stat
       collected.manifest_ok = false;
       collected.manifest_issue =
           L"package.manifest version does not match this executable";
+    } else if (manifest.commit.empty() ||
+               manifest.commit != WideToUtf8(collected.commit)) {
+      collected.manifest_ok = false;
+      collected.manifest_issue = L"package.manifest commit does not match this executable";
     } else {
-      if (!manifest.commit.empty() &&
-          manifest.commit != WideToUtf8(collected.commit)) {
-        AddItem(&collected, L"Package build",
-                L"manifest commit differs from the executable's commit (warning)",
-                StatusLevel::kWarning);
-      }
+      AddItem(&collected, L"Package build", Utf8ToWide(manifest.commit), StatusLevel::kOk);
       AddItem(&collected, L"Package integrity",
               collected.manifest_failures == 0
                   ? (L"all " + std::to_wstring(collected.manifest_files) +
@@ -323,21 +327,32 @@ bool CollectProductStatusForPaths(const ProductPaths& paths, ProductStatus* stat
             ok ? StatusLevel::kOk : StatusLevel::kError);
   }
 
-  std::error_code ec;
+  bool licenses_ok = collected.manifest_ok;
   int license_files = 0;
-  if (std::filesystem::is_directory(paths.licenses_dir, ec) && !ec) {
-    for (std::filesystem::directory_iterator it(paths.licenses_dir, ec), end;
-         !ec && it != end; it.increment(ec)) {
-      if (it->is_regular_file(ec)) {
-        ++license_files;
-      }
-    }
+  for (const RequiredProductFile& required : RequiredProductFiles()) {
+    if (std::string(required.relative_path).rfind("licenses/", 0) != 0) { continue; }
+    ++license_files;
+    const FileVerification* verification = FindVerification(verifications, required.relative_path);
+    if (verification == nullptr || !verification->ok()) { licenses_ok = false; }
   }
   AddItem(&collected, L"Licences",
-          license_files > 0 ? (std::to_wstring(license_files) + L" files in " +
-                               paths.licenses_dir.wstring())
-                            : L"licenses folder is missing or empty",
-          license_files > 0 ? StatusLevel::kOk : StatusLevel::kError);
+          licenses_ok ? (std::to_wstring(license_files) + L" required files match the compiled policy")
+                      : L"required licence set or exact licence content failed verification",
+          licenses_ok ? StatusLevel::kOk : StatusLevel::kError);
+  collected.internal_only = manifest.internal_only;
+  collected.manifest_format = manifest.format;
+  collected.acceptance_profile = manifest.acceptance_profile;
+  collected.distribution_policy = manifest.distribution_policy;
+  collected.path_exception = manifest.path_exception;
+  std::wstring acceptance_why;
+  const bool acceptance_policy_ok = ValidateProductAcceptancePolicy(manifest, &acceptance_why);
+  AddItem(&collected, L"Package policy",
+          acceptance_policy_ok
+              ? (L"profile=" + Utf8ToWide(manifest.acceptance_profile) +
+                 L"; distribution=" + Utf8ToWide(manifest.distribution_policy) +
+                 L"; local integrity does not verify acceptance, signing or distribution authorization")
+              : acceptance_why,
+          acceptance_policy_ok ? StatusLevel::kOk : StatusLevel::kError);
 
   std::wstring user_why;
   collected.user_data_ok = ProbeUserDataWritable(paths, &user_why);
@@ -385,7 +400,8 @@ bool CollectProductStatusForPaths(const ProductPaths& paths, ProductStatus* stat
   AddItem(&collected, L"Capabilities", Utf8ToWide(kCapabilities), StatusLevel::kOk);
 
   collected.package_ready = collected.manifest_ok && collected.manifest_failures == 0 &&
-                            required_ok && license_files > 0 && collected.user_data_ok;
+                            required_ok && licenses_ok && acceptance_policy_ok &&
+                            collected.user_data_ok;
   *status = std::move(collected);
   return true;
 }
@@ -404,6 +420,13 @@ std::string FormatProductReport(const ProductStatus& status) {
   line("host", WideToUtf8(status.host));
   line("package", status.package_ready ? "ready" : "incomplete");
   line("manifest", status.manifest_ok ? "ok" : "failed");
+  line("internal_only", status.internal_only ? "yes" : "no");
+  line("manifest_format", std::to_string(status.manifest_format));
+  line("acceptance_profile", status.acceptance_profile);
+  line("distribution_policy", status.distribution_policy);
+  line("path_exception", status.path_exception);
+  line("readiness_scope", "local-package-integrity-only");
+  line("release_acceptance", "not-evaluated-use-check_release.ps1");
   line("manifest_files", std::to_string(status.manifest_files));
   line("manifest_failures", std::to_string(status.manifest_failures));
   line("manifest_issue", WideToUtf8(status.manifest_issue));

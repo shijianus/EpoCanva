@@ -1,0 +1,30 @@
+cmake_minimum_required(VERSION 3.25)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(EpoCanvaLanguagePackages LANGUAGES CXX)
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  set(CMAKE_CXX_EXTENSIONS OFF)
+endif()
+
+if(NOT TARGET epocanva_strict)
+  add_library(epocanva_strict INTERFACE)
+  target_compile_features(epocanva_strict INTERFACE cxx_std_17)
+  if(MSVC)
+    target_compile_options(epocanva_strict INTERFACE /utf-8 /permissive- /Zc:__cplusplus /W4 /EHsc)
+  else()
+    target_compile_options(epocanva_strict INTERFACE -Wall -Wextra -Wpedantic)
+  endif()
+endif()
+
+if(NOT TARGET epocanva_locale)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../locale"
+                   "${CMAKE_CURRENT_BINARY_DIR}/locale_core")
+endif()
+
+add_library(epocanva_language_packages STATIC language_package.cc language_package.h
+  module_requirements.h)
+target_include_directories(epocanva_language_packages PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(epocanva_language_packages PRIVATE epocanva_strict epocanva_locale)
+set_target_properties(epocanva_language_packages PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

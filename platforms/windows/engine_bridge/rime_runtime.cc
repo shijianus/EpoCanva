@@ -3,6 +3,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -12,9 +13,11 @@
 #include <utility>
 #include <vector>
 
+#include "../../../engine/language_packages/module_requirements.h"
 #include "english_diagnostics.h"
 #include "rime_api.h"
 #include "rime_runtime_internal.h"
+#include "../local_path/local_path.h"
 
 namespace epocanva {
 namespace windows {
@@ -36,26 +39,23 @@ std::string LastErrorText(const char* what, DWORD error) {
   return std::string(what) + " failed (GetLastError=" + std::to_string(error) + ")";
 }
 
-std::wstring NormalizePath(const std::filesystem::path& path) {
-  const std::wstring raw = path.native();
-  if (raw.empty()) {
-    return std::wstring();
-  }
-  std::vector<wchar_t> buffer(1024, L'\0');
-  DWORD written = ::GetFullPathNameW(raw.c_str(), static_cast<DWORD>(buffer.size()),
-                                     buffer.data(), nullptr);
-  if (written == 0) {
-    return std::wstring();
-  }
-  if (written >= buffer.size()) {
-    buffer.assign(static_cast<std::size_t>(written) + 1, L'\0');
-    written = ::GetFullPathNameW(raw.c_str(), static_cast<DWORD>(buffer.size()),
-                                 buffer.data(), nullptr);
-    if (written == 0 || written >= buffer.size()) {
-      return std::wstring();
-    }
-  }
-  return std::wstring(buffer.data(), written);
+namespace local = ::epocanva::windows::local_path;
+
+struct RuntimePaths {
+  local::PreparedPath dll;
+  local::PreparedPath shared;
+  local::PreparedPath user;
+  local::PreparedPath log;
+  std::vector<local::PreparedPath> schemas;
+  std::vector<local::PinnedPath> pins;
+  std::wstring dll_load_path;
+};
+
+local::PreparedPath ChildPath(local::PreparedPath parent, const std::wstring& name) {
+  parent.components.push_back(name);
+  parent.display /= name;
+  parent.physical /= name;
+  return parent;
 }
 
 std::wstring LoadedModulePath(HMODULE module) {
@@ -128,74 +128,90 @@ bool IsSafeSchemaId(const std::string& schema_id) {
   return true;
 }
 
-bool ValidateDirectory(const std::filesystem::path& path, const char* name,
-                       std::string* why) {
-  if (!path.is_absolute()) {
-    *why = std::string(name) + " must be absolute";
+bool ValidateOptions(const RuntimeOptions& options, RuntimePaths* paths, std::string* why) {
+  // Check ALL caller paths and local DOS mappings before the first filesystem open.
+  // No is_directory/weakly_canonical/GetFullPathName may precede this boundary.
+  if (!local::Prepare(options.rime_dll_path, &paths->dll) ||
+      paths->dll.components.empty() ||
+      !local::Prepare(options.shared_data_dir, &paths->shared) ||
+      !local::Prepare(options.user_data_dir, &paths->user) ||
+      !local::Prepare(options.log_dir, &paths->log)) {
+    *why = "runtime paths must use unaliased absolute local physical-disk paths";
     return false;
   }
-  std::string utf8;
-  if (!WideToUtf8(path.native(), &utf8)) {
-    *why = std::string(name) + " cannot be encoded as UTF-8";
+  const language_packages::ModuleRequirementsStatus module_status =
+      language_packages::ValidateModuleRequirements(options.required_modules);
+  if (module_status != language_packages::ModuleRequirementsStatus::kOk) {
+    switch (module_status) {
+      case language_packages::ModuleRequirementsStatus::kEmpty:
+        *why = "required_modules must not be empty";
+        break;
+      case language_packages::ModuleRequirementsStatus::kUnsafeName:
+        *why = "required_modules contains an unsafe module identifier";
+        break;
+      case language_packages::ModuleRequirementsStatus::kUnapprovedName:
+        *why = "required_modules contains an unapproved built-in module";
+        break;
+      case language_packages::ModuleRequirementsStatus::kDuplicate:
+        *why = "required_modules contains a duplicate module identifier";
+        break;
+      case language_packages::ModuleRequirementsStatus::kOk:
+        break;
+    }
     return false;
   }
-  std::error_code ec;
-  if (!std::filesystem::is_directory(path, ec) || ec) {
-    *why = std::string(name) + " is not an existing directory";
-    return false;
+  if (options.deployment.has_value()) {
+    const DeploymentOptions& deployment = *options.deployment;
+    if (deployment.schema_files.empty() ||
+        !local::SafeComponent(std::filesystem::u8path(deployment.config_file_name).native())) {
+      *why = "deployment requires schema files and a safe bare config file name";
+      return false;
+    }
+    for (const auto& schema : deployment.schema_files) {
+      local::PreparedPath prepared;
+      if (!local::Prepare(schema, &prepared) ||
+          !SamePath(prepared.physical.parent_path().native(), paths->shared.physical.native())) {
+        *why = "deployment schemas must be local files directly inside shared_data_dir";
+        return false;
+      }
+      paths->schemas.push_back(std::move(prepared));
+    }
   }
   return true;
 }
 
-bool ValidateOptions(const RuntimeOptions& options, std::string* why) {
-  if (!options.rime_dll_path.is_absolute()) {
-    *why = "rime_dll_path must be absolute; the working directory is never searched";
+bool PinPath(RuntimePaths* paths, const local::PreparedPath& path, bool directory,
+             bool allow_missing = false, bool allow_inner_writes = false) {
+  local::PinnedPath pin;
+  if (!pin.Open(path, directory, allow_missing, allow_inner_writes)) return false;
+  paths->pins.push_back(std::move(pin));
+  return true;
+}
+
+bool PinDirectories(RuntimePaths* paths, std::string* why) {
+  // Shared data is installed read-only; the user directory and the log directory are
+  // written by the running engine and by the product's deployment record.
+  if (!PinPath(paths, paths->shared, true)) {
+    *why = "the shared runtime directory is missing, redirected, recalled or cannot be pinned";
     return false;
   }
-  if (!ValidateDirectory(options.shared_data_dir, "shared_data_dir", why) ||
-      !ValidateDirectory(options.user_data_dir, "user_data_dir", why) ||
-      !ValidateDirectory(options.log_dir, "log_dir", why)) {
-    return false;
-  }
-  if (!options.deployment.has_value()) {
-    return true;
-  }
-  const DeploymentOptions& deployment = *options.deployment;
-  if (deployment.schema_files.empty()) {
-    *why = "deployment.schema_files is empty";
-    return false;
-  }
-  const std::filesystem::path config_name(deployment.config_file_name);
-  if (deployment.config_file_name.empty() ||
-      config_name.filename() != config_name || deployment.config_file_name == "." ||
-      deployment.config_file_name == "..") {
-    *why = "deployment.config_file_name must be a bare file name";
-    return false;
-  }
-  std::error_code ec;
-  const std::filesystem::path shared =
-      std::filesystem::weakly_canonical(options.shared_data_dir, ec);
-  if (ec) {
-    *why = "shared_data_dir cannot be canonicalized";
-    return false;
-  }
-  for (const std::filesystem::path& schema : deployment.schema_files) {
-    if (!schema.is_absolute()) {
-      *why = "every deployment schema path must be absolute";
+  for (const auto* mutable_root : {&paths->user, &paths->log}) {
+    if (!PinPath(paths, *mutable_root, true, false, true)) {
+      *why = "a mutable runtime directory is missing, redirected, recalled or cannot be pinned";
       return false;
     }
-    if (WidePathToUtf8(schema).empty()) {
-      *why = "every deployment schema path must be encodable as UTF-8";
+  }
+  // Rime derives these children (third_party/librime/src/rime/setup.cc:56-65).
+  // Do not allow an existing build junction to bypass an otherwise safe root.
+  for (const auto* root : {&paths->shared, &paths->user}) {
+    if (!PinPath(paths, ChildPath(*root, L"build"), true, true, root == &paths->user)) {
+      *why = "a runtime build directory cannot be pinned without redirection";
       return false;
     }
-    if (!std::filesystem::is_regular_file(schema, ec) || ec) {
-      *why = "a deployment schema path is not an existing regular file";
-      return false;
-    }
-    const std::filesystem::path parent =
-        std::filesystem::weakly_canonical(schema.parent_path(), ec);
-    if (ec || !SamePath(parent.native(), shared.native())) {
-      *why = "a deployment schema is not directly inside shared_data_dir";
+  }
+  for (const auto& schema : paths->schemas) {
+    if (!PinPath(paths, schema, false)) {
+      *why = "a deployment schema cannot be pinned as a resident local file";
       return false;
     }
   }
@@ -266,6 +282,20 @@ RuntimeStartStatus CheckBaseModules(RuntimeCore& core, std::string* why) {
   return RuntimeStartStatus::kOk;
 }
 
+RuntimeStartStatus CheckRequestedModules(RuntimeCore& core,
+                                         const std::vector<std::string>& requested,
+                                         std::string* why) {
+  for (const std::string& name : requested) {
+    if (core.api->find_module(name.c_str()) == nullptr) {
+      *why = std::string("required module is not registered: ") + name;
+      return name == EPOCANVA_ENGLISH_MODULE_NAME
+                 ? RuntimeStartStatus::kEnglishModuleMissing
+                 : RuntimeStartStatus::kBaseModuleMissing;
+    }
+  }
+  return RuntimeStartStatus::kOk;
+}
+
 RuntimeStartStatus CheckEnglishModule(RuntimeCore& core, std::string* why) {
   RimeModule* module = core.api->find_module(EPOCANVA_ENGLISH_MODULE_NAME);
   if (module == nullptr) {
@@ -323,9 +353,13 @@ bool DestroyEngineSession(RuntimeCore& core, RimeSessionId session_id,
 
 struct RimeRuntime::Impl {
   std::shared_ptr<RuntimeCore> core = std::make_shared<RuntimeCore>();
+  std::unique_ptr<RuntimePaths> paths;
   bool start_attempted = false;
   bool initialize_entered = false;
   bool shutdown_done = false;
+  // A partially finalized/unloaded service cannot be retried or shared with a new
+  // runtime. Preserve the terminal failure for executor/broker cleanup reporting.
+  RuntimeShutdownStatus shutdown_failure = RuntimeShutdownStatus::kOk;
   std::string last_start_diagnostic;
   std::string last_shutdown_diagnostic;
 };
@@ -333,6 +367,9 @@ struct RimeRuntime::Impl {
 RimeRuntime::RimeRuntime() : impl_(new Impl) {}
 
 RimeRuntime::~RimeRuntime() {
+  if (impl_ && impl_->shutdown_done && impl_->core->module != nullptr) {
+    (void)impl_->paths.release();  // Quarantine pins with a terminally retained DLL.
+  }
   if (!impl_ || !impl_->start_attempted || impl_->shutdown_done) {
     return;
   }
@@ -341,6 +378,10 @@ RimeRuntime::~RimeRuntime() {
   // safely touch. That is a controlled leak, not a hidden success.
   if (impl_->core->IsOwnerThread()) {
     (void)Shutdown();
+  }
+  if (impl_->core->module != nullptr) {
+    // Match the deliberately retained DLL on wrong-thread/failed cleanup.
+    (void)impl_->paths.release();
   }
 }
 
@@ -353,11 +394,25 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
   impl.start_attempted = true;
 
   std::string why;
-  if (!ValidateOptions(options, &why)) {
+  auto paths = std::make_unique<RuntimePaths>();
+  if (!ValidateOptions(options, paths.get(), &why) || !PinDirectories(paths.get(), &why)) {
     impl.last_start_diagnostic = why;
     impl.shutdown_done = true;
     return RuntimeStartStatus::kInvalidOptions;
   }
+  local::PinnedPath dll_pin;
+  if (!dll_pin.Open(paths->dll, false)) {
+    impl.last_start_diagnostic = "rime_dll_path cannot be pinned as a resident local file";
+    impl.shutdown_done = true;
+    return dll_pin.error() == ERROR_FILE_NOT_FOUND || dll_pin.error() == ERROR_PATH_NOT_FOUND
+        ? RuntimeStartStatus::kDllLoadFailed : RuntimeStartStatus::kInvalidOptions;
+  }
+  // The Win32 PE loader rejects this build's GLOBALROOT and volume-GUID paths
+  // with ERROR_INVALID_PARAMETER. Keep the file/ancestors pinned, use the admitted
+  // DOS spelling, and recheck its physical mapping at the loader boundary. A
+  // concurrent DOS-device remap is not prevented by these filesystem handles.
+  paths->dll_load_path = paths->dll.display.native();
+  paths->pins.push_back(std::move(dll_pin));
 
   bool expected = false;
   if (!g_runtime_slot_held.compare_exchange_strong(expected, true)) {
@@ -369,34 +424,32 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
 
   core.started = true;
   core.owner_thread = std::this_thread::get_id();
-  core.requested_dll_path = NormalizePath(options.rime_dll_path);
-  if (core.requested_dll_path.empty()) {
-    impl.last_start_diagnostic = "rime_dll_path could not be normalized";
-    core.started = false;
-    impl.shutdown_done = true;
-    g_runtime_slot_held.store(false);
-    return RuntimeStartStatus::kInvalidOptions;
-  }
+  impl.paths = std::move(paths);
+  core.requested_dll_path = impl.paths->dll.display.native();
 
   auto fail = [&](RuntimeStartStatus status, std::string diagnostic) {
     if (impl.initialize_entered) {
-      bool finalized = false;
+      // A throw may leave only part of librime finalized. Never enter it twice.
+      impl.initialize_entered = false;
+      core.finalize_calls += 1;
       try {
         core.api->finalize();
-        core.finalize_calls += 1;
-        finalized = true;
       } catch (...) {
-        diagnostic += "; finalize() threw, the DLL was left loaded";
+        impl.shutdown_failure = RuntimeShutdownStatus::kFinalizeFailed;
+        impl.last_shutdown_diagnostic = "finalize() threw during failed Start cleanup";
+        diagnostic += "; finalize() threw, the DLL and runtime slot remain held";
       }
-      core.initialized = false;
-      core.english_module_loaded = false;
-      if (finalized && core.module != nullptr) {
-        ::FreeLibrary(core.module);
+    }
+    core.initialized = false;
+    core.english_module_loaded = false;
+    if (impl.shutdown_failure == RuntimeShutdownStatus::kOk && core.module != nullptr) {
+      if (::FreeLibrary(core.module) != FALSE) {
         core.module = nullptr;
+      } else {
+        impl.shutdown_failure = RuntimeShutdownStatus::kUnloadFailed;
+        impl.last_shutdown_diagnostic = LastErrorText("FreeLibrary", ::GetLastError());
+        diagnostic += "; FreeLibrary failed, the DLL and runtime slot remain held";
       }
-    } else if (core.module != nullptr) {
-      ::FreeLibrary(core.module);
-      core.module = nullptr;
     }
     core.api = nullptr;
     core.started = false;
@@ -404,21 +457,31 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
     core.librime_version.clear();
     impl.last_start_diagnostic = std::move(diagnostic);
     impl.shutdown_done = true;
-    g_runtime_slot_held.store(false);
+    if (impl.shutdown_failure == RuntimeShutdownStatus::kOk) {
+      impl.paths.reset();
+      g_runtime_slot_held.store(false);
+    } else {
+      (void)impl.paths.release();  // Retain namespace pins with the quarantined DLL.
+    }
     return status;
   };
 
-  if (!WideToUtf8(options.shared_data_dir.native(), &core.shared_data_dir_utf8) ||
-      !WideToUtf8(options.user_data_dir.native(), &core.user_data_dir_utf8) ||
-      !WideToUtf8(options.log_dir.native(), &core.log_dir_utf8)) {
+  if (!WideToUtf8(impl.paths->shared.physical.native(), &core.shared_data_dir_utf8) ||
+      !WideToUtf8(impl.paths->user.physical.native(), &core.user_data_dir_utf8) ||
+      !WideToUtf8(impl.paths->log.physical.native(), &core.log_dir_utf8)) {
     return fail(RuntimeStartStatus::kInvalidOptions,
                 "a runtime directory cannot be encoded as UTF-8");
   }
 
+  local::PreparedPath loader_path;
+  if (!local::Prepare(impl.paths->dll_load_path, &loader_path) ||
+      !SamePath(loader_path.physical.native(), impl.paths->dll.physical.native())) {
+    return fail(RuntimeStartStatus::kInvalidOptions, "the DLL drive mapping changed before load");
+  }
   const DWORD load_flags =
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
   HMODULE module =
-      ::LoadLibraryExW(core.requested_dll_path.c_str(), nullptr, load_flags);
+      ::LoadLibraryExW(impl.paths->dll_load_path.c_str(), nullptr, load_flags);
   if (module == nullptr) {
     return fail(RuntimeStartStatus::kDllLoadFailed,
                 LastErrorText("LoadLibraryExW", ::GetLastError()));
@@ -430,9 +493,11 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
     return fail(RuntimeStartStatus::kDllIdentityMismatch,
                 "GetModuleFileNameW could not name the loaded module");
   }
-  if (!SamePath(core.loaded_dll_path, core.requested_dll_path)) {
+  local::PreparedPath loaded;
+  if (!local::Prepare(core.loaded_dll_path, &loaded) ||
+      !SamePath(loaded.physical.native(), impl.paths->dll.physical.native())) {
     return fail(RuntimeStartStatus::kDllIdentityMismatch,
-                "the loaded module's path is not the requested path");
+                "the loaded module's path is not the pinned requested path");
   }
 
   FARPROC symbol = ::GetProcAddress(module, "rime_get_api");
@@ -497,10 +562,21 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
   core.traits.min_log_level = 3;
   core.modules.clear();
   core.modules.push_back("default");
+  for (const std::string& required_module : options.required_modules) {
+    const char* approved = language_packages::ApprovedModuleName(required_module);
+    if (approved == nullptr) {
+      return fail(RuntimeStartStatus::kBaseModuleMissing,
+                  "required module was not admitted by the runtime contract");
+    }
+    const bool already_requested = std::any_of(core.modules.begin(), core.modules.end(),
+        [&required_module](const char* name) { return required_module == name; });
+    if (!already_requested) {
+      core.modules.push_back(approved);
+    }
+  }
   if (options.deployment.has_value()) {
     core.modules.push_back("levers");
   }
-  core.modules.push_back(EPOCANVA_ENGLISH_MODULE_NAME);
   core.modules.push_back(nullptr);
   core.traits.modules = core.modules.data();
 
@@ -528,9 +604,16 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
   if (module_status != RuntimeStartStatus::kOk) {
     return fail(module_status, why);
   }
-  module_status = CheckEnglishModule(core, &why);
+  module_status = CheckRequestedModules(core, options.required_modules, &why);
   if (module_status != RuntimeStartStatus::kOk) {
     return fail(module_status, why);
+  }
+  if (std::find(options.required_modules.begin(), options.required_modules.end(),
+                std::string(EPOCANVA_ENGLISH_MODULE_NAME)) != options.required_modules.end()) {
+    module_status = CheckEnglishModule(core, &why);
+    if (module_status != RuntimeStartStatus::kOk) {
+      return fail(module_status, why);
+    }
   }
 
   if (options.deployment.has_value()) {
@@ -545,8 +628,8 @@ RuntimeStartStatus RimeRuntime::Start(const RuntimeOptions& options) {
       return fail(RuntimeStartStatus::kDeploymentFailed,
                   "deploy_config_file refused " + options.deployment->config_file_name);
     }
-    for (const std::filesystem::path& schema : options.deployment->schema_files) {
-      const std::string schema_utf8 = WidePathToUtf8(schema);
+    for (const auto& schema : impl.paths->schemas) {
+      const std::string schema_utf8 = WidePathToUtf8(schema.physical);
       core.counts.deploy_calls += 1;
       core.deploy_calls += 1;
       if (api->deploy_schema(schema_utf8.c_str()) == False) {
@@ -567,6 +650,9 @@ RuntimeShutdownStatus RimeRuntime::Shutdown() {
   if (!impl.start_attempted) {
     return RuntimeShutdownStatus::kNotStarted;
   }
+  if (impl.shutdown_failure != RuntimeShutdownStatus::kOk) {
+    return impl.shutdown_failure;
+  }
   if (impl.shutdown_done) {
     return RuntimeShutdownStatus::kAlreadyShutdown;
   }
@@ -582,18 +668,19 @@ RuntimeShutdownStatus RimeRuntime::Shutdown() {
   }
 
   if (impl.initialize_entered) {
+    impl.initialize_entered = false;
+    core.initialized = false;
+    core.english_module_loaded = false;
+    core.finalize_calls += 1;
     try {
       core.api->finalize();
-      core.finalize_calls += 1;
-    } catch (const std::exception& ex) {
-      core.initialized = false;
-      impl.last_shutdown_diagnostic =
-          std::string("RimeApi::finalize threw: ") + ex.what();
-      return RuntimeShutdownStatus::kFinalizeFailed;
     } catch (...) {
-      core.initialized = false;
-      impl.last_shutdown_diagnostic = "RimeApi::finalize threw";
-      return RuntimeShutdownStatus::kFinalizeFailed;
+      // Keep the DLL mapped and the slot reserved for the rest of the process.
+      // Mark terminal before recording text so even allocation failure cannot retry.
+      impl.shutdown_failure = RuntimeShutdownStatus::kFinalizeFailed;
+      impl.shutdown_done = true;
+      impl.last_shutdown_diagnostic = "RimeApi::finalize threw; runtime quarantined";
+      return impl.shutdown_failure;
     }
   }
   core.initialized = false;
@@ -601,15 +688,15 @@ RuntimeShutdownStatus RimeRuntime::Shutdown() {
 
   if (core.module != nullptr) {
     if (::FreeLibrary(core.module) == FALSE) {
-      impl.last_shutdown_diagnostic =
-          LastErrorText("FreeLibrary", ::GetLastError());
-      core.module = nullptr;
+      impl.shutdown_failure = RuntimeShutdownStatus::kUnloadFailed;
+      impl.shutdown_done = true;
+      impl.last_shutdown_diagnostic = LastErrorText("FreeLibrary", ::GetLastError());
+      // The loader still owns this reference. Retain the handle and slot rather
+      // than making another runtime reuse a DLL whose unload failed.
       core.api = nullptr;
       core.started = false;
       core.owner_thread = std::thread::id();
-      impl.shutdown_done = true;
-      g_runtime_slot_held.store(false);
-      return RuntimeShutdownStatus::kUnloadFailed;
+      return impl.shutdown_failure;
     }
     core.module = nullptr;
   }
@@ -618,6 +705,7 @@ RuntimeShutdownStatus RimeRuntime::Shutdown() {
   core.owner_thread = std::thread::id();
   impl.shutdown_done = true;
   impl.last_shutdown_diagnostic.clear();
+  impl.paths.reset();
   g_runtime_slot_held.store(false);
   return RuntimeShutdownStatus::kOk;
 }
@@ -680,20 +768,20 @@ SessionCreateResult RimeRuntime::CreateSession(const std::string& schema_id) {
   // (src/rime/schema.cc:40-42). ConfigFileUpdate writes it into staging_dir = <user>/build
   // (src/rime/setup.cc:62-65); the deployed resolver falls back to prebuilt_data_dir =
   // <shared>/build (src/rime/service.cc:181-187).
-  std::error_code ec;
-  const std::filesystem::path compiled_name = schema_id + ".schema.yaml";
-  std::filesystem::path compiled_schema =
-      std::filesystem::u8path(core.user_data_dir_utf8) / "build" / compiled_name;
-  if (!std::filesystem::is_regular_file(compiled_schema, ec) || ec) {
-    compiled_schema =
-        std::filesystem::u8path(core.shared_data_dir_utf8) / "build" / compiled_name;
-    if (!std::filesystem::is_regular_file(compiled_schema, ec) || ec) {
+  const std::wstring compiled_name = std::filesystem::u8path(schema_id + ".schema.yaml").native();
+  local::PinnedPath compiled;
+  if (!compiled.Open(ChildPath(ChildPath(impl_->paths->user, L"build"), compiled_name), false)) {
+    // Only absence permits fallback. Never fall through a redirected user schema
+    // and subsequently let schema_open follow it while the shared copy exists.
+    const DWORD error = compiled.error();
+    if ((error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) ||
+        !compiled.Open(ChildPath(ChildPath(impl_->paths->shared, L"build"), compiled_name), false)) {
       result.status = SessionCreateStatus::kSchemaUnavailable;
-      result.diagnostic =
-          "neither <user>/build nor <shared>/build has a compiled schema for this id";
+      result.diagnostic = "no resident local compiled schema can be pinned for this id";
       return result;
     }
   }
+  impl_->paths->pins.push_back(std::move(compiled));
 
   RimeConfig config{};
   const Bool opened = core.api->schema_open(schema_id.c_str(), &config);

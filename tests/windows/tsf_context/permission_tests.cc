@@ -165,6 +165,78 @@ struct RawObservation {
   VARTYPE disabled_vt = VT_EMPTY;
   long disabled_value = 0;
   HRESULT app_property_hr = E_FAIL;
+  HRESULT request_hr = E_FAIL;
+  HRESULT session_hr = E_FAIL;
+  HRESULT selection_hr = E_FAIL;
+  HRESULT scope_value_hr = E_FAIL;
+  VARTYPE scope_value_vt = VT_EMPTY;
+  bool scope_read = false;
+  PermissionDecision cookie_decision;
+};
+
+// An independent raw GetValue observation inside a real granted read lock. The same
+// callback also exercises the production last-moment permission reader.
+class RawScopeRead final : public ITfEditSession {
+ public:
+  explicit RawScopeRead(ITfContext* context) : context_(context) {
+    context_->AddRef();
+  }
+  ~RawScopeRead() { context_->Release(); }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+    if (object == nullptr) {
+      return E_INVALIDARG;
+    }
+    *object = nullptr;
+    if (iid != IID_IUnknown && iid != IID_ITfEditSession) {
+      return E_NOINTERFACE;
+    }
+    *object = static_cast<ITfEditSession*>(this);
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG remaining = --references_;
+    if (remaining == 0) {
+      delete this;
+    }
+    return remaining;
+  }
+  HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
+    TF_SELECTION selection = {};
+    ULONG fetched = 0;
+    observed.selection_hr = context_->GetSelection(
+        cookie, TF_DEFAULT_SELECTION, 1, &selection, &fetched);
+    ITfReadOnlyProperty* property = nullptr;
+    observed.app_property_hr =
+        context_->GetAppProperty(GUID_PROP_INPUTSCOPE, &property);
+    if (SUCCEEDED(observed.selection_hr) && fetched == 1 &&
+        selection.range != nullptr && SUCCEEDED(observed.app_property_hr) &&
+        property != nullptr) {
+      VARIANT value;
+      ::VariantInit(&value);
+      observed.scope_value_hr = property->GetValue(cookie, selection.range, &value);
+      observed.scope_value_vt = value.vt;
+      observed.scope_read = true;
+      ::VariantClear(&value);
+    }
+    if (property != nullptr) {
+      property->Release();
+    }
+    if (selection.range != nullptr) {
+      selection.range->Release();
+    }
+    observed.cookie_decision =
+        DecidePermission(ReadPermissionFactsWithCookie(context_, cookie));
+    return S_OK;
+  }
+
+  RawObservation observed;
+
+ private:
+  std::atomic<ULONG> references_{1};
+  ITfContext* context_;
 };
 
 RawObservation ProbeRaw(TestDocument* document, TfClientId client_id) {
@@ -197,13 +269,53 @@ RawObservation ProbeRaw(TestDocument* document, TfClientId client_id) {
     manager->Release();
   }
 
-  ITfReadOnlyProperty* property = nullptr;
-  raw.app_property_hr = context->GetAppProperty(GUID_PROP_INPUTSCOPE, &property);
-  if (property != nullptr) {
-    property->Release();
-  }
-  (void)client_id;
+  RawScopeRead* read = new RawScopeRead(context);
+  HRESULT session_hr = E_FAIL;
+  const HRESULT request_hr = context->RequestEditSession(
+      client_id, read, TF_ES_SYNC | TF_ES_READ, &session_hr);
+  raw.app_property_hr = read->observed.app_property_hr;
+  raw.selection_hr = read->observed.selection_hr;
+  raw.scope_value_hr = read->observed.scope_value_hr;
+  raw.scope_value_vt = read->observed.scope_value_vt;
+  raw.scope_read = read->observed.scope_read;
+  raw.cookie_decision = read->observed.cookie_decision;
+  raw.request_hr = request_hr;
+  raw.session_hr = session_hr;
+  read->Release();
   return raw;
+}
+
+void CheckRawScopeDecision(Case& setup, const RawObservation& raw,
+                            const PermissionQueryResult& result, const char* label) {
+  Check(SUCCEEDED(raw.request_hr) && SUCCEEDED(raw.session_hr) && raw.scope_read,
+        std::string(label) + ": raw GetValue ran inside a real read session",
+        Hr(raw.request_hr) + "/" + Hr(raw.session_hr));
+  if (!raw.scope_read) {
+    return;
+  }
+  const PermissionState want = FAILED(raw.scope_value_hr)
+                                   ? PermissionState::kUnknown
+                                   : PermissionState::kAllowed;
+  CheckState(result, want, label);
+  Check(raw.cookie_decision.state == want,
+        std::string(label) + ": granted-cookie reader uses the same classification",
+        DescribeDecision(raw.cookie_decision));
+  if (FAILED(raw.scope_value_hr)) {
+    const PermissionQueryDiagnostics diagnostics = setup.source->Diagnostics();
+    Check((result.decision.unknown_findings & kFindingScopeQueryFailed) != 0 &&
+              diagnostics.last_scope_stage == 2 &&
+              diagnostics.last_scope_hr == raw.scope_value_hr,
+          std::string(label) + ": failed GetValue keeps its HRESULT and scope finding",
+          Hr(diagnostics.last_scope_hr));
+  } else {
+    Check(raw.scope_value_hr == S_FALSE || raw.scope_value_vt == VT_EMPTY ||
+              raw.scope_value_vt == VT_NULL,
+          std::string(label) + ": absence has a successful no-value answer",
+          Hr(raw.scope_value_hr));
+  }
+  std::printf("[context-permission] raw-scope %s: GetValue=%s vt=%d state=%s\n",
+              label, Hr(raw.scope_value_hr).c_str(),
+              static_cast<int>(raw.scope_value_vt), DescribePermissionState(want));
 }
 
 }  // namespace
@@ -511,12 +623,15 @@ int RunSensitiveScopesDenied() {
 int RunScopeAbsentWrongTypeFail() {
   {
     Case setup;
-    if (!SetupCase(&setup, TestDocumentOptions{}, "absent")) {
+    TestDocumentOptions options;
+    options.scope_answer = TestScopeAnswer::kNone;
+    options.input_scopes.clear();
+    if (!SetupCase(&setup, options, "absent")) {
       return Finish();
     }
+    const RawObservation raw = ProbeRaw(setup.document, setup.host->client_id());
     const PermissionQueryResult result = QueryOnce(setup, "absent");
-    CheckState(result, PermissionState::kAllowed,
-               "absent: no published scope metadata is Allowed (the official default)");
+    CheckRawScopeDecision(setup, raw, result, "absent");
   }
   {
     Case setup;
@@ -533,19 +648,17 @@ int RunScopeAbsentWrongTypeFail() {
           DescribeDecision(result.decision));
   }
   {
-    // A well-formed answer whose VARIANT carries no payload. Whether msctf surfaces it as
-    // S_OK+VT_EMPTY or as its no-coverage answer, it is an absence, not a permission fact.
+    // Successful empty values are absence; a failed GetValue stays Unknown even
+    // when this test owner tried to publish an empty attribute.
     Case setup;
     TestDocumentOptions options;
     options.scope_answer = TestScopeAnswer::kEmptyValue;
     if (!SetupCase(&setup, options, "empty-value")) {
       return Finish();
     }
+    const RawObservation raw = ProbeRaw(setup.document, setup.host->client_id());
     const PermissionQueryResult result = QueryOnce(setup, "empty-value");
-    CheckState(result, PermissionState::kAllowed,
-               "empty-value: a normal empty value is absent, not Unknown");
-    Check(result.decision.unknown_findings == kFindingNone,
-          "empty-value: no unknown finding", DescribeDecision(result.decision));
+    CheckRawScopeDecision(setup, raw, result, "empty-value");
   }
   {
     // The store refuses GetSelection while the read lock is held: the InputScope range
@@ -569,22 +682,21 @@ int RunScopeAbsentWrongTypeFail() {
           std::to_string(diagnostics.last_scope_stage));
   }
   {
-    // DOCUMENTED GAP: when the context owner's RetrieveRequestedAttrs fails, the real
-    // msctf.dll surfaces the same E_FAIL from GetAppProperty(...)->GetValue that an
-    // attribute-free owner produces (observed on this machine, stage-2 hr=0x80004005 in
-    // both configurations). The two states are indistinguishable from the text service
-    // side, so both classify as Absent; a broken owner cannot be refused through this
-    // property. The wrong-type mode above is the one malformed-metadata state that
-    // stays distinguishable and Unknown.
+    // The owner really fails RetrieveRequestedAttrs. Preserve the raw GetValue
+    // result as evidence and reject it in both permission entry points.
     Case setup;
     TestDocumentOptions options;
     options.scope_answer = TestScopeAnswer::kFail;
     if (!SetupCase(&setup, options, "scope-fail")) {
       return Finish();
     }
+    const RawObservation raw = ProbeRaw(setup.document, setup.host->client_id());
+    Check(raw.scope_value_hr == E_FAIL, "scope-fail: real GetValue surfaces E_FAIL",
+          Hr(raw.scope_value_hr));
     const PermissionQueryResult result = QueryOnce(setup, "scope-fail");
-    CheckState(result, PermissionState::kAllowed,
-               "scope-fail: an owner read failure is indistinguishable from absence");
+    CheckRawScopeDecision(setup, raw, result, "scope-fail");
+    CheckState(result, PermissionState::kUnknown,
+               "scope-fail: an owner read failure cannot grant permission");
   }
   return Finish();
 }

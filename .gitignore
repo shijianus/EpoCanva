@@ -60,3 +60,6 @@ Thumbs.db
 secrets.json
 .env
 .env.*
+
+# --- agent session state (ZCode local plans/transcripts, never project source) ---
+.zcode/

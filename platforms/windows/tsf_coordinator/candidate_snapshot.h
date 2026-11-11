@@ -40,6 +40,7 @@ enum class CandidateKind : std::uint8_t {
   kLiteral = 0,
   kCompletion,
   kSpelling,
+  kMorphology, kExpansion, kConversion, kPrediction,
 };
 
 const char* DescribeCandidateKind(CandidateKind kind);
@@ -67,10 +68,16 @@ struct CandidateItem {
   CandidateKind kind = CandidateKind::kCompletion;
   std::size_t page_index = 0;
   std::size_t menu_index = 0;
+  std::uint64_t backend_candidate_token = 0;
 };
 
 struct CandidateSnapshot {
   bool valid = false;
+  std::uint64_t backend_snapshot_token = 0;
+  std::uint32_t profile_id = 0;
+  std::uint32_t language = 0;
+  bool next_word = false;
+  std::u16string preedit_utf16_code_units;
   // Monotonic; every observation increments it, including observations that clear the
   // menu. A click carries the version it was drawn from.
   std::uint64_t version = 0;

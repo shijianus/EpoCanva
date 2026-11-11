@@ -1,0 +1,501 @@
+{
+  "dimensions": [
+    "engine",
+    "resources",
+    "real_input_integration",
+    "host_acceptance"
+  ],
+  "format": 1,
+  "owner": "epocanva-capability-matrix-v1",
+  "purpose": "Per-binding capability status for the E3 candidate-source gate. Rows are claims about what is actually verified, bound to an existing backend binding from data/locale/backend-bindings.json and to a committed evidence path. tests/capability_matrix enforces the schema, the status vocabulary, evidence existence, and two hard rules of format 1: nothing may claim host_verified, and every host_acceptance row stays not_implemented until a real registered host acceptance is recorded (which requires a format bump and a validator change). A language identity without a verified engine is never a capability row with a positive status.",
+  "rows": [
+    {
+      "binding_id": 1,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "en",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 1,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "en",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 1,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "en",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 1,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "en",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 2,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "zh",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 2,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "zh",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 2,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "zh",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 2,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "zh",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 3,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "fr",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 3,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "fr",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 3,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "fr",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 3,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "fr",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 4,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ja",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 4,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "ja",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 4,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "ja",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 4,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ja",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 5,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ko",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 5,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "ko",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 5,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "ko",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 5,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ko",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 6,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "zh",
+      "note": "zhuyin-unverified: locale scheme_implementation is unverified; the locale registry resolves kSchemeNotVerified and no product profile exposes it",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 6,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "zh",
+      "note": "zhuyin-unverified: locale scheme_implementation is unverified; the locale registry resolves kSchemeNotVerified and no product profile exposes it; hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 6,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "zh",
+      "note": "zhuyin-unverified: locale scheme_implementation is unverified; the locale registry resolves kSchemeNotVerified and no product profile exposes it; real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 6,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "zh",
+      "note": "zhuyin-unverified: locale scheme_implementation is unverified; the locale registry resolves kSchemeNotVerified and no product profile exposes it; no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 7,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ja",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 7,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "ja",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 7,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "ja",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 7,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ja",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 8,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ja",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 8,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "ja",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 8,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "ja",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 8,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ja",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 9,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ja",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 9,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "ja",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 9,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "ja",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 9,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ja",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 10,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ko",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 10,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "ko",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 10,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "ko",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 10,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "ko",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 11,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "en",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 11,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "en",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 11,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "en",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 11,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "en",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 12,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "en",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 12,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "en",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 12,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "en",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 12,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "en",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": 13,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "en",
+      "note": "real per-language candidate source exercised through the public ABI by the real-resource backend suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 13,
+      "dimension": "resources",
+      "evidence_ref": "docs/testing/backend-resource-staging.md",
+      "language": "en",
+      "note": "hash-pinned staged resources verified by the staging provenance gates",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 13,
+      "dimension": "real_input_integration",
+      "evidence_ref": "tests/backend/profiles.cc",
+      "language": "en",
+      "note": "real input to real candidates through the public backend ABI in the controlled test suite",
+      "status": "integration_tested"
+    },
+    {
+      "binding_id": 13,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
+      "language": "en",
+      "note": "no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": null,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-audit-implementation-verification.md",
+      "language": "es",
+      "note": "core-required by the product spec; no engine, resources or binding exists; identity-only status is not support",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": null,
+      "dimension": "resources",
+      "evidence_ref": "docs/reports/phase-e-audit-implementation-verification.md",
+      "language": "es",
+      "note": "core-required by the product spec; no engine, resources or binding exists; identity-only status is not support",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": null,
+      "dimension": "real_input_integration",
+      "evidence_ref": "docs/reports/phase-e-audit-implementation-verification.md",
+      "language": "es",
+      "note": "core-required by the product spec; no engine, resources or binding exists; identity-only status is not support",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": null,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-audit-implementation-verification.md",
+      "language": "es",
+      "note": "core-required by the product spec; no engine, resources or binding exists; identity-only status is not support",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": null,
+      "dimension": "engine",
+      "evidence_ref": "docs/reports/phase-e-audit-implementation-verification.md",
+      "language": "de",
+      "note": "core-required by the product spec; no engine, resources or binding exists; identity-only status is not support",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": null,
+      "dimension": "resources",
+      "evidence_ref": "docs/reports/phase-e-audit-implementation-verification.md",
+      "language": "de",
+      "note": "core-required by the product spec; no engine, resources or binding exists; identity-only status is not support",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": null,
+      "dimension": "real_input_integration",
+      "evidence_ref": "docs/reports/phase-e-audit-implementation-verification.md",
+      "language": "de",
+      "note": "core-required by the product spec; no engine, resources or binding exists; identity-only status is not support",
+      "status": "not_implemented"
+    },
+    {
+      "binding_id": null,
+      "dimension": "host_acceptance",
+      "evidence_ref": "docs/reports/phase-e-audit-implementation-verification.md",
+      "language": "de",
+      "note": "core-required by the product spec; no engine, resources or binding exists; identity-only status is not support",
+      "status": "not_implemented"
+    }
+  ],
+  "statuses": [
+    "source_verified",
+    "unit_tested",
+    "integration_tested",
+    "host_verified",
+    "blocked",
+    "not_implemented"
+  ]
+}

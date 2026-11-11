@@ -201,6 +201,7 @@ enum class WorkKind : std::uint8_t {
   // Host-owned text: an explicit, versioned candidate selection that replaces the token
   // immediately before the caret. No engine command is involved.
   kSuggestionReplace,
+  kBackendWork,
 };
 
 enum class WorkPhase : std::uint8_t {
@@ -214,6 +215,7 @@ enum class WorkPhase : std::uint8_t {
   // An edit plan was submitted through the P3.7 session and its callback has not been
   // observed complete. TF_S_ASYNC is exactly this state, never Applied.
   kEditPending,
+  kBackendAckPending,  // host terminal known; waiting only for executor ACK admission
 };
 
 enum class WorkOutcome : std::uint8_t {
@@ -587,6 +589,10 @@ class ContextCoordinator {
   // edits: ordinary text belongs to the host. Product mode sets this before the first bind.
   void SetSuggestionMode(bool enabled);
   bool suggestion_mode() const { return suggestion_mode_; }
+  bool unified_backend() const { return executor_.unified_backend(); }
+  void SetBackendAccess(const engine::BackendAccess& access);
+  SubmitStatus SubmitBackendWork(engine::BackendWork work, WorkId* id);
+  void RevokeBackendAccess();
   // The current menu copy. The version increments on every engine observation.
   CandidateSnapshot candidate_snapshot() const { return candidate_snapshot_; }
   bool candidate_menu_open() const { return candidate_snapshot_.valid; }
@@ -631,6 +637,7 @@ class ContextCoordinator {
   // What a kPermissionPending work item is waiting to do once the verdict arrives.
   struct PendingPermissionWork {
     WorkKind kind = WorkKind::kNone;
+    engine::BackendWork backend_work;
     // kKey: the submitted key, held for its dispatch decision.
     input::KeyEventSnapshot event{};
     input::KeyText text{};
@@ -752,6 +759,10 @@ class ContextCoordinator {
   void FinishWorkLedger(WorkKind kind);
   SubmitStatus FinishSubmit(engine::RequestId request, WorkKind kind);
   void ResolveEngineResult(const engine::CommandResult& result);
+  void ResolveBackendResult(const engine::BackendWorkOutcome& result);
+  bool UpdateBackendSnapshot(const engine::BackendSnapshotOutcome& snapshot);
+  bool QueueBackendAck(WorkOutcome outcome, RejectCause cause);
+  void PumpBackendAck();
   // Copies the engine's current page into candidate_snapshot_ (or clears it) and bumps the
   // version. Text lives only in memory; diagnostics never see it.
   void UpdateCandidateSnapshot(const engine::EngineState& state);
@@ -785,6 +796,14 @@ class ContextCoordinator {
   bool bound_ = false;
   bool closed_ = false;
   bool suggestion_mode_ = false;
+  engine::BackendAccess backend_access_;
+  engine::BackendWork backend_work_;
+  std::u16string backend_expected_utf16_;
+  LONG backend_caret_utf16_ = -1;
+  std::uint64_t backend_commit_token_ = 0;
+  bool backend_ack_in_flight_ = false;
+  WorkOutcome backend_terminal_outcome_ = WorkOutcome::kNone;
+  RejectCause backend_terminal_cause_ = RejectCause::kNone;
   // Last engine observation said the engine itself is composing (its preedit is not in the
   // document in suggestion mode). Used only to classify Backspace/Enter/Escape as engine
   // candidates while the host owns the text.

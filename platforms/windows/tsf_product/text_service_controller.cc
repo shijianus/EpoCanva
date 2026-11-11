@@ -1,6 +1,7 @@
 // EpoCanva W2 -- product STA controller implementation. See the header for the contract.
 #include "text_service_controller.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <utility>
@@ -10,6 +11,7 @@
 #include "module_lifetime.h"
 #include "module_state.h"
 #include "product_display_preference.h"
+#include "product_io.h"
 #include "product_paths.h"
 #include "product_settings.h"
 
@@ -93,6 +95,17 @@ class ProductTextController::ClientProvider final
     return client;
   }
 
+  engine::ClientId NextClientForTarget(const ctx::ObservedTarget& target) override {
+    if (!executor_.unified_backend()) return NextClient();
+    access_ = {target.context_id, target.generation, std::make_shared<std::atomic<bool>>(true)};
+    engine::RequestId request; engine::ClientId client;
+    const auto status = executor_.TryCreateProfileClient(executor_.active_profile_id(), access_, &request, &client);
+    ++requests_;
+    if (status != engine::SubmitStatus::kAccepted) { ++refusals_; return {}; }
+    pending_.push_back(request); last_client_ = client; return client;
+  }
+  engine::BackendAccess CurrentBackendAccess() const override { return access_; }
+
   struct Harvest {
     bool failed = false;
     engine::ClientId failed_client;
@@ -127,6 +140,7 @@ class ProductTextController::ClientProvider final
 
  private:
   engine::EngineExecutor& executor_;
+  engine::BackendAccess access_;
   std::vector<engine::RequestId> pending_;
   engine::ClientId last_client_{};
   std::uint64_t requests_ = 0;
@@ -191,7 +205,8 @@ bool ProductTextController::Start(const Options& options, std::wstring* why) {
   // transaction, so it would never publish the value. In that one case read it here, once
   // per activation. A fresh engine start stays free of synchronous settings I/O on the STA;
   // that timing is what the direct-sink regression tests exercise.
-  if (ProductEngineBootstrap::Instance().state() == EngineBootstrapState::kReady) {
+  if (ProductEngineBootstrap::Instance().state() ==
+      ::epocanva::product::EngineBootstrapState::kReady) {
     ::epocanva::product::ProductPaths display_paths;
     std::wstring display_why;
     if (::epocanva::product::ResolveProductPaths(ModuleInstance(), &display_paths,
@@ -276,7 +291,7 @@ void ProductTextController::TryAttachEngine() {
     std::wstring acquire_why;
     if (!ProductEngineBootstrap::Instance().AcquireRunning(&attachment, &acquire_why)) {
       TraceStage("attach_acquire_failed", 1);
-      engine_failure_ = std::string(acquire_why.begin(), acquire_why.end());
+      engine_failure_ = ::epocanva::product::WideToUtf8(acquire_why);
       attaching_ = false;
       return;
     }
@@ -289,9 +304,8 @@ void ProductTextController::TryAttachEngine() {
                static_cast<long long>(bootstrap.start_attempts()));
     TraceStage("attach_start_failures",
                static_cast<long long>(bootstrap.start_failures()));
-    const std::wstring bootstrap_failure = bootstrap.failure();
-    if (!bootstrap_failure.empty()) {
-      TraceText("attach_failure", bootstrap_failure);
+    if (!bootstrap.failure().empty()) {
+      TraceStage("attach_failure_present", 1);
     }
     attaching_ = false;
     return;
@@ -301,7 +315,7 @@ void ProductTextController::TryAttachEngine() {
   if (!BuildEnginePipeline(&build_why)) {
     TraceStage("attach_pipeline_failed", 1);
     ++engine_attach_failures_;
-    engine_failure_ = std::string(build_why.begin(), build_why.end());
+    engine_failure_ = ::epocanva::product::WideToUtf8(build_why);
     ResetObjects();
     std::shared_ptr<ProductEngineAttachment> failed = std::move(engine_);
     attaching_ = false;
@@ -346,7 +360,7 @@ bool ProductTextController::BuildEnginePipeline(std::wstring* why) {
   std::string subscribe_error;
   if (!observer_->Subscribe(thread_manager_, this, &subscribe_error)) {
     if (why != nullptr) {
-      *why = std::wstring(subscribe_error.begin(), subscribe_error.end());
+      *why = ::epocanva::product::Utf8ToWide(subscribe_error);
     }
     return false;
   }
@@ -560,11 +574,15 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
     host_token_origin_valid_ = false;
     host_token_origin_caret_utf16_ = -1;
     ResetCandidateAnchorRetry();
-    if (key.decision.is_engine_candidate() || suggestion_in_flight_) {
+    if (!coordinator_->unified_backend() && (key.decision.is_engine_candidate() || suggestion_in_flight_)) {
       FeedSuggestionKey(key, snapshot, /*ends_token=*/true);
     }
     ++eaten_;
     return true;
+  }
+
+  if (coordinator_->unified_backend()) {
+    return HandleUnifiedHostKey(key);
   }
 
   // --- host-owned original text ---------------------------------------------------------
@@ -954,6 +972,14 @@ void ProductTextController::ResolveReplacement() {
       internal_text_losses_ += snapshot.last_suggestion_expected_units;
     }
   }
+  if (coordinator_->unified_backend()) {
+    suggestion_stale_ = false; token_abandoned_ = false;
+    host_token_units_ = 0; host_token_origin_valid_ = false;
+    host_context_caret_utf16_ = snapshot.tracked_caret_utf16;
+    host_context_read_owed_ = snapshot.outcome == coordinator::WorkOutcome::kApplied;
+    if (host_context_read_owed_) ++host_context_read_revision_;
+    return;
+  }
   // Whether the candidate applied or was refused, the engine's state describes the token
   // before the selection. Cancel only that engine composition; the document and binding
   // stay as they are.
@@ -1015,6 +1041,7 @@ void ProductTextController::PumpNow() {
   }
   ResolveSuggestionWork();
   ResolveReplacement();
+  if (coordinator_->unified_backend()) PumpUnifiedHostContext();
   UpdateCandidateUi();
   UpdatePacing();
 }
@@ -1034,7 +1061,8 @@ void ProductTextController::UpdatePacing() {
         coordinator.retirement.retiring_bindings != 0 ||
         coordinator.retirement.admission_paused || clients_->pending() != 0 ||
         (!coordinator.bound && observer.awaiting_bind) ||
-        observer.selection_read_pending || candidate_anchor_retry_) {
+        observer.selection_read_pending || candidate_anchor_retry_ || host_context_read_owed_ ||
+        host_context_work_in_flight_) {
       pace = true;
     }
   }
@@ -1054,7 +1082,7 @@ bool ProductTextController::CandidatesOpen() const {
       replacement_pending_) {
     return false;
   }
-  if (suggestion_in_flight_ || !suggestion_queue_.empty()) {
+  if (suggestion_in_flight_ || !suggestion_queue_.empty() || host_context_work_in_flight_ || host_context_read_owed_) {
     // The menu describes a prefix the engine has already processed; a key is still in
     // flight, so the displayed menu no longer matches everything the host has typed.
     return false;
@@ -1113,7 +1141,7 @@ bool ProductTextController::FinalizeCandidateSelection(
                    : 0);
     TraceStage("finalize_caret_match",
                selection.caret_utf16 == snapshot.caret_utf16 ? 1 : 0);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     if (snapshot.valid && snapshot.version == selection.snapshot_version) {
       // The request names the current version but its identity/caret does not match it.
       // Close that menu. A request from an older version must not dismiss the current one.
@@ -1122,7 +1150,7 @@ bool ProductTextController::FinalizeCandidateSelection(
     }
     return false;
   }
-  if (suggestion_in_flight_ || replacement_pending_ || !suggestion_queue_.empty() ||
+  if (suggestion_in_flight_ || host_context_work_in_flight_ || host_context_read_owed_ || replacement_pending_ || !suggestion_queue_.empty() ||
       token_abandoned_ || suggestion_stale_ ||
       snapshot.input_utf16_code_units.size() != host_token_units_) {
     TraceStage("finalize_refuse", 3);
@@ -1134,14 +1162,14 @@ bool ProductTextController::FinalizeCandidateSelection(
     TraceStage("finalize_units",
                static_cast<long long>(snapshot.input_utf16_code_units.size()));
     TraceStage("finalize_host_units", static_cast<long long>(host_token_units_));
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     DismissCandidateMenu();
     return false;
   }
   if (!CandidatesOpen()) {
     TraceStage("finalize_refuse", 6);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     DismissCandidateMenu();
     return false;
@@ -1149,7 +1177,7 @@ bool ProductTextController::FinalizeCandidateSelection(
   std::int32_t expected_caret = -1;
   if (!ExpectedCandidateCaretUtf16(&expected_caret)) {
     TraceStage("finalize_refuse", 4);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     DismissCandidateMenu();
     return false;
@@ -1174,7 +1202,7 @@ bool ProductTextController::FinalizeCandidateSelection(
       // A live read that cannot be verified is refused the same way. Never retarget the
       // menu or submit at the current cursor.
       TraceStage("finalize_refuse", 5);
-      ++candidate_stale_selections_;
+      ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
       candidate_dismissed_version_ = snapshot.version;
       DismissCandidateMenu();
       return false;
@@ -1187,7 +1215,7 @@ bool ProductTextController::FinalizeCandidateSelection(
     }
   } else if (anchor_caret != expected_caret) {
     TraceStage("finalize_refuse", 7);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     DismissCandidateMenu();
     return false;
@@ -1199,7 +1227,7 @@ bool ProductTextController::FinalizeCandidateSelection(
   anchored.caret_utf16 = anchor_caret;
   if (!SubmitReplacement(anchored)) {
     TraceStage("finalize_refuse", 8);
-    ++candidate_stale_selections_;
+    ++candidate_stale_selections_; ++replacement_refused_;  // attempted selection, no write
     candidate_dismissed_version_ = snapshot.version;
     return false;
   }
@@ -1208,6 +1236,10 @@ bool ProductTextController::FinalizeCandidateSelection(
 }
 
 bool ProductTextController::ExpectedCandidateCaretUtf16(std::int32_t* expected) const {
+  if (coordinator_ && coordinator_->unified_backend() && host_token_origin_valid_ &&
+      host_token_units_ == 0 && expected) {
+    *expected = host_token_origin_caret_utf16_; return *expected >= 0;
+  }
   return CandidateTokenEndUtf16(
       host_token_origin_valid_, static_cast<std::int32_t>(host_token_origin_caret_utf16_),
       host_token_units_, expected);
@@ -1248,8 +1280,10 @@ void ProductTextController::UpdateCandidateUi() {
   TraceStage("candidate_snapshot_valid", snapshot.valid ? 1 : 0);
   TraceStage("candidate_items", static_cast<long long>(snapshot.items.size()));
   if (!snapshot.valid || suggestion_stale_ || token_abandoned_ || replacement_pending_ ||
-      suggestion_in_flight_ || !suggestion_queue_.empty()) {
+      suggestion_in_flight_ || !suggestion_queue_.empty() || host_context_work_in_flight_ ||
+      host_context_read_owed_ || host_text_changed_) {
     if (!snapshot.valid) TraceStage("candidate_invalid", 1);
+    if (host_text_changed_) TraceStage("candidate_host_text_changed", 1);
     if (suggestion_stale_) TraceStage("candidate_stale", 1);
     if (token_abandoned_) TraceStage("candidate_abandoned", 1);
     if (replacement_pending_) TraceStage("candidate_replacement_pending", 1);
@@ -1323,10 +1357,15 @@ void ProductTextController::UpdateCandidateUi() {
         TraceStage("candidate_live_caret_ok", live_ok ? 1 : 0);
         if (live_ok) {
           TraceStage("candidate_live_caret", live_caret);
-          const CandidateAnchorCheck check = CheckCandidateAnchor(
+          CandidateAnchorCheck check = CheckCandidateAnchor(
               host_token_origin_valid_,
               static_cast<std::int32_t>(host_token_origin_caret_utf16_),
               host_token_units_, static_cast<std::int32_t>(live_caret));
+          if (coordinator_->unified_backend() && host_token_origin_valid_ && host_token_units_ == 0) {
+            check.expected_caret_utf16 = host_token_origin_caret_utf16_;
+            check.decision = live_caret == host_token_origin_caret_utf16_
+                ? CandidateAnchorDecision::kAccept : CandidateAnchorDecision::kCaretMismatch;
+          }
           if (check.decision != CandidateAnchorDecision::kAccept) {
             // A caret at another position is a different token, even when the same text
             // precedes it. Never retarget this menu to the current cursor.
@@ -1353,7 +1392,7 @@ void ProductTextController::UpdateCandidateUi() {
         RECT rect = {};
         LONG observed_caret = -1;
         const LONG token_units =
-            static_cast<LONG>(snapshot.input_utf16_code_units.size());
+            (std::max)(1L, static_cast<LONG>(snapshot.input_utf16_code_units.size()));
         const bool token_rect_ok =
             ReadTokenRect(ui_context_, client_id_, candidate_anchor_caret_utf16_,
                           token_units, &rect, &clipped, &observed_caret, nullptr);
@@ -1475,6 +1514,9 @@ void ProductTextController::OnTargetLost(ctx::ContextDropReason reason) {
   ++target_losses_;
   // Original text is already in its document. Only the cancelable suggestion stream dies
   // here; nothing is retracted, replayed or attributed to the user.
+  host_context_read_owed_ = false;
+  host_context_work_in_flight_ = false;
+  host_text_changed_ = false;
   suggestion_queue_.clear();
   suggestion_in_flight_ = false;
   suggestion_engaged_ = false;
@@ -1521,12 +1563,21 @@ void ProductTextController::OnTargetBound(ITfContext* context,
   }
   // A fresh binding starts with a fresh engine client and a fresh suggestion stream. The
   // host's text is unaffected and is never re-read or replayed.
+  host_context_read_owed_ = false;
+  host_context_work_in_flight_ = false;
+  host_text_changed_ = false;
   suggestion_queue_.clear();
   suggestion_in_flight_ = false;
   suggestion_engaged_ = false;
   suggestion_work_id_ = 0;
   suggestion_stale_ = false;
   stream_reset_owed_ = false;
+  // A replacement waiting for the old binding cannot apply to the new one. It was an
+  // attempted enhancement that ended without a write, so report it as refused instead of
+  // letting the pending flag disappear with the old binding.
+  if (replacement_pending_) {
+    ++replacement_refused_;
+  }
   replacement_pending_ = false;
   replacement_work_id_ = 0;
   host_token_units_ = 0;
@@ -1541,13 +1592,38 @@ void ProductTextController::OnTargetBound(ITfContext* context,
   ResetCandidateAnchorRetry();
   DismissCandidateMenu();
   binding_->OnTargetBound(context, target);
+  if (coordinator_->unified_backend()) {
+    host_context_caret_utf16_ = target.caret_utf16;
+    host_context_read_owed_ = true;
+    host_text_changed_ = false;
+    ++host_context_read_revision_;
+  }
   waker_.SetPacing(true);
+  waker_.Notify();
 }
 
 void ProductTextController::OnHostEditCompleted(
     ITfContext* context, const ctx::ObservedTarget& target,
     const ctx::SelectionSnapshot& selection) {
-  // The caret mirror is updated; the product never reads, copies or recovers this text.
+  if (coordinator_ && coordinator_->unified_backend()) {
+    if (binding_) binding_->OnHostEditCompleted(context, target, selection);
+    const auto current = coordinator_->identity();
+    if (selection.ok() && current.context_id == target.context_id && current.generation == target.generation) {
+      predicted_host_caret_utf16_ = selection.caret_utf16;
+      host_context_caret_utf16_ = selection.caret_utf16;
+      host_context_read_owed_ = true;
+      ++host_context_read_revision_;
+      ++host_edits_matched_;
+      // A scheduling wake must not depend on the paced watcher: if that timer is between
+      // waits, the only owed read would otherwise wait for an unrelated event.
+      waker_.Notify();
+    } else {
+      host_context_read_owed_ = false;
+      coordinator_->RevokeBackendAccess();
+    }
+    DismissCandidateMenu(); waker_.SetPacing(true); return;
+  }
+  // Legacy suggestion mode only tracks its caret mirror.
   if (binding_) {
     binding_->OnHostEditCompleted(context, target, selection);
   }
@@ -1640,7 +1716,7 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   const std::wstring bootstrap_failure = ProductEngineBootstrap::Instance().failure();
   diagnostics.engine_failure =
       engine_failure_.empty()
-          ? std::string(bootstrap_failure.begin(), bootstrap_failure.end())
+          ? ::epocanva::product::WideToUtf8(bootstrap_failure)
           : engine_failure_;
   diagnostics.literal_key_downs = literal_key_downs_;
   diagnostics.engine_attach_attempts = engine_attach_attempts_;
@@ -1721,7 +1797,23 @@ ControllerDiagnostics ProductTextController::Snapshot() const {
   if (binding_) {
     diagnostics.binding = binding_->Snapshot();
   }
-  diagnostics.pacing = waker_.Snapshot().paced;
+  const StaWakerDiagnostics waker = waker_.Snapshot();
+  diagnostics.pacing = waker.paced;
+  diagnostics.waker_wakes_posted = waker.wakes_posted;
+  diagnostics.waker_wakes_received = waker.wakes_received;
+  diagnostics.waker_stale_wakes = waker.stale_wakes_ignored;
+  diagnostics.waker_post_failures = waker.wake_post_failures;
+  diagnostics.waker_stops = waker.stops;
+  diagnostics.waker_loop_ticks = waker.loop_ticks;
+  diagnostics.waker_window_thread = waker.window_thread_id;
+  diagnostics.waker_window_messages = waker.window_messages;
+  diagnostics.controller_thread = ::GetCurrentThreadId();
+  diagnostics.waker_started = waker.started;
+  diagnostics.host_context_read_owed = host_context_read_owed_;
+  diagnostics.host_context_work_in_flight = host_context_work_in_flight_;
+  diagnostics.host_context_caret_utf16 = host_context_caret_utf16_;
+  diagnostics.host_context_read_revision = host_context_read_revision_;
+  diagnostics.host_context_submitted_revision = host_context_submitted_revision_;
   return diagnostics;
 }
 

@@ -4,6 +4,13 @@
 
 Accepted（基线决策）。P0.1 阶段仅落到文档与构建约束，未涉及任何实现。
 
+**部分被取代（2026-11-05）**：语言优先级的**具体顺序**已由
+[ADR 0005](0005-multilingual-language-profiles.md) 与
+`docs/product/requirements.md` §3 取代为
+`English > Chinese > French > Spanish > Japanese > Korean > German`。
+本 ADR 的其余决策（英文优先的冲突裁决、英文是独立能力模块、禁止两种伪实现）
+继续有效。按本 ADR 自身第 1 条，此次调整正是通过新 ADR 完成的。
+
 ## 背景
 
 多数基于 librime 的输入法把英文当作"附加语言"处理：挂一个词典 Translator，

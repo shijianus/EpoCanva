@@ -6,8 +6,11 @@ follow the task brief and flag the conflict in your report.
 ## 1. Language priority (fixed, do not re-order)
 
 ```
-English > Chinese > French > Japanese > Korean > generic i18n
+English > Chinese > French > Spanish > Japanese > Korean > German > other declared languages
 ```
+
+The machine-readable form of this order lives in `engine/locale/language_tag.cc`
+(`LanguagePriority`). Do not create a second hardcoded list; call that function.
 
 - English is the product's differentiating capability. It is **never** acceptable to
   implement it as an ASCII pass-through, or as "one dictionary-backed Translator".
@@ -16,6 +19,19 @@ English > Chinese > French > Japanese > Korean > generic i18n
   spelling correction, auto-segmentation of run-together input, abbreviation
   expansion, and cross-app consistency.
 - Do not silently downgrade English behaviour to satisfy another language's flow.
+- The order governs **research depth and resource allocation**, never whether a
+  language can be typed at all. A lower-priority language must still accept its
+  own script; "not implemented yet" is a status, not a licence to refuse input.
+- Chinese means Simplified, Traditional, regional and multi-scheme input as
+  distinct identities (`zh-Hans-CN`, `zh-Hant-TW`, `zh-Hant-HK`, `yue-Hant-HK`
+  and the pinyin/zhuyin/cangjie/wubi/jyutping schemes). Simplified↔Traditional
+  conversion is **not** regional variant support.
+- Spanish and German are core-required even while their engines are absent.
+  Declaring a language's identity and priority is never a claim that it works.
+- The remaining world languages listed in the product requirements are permanent
+  scope, not optional decoration. Registering a language name with no engine is
+  forbidden: a profile resolves only when its input scheme reaches a verified
+  implementation state.
 
 ## 2. Privacy and offline rules (non-negotiable)
 
@@ -25,6 +41,16 @@ English > Chinese > French > Japanese > Korean > generic i18n
   content, focused-field names, or app identifiers that reveal user content.
 - Password fields, one-time-code fields and other privacy-classified fields are
   excluded from learning and from any persistence layer.
+- Local personalisation is the product's only form of learning. User preferences and
+  learned counts stay on the device, are never uploaded, and must be clearable by an
+  explicit user action. An unclassified field is treated as sensitive, not as normal.
+- Deletion is never evidence of disliking a candidate. Learning may record an
+  explicit selection, an explicit rejection, a replacement choice or a user-authored
+  word; it must not infer preference from keystrokes, backspaces or ordinary commits.
+- Neural prediction is an optional enhancement. The default state is: no model
+  downloaded, no model loaded, no inference performed. Basic input, base candidates
+  and the statistical ranking path must work with no model installed. Model weights
+  are never fetched silently, and no model may rewrite already-committed text.
 - Do not claim OS-enforced guarantees that do not exist. A normal (non-packaged,
   non-containerised) Windows TSF DLL loaded into an arbitrary host process **cannot**
   be sandboxed away from the network by the OS; the guarantee there is architectural
@@ -53,7 +79,7 @@ English > Chinese > French > Japanese > Korean > generic i18n
   phase report then had to open by declaring a conflict with it.
 - Permanent, phase-independent constraints: the language priority of §1, the privacy and
   offline rules of §2, honesty in §3, unit discipline in §5, verify-against-real-sources in
-  §6, byte-clean third parties in §7, undecided licensing in §8, git safety in §9, build
+  §6, byte-clean third parties in §7, licensing in §8, git safety in §9, build
   hygiene in §10. These bind in every phase.
 - Anything beyond the assigned phase goes into "open questions" in the phase report, not
   into code. If a task brief asks for work that a permanent rule forbids, the brief wins
@@ -88,8 +114,13 @@ English > Chinese > French > Japanese > Korean > generic i18n
 
 ## 8. Licensing
 
-- The EpoCanva licence is **undecided**. Do not add licence headers, LICENSE files,
-  SPDX identifiers, or contributor licence text on your own initiative.
+- Project-owned EpoCanva code is licensed under **AGPL-3.0-only**, as explicitly
+  selected by the project owner. Preserve the complete root `LICENSE` and the
+  project licensing decision record when distributing project code.
+- Third-party code, dictionaries, corpora and generated data retain their own
+  licences and notices. The project licence does not grant rights to those works.
+- Do not add contributor licence terms or change the selected licence on your own
+  initiative.
 
 ## 9. Git and workspace safety
 

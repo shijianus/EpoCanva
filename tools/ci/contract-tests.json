@@ -1,0 +1,24 @@
+{
+  "expected_by": "tools/ci/contract_inventory.py",
+  "label": "contract-gate",
+  "note": "Exact CTest name set that carries the contract-gate label in the root vs2022-x64-debug tree. Generated from ctest --show-only=json-v1 at commit dde477e; extended with the fusion.* entries in feat/phase-e-multilingual-fusion and verified by tools/ci/contract_inventory.py before every labelled run. Add a test here in the same change that registers it; a mismatch fails the gate closed.",
+  "tests": [
+    "candidate_contract.forcefail",
+    "candidate_contract.unit",
+    "candidate_contract.unknown",
+    "candidate_evaluation.contract",
+    "capability_matrix.contract",
+    "ci_gate.contract",
+    "ci_inputs_lock.contract",
+    "fusion.can_fail",
+    "fusion.dedup",
+    "fusion.merge",
+    "fusion.mixed",
+    "fusion.policy",
+    "locale_registry.forcefail",
+    "locale_registry.manifest",
+    "locale_registry.manifest_stale_can_fail",
+    "locale_registry.unit",
+    "locale_registry.unknown"
+  ]
+}

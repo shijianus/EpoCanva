@@ -8,9 +8,66 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 每个阶段的范围与验收标准在对应的任务书与 `docs/reports/` 阶段报告里，
 **不写在本文件**，因为阶段性的限制会过期。
 
+## 发行验证
+
+项目自有代码采用 **AGPL-3.0-only**；第三方代码及数据保留原许可。当前仍是内部 Alpha，
+不是已验收的五语言发行版。用户允许先做内部无签名验收，但不豁免功能、隐私、源码对应、安装与真实宿主测试。
+发行条件与证据格式见
+[`docs/product/release-gate.md`](docs/product/release-gate.md)。
+产品构建入口 `tools/product/build_product.ps1` 按配置、构建、CTest 的顺序运行，
+并记录完整源码身份、实际文件指纹、二进制 SHA-256、退出码及跳过项；
+`tools/product/stage_product.ps1` 只接受匹配当前源码的成功构建收据，默认拒绝个人构建路径。
+`tools/product/check_release.ps1` 分别检查 `internal-unsigned` 和 `public-signed`；
+无签名模式只省略签名要求，五语言聚合、干净源码、源码归档、安装及宿主门禁仍然必需。
+
+内部验收可先使用 `tools/product/stage_internal_product.ps1` 组装
+`build/<preset>/internal-product/EpoCanva-internal`：它复制当前二进制、产品数据和经
+staging 校验的五语言运行资源，逐文件核对 SHA-256，并写出 `INTERNAL-ONLY.txt`；它**不写**
+`package.manifest`，因此不是发行包，不能通过 `check_release.ps1`。设置窗口会如实显示
+`Package incomplete`，但会加载 13 个真实 profile，统一后端也可用该布局运行五语言与中文简拼
+测试。正式安装器、注册/卸载闭环和公开发行数据授权仍未完成。
+示例：`powershell -NoProfile -ExecutionPolicy Bypass -File tools/product/stage_internal_product.ps1 -BuildDir build/<preset>`
+（默认读取 `build/product-resources/product`；不存在时回退 `build/ime-resources/product`）。
+
+带 `package.manifest` 的内部发行候选包使用正式入口
+`build_product.ps1` + `stage_product.ps1 -BackendResourcesRoot <staged-root>`；当前生成的
+`build/windows-product/stage/EpoCanva-internal` 为 66 文件、171,994,763 bytes，
+`EpoCanva.exe --diagnose` 返回 `package=ready`/`manifest=ok`，设置窗口加载 13 个 profile。
+`check_release.ps1` 仍因 clean source、installer/toolchain、real-host、
+language-acceptance、证据绑定和公开数据授权而阻塞；内部候选包不是公开 release。
+`technical_ready`、`distribution_authorized`、`signature_verified`、`release_ready` 分开报告。
+包内文件校验通过不代表已获得分发许可或已完成系统输入验证。
+
 ## 现在能做什么，不能做什么
 
-引擎底座已经跑通，**英文能力只有四项，范围都很小**；P2.4 增加的是**验证规模**，不是能力项。
+已具备五语言离线 n-gram 模型、真实 Rime 中文词典、Hunspell 法文字典、Mozc 数据驱动的日文解码和韩文两套式组字。后端不是只查询前缀：上下文会影响补全、下一词和多词缩写展开，候选选择采用独立的宿主提交确认协议。2026-11-05 复审把上下文缩写展开改为新装默认开启（`abbreviation_enabled=1`），否则新用户只能看到前缀补全，当前缩写结合上下文的路径形同未交付；拼写、形态和二次编辑建议仍是显式 opt-in。中文简拼（如 `nh` → 你好）由来自身份校验 Terra 词典的有界声母/汉字索引加字符模型解码，合法全拼仍由 Rime 处理；`NEXT_WORD` 只返回词，不再让标点占据下一词首位。
+
+本次审计新增兼容 v1 的 v2 profile 接口、非 ASCII UTF-8 输入、短期上下文导入、模型驱动首字母缩写、部分显式缩写、统一候选评分和前缀索引。US QWERTY、French AZERTY、German QWERTZ、Dvorak 与未知布局中性评分分开建模；语言、键盘布局和输出模式不再混为一个英文 schema。经过来源校验的本地暂存资源提供 13 个 profile，详见 `docs/testing/backend-resource-staging.md`。
+
+2026-11-05 的第二轮独立复审又新增两个**跨平台**核心库，均不含 Windows 头文件：
+`engine/locale` 负责 BCP 47 语言标签解析与匹配、七语言固定优先级、输入 profile 注册表
+与输入方案的三级实现状态（已实现/未验证/缺失，`kImplemented` 必须带本地证据）；
+`engine/ranking` 负责有界确定性候选排序与学习事件语义（显式选择/拒绝/被替代/手动词条，
+没有按键或退格事件类型）。
+
+阶段 D 已把学习存储升级到 **schema v3**：保留有界 word/pair 计数，新增 profile/language
+身份、候选稳定 ID、规范化词条身份、正/负摘要、UTC 毫秒衰减、手动词条和 schema 版本；
+v1/v2 可迁移，迁移前保留 `.v2` 备份，损坏文件隔离为 `.corrupt`，显式清除覆盖 data/tmp/
+backup/corrupt 并可跨 profile 清空。读取与写入已分离：暂停记录后不再写新数据，但既有偏好
+仍可参与排序；敏感/未分类字段两条路径都拒绝。`engine/ranking` 的**只读**个性化重排已接进
+统一后端的 COMPLETION 候选（后端既有顺序作为归一化先验，权重是工程默认值、未做语料校准；
+原文候选保持首位；NEXT_WORD 本阶段不重排）。
+
+**产品持久写入仍关闭**：`ProductLearningWritesPermitted()` 为 false，因为 TSF 字段权限
+判定是一次查询，不是覆盖排队、worker、确认和持久化的 OS 锁。设置页显示“录制不可用”、
+数据位置和真实清除入口，并明确说明暂停记录不会清除既有偏好。逐项证据见
+`docs/reports/phase-d-learning-closure.md`、`docs/testing/learning-store-v3.md` 与 ADR 0011。
+
+**当前仍不可作为完整输入法交付。** Windows 新路径接入统一后端，但采用宿主保留原文、显式选择后替换目标词的模式，不是完整中日韩行内组合输入。产品持久学习**写入**仍因字段权限锁生命周期未闭合而禁用；v3 存储、v1/v2 迁移、只读既有偏好、暂停/清除语义与设置入口已实现并有测试，但产品写入不会在无证据时打开。简繁、部分确认、韩文词尾/空格、完整 Unicode 字素编辑和真实多键盘宿主矩阵仍未验收。没有 Android IME 发行物，当前源码的安装器与注册后跨宿主闭环也未完成。
+
+本轮真实命令、测试结果、失败修复和剩余阻塞见 `docs/reports/ime-prediction-audit.md`。此前 44 项后端、228 项产品等记录属于历史源码，不能替代当前构建收据。语言声明保持 blocked/partial，不以核心或受控文本存储测试通过冒充正式宿主验收。
+
+以下为既有英文与 Windows 路径的历史能力说明；P2.4 增加的是验证规模，而不是生产语料词频。
 
 - 已有：librime 固定提交的原版构建与两套自有构建、公开 C API 上的无界面按键回放、
   编译进引擎 DLL 的自有组件及其可达性验证，以及
@@ -42,22 +99,23 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
   （`helloworld` 仍整串保留）。实现形态是编译进 `rime.dll` 的最小英文 Processor
   （`engine/rime_components/english/english_space_processor.cc`），规则本身在
   `engine/languages/en/english_space_policy.h`，测试侧只拼接 API 真正返回过的 commit。
-- 没有：词频与上下文**学习**、
-  形态变化（复数、`-s/-ed/-ing`、所有格、缩合）、拼写**纠错**、连写**自动分段**、
-  缩写展开、跨应用一致性、下一词预测、候选编排与分页；
+- 尚未完成产品验收：生产词频与上下文**学习**、Unicode 英文完整性、
+  基于实际语料的连写分段、跨应用一致性和下一词预测。
+  新增形态、缩写、二编辑拼写是明确选择的建议，不自动纠正宿主文本；
+  形态默认要求词典收录或所有格基词已收录，不声称完整词性分析。
   大小写方面**只有** ASCII 映射——没有 Unicode case folding、没有句首自动大写、
   没有专名/品牌词大小写恢复（`iPhone`、`GitHub` 一类仍不补全）；
   词形方面**只有**"至多一个 ASCII 分隔符、不在首尾、不两种混用"这一条有限规则——
   没有多分隔符词形、没有 Unicode 弯撇号/破折号规范化、没有自动标点替换、
   没有 URL/邮箱/代码解析器；**没有已安装、已激活的系统 TSF 输入法**，没有 Android
-  前端，没有已执行的安装器（W3-B 只交付并测试了注册导出，未运行系统安装）；
+  前端，没有已执行的安装器；旧包的系统注册实验不能代替当前包的真实宿主验收；
   W1 只交付未注册的产品 TSF DLL 与设置壳；W2-A 已把产品 TSF DLL 接到真实
   `ITfKeyEventSink`、上下文观察、真实许可、协调器、固定 STA 唤醒与有界输入队列；
   W2-A-R 又补上高水位原样降级（文本不丢/不重/不乱序）、首 token 宿主归属与运行期共享锁；
   候选窗口已由 W2-B 实现；W2-B-R 修复了容量边界后的同会话恢复与 COM 回调/卸载生命周期，
   并补齐降级控制键与启动/停用端到端回归；W3-A 增加 UIElement 类别、宿主绘制决定遵从与
   token 锚点；W3-B 增加 `DllRegisterServer`/`DllUnregisterServer`、候选回退显示设置与
-  版本/图标资源，但安装与真实系统注册仍需一次显式授权的 C 层会话。
+  版本/图标资源；安装和真实系统输入仍需与具体包身份绑定的完整 C 层证据。
 - 词库事实：W1 起的内部产品包**已包含** `data/lexicon/epocanva_en_alpha.tsv`
   （42,356 行，由 `tools/data/build_product_lexicon.py` 从固定 ESDB 提交确定性生成并记录
   provenance），它随暂存包分发但**仅限内部 Alpha**——跨法域再分发仍需负责人与法务确认
@@ -71,7 +129,7 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 - W1 起另有一条**内部 Alpha 产品壳**：原生 Win32 的 `EpoCanva.exe`（设置、状态、离线/隐私说明、
   数据位置、许可入口）、产品 TSF DLL、`%LOCALAPPDATA%\EpoCanva` 用户数据、
   只读安装数据与白名单离线暂存包。W3-B 让 DLL 自带 `DllRegisterServer`/
-  `DllUnregisterServer` 与图标/版本资源，但**本机尚未执行系统注册**；
+  `DllUnregisterServer` 与图标/版本资源，但**当前源码对应的正式包尚未完成真实宿主闭环**；
   未注册时它不是系统输入法，候选窗口只在产品 DLL 自身的受控会话内出现。
   内部 Alpha 包不得公开分发。
 
@@ -98,8 +156,13 @@ EpoCanva 是一个以**英文能力为第一优先级**的输入法平台，底�
 | W2-A-R | 输入可靠性收敛：高水位原样降级（原文优先于补全/拼写建议）、首 token 宿主归属、宿主默认输入与参考文档模型、运行期共享锁取证 | 已交付（内部运行包 `0.2.1-w2r`；未注册） | `docs/reports/W2-A-R-input-reliability.md` |
 | W2-C | 输入保真 P0：普通原文归宿主、引擎建议有界可丢弃、显式候选替换的范围校验；删除 raw 容量路径并更正 177 的归属 | 已交付（内部运行包 `0.2.4-w2c`；未注册；C 层未验证） | `docs/reports/W2-C-input-fidelity.md` |
 | W3-A | 正式 TIP 注册/激活身份、UIElement 类别、宿主绘制决定遵从、token 锚点与隔离验证工具 | 已交付（内部运行包 `0.2.5-w3a`；C 层 trace 轮次完成，正式包闭环待复验） | `docs/reports/W3-A-isolation-registration.md` |
-| W3-B | `DllRegisterServer`/`DllUnregisterServer`（HKLM/HKCU、回读、回滚、外来 CLSID 拒绝）、候选回退显示设置、版本/图标资源、安装工具链只读探测 | 已实现并完成 B 层验证（内部 Alpha；未分发；系统注册/安装与 C 层闭环待一次显式 UAC 授权） | `docs/reports/W3-B-install-and-fallback.md` |
-| 之后 | 安装器（工具链缺失，W3-B 未执行）、C 层闭环、其余英文能力、Android | 未开始 | — |
+| W3-B | `DllRegisterServer`/`DllUnregisterServer`（HKLM/HKCU、回读、回滚、外来 CLSID 拒绝）、候选回退显示设置、版本/图标资源、安装工具链只读探测 | 已实现并完成 B 层验证；C 层六轮真实会话已执行（2026-11-02）：注册/激活/卸载与零残留六次实证、TIP 已被真实宿主加载并打穿真实键入；**候选窗口真实可见仍未证明**（UAC 预算用尽） | `docs/reports/W3-B-install-and-fallback.md`、`docs/reports/W3-B-c-layer-sessions.md` |
+| 发行准备修复 | 构建身份/收据、权限失败拒绝、运行库绑定、生命周期/共享锁、注册回滚、精确载荷/许可、路径清理与发行检查 | 产品 161 项：160 通过、1 显式跳过；内测候选已重建；公开发行仍阻塞 | `docs/reports/release-readiness-hardening.md` |
+| 离线五语言后端 | 真实五语言资源、n-gram 预测、确认学习协议及训练评测 | 已有工程检查点；语言完整性、端到端性能与发行门禁未闭合 | `docs/reports/backend-prediction-development.md` |
+| 预测输入法审计 | 上下文缩写、多 profile、键盘评分、资源暂存、统一后端 TSF 接线与回归 | 审计修正；不作为完整输入法交付，实际验收与阻塞见报告 | `docs/reports/ime-prediction-audit.md` |
+| 多语言复审与核心切片 | 独立复审（15 项证据等级）、规格升级、BCP 47 locale/profile 注册表、有界自适应排序与学习事件语义 | 核心库已实现；只读偏好已接后端 COMPLETION 候选，未接 TSF 权威验收 | `docs/reports/multilingual-intelligence-audit.md`、`docs/reports/multilingual-intelligence-slice.md` |
+| D：本地学习闭环 | schema v3（profile/language、衰减、正负反馈、手动词条）、v1/v2 迁移、`.v2` 备份、`.corrupt` 隔离、清除、只读偏好接线、设置入口 | 存储/迁移/仓库/只读排序/真实后端集成与设置清除已验证；**产品持久写入因字段锁未证明而保持关闭**，标注部分完成 | `docs/reports/phase-d-learning-closure.md` |
+| 之后 | 安装器、当前包 C 层闭环、完整中日韩组合、Android、模型目录 | 尚未交付 | `docs/task-briefs/phase-e-next.md` |
 
 ## 目录结构
 
@@ -111,6 +174,8 @@ engine/
   rime_components/
     probe/                  P1.4 可达性探针组件（编译进 rime.dll）
     english/                P2.1 英文组件（模块 epocanva_english）：Translator + P2.5 空格 Processor
+  locale/                   BCP 47 身份、七语言优先级、输入 profile 注册表（跨平台，无平台头）
+  ranking/                  有界自适应排序与学习事件语义（跨平台，无 I/O，未接产品）
   languages/en/             英文语言核心：词表、大小写、词形(token)、空格与提交边界、前缀查询，不含 Rime 头
 platforms/windows/
   product/                  W1 产品壳：EpoCanva.exe、产品 TSF 配置、设置/清单/诊断、GUI 与引擎测试
@@ -127,7 +192,7 @@ tools/
   rime_input_replay/        无界面按键回放（P1.3）
   rime_component_probe/     自有组件可达性测试（P1.4）
   test_english_integration.ps1  英文集成测试的正式入口：参数与工具检查 → 配置 → 构建 → 导出实际测试清单 → CTest → 真实退出码
-  rime_english_recovery/    英文集成测试（事故后的模块化重建：入口 + 公共框架 + 每组行为一个文件；pilot 关闭 27 条 CTest，开启 33 条）
+  rime_english_recovery/    英文集成测试（事故后的模块化重建：入口 + 公共框架 + 每组行为一个文件；pilot 关闭 39 条 CTest，开启 45 条）
   rime_english_completion/  已退役的旧入口，目录内只剩指向新正式入口的 README（原因与旧用例去向见该文件）
   data/build_english_pilot.py  真实词表的确定性离线转换器（P2.4，默认不联网）
   build_librime_baseline.ps1  唯一的 librime 原生构建入口，-Mode baseline|component-probe|english-completion
@@ -145,7 +210,7 @@ tests/
 docs/
   product/requirements.md   产品定位、语言优先级、隐私与验收原则
   architecture/             分层与模块边界
-  adr/                      架构决策记录（0001 英文优先 … 0004 编译进引擎的组件）
+  adr/                      架构决策记录（0001 英文优先 … 0010 模型分发与离线运行）
   security/threat-model.md  隐私威胁模型
   compliance/               依赖与许可证审计、english-pilot-data.md（试验词表授权）
   build/                    从零搭建步骤、librime Windows 基线
@@ -174,9 +239,13 @@ cmake --build --preset vs2022-x64-debug
 ctest --test-dir build/vs2022-x64-debug -C Debug --output-on-failure --no-tests=error
 ```
 
-（该套件现在是 **8 条**：4 条工具链基础设施 + 4 条英文核心单测。第 8 条
-`english.core.spelling_cost_trial_on_pilot_lexicon` 只在生成的真实词表在位时才注册，
-所以没有该产物的机器上是 7 条——不存在"静默跳过"的那一条。）
+（该套件现在是 **78 条**：4 条工具链基础设施、4 条英文核心、中文/法文/组字核心、
+学习核心 11 条、Windows 学习仓库 13 条（含 v3 迁移、损坏隔离、清除与反馈）、语言包、
+locale 注册表 3 条、自适应排序 14 条。阶段 D 额外增加根工程 3 条学习用例，
+仓库 2 条和排序 1 条；真实后端集成/产品设置用例在各自构建树中运行。
+其中 1 条 Windows 符号链接用例在有权限限制时显式跳过，不会静默变绿。
+第 8 条 `english.core.spelling_cost_trial_on_pilot_lexicon` 只在生成的真实词表在位时
+才注册，所以没有该产物的机器上会少一条——不存在"静默跳过"的那一条。）
 
 `vs2026-x64-debug`（生成器 `Visual Studio 18 2026`）是**可选路径，本机未验证**：
 上游 CMake 4.2 发布说明确认该生成器自 4.2 起提供，而本机 CMake 3.31.6 没有它，
@@ -243,13 +312,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/product/stage_prod
 `__FILE__` 构建前缀给出警告（公开分发前的构建修复项，见 W1 报告）。
 
 **这不是已安装的系统输入法**：产品 DLL 现在导出 `DllRegisterServer`/`DllUnregisterServer`
-（只写本产品自己的 CLSID、`InprocServer32` 与两个实现类别，支持 HKLM/HKCU、逐项回读、失败回滚），
-但 W3-B 没有在本机执行系统注册，也没有可用的安装器工具链；未注册时没有系统键盘接管，
+（只写本产品自己的 CLSID、`InprocServer32` 与两个实现类别，支持 HKLM/HKCU、逐项回读、失败回滚）。
+2026-11-02 的六轮 C 层真实会话（`docs/reports/W3-B-c-layer-sessions.md`）已在真实注册表上
+六次执行注册/激活/卸载并逐项验证残留为零，产品 TIP 也已被真实记事本宿主加载并打穿真实键入；
+但**候选窗口在真实宿主中的可见性尚未证明**，输入法选择器接管尚未演示，
+也没有可用的安装器工具链；平时未注册时没有系统键盘接管，
 候选窗口只在产品 DLL 的受控会话内出现。设置 EXE 可以保存并回读真实设置，
 产品 TSF DLL 会在下一次被宿主加载/激活时部署设置补丁；不要描述成“系统输入已经可用”。
 设置项之外的预测、学习和其他语言没有可点击的假开关。
 
 ## 许可证
 
-项目自身许可证**尚未确定**。在架构负责人确认之前，本仓库不添加任何授权声明、
-LICENSE 文件或版权头承诺。`third_party/` 下的规则仅针对外部依赖，与本项目许可证无关。
+项目自有代码采用 **AGPL-3.0-only**，保留根目录 `LICENSE` 与 `docs/product/license-decision.md` 的许可决定。第三方代码、词典、语料和模型各自保留原许可与署名要求；项目许可并不自动授予这些资料的再分发权。公开分发与稳定发行仍受独立验收门禁约束。

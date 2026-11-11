@@ -3,9 +3,18 @@ EpoCanva - Windows English Alpha (W1)
 
 Project licence
 ---------------
-EpoCanva's own licence is undecided. This package is an internal alpha build and is not
-cleared for public redistribution. No LICENSE file or licence header is added by this
-build (AGENTS.md section 8).
+EpoCanva-owned code and build/control scripts are licensed under the GNU Affero
+General Public License, version 3 only (AGPL-3.0-only). The complete, unmodified GNU
+text is supplied as LICENSE. The project is provided without warranty, including
+without the implied warranties of merchantability or fitness for a particular
+purpose, to the extent permitted by applicable law; see LICENSE sections 15-17.
+
+The user selected internal unsigned acceptance first. This records a project
+release-process scope, not a restriction on recipients' AGPL rights. Public release
+and word-list redistribution jurisdictions have not been approved by that choice.
+license-decision.json records the decision's exact scope. Corresponding Source must
+match the actual binaries and include the scripts needed to build/install/run them;
+package integrity alone does not demonstrate source-delivery compliance.
 
 Runtime offline statement
 -------------------------
@@ -13,6 +22,8 @@ The product runtime performs no network I/O: no telemetry, crash reporting, upda
 dictionary sync or cloud lookup. This is an architectural guarantee for the Windows DLL
 and EXE (our code and dependencies make no socket calls), not an OS sandbox. It is checked
 by the package import scan and by review, not enforced by the operating system.
+Android can enforce absence of network permission by omitting
+android.permission.INTERNET; this Windows package does not certify an Android build.
 
 No keystroke, composition buffer, committed text, clipboard content, focused-field name or
 application identifier is logged. This build stores no input history and implements no
@@ -20,18 +31,26 @@ learning.
 
 Bundled engine and libraries
 ----------------------------
-The package includes a statically linked librime 1.17.0 (commit 33e7814) build and the
-following build dependencies. Full licence texts are in the licences/ directory.
+The package includes rime.dll, a shared librime 1.17.0 build (commit 33e7814).
+Its dependencies below are linked into that DLL or compiled from their headers.
+Full licence texts are in the licenses/ directory.
 
   librime        BSD-3-Clause    Copyright (c) 2014, RIME Developers
   yaml-cpp       MIT
   leveldb        BSD-3-Clause
   marisa-trie    BSD-2-Clause (dual-licensed BSD-2 / LGPL-2.1+; the BSD-2 branch is used)
   OpenCC         Apache-2.0
+  RapidJSON      MIT (OpenCC's vendored 1.1.0 headers; no JSON-checker sources)
   Boost 1.89.0   Boost Software License 1.0
-  utfcpp         MIT
+  utfcpp         Boost Software License 1.0 (the grant in include/utf8.h)
   darts-clone    BSD-3-Clause
-  X11 keysym.h   X11/MIT-style notice (header only)
+  X11 keysym     X11/MIT-style notices from keysym.h and keysymdef.h
+
+RapidJSON's complete upstream licence file is included. Its JSON-licensed
+bin/jsonchecker sources and legacy msinttypes headers are not compiled in this
+MSVC build. TCLAP is used only by OpenCC's command-line tools, which are not shipped.
+The unused bundled marisa 0.2.6, tests, Python bindings, benchmarks and upstream
+conversion dictionaries are not payload files.
 
 No upstream source file was modified for this package. The engine is built from the pinned
 librime checkout; EpoCanva's own English component is compiled into rime.dll from

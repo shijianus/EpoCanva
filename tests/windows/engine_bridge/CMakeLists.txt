@@ -151,5 +151,31 @@ set_tests_properties(
   PROPERTIES TIMEOUT 360
              LABELS "windows;engine;runtime;session;controller;bridge")
 
-message(STATUS "  engine_bridge cases : 6 (runtime_lifecycle, state_mapping, "
-               "runtime_can_fail, key_dispatch, dispatch_guards, dispatch_can_fail)")
+# Fault-injection DLL and driver use the bridge's MSVC/static-CRT configuration.
+# The fake API only exercises defensive exception handling; it is not evidence that
+# the pinned C API normally throws. Poison cases each need their own process.
+add_library(engine_runtime_fault_api SHARED runtime_fault_api.cc)
+add_executable(engine_runtime_fault_tests runtime_fault_tests.cc)
+foreach(_fault_target engine_runtime_fault_api engine_runtime_fault_tests)
+  target_compile_definitions(${_fault_target} PRIVATE
+    _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+  target_compile_options(${_fault_target} PRIVATE
+    /W4 /permissive- /EHsc /Zc:__cplusplus /utf-8)
+endforeach()
+target_include_directories(engine_runtime_fault_api PRIVATE
+  "${EPOCANVA_RIME_INCLUDE_DIR}" "${EPOCANVA_ENGLISH_COMPONENT_DIR}")
+target_link_libraries(engine_runtime_fault_tests PRIVATE epocanva_engine_bridge)
+add_dependencies(engine_runtime_fault_tests engine_runtime_fault_api)
+set(_runtime_fault_modes
+  clean initialize_failure initialize_cleanup_throw shutdown_throw module_cleanup_throw)
+set(_runtime_fault_mode 0)
+foreach(_fault_case IN LISTS _runtime_fault_modes)
+  add_test(NAME windows.engine.runtime_fault_${_fault_case}
+    COMMAND engine_runtime_fault_tests ${_runtime_fault_mode}
+      $<TARGET_FILE:engine_runtime_fault_api> "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(windows.engine.runtime_fault_${_fault_case}
+    PROPERTIES TIMEOUT 30 LABELS "windows;engine;runtime;fault-injection")
+  math(EXPR _runtime_fault_mode "${_runtime_fault_mode} + 1")
+endforeach()
+
+message(STATUS "  engine_bridge cases : 6 behavioural/control + 5 runtime fault cases")

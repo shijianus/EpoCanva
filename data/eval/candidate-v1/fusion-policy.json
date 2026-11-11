@@ -1,0 +1,90 @@
+{
+  "format": "epocanva-candidate-fusion-policy-v1",
+  "version": 1,
+  "dedup_version": 1,
+  "dedup_rule": {
+    "case_fold": "ascii-a-z",
+    "folded_sources": ["word", "expansion", "morphology"],
+    "folded_languages": ["en", "fr", "ko"],
+    "nfkc": false,
+    "unicode_casefold": false,
+    "nfc_nfd_equivalence": false,
+    "note": "Mirror of engine/fusion/fusion_policy.cc DedupKey(); the content test pins the equality. NFC and NFD stay distinct, matching the candidate contract tests."
+  },
+  "score_scale": {
+    "unit": "fusion-points",
+    "min": 0.0,
+    "max": 1000.0,
+    "calibrated_band_floor": 400.0,
+    "fallback_band_floor": 100.0,
+    "note": "Raw source scores from different backends are never added together. Order inside the fallback band is the producer insertion ordinal; no uncalibrated scale participates."
+  },
+  "sources": {
+    "raw": {
+      "calibration": "hard-tier",
+      "rank_only": true,
+      "evidence": "eval/candidate-v1-r3: raw is the hard tier",
+      "can_win_default_fusion": true,
+      "note": "The raw tier is a hard rule, not a score; it always precedes suggestions."
+    },
+    "word": {
+      "calibration": "restricted-fallback",
+      "rank_only": true,
+      "linear": 0.0,
+      "offset": 0.0,
+      "evidence": "merge/producer-probe-r1",
+      "can_win_default_fusion": false
+    },
+    "spelling": {
+      "calibration": "restricted-fallback",
+      "rank_only": true,
+      "linear": 0.0,
+      "offset": 0.0,
+      "evidence": "merge/producer-probe-r1",
+      "can_win_default_fusion": false
+    },
+    "morphology": {
+      "calibration": "restricted-fallback",
+      "rank_only": true,
+      "linear": 0.0,
+      "offset": 0.0,
+      "evidence": "merge/producer-probe-r1",
+      "can_win_default_fusion": false
+    },
+    "expansion": {
+      "calibration": "restricted-fallback",
+      "rank_only": true,
+      "linear": 0.0,
+      "offset": 0.0,
+      "evidence": "merge/producer-probe-r1",
+      "can_win_default_fusion": false,
+      "note": "Exact expansions keep their hard protection inside the fallback band: the merger hoists an exact_expansion row above non-exact rows of its own band."
+    },
+    "conversion": {
+      "calibration": "restricted-fallback",
+      "rank_only": true,
+      "linear": 0.0,
+      "offset": 0.0,
+      "evidence": "merge/producer-probe-r1",
+      "can_win_default_fusion": false
+    },
+    "prediction": {
+      "calibration": "restricted-fallback",
+      "rank_only": true,
+      "linear": 0.0,
+      "offset": 0.0,
+      "evidence": "merge/producer-probe-r1",
+      "can_win_default_fusion": false
+    }
+  },
+  "calibration_basis": {
+    "eval/candidate-v1-r3": "Recorded candidate-menu evaluation (evaluator schema v3, see docs/reports/phase-e-multilingual-fusion.md). Established that prediction, conversion, word/morphology and expansion rows each live on their own log-like scale and are not comparable as raw numbers.",
+    "merge/producer-probe-r1": "Merge probe over the recorded menus: NormalizeToPoints with rank-only sources reproduced every recorded winner and left single-language menus byte-identical. This is the recorded basis for shipping all non-raw sources as restricted fallback in policy v1; flipping any source to calibrated requires a new recorded evaluation and a version bump."
+  },
+  "fail_closed": {
+    "missing_contract_field": "refuse-query",
+    "invalid_contract": "refuse-query",
+    "uncalibrated_source_wins": "impossible-by-construction",
+    "guess_language_from_script": false
+  }
+}

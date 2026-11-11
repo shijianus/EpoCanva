@@ -34,3 +34,16 @@ link_directories("${_epocanva_marisa_lib}")
 message(STATUS
   "EpoCanva external-marisa hook: includes ${_epocanva_marisa_include}; "
   "link dirs ${_epocanva_marisa_lib}")
+
+# OpenCC's absolute install prefix is not a runtime data path on another machine.
+# Common.hpp uses an empty package fallback when PKGDATADIR is undefined.
+function(epocanva_remove_opencc_install_paths directory)
+  get_property(_definitions DIRECTORY "${directory}" PROPERTY COMPILE_DEFINITIONS)
+  list(FILTER _definitions EXCLUDE REGEX "^(PKGDATADIR|LOCALEDIR)=")
+  set_property(DIRECTORY "${directory}" PROPERTY COMPILE_DEFINITIONS "${_definitions}")
+  get_property(_children DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+  foreach(_child IN LISTS _children)
+    epocanva_remove_opencc_install_paths("${_child}")
+  endforeach()
+endfunction()
+cmake_language(DEFER CALL epocanva_remove_opencc_install_paths "${CMAKE_CURRENT_SOURCE_DIR}")

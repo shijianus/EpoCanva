@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -309,6 +310,8 @@ void CheckInitialWindow(HWND window) {
 
   for (int id : {ui::kSave, ui::kClose, ui::kAbout, ui::kCompletionEnabled,
                  ui::kSpellingEnabled, ui::kCompletionCount, ui::kSpellingCount,
+                 ui::kMorphologyEnabled, ui::kAbbreviationEnabled,
+                 ui::kTwoEditSpellingEnabled,
                  ui::kPathInstall, ui::kPathUser,
                  ui::kPathSettings, ui::kPathEngine, ui::kStatusEdit}) {
     HWND control = ::GetDlgItem(window, id);
@@ -394,6 +397,7 @@ int main(int argc, char** argv) {
   std::filesystem::path exe;
   std::filesystem::path user_root;
   std::filesystem::path screenshot;
+  int expected_profiles = 0;
   for (int index = 1; index < argc; ++index) {
     const std::string option = argv[index];
     if (option == "--exe" && index + 1 < argc) {
@@ -402,6 +406,9 @@ int main(int argc, char** argv) {
       user_root = argv[++index];
     } else if (option == "--screenshot" && index + 1 < argc) {
       screenshot = argv[++index];
+    } else if (option == "--expect-profiles" && index + 1 < argc) {
+      expected_profiles = std::atoi(argv[++index]);
+      if (expected_profiles < 0) expected_profiles = 0;
     }
   }
   if (exe.empty() || user_root.empty() || screenshot.empty() ||
@@ -432,6 +439,14 @@ int main(int argc, char** argv) {
   CheckInitialWindow(window);
   CheckDpi(process.handle);
   CheckKeyboardTraversal(window, ::GetWindowThreadProcessId(window, nullptr));
+  if (expected_profiles > 0) {
+    const HWND profile_choice = ::GetDlgItem(window, ui::kProfileChoice);
+    const int profiles = profile_choice == nullptr
+        ? -1
+        : static_cast<int>(::SendMessageW(profile_choice, CB_GETCOUNT, 0, 0));
+    std::cout << "profiles=" << profiles << " expected=" << expected_profiles << "\n";
+    Check(profiles == expected_profiles, "profile list contains the expected entries");
+  }
 
   HWND completion = ::GetDlgItem(window, ui::kCompletionEnabled);
   HWND spelling = ::GetDlgItem(window, ui::kSpellingEnabled);
@@ -455,6 +470,19 @@ int main(int argc, char** argv) {
 
   Check(::SendMessageW(candidate_host, BM_GETCHECK, 0, 0) == BST_CHECKED,
         "the default candidate display follows the host");
+  HWND abbreviation = ::GetDlgItem(window, ui::kAbbreviationEnabled);
+  Check(abbreviation != nullptr &&
+            ::SendMessageW(abbreviation, BM_GETCHECK, 0, 0) == BST_CHECKED,
+        "contextual abbreviation expansion starts enabled");
+  for (int id : {ui::kMorphologyEnabled, ui::kTwoEditSpellingEnabled}) {
+    HWND feature = ::GetDlgItem(window, id);
+    Check(feature != nullptr && ::SendMessageW(feature, BM_GETCHECK, 0, 0) == BST_UNCHECKED,
+          "noisier extended English features start disabled");
+  }
+  for (int id : {ui::kMorphologyEnabled, ui::kAbbreviationEnabled,
+                 ui::kTwoEditSpellingEnabled}) {
+    EnsureCheck(::GetDlgItem(window, id), true);
+  }
   EnsureCheck(completion, false);
   EnsureCheck(spelling, true);
   ::SendMessageW(completion_count, CB_SETCURSEL, 2, 0);  // 3
@@ -486,6 +514,10 @@ int main(int argc, char** argv) {
         "saved INI has 2 suggestions");
   Check(Contains(settings_text, "candidate_display=always_self"),
         "saved INI records the always_self candidate display");
+  Check(Contains(settings_text, "morphology_enabled=1") &&
+            Contains(settings_text, "abbreviation_enabled=1") &&
+            Contains(settings_text, "two_edit_spelling_enabled=1"),
+        "saved INI records the three extended feature switches");
   const std::string patch_text = ReadText(patch_file);
   Check(Contains(patch_text, "english/max_completions\": 0"),
         "saved patch disables completions");
@@ -493,6 +525,10 @@ int main(int argc, char** argv) {
         "saved patch enables spelling");
   Check(Contains(patch_text, "english/max_suggestions\": 2"),
         "saved patch sets two suggestions");
+  Check(Contains(patch_text, "english/enable_morphology\": true") &&
+            Contains(patch_text, "english/enable_abbreviation\": true") &&
+            Contains(patch_text, "english/enable_two_edit_spelling\": true"),
+        "saved patch projects the extended English switches");
   std::string marker;
   Check(epocanva::product::ReadDeployMarkerToken(marker_file, &marker),
         "saved deployment marker exists");
@@ -535,6 +571,11 @@ int main(int argc, char** argv) {
         "relaunch reads completion disabled");
   Check(::SendMessageW(spelling, BM_GETCHECK, 0, 0) == BST_CHECKED,
         "relaunch reads spelling enabled");
+  for (int id : {ui::kMorphologyEnabled, ui::kAbbreviationEnabled,
+                 ui::kTwoEditSpellingEnabled}) {
+    Check(::SendMessageW(::GetDlgItem(window, id), BM_GETCHECK, 0, 0) == BST_CHECKED,
+          "relaunch reads extended English enabled");
+  }
   Check(::SendMessageW(candidate_always, BM_GETCHECK, 0, 0) == BST_CHECKED &&
             ::SendMessageW(candidate_host, BM_GETCHECK, 0, 0) == BST_UNCHECKED,
         "relaunch reads the always_self candidate display");

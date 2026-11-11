@@ -115,6 +115,30 @@ class TestEditSession final : public ITfEditSession {
     }
     const bool replaces_text = mode_ == ExternalEditMode::kInsertText ||
                                mode_ == ExternalEditMode::kReplaceText;
+    // A real host moves an existing caret with the text it inserts or removes. Capture the
+    // pre-edit caret so an insert before it shifts the caret instead of resetting it.
+    LONG prior_caret = -1;
+    {
+      TF_SELECTION prior = {};
+      ULONG fetched = 0;
+      if (SUCCEEDED(context_->GetSelection(edit_cookie, TF_DEFAULT_SELECTION, 1, &prior,
+                                           &fetched)) &&
+          fetched == 1 && prior.range != nullptr) {
+        ITfRangeACP* prior_acp = nullptr;
+        LONG prior_start = -1;
+        LONG prior_length = -1;
+        if (SUCCEEDED(prior.range->QueryInterface(
+                IID_ITfRangeACP, reinterpret_cast<void**>(&prior_acp))) &&
+            prior_acp != nullptr) {
+          if (SUCCEEDED(prior_acp->GetExtent(&prior_start, &prior_length)) &&
+              prior_length == 0) {
+            prior_caret = prior_start;
+          }
+          prior_acp->Release();
+        }
+        prior.range->Release();
+      }
+    }
     const LONG length_utf16 = mode_ == ExternalEditMode::kInsertText
                                   ? 0
                                   : end_utf16_ - start_utf16_;
@@ -123,7 +147,20 @@ class TestEditSession final : public ITfEditSession {
       if (replaces_text) {
         hr = acp->SetText(edit_cookie, 0, text_.c_str(),
                           static_cast<LONG>(text_.size()));
-      } else {
+        if (SUCCEEDED(hr)) {
+          const LONG delta = static_cast<LONG>(text_.size()) - length_utf16;
+          LONG caret = start_utf16_ + static_cast<LONG>(text_.size());
+          if (prior_caret >= 0) {
+            if (prior_caret < start_utf16_) {
+              caret = prior_caret;
+            } else if (prior_caret >= end_utf16_) {
+              caret = prior_caret + delta;
+            }
+          }
+          hr = acp->SetExtent(caret, 0);
+        }
+      }
+      if (SUCCEEDED(hr)) {
         TF_SELECTION selection = {};
         selection.range = acp;
         selection.style.ase = TF_AE_END;

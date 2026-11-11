@@ -26,15 +26,34 @@ enum class CandidateDisplay {
 };
 
 struct ProductSettings {
+  int profile_id = 1;  // exact resource-manifest profile, applies on next engine start
   bool completion_enabled = true;
   int completion_candidates = 7;  // 1..7
   bool spelling_enabled = false;
   int spelling_candidates = 3;  // 1..3
+  bool morphology_enabled = false;
+  // Contextual abbreviation expansion is the product's headline prediction path
+  // ("gm" after "have a" -> "good morning"). It must be on for a fresh install:
+  // an opt-in default hides that path and makes the IME look like a prefix-only
+  // word finder. Spelling/morphology stay explicit opt-ins because their
+  // suggestions are noisier.
+  bool abbreviation_enabled = true;
+  bool two_edit_spelling_enabled = false;
+  // User intent for durable local learning. Product builds currently force this to false
+  // at the execution boundary because the Windows field-permission lock does not cover
+  // the queued worker call chain. Existing local preferences are still used for ranking.
+  bool learning_recording_enabled = false;
   CandidateDisplay candidate_display = CandidateDisplay::kHost;
 
   static ProductSettings Defaults() { return ProductSettings{}; }
   bool valid() const;
 };
+
+// True only when this build can prove a field-permission lock across observation,
+// queueing, worker execution, event confirmation and persistence. It is false today:
+// the TSF permission verdict is a point-in-time query, not an OS-enforced lock held by
+// the worker. Do not flip this to true without the evidence described in the phase report.
+bool ProductLearningWritesPermitted();
 
 enum class SettingsLoadStatus {
   kLoaded = 0,

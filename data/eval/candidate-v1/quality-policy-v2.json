@@ -1,0 +1,28 @@
+{
+  "format": "epocanva-candidate-quality-policy-v2",
+  "version": 2,
+  "languages": ["en", "zh", "fr", "ja", "ko"],
+  "qualification": {"runs": 2, "repeat": 2, "warmup_queries": 20},
+  "minimum_cases": {"en": 1001, "zh": 1001, "fr": 1001, "ja": 1001, "ko": 500},
+  "thresholds": {
+    "deterministic_case_rate_min": 1.0,
+    "wrong_language_rate_max": 0.0,
+    "empty_menu_rate_max": 0.0,
+    "raw_present_rate_min": 1.0,
+    "raw_first_rate_min": 1.0,
+    "not_observable_is_failure": true
+  },
+  "regression": {
+    "warm_p95_ms": {"relative_increment_max": 0.2, "absolute_increment_max": 5.0},
+    "peak_working_set_bytes": {"relative_increment_max": 0.2, "absolute_increment_max": 33554432}
+  },
+  "invariants": {
+    "runtime_network": false,
+    "telemetry": false,
+    "raw_user_content_logging": false,
+    "product_learning_writes": false,
+    "public_backend_abi": 1
+  },
+  "absolute_quality": {"decision": "pending_product_owner", "top1_min": null, "top3_min": null, "mrr_min": null},
+  "tier_b_lock": "tier-b.lock.json"
+}

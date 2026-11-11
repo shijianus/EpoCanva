@@ -20,11 +20,11 @@
 // a text service: GetAppProperty(GUID_PROP_INPUTSCOPE) + GetValue over a range inside a
 // real edit session. The application side of that contract is the context owner's
 // attribute support (ITextStoreACP::RequestSupportedAttrs / RetrieveRequestedAttrs),
-// which is how the P3.7 test host publishes scopes in the integration tests. Two
-// no-metadata answers map to "absent": the officially documented S_FALSE (no coverage,
-// VT_EMPTY) and the E_FAIL this machine's real msctf.dll returns for exactly that state
-// (empirically verified; see the .cc for the residual-risk reasoning). Every other
-// failure HRESULT is a query failure and yields Unknown.
+// which is how the P3.7 test host publishes scopes in the integration tests. The
+// documented S_FALSE no-coverage answer and successful VT_EMPTY/VT_NULL values mean
+// absence. Every failed GetValue, including E_FAIL, yields Unknown. Some msctf builds
+// return E_FAIL for both an attribute-free owner and a broken attribute read; neither
+// grants permission. Ordinary hosts with that ambiguous answer lose suggestions.
 //
 // IDENTITY AND LIFETIME. A query is begun against one (context, context_id, generation)
 // triple and its result carries that triple; the coordinator re-validates it against

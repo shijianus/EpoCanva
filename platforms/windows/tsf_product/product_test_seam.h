@@ -161,6 +161,23 @@ struct EpoCanvaTestCounters {
   int candidate_token_origin_valid;
   long long candidate_token_origin_caret;
   long long predicted_host_caret;
+  // Unified host-context read scheduling (text-free).
+  int host_context_owed;
+  int host_context_in_flight;
+  long long host_context_caret;
+  unsigned long long host_context_revision;
+  unsigned long long host_context_submitted_revision;
+  unsigned long long waker_wakes_posted;
+  unsigned long long waker_wakes_received;
+  unsigned long long waker_stale_wakes;
+  unsigned long long waker_post_failures;
+  unsigned long long waker_stops;
+  unsigned long long waker_loop_ticks;
+  unsigned long waker_window_thread;
+  unsigned long controller_thread;
+  unsigned long long waker_window_messages;
+  int waker_started;
+  int pacing;
 };
 
 __declspec(dllexport) int EpoCanvaTestQueryCounters(EpoCanvaTestCounters* out);
@@ -182,6 +199,8 @@ __declspec(dllexport) int EpoCanvaTestResetBootstrap();
 __declspec(dllexport) int EpoCanvaTestBootstrapState();
 // EngineHostState value: 0 idle, 1 starting, 2 running, 3 stopping, 4 failed.
 __declspec(dllexport) int EpoCanvaTestEngineHostState();
+// Current lease count, used to order multi-attachment lifecycle assertions.
+__declspec(dllexport) unsigned long long EpoCanvaTestEngineHostLeaseCount();
 // Module lifetime facts behind DllCanUnloadNow, plus the number of live edit-layer COM
 // objects counted through module_lifetime.h. Any of the pointers may be null.
 __declspec(dllexport) int EpoCanvaTestModuleState(long long* live_objects,
@@ -192,6 +211,9 @@ __declspec(dllexport) int EpoCanvaTestModuleState(long long* live_objects,
 // Per-kind live guard counts (edit session, selection read, composition sink, rect read,
 // candidate element, candidate sink). Returns the number written.
 __declspec(dllexport) int EpoCanvaTestGuardedObjects(long long* out, int capacity);
+// Text-free engine bootstrap failure message (UTF-8). Returns the required byte count;
+// zero means no failure is recorded. Used only by the controlled test suite.
+__declspec(dllexport) int EpoCanvaTestEngineFailure(char* buffer, unsigned capacity);
 
 }  // extern "C"
 

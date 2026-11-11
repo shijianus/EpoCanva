@@ -283,14 +283,89 @@ bool Sha256(const void* data, std::size_t size, std::string* lowercase_hex,
 
 bool Sha256File(const std::filesystem::path& path, std::string* lowercase_hex,
                 std::uint64_t* size, std::wstring* why) {
-  std::vector<std::uint8_t> bytes;
-  if (!ReadFileBytes(path, &bytes, why)) {
+  if (lowercase_hex == nullptr) {
+    if (why != nullptr) *why = L"Sha256File received a null output string";
     return false;
   }
-  if (size != nullptr) {
-    *size = bytes.size();
+  // Hash by streaming rather than ReadFileBytes: the verified Japanese lexicon
+  // is larger than the 64 MiB bounded-read limit, and package verification must
+  // cover every payload file without loading it whole.
+  HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING,
+                              FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT |
+                                  FILE_FLAG_OPEN_NO_RECALL,
+                              nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    if (why != nullptr) {
+      *why = L"cannot open " + path.wstring() + L" for hashing (error " +
+          std::to_wstring(::GetLastError()) + L")";
+    }
+    return false;
   }
-  return Sha256(bytes.data(), bytes.size(), lowercase_hex, why);
+  struct FileCloser {
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    ~FileCloser() { if (handle != INVALID_HANDLE_VALUE) ::CloseHandle(handle); }
+  } closer{file};
+  LARGE_INTEGER length = {};
+  if (!::GetFileSizeEx(file, &length) || length.QuadPart < 0) {
+    if (why != nullptr) *why = L"cannot size " + path.wstring();
+    return false;
+  }
+  BCRYPT_ALG_HANDLE raw_algorithm = nullptr;
+  NTSTATUS status = ::BCryptOpenAlgorithmProvider(
+      &raw_algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+  if (!BCRYPT_SUCCESS(status)) {
+    if (why != nullptr) *why = StatusText(L"BCryptOpenAlgorithmProvider", status);
+    return false;
+  }
+  AlgorithmHandle algorithm(raw_algorithm);
+  DWORD object_size = 0;
+  DWORD result_size = 0;
+  status = ::BCryptGetProperty(algorithm.get(), BCRYPT_OBJECT_LENGTH,
+      reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size), &result_size, 0);
+  if (!BCRYPT_SUCCESS(status) || object_size == 0) {
+    if (why != nullptr) *why = StatusText(L"BCryptGetProperty(object length)", status);
+    return false;
+  }
+  std::vector<std::uint8_t> object(object_size);
+  BCRYPT_HASH_HANDLE raw_hash = nullptr;
+  status = ::BCryptCreateHash(algorithm.get(), &raw_hash, object.data(), object_size,
+                              nullptr, 0, 0);
+  if (!BCRYPT_SUCCESS(status)) {
+    if (why != nullptr) *why = StatusText(L"BCryptCreateHash", status);
+    return false;
+  }
+  HashHandle hash(raw_hash);
+  std::vector<std::uint8_t> buffer(1u << 20);
+  std::uint64_t remaining = static_cast<std::uint64_t>(length.QuadPart);
+  while (remaining > 0) {
+    const DWORD want = static_cast<DWORD>(
+        std::min<std::uint64_t>(remaining, buffer.size()));
+    DWORD read = 0;
+    if (!::ReadFile(file, buffer.data(), want, &read, nullptr) || read == 0) {
+      if (why != nullptr) {
+        *why = L"reading " + path.wstring() + L" failed (error " +
+            std::to_wstring(::GetLastError()) + L")";
+      }
+      return false;
+    }
+    status = ::BCryptHashData(hash.get(), buffer.data(), read, 0);
+    if (!BCRYPT_SUCCESS(status)) {
+      if (why != nullptr) *why = StatusText(L"BCryptHashData", status);
+      return false;
+    }
+    remaining -= read;
+  }
+  std::array<unsigned char, 32> digest = {};
+  status = ::BCryptFinishHash(hash.get(), digest.data(),
+                              static_cast<ULONG>(digest.size()), 0);
+  if (!BCRYPT_SUCCESS(status)) {
+    if (why != nullptr) *why = StatusText(L"BCryptFinishHash", status);
+    return false;
+  }
+  HexLower(digest.data(), digest.size(), lowercase_hex);
+  if (size != nullptr) *size = static_cast<std::uint64_t>(length.QuadPart);
+  return true;
 }
 
 bool IsLowercaseHexSha256(const std::string& text) {

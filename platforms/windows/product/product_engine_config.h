@@ -39,6 +39,12 @@ namespace product {
 // description) when the product or user layout cannot be resolved. Callable repeatedly.
 bool ApplyProductEngineConfig(HMODULE module, std::wstring* why);
 
+// Releases a transferred engine.lock handle after its engine lease has stopped.
+// Unresolved broker cleanup deliberately retains the handle until process exit so
+// another process cannot deploy over a possibly live engine. Never retains the
+// separate named start mutex. No input content is recorded.
+void ReleaseEngineLeaseLock(void* lock) noexcept;
+
 // One activation's deployment transaction. Prepare() acquires the cross-process start
 // lock; Complete()/Abort() release it. The destructor aborts an unfinished transaction, so
 // an exception path cannot leak the mutex. All methods run on the activating STA.
@@ -57,8 +63,9 @@ class EngineStartTransaction {
   // Called after EngineHostBroker::Acquire succeeded. Verifies the compiled artefact when
   // a deployment was requested, records the deployed snapshot and retires the marker.
   // Returns false only when a requested deployment produced no usable artefact; the caller
-  // must release the engine lease and fail activation. A state-record write failure keeps
-  // the marker and still returns true (the engine is usable, the retry evidence survives).
+  // must release the engine lease and fail activation before Abort/destruction
+  // releases (or conservatively retains) the file lock. A state-record write failure
+  // keeps the marker and still returns true (the engine is usable, the retry evidence survives).
   bool Complete(std::wstring* why);
 
   // Called after Acquire failed or a later activation step failed. Never writes or removes
@@ -67,8 +74,8 @@ class EngineStartTransaction {
 
   // Transfers the shared engine.lock handle acquired for this activation. The caller must
   // hold it exactly as long as the engine lease: closing it while the engine runs would
-  // let another process delete the compiled output underneath it. Returns null after a
-  // failed Complete or a previous transfer.
+  // let another process delete the compiled output underneath it. Call only after a
+  // successful Complete; returns null after a previous transfer.
   void* TakeLeaseLock();
 
   bool prepared() const { return prepared_; }

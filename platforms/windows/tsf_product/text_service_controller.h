@@ -55,6 +55,7 @@
 #include "engine_executor.h"
 #include "key_decision.h"
 #include "key_event.h"
+#include "host_context.h"
 #include "observed_binding.h"
 #include "permission_query.h"
 #include "product_engine_bootstrap.h"
@@ -148,6 +149,21 @@ struct ControllerDiagnostics {
   std::uint64_t candidate_stale_selections = 0;
   CandidateUiDiagnostics candidate_ui;
   bool pacing = false;
+  bool host_context_read_owed = false;
+  bool host_context_work_in_flight = false;
+  long long host_context_caret_utf16 = -1;
+  std::uint64_t host_context_read_revision = 0;
+  std::uint64_t host_context_submitted_revision = 0;
+  std::uint64_t waker_wakes_posted = 0;
+  std::uint64_t waker_wakes_received = 0;
+  std::uint64_t waker_stale_wakes = 0;
+  std::uint64_t waker_post_failures = 0;
+  std::uint64_t waker_stops = 0;
+  std::uint64_t waker_loop_ticks = 0;
+  unsigned long waker_window_thread = 0;
+  std::uint64_t waker_window_messages = 0;
+  unsigned long controller_thread = 0;
+  bool waker_started = false;
   coordinator::CoordinatorSnapshot coordinator;
   coordinator::ObservedBindingController::Diagnostics binding;
   context::ContextObserverSnapshot observer;
@@ -253,6 +269,17 @@ class ProductTextController final : public StaWakeTarget,
   // named status; it never blocks and never retries inside a key callback.
   void TryAttachEngine();
   bool BuildEnginePipeline(std::wstring* why);
+  void PumpUnifiedHostContext();
+  bool HandleUnifiedHostKey(const BuiltKey& key);
+  bool host_context_read_owed_ = false;
+  bool host_context_work_in_flight_ = false;
+  // A host text edit happened since the last submitted context read. The published
+  // candidate snapshot (if any) predates it and must not be presented.
+  bool host_text_changed_ = false;
+  LONG host_context_caret_utf16_ = -1;
+  std::uint64_t host_context_event_token_ = 0;
+  std::uint64_t host_context_read_revision_ = 0;
+  std::uint64_t host_context_submitted_revision_ = 0;
   // Literal mode: count the key. No engine, query or edit is touched.
   void TrackLiteralKey(WPARAM wparam, LPARAM lparam);
 

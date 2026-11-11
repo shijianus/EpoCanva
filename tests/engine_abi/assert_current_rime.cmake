@@ -1,0 +1,15 @@
+# Bind every real-engine test invocation to the file validated at configure time.
+# Do not silently test a replacement DLL after a concurrent or later rebuild.
+foreach(_required RIME_DLL EXPECTED_RIME_SHA256)
+  if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
+    message(FATAL_ERROR "ABI runner requires ${_required}")
+  endif()
+endforeach()
+if(NOT EXISTS "${RIME_DLL}")
+  message(FATAL_ERROR "Configured Rime DLL disappeared; no real-engine test was run")
+endif()
+file(SHA256 "${RIME_DLL}" _current_hash)
+if(NOT _current_hash STREQUAL EXPECTED_RIME_SHA256)
+  message(FATAL_ERROR "Rime DLL changed since configure; reconfigure against the current build/receipt before testing")
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/../english_completion/assert_exit.cmake")

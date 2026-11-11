@@ -35,8 +35,13 @@ struct ProductStatus {
   std::wstring version;
   std::wstring commit;
   std::wstring host;
-  bool package_ready = false;
+  bool package_ready = false;  // local integrity/isolation only; not release acceptance
   bool manifest_ok = false;
+  bool internal_only = true;  // scope for format 2; legacy diagnostic field for format 1
+  int manifest_format = 0;
+  std::string acceptance_profile;
+  std::string distribution_policy;
+  std::string path_exception;
   std::wstring manifest_issue;
   int manifest_files = 0;
   int manifest_failures = 0;

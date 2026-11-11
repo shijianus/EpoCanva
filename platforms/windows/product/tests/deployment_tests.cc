@@ -1,6 +1,8 @@
 // EpoCanva W2 -- deployment snapshot and cross-process start-coordination tests.
 //
-// These cases never start the engine. They exercise the real product configuration
+// The normal cases simulate deployment without starting an engine. The cleanup-lock
+// case uses a test-only runtime DLL to prove failed cleanup retains the file locks.
+// They exercise the real product configuration
 // transaction (fingerprint, marker retirement, state record, named-mutex coordination)
 // against throwaway user roots below --run-root. The product data layout is copied next to
 // this executable by CMake, so ResolveProductPaths(GetModuleHandle(nullptr)) is the same
@@ -429,7 +431,7 @@ void TestRuntimeLease(const std::filesystem::path& run_root) {
   second.spelling_candidates = 3;
   Check(save_bundle(second, &token, &why),
         "runtime: a changed settings bundle is written while the engine runs (" +
-            std::string(why.begin(), why.end()) + ")");
+            epocanva::product::WideToUtf8(why) + ")");
   const std::filesystem::path sentinel = paths.engine_user_dir / L"build" / L"keep.txt";
   {
     std::error_code ec;
@@ -477,6 +479,117 @@ void TestRuntimeLease(const std::filesystem::path& run_root) {
         "runtime: the record names the newly deployed fingerprint");
 }
 
+int ProbeCleanupLocks(const std::filesystem::path& user_root) {
+  for (const wchar_t* name : {L"engine.lock", L"shared-cleanup.lock"}) {
+    const auto path = user_root / L"engine" / name;
+    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    Check(file != INVALID_HANDLE_VALUE, "cleanup child: lock file opens");
+    if (file == INVALID_HANDLE_VALUE) {
+      continue;
+    }
+    OVERLAPPED overlap = {};
+    const BOOL acquired = ::LockFileEx(file,
+        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlap);
+    const DWORD error = acquired ? ERROR_SUCCESS : ::GetLastError();
+    Check(!acquired && error == ERROR_LOCK_VIOLATION,
+          "cleanup child: exclusive deployment access is refused");
+    ::CloseHandle(file);
+  }
+  const std::string utf8 = epocanva::product::WideToUtf8((user_root / L"engine").wstring());
+  std::string digest;
+  Check(epocanva::product::Sha256(utf8.data(), utf8.size(), &digest, nullptr),
+        "cleanup child: start mutex identity resolves");
+  const std::wstring name = L"Local\\EpoCanva.Deploy." + epocanva::product::Utf8ToWide(digest);
+  HANDLE mutex = ::CreateMutexW(nullptr, FALSE, name.c_str());
+  Check(mutex != nullptr, "cleanup child: start mutex opens");
+  if (mutex != nullptr) {
+    const DWORD wait = ::WaitForSingleObject(mutex, 1000);
+    Check(wait == WAIT_OBJECT_0, "cleanup child: start mutex was released normally");
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
+      ::ReleaseMutex(mutex);
+    }
+    ::CloseHandle(mutex);
+  }
+  return g_failures == 0 ? 0 : 14;
+}
+
+void TestCleanupLock(const std::filesystem::path& run_root,
+                     const std::filesystem::path& fault_dll) {
+  const auto user_root = run_root / L"cleanup-user";
+  ResetUserRoot(user_root);
+  ::SetEnvironmentVariableW(L"EPOCANVA_USER_DATA_ROOT", user_root.c_str());
+  Check(epocanva::product::ApplyProductEngineConfig(::GetModuleHandleW(nullptr), nullptr),
+        "cleanup: product configuration applied");
+  epocanva::product::EngineStartTransaction transaction;
+  std::wstring why;
+  if (!transaction.Prepare(&why)) {
+    Check(false, "cleanup: start transaction acquired its locks");
+    return;
+  }
+
+  HMODULE fixture = ::LoadLibraryExW(fault_dll.c_str(), nullptr,
+      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+  Check(fixture != nullptr, "cleanup: fault API DLL loaded");
+  if (fixture == nullptr) {
+    return;
+  }
+  using Configure = void (*)(int);
+  const auto configure = reinterpret_cast<Configure>(
+      ::GetProcAddress(fixture, "RuntimeFaultConfigure"));
+  Check(configure != nullptr, "cleanup: fault API configuration available");
+  if (configure == nullptr) {
+    ::FreeLibrary(fixture);
+    return;
+  }
+  configure(2);  // initialize and its cleanup finalize both throw
+  epocanva::tsf::EngineHostConfig config;
+  Check(transaction.config(&config), "cleanup: transaction configuration captured");
+  Check(!config.backend.learning_writes_trusted &&
+        !config.backend.learning_recording_enabled,
+        "cleanup: durable product learning is closed at the engine boundary");
+  config.rime_dll_path = fault_dll;
+  config.deployment.reset();
+  epocanva::tsf::EngineLease lease;
+  const auto acquired = epocanva::tsf::EngineHostBroker::Instance().Acquire(config, &lease);
+  Check(acquired == epocanva::tsf::EngineLeaseStatus::kCleanupFailed,
+        "cleanup: the real broker observes the injected runtime cleanup failure");
+  epocanva::tsf::EngineHostDiagnostics diagnostics;
+  epocanva::tsf::EngineHostBroker::Instance().Snapshot(&diagnostics);
+  Check(diagnostics.cleanup_failed && diagnostics.state == epocanva::tsf::EngineHostState::kFailed,
+        "cleanup: broker failure is persistent and observable");
+  transaction.Abort();  // retain engine.lock; release the separate named start mutex
+
+  // The attachment owner's deleter uses this same release function after a failed stop.
+  HANDLE shared = ::CreateFileW((user_root / L"engine" / L"shared-cleanup.lock").c_str(),
+      GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+      OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  Check(shared != INVALID_HANDLE_VALUE, "cleanup: shared runtime lock opens");
+  if (shared != INVALID_HANDLE_VALUE) {
+    OVERLAPPED overlap = {};
+    Check(::LockFileEx(shared, LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlap) != FALSE,
+          "cleanup: shared runtime lock acquired");
+    epocanva::product::ReleaseEngineLeaseLock(shared);
+  }
+  const auto exe = ExeDirectory() / L"epocanva_product_deployment_tests.exe";
+  std::wstring command = Quote(exe) + L" --mode cleanup-probe --user-root " + Quote(user_root);
+  std::vector<wchar_t> buffer(command.begin(), command.end());
+  buffer.push_back(L'\0');
+  STARTUPINFOW startup = {};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process = {};
+  const bool launched = ::CreateProcessW(exe.c_str(), buffer.data(), nullptr, nullptr,
+      FALSE, 0, nullptr, nullptr, &startup, &process) != FALSE;
+  Check(launched, "cleanup: independent lock-probe process launches");
+  if (launched) {
+    DWORD exit_code = 1;
+    Check(WaitForProcess(&process, &exit_code, 10000) && exit_code == 0,
+          "cleanup: another process cannot take exclusive locks but can take the start mutex");
+  }
+  ::FreeLibrary(fixture);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -487,6 +600,8 @@ int main(int argc, char** argv) {
   DWORD hold_ms = 0;
   bool child = false;
   bool child_runtime = false;
+  std::string mode;
+  std::filesystem::path fault_dll;
   for (int index = 1; index < argc; ++index) {
     const std::string argument = argv[index];
     if (argument == "--run-root" && index + 1 < argc) {
@@ -494,7 +609,10 @@ int main(int argc, char** argv) {
     } else if (argument == "--child") {
       child = true;
     } else if (argument == "--mode" && index + 1 < argc) {
-      child_runtime = std::string(argv[++index]) == "runtime";
+      mode = argv[++index];
+      child_runtime = mode == "runtime";
+    } else if (argument == "--fault-dll" && index + 1 < argc) {
+      fault_dll = std::filesystem::path(argv[++index]);
     } else if (argument == "--user-root" && index + 1 < argc) {
       child_user_root = std::filesystem::path(argv[++index]);
     } else if (argument == "--artifact" && index + 1 < argc) {
@@ -504,6 +622,9 @@ int main(int argc, char** argv) {
     } else if (argument == "--hold-ms" && index + 1 < argc) {
       hold_ms = static_cast<DWORD>(std::stoul(argv[++index]));
     }
+  }
+  if (mode == "cleanup-probe") {
+    return child_user_root.is_absolute() ? ProbeCleanupLocks(child_user_root) : 2;
   }
   if (child) {
     if (child_user_root.empty() || child_artifact.empty() || child_result.empty()) {
@@ -519,9 +640,16 @@ int main(int argc, char** argv) {
   std::error_code ec;
   std::filesystem::create_directories(run_root, ec);
 
-  TestFingerprintLifecycle(run_root / L"fingerprint-user");
-  TestCrossProcess(run_root);
-  TestRuntimeLease(run_root);
+  if (mode == "cleanup-lock") {
+    if (!fault_dll.is_absolute()) {
+      return 2;
+    }
+    TestCleanupLock(run_root, fault_dll);
+  } else {
+    TestFingerprintLifecycle(run_root / L"fingerprint-user");
+    TestCrossProcess(run_root);
+    TestRuntimeLease(run_root);
+  }
 
   if (g_failures != 0) {
     std::cout << "FAILED: " << g_failures << " check(s)\n";

@@ -106,6 +106,22 @@ extern "C" int EpoCanvaTestQueryCounters(EpoCanvaTestCounters* out) {
   out->candidate_token_origin_caret =
       diagnostics.candidate_token_origin_caret_utf16;
   out->predicted_host_caret = diagnostics.predicted_host_caret_utf16;
+  out->host_context_owed = diagnostics.host_context_read_owed ? 1 : 0;
+  out->host_context_in_flight = diagnostics.host_context_work_in_flight ? 1 : 0;
+  out->host_context_caret = diagnostics.host_context_caret_utf16;
+  out->host_context_revision = diagnostics.host_context_read_revision;
+  out->host_context_submitted_revision = diagnostics.host_context_submitted_revision;
+  out->waker_wakes_posted = diagnostics.waker_wakes_posted;
+  out->waker_wakes_received = diagnostics.waker_wakes_received;
+  out->waker_stale_wakes = diagnostics.waker_stale_wakes;
+  out->waker_post_failures = diagnostics.waker_post_failures;
+  out->waker_stops = diagnostics.waker_stops;
+  out->waker_loop_ticks = diagnostics.waker_loop_ticks;
+  out->waker_window_thread = diagnostics.waker_window_thread;
+  out->controller_thread = diagnostics.controller_thread;
+  out->waker_window_messages = diagnostics.waker_window_messages;
+  out->waker_started = diagnostics.waker_started ? 1 : 0;
+  out->pacing = diagnostics.pacing ? 1 : 0;
   out->page_no = candidates.page_no;
   out->page_size = candidates.page_size;
   out->is_last_page = candidates.is_last_page ? 1 : 0;
@@ -320,6 +336,38 @@ extern "C" int EpoCanvaTestEngineHostState() {
   epocanva::tsf::EngineHostBroker::Instance().Snapshot(&diagnostics);
   return static_cast<int>(diagnostics.state);
 }
+
+extern "C" int EpoCanvaTestEngineFailure(char* buffer, unsigned capacity) {
+  using namespace epocanva::tsf::product;
+  std::lock_guard<std::mutex> guard(g_controller_mutex);
+  ProductTextController* controller = CurrentControllerLocked();
+  if (controller == nullptr) {
+    return 0;
+  }
+  const auto diagnostics = controller->Snapshot();
+  std::string text = diagnostics.engine_failure;
+  // A failed broker start explains itself through the executor's text-free diagnostic.
+  epocanva::tsf::EngineHostDiagnostics host;
+  epocanva::tsf::EngineHostBroker::Instance().Snapshot(&host);
+  if (!host.start_diagnostic.empty()) {
+    if (!text.empty()) text += " | ";
+    text += "host[" + std::to_string(host.runtime_start_status) + "]: " +
+            host.start_diagnostic;
+  }
+  if (buffer != nullptr && capacity > 0) {
+    const std::size_t count = std::min<std::size_t>(text.size(), capacity - 1);
+    std::copy_n(text.data(), count, buffer);
+    buffer[count] = '\0';
+  }
+  return static_cast<int>(text.size());
+}
+
+extern "C" unsigned long long EpoCanvaTestEngineHostLeaseCount() {
+  epocanva::tsf::EngineHostDiagnostics diagnostics;
+  epocanva::tsf::EngineHostBroker::Instance().Snapshot(&diagnostics);
+  return diagnostics.lease_count;
+}
+
 
 extern "C" int EpoCanvaTestModuleState(long long* live_objects, long long* server_locks,
                                        long long* host_active, long long* host_failed,

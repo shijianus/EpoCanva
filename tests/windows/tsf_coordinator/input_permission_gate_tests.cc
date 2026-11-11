@@ -358,15 +358,21 @@ int RunUnknownAbsentAndGap() {
     }
   }
   {
-    // No published InputScope metadata is the documented ordinary default; it is Allowed
-    // and the work proceeds through every real axis.
+    // This msctf build returns E_FAIL for a genuinely attribute-free owner. That
+    // ambiguity must not dispatch to the engine or mutate the document.
+    TestDocumentOptions options;
+    options.scope_answer = TestScopeAnswer::kNone;
+    options.input_scopes.clear();
     GateCase setup;
-    if (SetupGateCase(&setup, TestDocumentOptions{}, "scope-absent")) {
-      const DriveResult driven = TypeLetter(setup, L'h', "scope-absent");
-      CheckOutcome(driven.final_state, WorkOutcome::kApplied,
-                   "scope-absent: the work applied");
-      CheckDocText(setup.document->text_utf16(), L"h",
-                   "scope-absent: the document advanced");
+    if (SetupGateCase(&setup, options, "scope-absent")) {
+      WorkId id;
+      const executor_tests::TextKey h = Letter(L'h');
+      const SubmitStatus submitted = setup.coordinator->SubmitKey(h.event, h.text, &id);
+      CheckRefusedBeforeEngine(setup, submitted, SubmitStatus::kPermissionUnknown,
+                               "scope-absent");
+      const auto diagnostics = setup.permission->Diagnostics();
+      Check(diagnostics.last_scope_stage == 2 && diagnostics.last_scope_hr == E_FAIL,
+            "scope-absent: real GetValue returned the ambiguous E_FAIL", "");
     }
   }
   {
@@ -381,19 +387,20 @@ int RunUnknownAbsentAndGap() {
     }
   }
   {
-    // DOCUMENTED GAP: an owner whose RetrieveRequestedAttrs fails surfaces the same
-    // E_FAIL msctf returns for an attribute-free owner, so the text-service side cannot
-    // distinguish "broken" from "publishes nothing". This case pins the observed
-    // behaviour and the limitation is stated in input-permission-contract.md.
+    // The owner fails its real attribute read. E_FAIL stays Unknown even though
+    // this msctf build uses the same HRESULT for an attribute-free owner.
     TestDocumentOptions options;
     options.scope_answer = TestScopeAnswer::kFail;
     GateCase setup;
     if (SetupGateCase(&setup, options, "scope-owner-failure")) {
-      const DriveResult driven = TypeLetter(setup, L'h', "scope-owner-failure");
-      CheckOutcome(driven.final_state, WorkOutcome::kApplied,
-                   "scope-owner-failure: indistinguishable from absence (documented gap)");
-      std::printf("[coordinator-win] evidence gap scope-owner-failure: "
-                  "E_FAIL-is-indistinguishable-from-absent\n");
+      WorkId id;
+      const executor_tests::TextKey h = Letter(L'h');
+      const SubmitStatus submitted = setup.coordinator->SubmitKey(h.event, h.text, &id);
+      CheckRefusedBeforeEngine(setup, submitted, SubmitStatus::kPermissionUnknown,
+                               "scope-owner-failure");
+      const auto diagnostics = setup.permission->Diagnostics();
+      Check(diagnostics.last_scope_stage == 2 && diagnostics.last_scope_hr == E_FAIL,
+            "scope-owner-failure: failed GetValue keeps E_FAIL", "");
     }
   }
   return Finish();
@@ -517,17 +524,18 @@ int RunFlipBeforeApply() {
 
 // --- 11. engine already ran, the edit is refused; restoring Allowed must not replay -----
 
-int RunEngineRanEditRefused() {
+int CheckEngineRanEditRefused(TestScopeAnswer changed_scope,
+                              edit::EditRejectReason expected_reason) {
   TestDocumentOptions options;
   options.async_locks = true;
   GateCase setup;
   if (!SetupGateCase(&setup, options, "engine-ran-edit-refused")) {
-    return Finish();
+    return g_failed;
   }
   WorkId id;
   SubmitH(setup, &id, "engine-ran-edit-refused");
   if (!ReachEditPending(setup, "engine-ran-edit-refused")) {
-    return Finish();
+    return g_failed;
   }
   Check(setup.harness.backend->dispatch_calls() == 1,
         "engine-ran-edit-refused: the controlled engine processed the key", "");
@@ -538,7 +546,7 @@ int RunEngineRanEditRefused() {
 
   // Flip the real scope while the write lock is deferred. The coordinator's pre-edit
   // query already said Allowed; only the callback-time real-metadata recheck can see this.
-  setup.document->SetScopeAnswer(TestScopeAnswer::kScopes, {31L});  // IS_PASSWORD
+  setup.document->SetScopeAnswer(changed_scope, {31L});
   const HANDLE completion = setup.coordinator->EditCompletionEvent();
   Check(completion != nullptr, "engine-ran-edit-refused: completion event exposed", "");
   Check(setup.host->PumpUntil(completion, 5000),
@@ -549,7 +557,7 @@ int RunEngineRanEditRefused() {
             refused.outcome == WorkOutcome::kNeedsResync,
         "engine-ran-edit-refused: the refused edit is a divergence",
         DescribeSnapshot(refused));
-  Check(refused.last_edit_reason == edit::EditRejectReason::kPermissionDenied,
+  Check(refused.last_edit_reason == expected_reason,
         "engine-ran-edit-refused: P3.7 named the permission refusal",
         edit::DescribeEditRejectReason(refused.last_edit_reason));
   Check(refused.permission_rechecks == 1,
@@ -566,7 +574,7 @@ int RunEngineRanEditRefused() {
 
   // Restore Allowed: the blocked binding must not silently resume with the engine's old
   // "h" state. Only an explicit invalidation plus a rebuilt binding may continue.
-  setup.document->SetScopeAnswer(TestScopeAnswer::kNone, {});
+  setup.document->SetScopeAnswer(TestScopeAnswer::kScopes, {0L});
   executor_tests::TextKey e = Letter(L'e');
   WorkId second;
   const SubmitStatus blocked = setup.coordinator->SubmitKey(e.event, e.text, &second);
@@ -610,6 +618,14 @@ int RunEngineRanEditRefused() {
                 static_cast<unsigned long long>(first_store.text_mutations),
                 static_cast<unsigned long long>(refused.permission_rechecks));
   }
+  return g_failed;
+}
+
+int RunEngineRanEditRefused() {
+  (void)CheckEngineRanEditRefused(TestScopeAnswer::kScopes,
+                                 edit::EditRejectReason::kPermissionDenied);
+  (void)CheckEngineRanEditRefused(TestScopeAnswer::kFail,
+                                 edit::EditRejectReason::kPermissionUnknown);
   return Finish();
 }
 

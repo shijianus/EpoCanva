@@ -1,0 +1,229 @@
+# Minimal Contract Gate CI for EpoCanva.
+#
+# This is the executable part of docs/ci/windows-ci.md section 3.1, enabled on a
+# GitHub-hosted runner. It needs no external Tier 2 build inputs: the manifest
+# freshness gate, the locale/candidate contract tests, the capability matrix
+# validation, the Tier 2 input-lock contract tests, the candidate-evaluation
+# evaluator tests, the CI-gate tooling tests, and the Python staging unit tests
+# all run from the committed source tree alone.
+#
+# The backend, windows-product and nightly-stress jobs from the design document
+# are deliberately NOT enabled here. They require the self-hosted runner with the
+# hash-verified immutable input cache (docs/ci/windows-ci.md section 2); enabling
+# them without that cache would produce false failures or, worse, tempt an
+# unverified-input workaround. Enabling them is a separate reviewed change.
+#
+# Privacy: every test here uses synthetic fixtures and committed project data.
+# Nothing in this workflow downloads models, dictionaries or telemetry; the
+# product runtime performs no network I/O, and neither do these jobs.
+#
+# Gate falsifiability contract (this round):
+# - The whitespace gate compares exactly the commits the event introduced
+#   (tools/ci/check_whitespace.py), never the working tree of a clean checkout.
+# - The contract suite runs what the version-controlled inventory
+#   (tools/ci/contract-tests.json) proves, verified against the real CTest
+#   tree by tools/ci/contract_inventory.py before any test executes.
+# - Every action is pinned to a full commit SHA of a reviewed release; the
+#   official gate runs on the image the toolchain was verified against
+#   (windows-2022), with a windows-latest canary allowed to drift.
+name: windows-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, "feat/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract-gate:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Pin checkout bytes to the committed LF endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+        with:
+          # Full history: the event-aware whitespace gate needs the base/before
+          # objects to resolve its merge bases; an insufficient depth must fail
+          # the gate closed, not silently narrow it.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Locate VS CMake
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $cmake = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
+          if (-not $cmake) { throw "VS CMake not found" }
+          "EPOCANVA_CMAKE=$cmake" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "EPOCANVA_CTEST=$(Join-Path (Split-Path $cmake) 'ctest.exe')" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Record toolchain versions
+        run: |
+          git --version
+          & $env:EPOCANVA_CMAKE --version | Select-Object -First 1
+          & $env:EPOCANVA_CTEST --version
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property catalog_productDisplayVersion
+          $PSVersionTable.PSVersion.ToString()
+
+      - name: Install the pinned Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # actions/setup-python v7.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Event-aware whitespace gate
+        run: |
+          python -B tools/ci/check_whitespace.py `
+            --event "${{ github.event_name }}" `
+            --base-sha "${{ github.event.pull_request.base.sha }}" `
+            --head-sha "${{ github.event.pull_request.head.sha || github.sha }}" `
+            --before-sha "${{ github.event.before }}" `
+            --after-sha "${{ github.sha }}" `
+            --baseline-ref "origin/${{ github.event.repository.default_branch }}"
+          if ($LASTEXITCODE -ne 0) { throw "whitespace gate failed with exit $LASTEXITCODE" }
+
+      - name: Configure root preset
+        run: |
+          & $env:EPOCANVA_CMAKE --preset vs2022-x64-debug
+          if ($LASTEXITCODE -ne 0) { throw "configure failed with exit $LASTEXITCODE" }
+
+      - name: Build the contract-gate aggregate target
+        run: |
+          & $env:EPOCANVA_CMAKE --build build/vs2022-x64-debug --config Debug `
+            --target epocanva_contract_gate_tests --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "build failed with exit $LASTEXITCODE" }
+
+      - name: Contract inventory must match the committed set exactly
+        run: |
+          python -B tools/ci/contract_inventory.py `
+            --ctest $env:EPOCANVA_CTEST `
+            --build-dir build/vs2022-x64-debug --config Debug `
+            --expected tools/ci/contract-tests.json
+          if ($LASTEXITCODE -ne 0) { throw "contract inventory failed with exit $LASTEXITCODE" }
+
+      - name: Contract CTests by the verified label
+        run: |
+          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug `
+            -L contract-gate --no-tests=error --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "contract ctest failed with exit $LASTEXITCODE" }
+
+      - name: Regenerate the backend binding manifest and compare bytes
+        run: |
+          $probe = "build/vs2022-x64-debug/tests/locale_registry/Debug/epocanva_locale_registry_tests.exe"
+          if (-not (Test-Path $probe)) { throw "locale probe not built at $probe" }
+          New-Item -ItemType Directory -Force build/ci/manifest | Out-Null
+          & $probe --manifest build/ci/manifest/backend-bindings.json
+          if ($LASTEXITCODE -ne 0) { throw "manifest export failed with exit $LASTEXITCODE" }
+          git diff --no-index --exit-code `
+            data/locale/backend-bindings.json build/ci/manifest/backend-bindings.json
+          if ($LASTEXITCODE -ne 0) {
+            throw "committed data/locale/backend-bindings.json is stale relative to the C++ registry export"
+          }
+
+      - name: Python staging unit tests
+        run: |
+          python -B -m unittest discover -s tests/backend_resource_staging -p "test_*.py"
+          if ($LASTEXITCODE -ne 0) { throw "staging unit tests failed with exit $LASTEXITCODE" }
+
+      - name: Source tree must stay clean
+        run: |
+          $status = git status --porcelain --untracked-files=all
+          if ($status) { $status; throw "source tree changed during the gate" }
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # actions/upload-artifact v7.0.2
+        with:
+          name: contract-gate-logs-${{ github.run_attempt }}
+          path: |
+            build/vs2022-x64-debug/Testing/Temporary/LastTest.log
+            build/vs2022-x64-debug/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore
+
+  # Canary for runner-image drift, not a gate: windows-latest may roll to a
+  # toolchain this repository has not verified; its failures are findings to
+  # record, never release evidence.
+  contract-gate-canary:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Pin checkout bytes to the committed LF endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Locate VS CMake
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $cmake = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
+          if (-not $cmake) { throw "VS CMake not found" }
+          "EPOCANVA_CMAKE=$cmake" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "EPOCANVA_CTEST=$(Join-Path (Split-Path $cmake) 'ctest.exe')" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Record toolchain versions
+        run: |
+          git --version
+          & $env:EPOCANVA_CMAKE --version | Select-Object -First 1
+          & $env:EPOCANVA_CTEST --version
+          $PSVersionTable.PSVersion.ToString()
+      - name: Install the pinned Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # actions/setup-python v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Event-aware whitespace gate
+        run: |
+          python -B tools/ci/check_whitespace.py `
+            --event "${{ github.event_name }}" `
+            --base-sha "${{ github.event.pull_request.base.sha }}" `
+            --head-sha "${{ github.event.pull_request.head.sha || github.sha }}" `
+            --before-sha "${{ github.event.before }}" `
+            --after-sha "${{ github.sha }}" `
+            --baseline-ref "origin/${{ github.event.repository.default_branch }}"
+          if ($LASTEXITCODE -ne 0) { throw "whitespace gate failed with exit $LASTEXITCODE" }
+      - name: Configure root preset
+        run: |
+          & $env:EPOCANVA_CMAKE --preset vs2022-x64-debug
+          if ($LASTEXITCODE -ne 0) { throw "configure failed with exit $LASTEXITCODE" }
+      - name: Build the contract-gate aggregate target
+        run: |
+          & $env:EPOCANVA_CMAKE --build build/vs2022-x64-debug --config Debug `
+            --target epocanva_contract_gate_tests --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "build failed with exit $LASTEXITCODE" }
+      - name: Contract inventory must match the committed set exactly
+        run: |
+          python -B tools/ci/contract_inventory.py `
+            --ctest $env:EPOCANVA_CTEST `
+            --build-dir build/vs2022-x64-debug --config Debug `
+            --expected tools/ci/contract-tests.json
+          if ($LASTEXITCODE -ne 0) { throw "contract inventory failed with exit $LASTEXITCODE" }
+      - name: Contract CTests by the verified label
+        run: |
+          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug `
+            -L contract-gate --no-tests=error --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "contract ctest failed with exit $LASTEXITCODE" }

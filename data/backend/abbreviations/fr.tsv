@@ -1,0 +1,6 @@
+EPOCANVA_ABBREVIATION_DEFINITIONS_TSV	1
+language	key	expansion	evidence
+fr	min	minute	pjer:Tatoeba/1892588;backend-corpus-prepared/fr.jsonl;explicit minute abbreviation
+fr	mme	madame	Grammalecte-7.7:fr.dic:Mme;Igider:Tatoeba/10556204;project-authored expansion
+fr	dr	docteur	Grammalecte-7.7:fr.dic:Dr;Igider:Tatoeba/10556204;project-authored expansion
+fr	c.-à-d.	c'est-à-dire	menaud:Tatoeba/12965516;backend-corpus-prepared/fr.jsonl;project-authored expansion
