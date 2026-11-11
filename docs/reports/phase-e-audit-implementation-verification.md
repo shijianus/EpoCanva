@@ -396,5 +396,3 @@ None.
 **Data loss, privacy, or regression risk:** None identified. All existing safety boundaries are intact. The E1 change is additive (new struct and function) and does not modify any existing behavior.
 
 **Can the source enter the next phase?** Yes. The M0 quality baseline is established, E1 provides the unified profile foundation, and the codebase is stable with 367/371 tests passing. E2 (candidate contract), E3 (candidate sources), and E4 (fusion) can proceed incrementally.
-
-
