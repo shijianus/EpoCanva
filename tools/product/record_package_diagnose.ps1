@@ -127,6 +127,32 @@ $document = [ordered]@{
     language_policy_sha256 = (Get-Sha256 (Join-Path $script:repoRoot 'data\manifests\language-readiness.json'))
     entries = @($entry)
 }
+# Bind the Corresponding Source producer output. The release gate requires this
+# top-level reference; without it a valid archive is unreachable. The manifest must
+# belong to the same source/package as this diagnosis, and its archive bytes must
+# match the manifest before the reference is recorded.
+$sourceManifestPath = Join-Path $BuildDir 'source-manifest.json'
+if (-not (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf)) {
+    Fail 'source-manifest.json is missing; run tools/product/stage_source.ps1 before recording release evidence' 5
+}
+$sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($sourceManifest.format -ne 1 -or $sourceManifest.commit -cne $current.commit -or
+        $sourceManifest.source_sha256 -cne $current.source_sha256 -or
+        $sourceManifest.package_manifest_sha256 -cne (Get-Sha256 $stageManifest)) {
+    Fail 'source-manifest.json belongs to a different source or package' 5
+}
+$archiveRelative = [string]$sourceManifest.archive.path
+if (-not $archiveRelative -or $archiveRelative.Contains('..') -or
+        $archiveRelative.StartsWith('/') -or $archiveRelative -match '^[A-Za-z]:') {
+    Fail 'source-manifest.json archive path is not repository-relative' 5
+}
+$archivePath = Join-Path $script:repoRoot $archiveRelative.Replace('/', '\')
+if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) { Fail 'the corresponding source archive is missing' 5 }
+if ((Get-Sha256 $archivePath) -cne [string]$sourceManifest.archive.sha256 -or
+        (Get-Item -LiteralPath $archivePath -Force).Length -ne [long]$sourceManifest.archive.bytes) {
+    Fail 'the corresponding source archive differs from its manifest' 5
+}
+$document['source_manifest'] = New-Reference $sourceManifestPath $BuildDir
 [System.IO.File]::WriteAllText($EvidencePath, ($document | ConvertTo-Json -Depth 8) + "`n",
     (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "wrote $EvidencePath"
