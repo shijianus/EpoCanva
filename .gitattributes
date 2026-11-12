@@ -51,5 +51,11 @@ CMakeLists.txt text eol=lf
 # whitespace included: data/manifests/product-dependencies.json pins the
 # licence sha256 and byte count, so rewriting the text would break the pin and
 # stop the retained notice from being a faithful copy. The whitespace gate
-# therefore does not apply to them; no other file is exempt.
+# therefore does not apply to them.
 data/product/licenses/*.txt -whitespace
+
+# Unified-diff patch files also keep their bytes verbatim. Every blank context
+# line is a single space by definition, so `git diff --check` on a newly added
+# patch reports the diff syntax itself. The patch hash is pinned in
+# data/manifests/backend-hunspell.sources.json, so reflowing it is not an option.
+third_party/patches/*.patch -whitespace
