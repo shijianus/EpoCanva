@@ -590,19 +590,26 @@ int RunRealFocus() {
 
   std::printf(
       "[observer-win] evidence real-focus: set_focus=%s get_focus=%d "
-      "focus_notifications=%llu->%llu target_published=%d last_lost=%s\n",
+      "focus_notifications=%llu->%llu target_published=%d notification_dropped=%d "
+      "last_lost=%s\n",
       set_ok ? "S_OK" : "FAILED", focus.get_focus_ok ? 1 : 0,
       static_cast<unsigned long long>(focus_before),
       static_cast<unsigned long long>(after_focus.focus_notifications),
-      after_focus.has_published_target ? 1 : 0,
+      after_focus.has_published_target ? 1 : 0, notification_dropped ? 1 : 0,
       DescribeContextDropReason(after_focus.last_target_lost_reason));
 
-  // AssociateFocus reference ownership: the manager does not AddRef pdim_new, and the
-  // pointer returned in ppdimPrev belongs to the caller. This part is independent of
-  // whether a window can receive focus.
+  // Real visible-window focus. AssociateFocus with a top-level window is the documented
+  // TSF application path and a real OnSetFocus source; the programmatic SetFocus above is
+  // kept as evidence that this environment does not notify for that path alone. The test
+  // still owns no observer callback: every state change below arrives from TSF.
   HWND window = nullptr;
   std::string window_error;
+  bool window_on_set_focus = false;
+  bool window_bound_b = false;
+  bool window_cleared = false;
   if (CreateVisibleTestWindow(&window, &window_error)) {
+    const std::uint64_t before_associate =
+        env.observer->Snapshot().focus_notifications;
     ITfDocumentMgr* previous = nullptr;
     const HRESULT associate_hr = AssociateDocumentFocus(
         env.host->thread_manager_for_test(), window,
@@ -610,7 +617,32 @@ int RunRealFocus() {
     Check(SUCCEEDED(associate_hr),
           "real-focus: AssociateFocus(window, B) succeeded",
           "hr=0x" + std::to_string(static_cast<unsigned long>(associate_hr)));
+    // The manager does not AddRef pdim_new; the pointer returned in ppdimPrev belongs to
+    // the caller and is released here whether or not the association succeeded.
     ReleaseAssociatedDocumentManager(previous);
+
+    const ObserverDriveResult associated =
+        PumpUntilSettled(*env.observer, *env.host, 20000);
+    const ContextObserverSnapshot after_associate = env.observer->Snapshot();
+    window_on_set_focus = after_associate.focus_notifications > before_associate;
+    Check(window_on_set_focus,
+          "real-focus: AssociateFocus on a visible window delivered OnSetFocus",
+          DescribeObserverSnapshot(after_associate));
+    const ContextIdRecord record_b = ObserveRecord(*env.registry, doc_b);
+    window_bound_b = associated.settled && after_associate.has_published_target &&
+                     env.sink.last_target().context_id == record_b.context_id;
+    Check(window_bound_b,
+          "real-focus: the OnSetFocus path bound document B",
+          DescribeObserverSnapshot(associated.final_state));
+    std::printf(
+        "[observer-win] evidence associate-focus: notifications=%llu->%llu "
+        "bound_b=%d generation=%llu target_published=%d\n",
+        static_cast<unsigned long long>(before_associate),
+        static_cast<unsigned long long>(after_associate.focus_notifications),
+        window_bound_b ? 1 : 0,
+        static_cast<unsigned long long>(env.sink.last_target().generation),
+        after_associate.has_published_target ? 1 : 0);
+
     ITfDocumentMgr* cleared = nullptr;
     const HRESULT clear_hr = AssociateDocumentFocus(
         env.host->thread_manager_for_test(), window, nullptr, &cleared);
@@ -630,15 +662,20 @@ int RunRealFocus() {
       if (expected_unknown != nullptr) expected_unknown->Release();
       cleared->Release();
     }
-    // SetFocus on our own window is thread-local; it never forces the system foreground.
-    ::SetFocus(window);
-    PumpMessagesFor(*env.host, 400);
-    const ContextObserverSnapshot after_window = env.observer->Snapshot();
+    const ObserverDriveResult cleared_state =
+        PumpUntilSettled(*env.observer, *env.host, 20000);
+    const ContextObserverSnapshot after_clear = env.observer->Snapshot();
+    window_cleared = cleared_state.settled &&
+                     (!after_clear.has_published_target ||
+                      env.sink.last_target().context_id != record_b.context_id);
+    Check(window_cleared,
+          "real-focus: clearing the association removes the document B target",
+          DescribeObserverSnapshot(after_clear));
     std::printf(
-        "[observer-win] evidence associate-focus: focus_notifications=%llu "
-        "target_published=%d\n",
-        static_cast<unsigned long long>(after_window.focus_notifications),
-        after_window.has_published_target ? 1 : 0);
+        "[observer-win] evidence association-cleared: target_published=%d "
+        "last_lost=%s\n",
+        after_clear.has_published_target ? 1 : 0,
+        DescribeContextDropReason(after_clear.last_target_lost_reason));
     ::DestroyWindow(window);
   } else {
     std::printf(
@@ -647,20 +684,15 @@ int RunRealFocus() {
         window_error.c_str());
   }
 
-  if (notification_delivered && notification_dropped) {
-    const ObserverDriveResult driven =
-        PumpUntilSettled(*env.observer, *env.host, 20000);
-    Check(driven.settled && driven.final_state.has_published_target,
-          "real-focus: Pump bound the newly focused document",
-          DescribeObserverSnapshot(driven.final_state));
-    Check(env.sink.last_target().context_id == ObserveRecord(*env.registry, doc_b).context_id,
-          "real-focus: the target is document B", "");
+  if (window_on_set_focus && window_bound_b && window_cleared) {
     std::printf("[observer-win] RESULT PASS real focus notification delivered\n");
     return Finish();
   }
 
   // The notification path was not exercised. Prove the fallback separately, and report
-  // the case as environment-limited rather than green.
+  // the case as environment-limited rather than green. When the visible-window path did
+  // run, clearing the association is expected to change focus again, so only the
+  // no-window case may assert that GetFocus still finds B.
   const ObserverDriveResult fallback =
       PumpUntilSettled(*env.observer, *env.host, 20000);
   std::printf(
@@ -669,8 +701,10 @@ int RunRealFocus() {
       static_cast<unsigned long long>(
           fallback.final_state.focus_revalidation_changes),
       fallback.final_state.has_published_target ? 1 : 0);
-  Check(fallback.settled && fallback.final_state.has_published_target,
-        "real-focus: Pump's GetFocus revalidation still finds B", "");
+  if (window == nullptr) {
+    Check(fallback.settled && fallback.final_state.has_published_target,
+          "real-focus: Pump's GetFocus revalidation still finds B", "");
+  }
   std::printf(
       "[observer-win] RESULT ENV-LIMITED real focus notification not delivered: "
       "SetFocus changed GetFocus but TSF sent no OnSetFocus to this thread's sink\n");
