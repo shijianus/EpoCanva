@@ -952,6 +952,17 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
         for (const auto& row : lexical.candidates) {
           flow::Candidate candidate;
           candidate.kind=Kind(row.type); candidate.text_utf8=row.text_utf8;
+          // The raw contract is the literal host-held input. Korean two-set
+          // composes the preedit from Latin keys, so the lexical service's
+          // original row carries the composed Hangul; publishing it as RAW
+          // would make "cancel" commit text the user never typed. Keep the
+          // typed keys for the raw row and leave composition to the conversion
+          // candidates.
+          if (row.type == lex::CandidateType::kOriginal &&
+              session.language == EPOCANVA_BACKEND_KO && !session.raw.empty() &&
+              session.raw != session.preedit) {
+            candidate.text_utf8 = session.raw;
+          }
           candidate.lexeme_ids=row.lexeme_ids; candidate.score=row.match_log_score;
           candidate.input_end_utf8_byte=session.raw.size();
           if (candidate.lexeme_ids.size()>8 || std::any_of(candidate.lexeme_ids.begin(),candidate.lexeme_ids.end(),

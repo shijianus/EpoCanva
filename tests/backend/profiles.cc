@@ -651,6 +651,11 @@ void Conversions(const Backend& backend, const Fixture& fixture) {
     SetInput(session, test.input_utf8);
     auto menu = Query(session, model);
     REQUIRE(menu.raw_utf8 == test.input_utf8, "converter-retains-raw-input-utf8");
+    if (session.profile.language == EPOCANVA_BACKEND_KO) {
+      REQUIRE(menu.rows.front().metadata.kind == EPOCANVA_BACKEND_RAW &&
+                  menu.rows.front().text_utf8 == test.input_utf8,
+              "ko-raw-candidate-is-the-literal-typed-input");
+    }
     const auto& target = Find(menu, test.target_utf8, session.profile.language == EPOCANVA_BACKEND_EN ||
         session.profile.language == EPOCANVA_BACKEND_FR || session.profile.language == EPOCANVA_BACKEND_KO);
     REQUIRE(target.metadata.kind != EPOCANVA_BACKEND_RAW, "converter-target-is-not-ascii-pass-through");
