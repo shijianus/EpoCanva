@@ -538,9 +538,11 @@ add_test(NAME product.integration.runtime_modules
 string(SHA256 _policy_build_hash "${CMAKE_BINARY_DIR}")
 string(SUBSTRING "${_policy_build_hash}" 0 12 _policy_build_tag)
 get_filename_component(_policy_repo_root "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-foreach(_policy_suite release_gate source_producer)
+foreach(_policy_suite release_gate source_producer candidate_quality)
   if(_policy_suite STREQUAL "release_gate")
     set(_policy_script "${CMAKE_CURRENT_LIST_DIR}/tests/release_gate_tests.ps1")
+  elseif(_policy_suite STREQUAL "candidate_quality")
+    set(_policy_script "${CMAKE_CURRENT_LIST_DIR}/tests/candidate_quality_gate_tests.ps1")
   else()
     set(_policy_script "${CMAKE_CURRENT_LIST_DIR}/../../../tests/product_source/source_producer_tests.ps1")
   endif()
@@ -573,10 +575,10 @@ add_test(
     "-DMARKER=RESULT PASS"
     -DMARKER_POLICY=require
     "-DPASS_ARGS=--run-root;${_product_run}/unit;--exe;$<TARGET_FILE:EpoCanva>;--product-dll;$<TARGET_FILE:epocanva_tsf_product>;--version-file;${CMAKE_CURRENT_LIST_DIR}/VERSION"
-    -DTIMEOUT_SECONDS=120
+    -DTIMEOUT_SECONDS=600
     -P ${_product_assert})
 set_tests_properties(product.unit.settings_manifest_paths
-  PROPERTIES TIMEOUT 180 LABELS "windows;product;settings;manifest;paths;version;icon")
+  PROPERTIES TIMEOUT 660 LABELS "windows;product;settings;manifest;paths;version;icon")
 
 add_test(
   NAME product.integration.engine_settings

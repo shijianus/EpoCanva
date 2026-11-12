@@ -67,7 +67,7 @@ function Gate([string]$Case, [string]$Profile = 'internal-unsigned', [string]$Pa
     Copy-Item -LiteralPath (Join-Path $RunRoot 'release-readiness.json') -Destination (Join-Path $fixtureRoot "$Case.json") -Force
     Check (-not $report.technical_ready -and -not $report.acceptance_ready -and -not $report.distribution_authorized -and
            -not $report.signature_verified -and -not $report.release_ready) "$Case makes no readiness/authorization/signature claim"
-    foreach ($id in @('verified-build', 'source-clean', 'corresponding-source', 'real-host', 'installer-lifecycle', 'english-capabilities', 'language-readiness', 'language-acceptance')) {
+    foreach ($id in @('verified-build', 'source-clean', 'corresponding-source', 'real-host', 'installer-lifecycle', 'english-capabilities', 'language-acceptance')) {
         $gate = @($report.checks | Where-Object { $_.id -ceq $id })
         Check ($gate.Count -eq 1 -and $gate[0].status -ceq 'blocked') "$Case retains mandatory blocker $id"
     }
@@ -81,6 +81,8 @@ $report = Gate 'strict-internal'
 foreach ($id in @('package-policy', 'package-integrity', 'acceptance-profile', 'project-license-selection', 'package-path-hygiene')) {
     Check ((Status $report $id) -ceq 'passed') "strict internal positive unit payload passes $id"
 }
+Check ((Status $report 'language-readiness') -ceq 'passed') 'complete five-language fixture payload satisfies the readiness policy'
+Check (-not $report.acceptance_ready) 'readiness policy alone never authorizes acceptance without executed evidence'
 Check ((Status $report 'signing') -ceq 'not_required' -and $report.signing_status -ceq 'not_required') 'unsigned acceptance omits signing without claiming verification'
 $report = Gate 'public-mismatch' 'public-signed'
 Check ((Status $report 'acceptance-profile') -ceq 'blocked' -and (Status $report 'signing') -ceq 'blocked') 'public profile cannot reuse unsigned metadata or omit signatures'

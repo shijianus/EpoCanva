@@ -2,7 +2,7 @@
   "format": "epocanva-candidate-quality-policy-v2",
   "version": 2,
   "languages": ["en", "zh", "fr", "ja", "ko"],
-  "qualification": {"runs": 2, "repeat": 2, "warmup_queries": 20},
+  "qualification": {"runs": 2, "repeat": 2, "warmup_queries": 20, "seed": 20261107, "bootstrap_replicates": 10000},
   "minimum_cases": {"en": 1001, "zh": 1001, "fr": 1001, "ja": 1001, "ko": 500},
   "thresholds": {
     "deterministic_case_rate_min": 1.0,

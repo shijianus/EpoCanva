@@ -44,7 +44,8 @@ def validate_policy(policy: Any) -> dict[str, Any]:
     if (not isinstance(languages, list) or not languages or len(set(languages)) != len(languages)
             or any(not isinstance(item, str) or not re.fullmatch(r"[a-z]{2}", item) for item in languages)):
         raise PolicyError("policy languages must be unique primary language tags")
-    _keys(policy["qualification"], {"runs", "repeat", "warmup_queries"}, "qualification")
+    _keys(policy["qualification"], {"runs", "repeat", "warmup_queries", "seed",
+                                    "bootstrap_replicates"}, "qualification")
     for key, value in policy["qualification"].items():
         _positive_int(value, key)
     _keys(policy["minimum_cases"], set(languages), "minimum_cases")

@@ -33,8 +33,8 @@ POLICY = load_policy()
 LANGUAGES = tuple(POLICY["languages"])
 SCHEMES = ("latin", "pinyin", "zhuyin", "romaji", "kana", "two_set", "katakana")
 KIND_RAW = 0
-DEFAULT_BOOTSTRAPS = 10_000
-DEFAULT_SEED = 20261107
+DEFAULT_BOOTSTRAPS = POLICY["qualification"]["bootstrap_replicates"]
+DEFAULT_SEED = POLICY["qualification"]["seed"]
 DEFAULT_RUNS = POLICY["qualification"]["runs"]
 DEFAULT_REPEAT = POLICY["qualification"]["repeat"]
 GATE_MINIMUM_CASES = POLICY["minimum_cases"]
@@ -978,7 +978,8 @@ def compare_baseline(per_language: dict[str, Any], identity: dict[str, Any],
     if baseline is None:
         return {"status": "not_evaluable", "reason": "no comparable measured baseline supplied", "per_language": {}}
     if (baseline.get("format") != EVALUATOR_SCHEMA_VERSION or
-            baseline.get("identity", {}).get("quality_policy_version") != policy["format"]):
+            baseline.get("identity", {}).get("quality_policy_version") != policy["format"] or
+            baseline.get("identity", {}).get("quality_policy_sha256") != identity.get("quality_policy_sha256")):
         raise EvaluationError("historical baseline schema/policy cannot establish observability or performance; rerun it")
     for key in ("corpus_sha256", "backend_manifest_sha256", "resource_manifest_sha256", "model_sha256_by_profile"):
         if baseline.get("identity", {}).get(key) != identity.get(key):
@@ -1013,6 +1014,38 @@ def compare_baseline(per_language: dict[str, Any], identity: dict[str, Any],
                   "baseline_ci95": previous.get("ci95", {}).get(key), "current_ci95": current.get("ci95", {}).get(key)}
             for key in ("top1", "top3", "mrr")}
     return {"status": "failed" if failures else "passed", "reason": "; ".join(failures), "per_language": comparisons}
+
+
+def artifact_hashes(args: argparse.Namespace) -> dict[str, str]:
+    """Hash the exact release artifacts this run is bound to.
+
+    Qualification binds its report to the staged package manifest, the
+    corresponding-source archive, the language policy and the fixed package
+    policy in addition to the corpus/policy inputs it already hashes. The
+    evaluator hashes those files itself; a caller cannot supply a digest.
+    """
+    expected = (
+        ("package_manifest", "package_manifest_sha256", "staged package manifest"),
+        ("source_archive", "source_archive_sha256", "corresponding-source archive"),
+        ("language_policy", "language_policy_sha256", "language policy"),
+        ("package_policy", "package_policy_sha256", "fixed package policy"),
+    )
+    values: dict[str, str] = {}
+    profile = getattr(args, "acceptance_profile", None)
+    if profile:
+        values["acceptance_profile"] = profile
+    for attribute, key, label in expected:
+        supplied = getattr(args, attribute, None)
+        if supplied:
+            path = Path(supplied)
+            if not path.is_file():
+                raise EvaluationError(f"{label} is missing: {path}")
+            values[key] = sha256_bytes(path.read_bytes())
+    values["evaluator_sha256"] = sha256_bytes(Path(__file__).resolve().read_bytes())
+    support = Path(__file__).resolve().parent / "candidate_quality_policy.py"
+    if support.is_file():
+        values["evaluator_support_sha256"] = sha256_bytes(support.read_bytes())
+    return values
 
 
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
@@ -1216,6 +1249,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "model_sha256_by_profile": model_sha256_by_profile,
             "model_sha256_notes": model_sha256_notes,
             "harness_sha256": harness_sha256,
+            **artifact_hashes(args),
         },
         "per_language": per_language,
         "unverified": unverified,
@@ -1309,6 +1343,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rime-dll", help="rime.dll path, required for zh cases")
     parser.add_argument("--rime-dll-sha256", help="expected rime.dll SHA-256")
     parser.add_argument("--rime-shared", help="reviewed ranked Chinese shared-data directory")
+    parser.add_argument("--package-manifest", help="staged package.manifest to bind into the report identity")
+    parser.add_argument("--source-archive", help="corresponding-source.zip to bind into the report identity")
+    parser.add_argument("--language-policy", help="language-readiness.json to bind into the report identity")
+    parser.add_argument("--package-policy", help="product-package-files.inc to bind into the report identity")
+    parser.add_argument("--acceptance-profile", choices=("internal-unsigned", "public-signed"),
+                        help="acceptance profile to bind into the report identity")
     args = parser.parse_args(argv)
     if args.runs < 1 or args.repeat < 1 or args.warmup_queries < 0 or args.bootstrap_replicates < 100 or args.timeout <= 0:
         parser.error("runs/repeat >= 1, bootstrap replicates >= 100, and a positive timeout are required")
@@ -1317,6 +1357,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--expected-repo-commit must be a 40-hex commit SHA")
     if args.mode == "qualification" and args.expected_repo_commit is None:
         parser.error("--expected-repo-commit is required in qualification mode")
+    if args.mode == "qualification":
+        for attribute in ("package_manifest", "source_archive", "language_policy",
+                          "package_policy", "acceptance_profile"):
+            if not getattr(args, attribute):
+                parser.error(f"--{attribute.replace('_', '-')} is required in qualification mode")
     try:
         report = evaluate(args)
         save_report(Path(args.output), report)

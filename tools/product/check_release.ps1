@@ -71,7 +71,9 @@ function Read-PassingJUnit([string]$Path) {
         $xml.XmlResolver = $null
         $xml.Load($reader)
     } finally { $reader.Dispose() }
-    if ($xml.DocumentElement.Name -notin @('testsuite', 'testsuites')) { throw 'Unsupported JUnit document.' }
+    # PowerShell's XML adapter lets a root `name` attribute shadow the
+    # XmlElement.Name property, so use the schema name (LocalName).
+    if ($xml.DocumentElement.LocalName -notin @('testsuite', 'testsuites')) { throw 'Unsupported JUnit document.' }
     $cases = @($xml.SelectNodes('//testcase'))
     if ($cases.Count -eq 0 -or $xml.SelectNodes('//failure | //error | //skipped').Count -ne 0) {
         throw 'Tests are absent, failed, errored or skipped; none can be waived for release.'
@@ -124,6 +126,254 @@ function Assert-Execution($Entry) {
             @($Entry.command | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
         throw 'The exact executed command must be recorded as a nonempty string array.'
     }
+}
+function Get-CqProperty($Object, [string]$Name) {
+    if ($null -eq $Object) { throw "candidate-quality input is missing $Name." }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { throw "candidate-quality input lacks $Name." }
+    return $property.Value
+}
+function Get-CqNumber($Object, [string]$Name) {
+    $value = Get-CqProperty $Object $Name
+    if ($value -is [bool] -or
+            ($value -isnot [int] -and $value -isnot [long] -and $value -isnot [double] -and $value -isnot [decimal])) {
+        throw "candidate-quality field $Name is not numeric."
+    }
+    $number = [double]$value
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { throw "candidate-quality field $Name is not finite." }
+    return $number
+}
+function Get-CqRate($Object, [string]$Name, [double]$Minimum, [double]$Maximum) {
+    $value = Get-CqNumber $Object $Name
+    if ($value -lt $Minimum -or $value -gt $Maximum) { throw "candidate-quality field $Name is outside its policy range." }
+    return $value
+}
+function Test-CandidateQualityPolicy($Policy) {
+    # This is a shape check of the one machine policy. It never supplies a
+    # second threshold table: every comparison below reads these values.
+    if ((Get-CqProperty $Policy 'format') -cne 'epocanva-candidate-quality-policy-v2') {
+        throw 'candidate-quality policy schema is unsupported.'
+    }
+    if ((Get-CqProperty $Policy 'version') -isnot [int] -or (Get-CqProperty $Policy 'version') -ne 2) {
+        throw 'candidate-quality policy version is unsupported.'
+    }
+    $languages = @('en', 'zh', 'fr', 'ja', 'ko')
+    $declared = @(Get-CqProperty $Policy 'languages')
+    if ($declared.Count -ne 5 -or ($declared -join ',') -cne ($languages -join ',')) {
+        throw 'candidate-quality policy must name exactly en,zh,fr,ja,ko in order.'
+    }
+    $minimums = Get-CqProperty $Policy 'minimum_cases'
+    foreach ($language in $languages) {
+        $minimum = Get-CqNumber $minimums $language
+        if ($minimum -lt 1 -or $minimum -ne [math]::Floor($minimum)) {
+            throw "candidate-quality minimum_cases.$language must be a positive integer."
+        }
+    }
+    $qualification = Get-CqProperty $Policy 'qualification'
+    foreach ($field in @('runs', 'repeat', 'warmup_queries', 'seed', 'bootstrap_replicates')) {
+        $value = Get-CqNumber $qualification $field
+        if ($value -lt 1 -or $value -ne [math]::Floor($value)) {
+            throw "candidate-quality qualification.$field must be a positive integer."
+        }
+    }
+    $thresholds = Get-CqProperty $Policy 'thresholds'
+    foreach ($field in @('deterministic_case_rate_min', 'raw_present_rate_min', 'raw_first_rate_min')) {
+        $null = Get-CqRate $thresholds $field 0 1
+    }
+    foreach ($field in @('wrong_language_rate_max', 'empty_menu_rate_max')) {
+        $null = Get-CqRate $thresholds $field 0 1
+    }
+    if ((Get-CqProperty $thresholds 'not_observable_is_failure') -ne $true) {
+        throw 'candidate-quality policy must fail closed when a metric is not observable.'
+    }
+    $absolute = Get-CqProperty $Policy 'absolute_quality'
+    if ((Get-CqProperty $absolute 'decision') -cne 'approved') {
+        throw 'candidate-quality absolute quality thresholds are not approved by the product owner.'
+    }
+    foreach ($field in @('top1_min', 'top3_min', 'mrr_min')) {
+        $null = Get-CqRate $absolute $field 0 1
+    }
+    return $languages
+}
+function Test-CandidateQualityEvidence {
+    [CmdletBinding()]
+    param(
+        $Report,
+        $JUnitCases,
+        $Execution,
+        [hashtable]$Bindings,
+        $Policy,
+        [datetimeoffset]$CommitTimeUtc
+    )
+    # Fail-closed validation of the qualification run. Every mandatory
+    # predicate is recomputed from the report and the current input hashes;
+    # quality_gate.status alone is never trusted.
+    $languages = Test-CandidateQualityPolicy $Policy
+    Assert-Execution $Execution
+    $started = [DateTimeOffset]::Parse((Get-CqProperty $Execution 'started_utc'))
+    if ($started -lt $CommitTimeUtc) {
+        throw 'candidate-quality evidence was produced before the candidate commit existed.'
+    }
+    if ((Get-CqProperty $Report 'format') -cne 'epocanva-candidate-eval-v3') {
+        throw 'candidate-quality report schema is unsupported.'
+    }
+    $identity = Get-CqProperty $Report 'identity'
+    if ((Get-CqProperty $identity 'mode') -cne 'qualification') {
+        throw 'candidate-quality report was not produced in qualification mode.'
+    }
+    if ((Get-CqProperty $identity 'repo_commit') -cne $Bindings['commit']) {
+        throw 'candidate-quality report commit does not match the candidate.'
+    }
+    if ((Get-CqProperty $identity 'source_tree_clean') -ne $true) {
+        throw 'candidate-quality report was produced from a dirty source tree.'
+    }
+    $identityBindings = @{
+        quality_policy_sha256 = $Bindings['quality_policy_sha256']
+        manifest_sha256 = $Bindings['corpus_manifest_sha256']
+        backend_manifest_sha256 = $Bindings['backend_manifest_sha256']
+        harness_sha256 = $Bindings['harness_sha256']
+        package_manifest_sha256 = $Bindings['package_manifest_sha256']
+        package_policy_sha256 = $Bindings['package_policy_sha256']
+        language_policy_sha256 = $Bindings['language_policy_sha256']
+        source_archive_sha256 = $Bindings['source_archive_sha256']
+        evaluator_sha256 = $Bindings['evaluator_sha256']
+        evaluator_support_sha256 = $Bindings['evaluator_support_sha256']
+        acceptance_profile = $Bindings['acceptance_profile']
+    }
+    foreach ($field in $identityBindings.Keys) {
+        if ((Get-CqProperty $identity $field) -cne $identityBindings[$field]) {
+            throw "candidate-quality report input binding mismatch: $field"
+        }
+    }
+    $corpus = Get-CqProperty $Report 'corpus'
+    $corpusEvidence = Get-CqProperty $corpus 'evidence'
+    if ((Get-CqProperty $corpusEvidence 'status') -cne 'passed' -or
+            (Get-CqProperty $corpusEvidence 'tier') -cne 'B') {
+        throw 'candidate-quality corpus lacks an approved Tier B provenance lock.'
+    }
+    if ((Get-CqProperty $corpusEvidence 'lock_sha256') -cne $Bindings['tier_b_lock_sha256']) {
+        throw 'candidate-quality Tier B lock changed after the run.'
+    }
+    $gate = Get-CqProperty $Report 'quality_gate'
+    if ((Get-CqProperty $gate 'status') -cne 'passed' -or (Get-CqProperty $gate 'met') -ne $true) {
+        throw 'candidate-quality evaluator did not report a passing quality gate.'
+    }
+    if ((Get-CqProperty $gate 'policy_version') -cne (Get-CqProperty $Policy 'format')) {
+        throw 'candidate-quality report policy version mismatch.'
+    }
+    if (@(Get-CqProperty $gate 'unmet_reasons').Count -ne 0 -or
+            @(Get-CqProperty $gate 'not_evaluated_predicates').Count -ne 0) {
+        throw 'candidate-quality report still lists unmet or unevaluated predicates.'
+    }
+    $minimums = Get-CqProperty $gate 'minimum_cases'
+    $policyMinimums = Get-CqProperty $Policy 'minimum_cases'
+    foreach ($language in $languages) {
+        if ((Get-CqNumber $minimums $language) -ne (Get-CqNumber $policyMinimums $language)) {
+            throw "candidate-quality report minimum sample count disagrees for $language."
+        }
+    }
+    $expectedPredicates = @('minimum_samples', 'exact_process_and_repeat_protocol',
+        'all_expected_cases_executed', 'no_extra_cases', 'validation_failures_empty',
+        'cross_process_determinism', 'in_process_repeat_determinism', 'empty_menu_rate_zero',
+        'raw_contract', 'candidate_quality_metrics_recorded', 'latency_memory_recorded',
+        'privacy_and_abi_status', 'wrong_language_observable', 'wrong_language_rate',
+        'tier_b_corpus', 'performance_regression', 'absolute_quality_thresholds')
+    $predicates = Get-CqProperty $gate 'predicates'
+    $observedNames = @($predicates.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($observedNames.Count -ne $expectedPredicates.Count -or
+            @(Compare-Object ($expectedPredicates | Sort-Object) ($observedNames | Sort-Object)).Count -ne 0) {
+        throw 'candidate-quality report predicate set is incomplete or contains unknown entries.'
+    }
+    foreach ($name in $expectedPredicates) {
+        if ((Get-CqProperty (Get-CqProperty $predicates $name) 'status') -cne 'passed') {
+            throw "candidate-quality predicate did not pass: $name"
+        }
+    }
+    if (@(Get-CqProperty $Report 'failures').Count -ne 0) {
+        throw 'candidate-quality report records case-level failures.'
+    }
+    $unverified = Get-CqProperty $Report 'unverified'
+    if ($null -ne $unverified -and @($unverified.PSObject.Properties).Count -ne 0) {
+        throw 'candidate-quality report still carries an unverified/partial-pass section.'
+    }
+    $determinism = Get-CqProperty $Report 'determinism'
+    $qualification = Get-CqProperty $Policy 'qualification'
+    if ((Get-CqNumber $determinism 'repeats_per_case') -ne (Get-CqNumber $qualification 'repeat') -or
+            (Get-CqNumber $determinism 'fresh_runs') -ne (Get-CqNumber $qualification 'runs')) {
+        throw 'candidate-quality determinism protocol differs from the frozen policy.'
+    }
+    $thresholds = Get-CqProperty $Policy 'thresholds'
+    $perLanguage = Get-CqProperty $Report 'per_language'
+    $observedLanguages = @($perLanguage.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($observedLanguages.Count -ne 5 -or
+            @(Compare-Object ($languages | Sort-Object) ($observedLanguages | Sort-Object)).Count -ne 0) {
+        throw 'candidate-quality report does not cover exactly the five required languages.'
+    }
+    foreach ($language in $languages) {
+        $values = Get-CqProperty $perLanguage $language
+        $minimum = Get-CqNumber $policyMinimums $language
+        if ((Get-CqNumber $values 'cases') -lt $minimum -or (Get-CqProperty $values 'minimum_cases_met') -ne $true) {
+            throw "candidate-quality sample shortfall for $language."
+        }
+        foreach ($field in @('deterministic_case_rate', 'in_process_repeat_deterministic_rate',
+                'cross_process_deterministic_rate')) {
+            if ((Get-CqNumber $values $field) -lt (Get-CqNumber $thresholds 'deterministic_case_rate_min')) {
+                throw "candidate-quality determinism failed for $language."
+            }
+        }
+        foreach ($field in @('raw_present_rate', 'raw_first_rate')) {
+            $rate = Get-CqProperty $values $field
+            if ($null -eq $rate -or [double]$rate -lt (Get-CqNumber $thresholds ($field + '_min'))) {
+                throw "candidate-quality raw contract failed for $language."
+            }
+        }
+        $empty = Get-CqProperty $values 'empty_menu_rate'
+        if ($null -eq $empty -or [double]$empty -gt (Get-CqNumber $thresholds 'empty_menu_rate_max')) {
+            throw "candidate-quality empty-menu contract failed for $language."
+        }
+        $wrong = Get-CqProperty $values 'wrong_language_rate'
+        if ($null -eq $wrong -or [double]$wrong -gt (Get-CqNumber $thresholds 'wrong_language_rate_max')) {
+            throw "candidate-quality wrong-language rate failed for $language."
+        }
+        $observability = Get-CqProperty $values 'wrong_language_observability'
+        if ((Get-CqProperty $observability 'status') -cne 'observable') {
+            throw "candidate-quality language attribution is not observable for $language."
+        }
+        $latency = Get-CqProperty $values 'latency_ms'
+        if ($null -eq (Get-CqProperty $latency 'cold')) { throw "candidate-quality cold latency is missing for $language." }
+        $warm = Get-CqProperty $latency 'warm'
+        foreach ($field in @('p50', 'p95', 'p99')) {
+            if ($null -eq (Get-CqProperty $warm $field)) { throw "candidate-quality warm $field is missing for $language." }
+        }
+        if ($null -eq (Get-CqProperty $values 'peak_working_set_bytes') -or
+                $null -eq (Get-CqProperty $values 'resource_load_ms')) {
+            throw "candidate-quality memory/load record is missing for $language."
+        }
+    }
+    $requiredCases = @('qualification', 'coverage', 'determinism', 'contracts', 'identity-binding')
+    $cases = @($JUnitCases)
+    if ($cases.Count -ne $requiredCases.Count) {
+        throw 'candidate-quality JUnit must contain exactly the five mandatory cases.'
+    }
+    foreach ($name in $requiredCases) {
+        $qualified = 'candidate-quality.' + $name
+        if (@($cases | Where-Object { $_.GetAttribute('name') -ceq $qualified }).Count -ne 1) {
+            throw "candidate-quality JUnit is missing or duplicates $qualified."
+        }
+    }
+    foreach ($case in $cases) {
+        if (@($case.SelectNodes('.//failure | .//error | .//skipped')).Count -ne 0) {
+            throw 'candidate-quality JUnit contains a failed, errored or skipped case.'
+        }
+    }
+    $document = $cases[0].OwnerDocument
+    foreach ($key in $Bindings.Keys) {
+        $properties = @($document.SelectNodes("//properties/property[@name='epocanva.$key']"))
+        if ($properties.Count -ne 1 -or $properties[0].GetAttribute('value') -cne [string]$Bindings[$key]) {
+            throw "candidate-quality JUnit lacks the current binding: epocanva.$key"
+        }
+    }
+    return $true
 }
 
 # Validate the output boundary before creating anything. Invalid output paths exit 2.
@@ -507,6 +757,72 @@ Add-Gate 'corresponding-source' {
     } finally { $zip.Dispose() }
     "$($listed.Count) actual source archive entries match the complete contract, current source and exact tested package."
 }
+Add-Gate 'candidate-quality' {
+    if ($null -eq $evidence -or $null -eq $source -or $null -eq $manifest) {
+        throw 'Candidate quality requires current evidence, source and package-manifest identities.'
+    }
+    $entries = @($evidence.entries | Where-Object { $_.id -ceq 'candidate-quality' })
+    if ($entries.Count -ne 1) { throw 'Exactly one current evidence entry is required: candidate-quality' }
+    $entry = $entries[0]
+    if ($entry.kind -cne 'test-run') { throw 'candidate-quality requires an executed test-run with log and JUnit.' }
+    $runnerPath = Read-Reference $entry.runner
+    if ($entry.command[0] -ine $runnerPath) { throw 'candidate-quality command does not identify its hashed runner.' }
+    $knownRunner = Join-Path $RepoRoot 'tools\product\run_candidate_quality.ps1'
+    if ((Get-Item -LiteralPath $knownRunner -Force).FullName -ine $runnerPath) {
+        throw 'candidate-quality evidence was not produced by the committed runner.'
+    }
+    $evaluatorPath = Read-Reference $entry.evaluator
+    if ($evaluatorPath -ine (Join-Path $RepoRoot 'tools\backend\evaluate_candidates.py')) {
+        throw 'candidate-quality evidence names an unexpected evaluator.'
+    }
+    $harnessPath = Read-Reference $entry.harness
+    Assert-PlainPath $harnessPath $buildBase
+    $logPath = Read-Reference $entry.log
+    $junitPath = Read-Reference $entry.junit
+    $reportPath = Read-Reference $entry.report
+    if ($reportPath -ine (Join-Path $BuildDir 'candidate-quality\report.json') -or
+            $junitPath -ine (Join-Path $BuildDir 'candidate-quality\candidate-quality.junit.xml') -or
+            $logPath -ine (Join-Path $BuildDir 'candidate-quality\process.log')) {
+        throw 'candidate-quality evidence files are not the producer outputs for this build directory.'
+    }
+    $qualityPolicyPath = Join-Path $RepoRoot 'data\eval\candidate-v1\quality-policy-v2.json'
+    $corpusManifestPath = Join-Path $RepoRoot 'data\eval\candidate-v1\manifest.json'
+    $backendManifestPath = Join-Path $RepoRoot 'data\locale\backend-bindings.json'
+    $supportPath = Join-Path $RepoRoot 'tools\backend\candidate_quality_policy.py'
+    $sourceArchivePath = Join-Path $BuildDir 'corresponding-source.zip'
+    Assert-PlainPath $sourceArchivePath $buildBase
+    $policyDocument = Get-Content -LiteralPath $qualityPolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $tierBLockPath = Join-Path (Split-Path -Parent $qualityPolicyPath) ([string]$policyDocument.tier_b_lock)
+    Assert-PlainPath $tierBLockPath $RepoRoot
+    $bindings = @{
+        version = $version
+        commit = $source.commit
+        source_sha256 = $source.source_sha256
+        package_manifest_sha256 = $manifest.sha256
+        package_policy_sha256 = $policyHash
+        language_policy_sha256 = $languagePolicyHash
+        acceptance_profile = $AcceptanceProfile
+        quality_policy_sha256 = (Get-Sha256 $qualityPolicyPath)
+        corpus_manifest_sha256 = (Get-Sha256 $corpusManifestPath)
+        source_archive_sha256 = (Get-Sha256 $sourceArchivePath)
+        evaluator_sha256 = (Get-Sha256 $evaluatorPath)
+        evaluator_support_sha256 = (Get-Sha256 $supportPath)
+        runner_sha256 = (Get-Sha256 $runnerPath)
+        harness_sha256 = [string]$entry.harness.sha256
+        backend_manifest_sha256 = (Get-Sha256 $backendManifestPath)
+        tier_b_lock_sha256 = (Get-Sha256 $tierBLockPath)
+    }
+    $reportDocument = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $cases = Read-PassingJUnit $junitPath
+    $commitTimeText = (& git -C $RepoRoot show -s --format=%cI HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $commitTimeText) { throw 'Cannot determine the candidate commit timestamp.' }
+    $commitTime = [DateTimeOffset]::Parse($commitTimeText)
+    $null = Test-CandidateQualityEvidence -Report $reportDocument -JUnitCases $cases -Execution $entry `
+        -Bindings $bindings -Policy $policyDocument -CommitTimeUtc $commitTime
+    'Qualification exited 0, its report passed every recomputed gate, and samples/contracts/determinism bind this candidate.'
+}
+
+
 Add-Gate 'installer-artifact' {
     if ($null -eq $evidence -or $null -eq $evidence.PSObject.Properties['installer']) {
         throw 'No hash-bound distributable installer artifact or lifecycle evidence.'
