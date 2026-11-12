@@ -122,8 +122,23 @@ if (-not (Test-Path -LiteralPath $Resources -PathType Container)) { Fail 'Resour
 if (-not (Test-Path -LiteralPath $RimeShared -PathType Container)) { Fail 'RimeShared directory is missing' 2 }
 if ($BaselineReport) { Assert-Leaf $BaselineReport 'baseline report' }
 
-$python = Get-Command python -CommandType Application -ErrorAction SilentlyContinue
-if (-not $python) { Fail 'Missing tool: python on PATH' 2 }
+# Resolve exactly one real Python interpreter. Get-Command can return several PATH
+# entries (and the WindowsApps app-execution alias); passing that array to the call
+# operator runs no evaluator while a stale $LASTEXITCODE can still look like success.
+# Prefer the first real file in PATH order and never accept the WindowsApps alias.
+$pythonCommands = @(Get-Command python -CommandType Application -All -ErrorAction SilentlyContinue)
+$pythonPaths = @($pythonCommands | ForEach-Object { $_.Source } | Where-Object {
+        $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) -and
+        $_ -notmatch '[\\/]WindowsApps[\\/]'
+    } | Select-Object -Unique)
+if ($pythonPaths.Count -eq 0) {
+    Fail 'Missing tool: a real python.exe on PATH (WindowsApps aliases are not accepted)' 2
+}
+$pythonExe = [string]$pythonPaths[0]
+$pythonVersion = (& $pythonExe -c 'import platform; print(platform.python_version())' 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $pythonVersion) {
+    Fail "Python interpreter is not runnable: $pythonExe" 2
+}
 
 . (Join-Path $PSScriptRoot 'build_identity.ps1')
 $source = Get-ProductSourceIdentity -RepoRoot $script:repoRoot
@@ -188,14 +203,21 @@ $evaluatorArguments = @(
 if ($BaselineReport) { $evaluatorArguments += @('--baseline-report', ([IO.Path]::GetFullPath($BaselineReport))) }
 
 $started = (Get-Date).ToUniversalTime().ToString('o')
+# Clear the previous native exit code first: if the invocation itself fails before
+# starting Python, $LASTEXITCODE must stay $null so the evidence cannot record 0.
+$global:LASTEXITCODE = $null
 $ErrorActionPreference = 'Continue'
-& $python.Source -B $evaluatorPath @evaluatorArguments 1> $stdoutPath 2> $stderrPath
-$evaluatorExit = $LASTEXITCODE
+try {
+    & $pythonExe -B $evaluatorPath @evaluatorArguments 1> $stdoutPath 2> $stderrPath
+} catch {
+    $global:LASTEXITCODE = -1
+}
+$evaluatorExit = if ($null -eq $LASTEXITCODE) { -1 } else { [int]$LASTEXITCODE }
 $ErrorActionPreference = 'Stop'
 $completed = (Get-Date).ToUniversalTime().ToString('o')
-if ($null -eq $evaluatorExit) { $evaluatorExit = -1 }
-$commandLine = @($python.Source, '-B', $evaluatorPath) + $evaluatorArguments
+$commandLine = @($pythonExe, '-B', $evaluatorPath) + $evaluatorArguments
 $logText = (@('evaluator_command=' + ($commandLine -join ' ')) +
+    @('python_exe=' + $pythonExe) + @('python_version=' + [string]$pythonVersion) +
     @('evaluator_exit=' + [string]$evaluatorExit) +
     @('started_utc=' + $started) + @('completed_utc=' + $completed) +
     @('--- stdout ---') + @(Get-Content -LiteralPath $stdoutPath -Encoding UTF8 -ErrorAction SilentlyContinue) +
