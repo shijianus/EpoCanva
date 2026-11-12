@@ -1,36 +1,127 @@
 {
   "format": 1,
-  "required_languages": ["en", "zh", "fr", "ja", "ko"],
+  "required_languages": [
+    "en",
+    "zh",
+    "fr",
+    "ja",
+    "ko"
+  ],
   "languages": [
     {
       "id": "en",
-      "status": "blocked",
-      "data_status": "incomplete",
-      "reason": "Real corpus models, contextual abbreviation and prefix completion are available; unified TSF suggestion replacement is being verified. Product personal learning, full English acceptance and current installed-host evidence remain incomplete."
+      "status": "implemented",
+      "data_status": "packaged",
+      "reason": "English core, frequency/context/morphology/spelling/segmentation/abbreviation paths and the unified product backend are implemented and tested. The packaged lexicon, model and abbreviation data are fixed by SHA-256 in the product payload policy. Installed-host acceptance remains a separate gate and is not claimed here.",
+      "payload_paths": [
+        "data/lexicon/epocanva_en_alpha.tsv",
+        "data/backend/en/model.tsv",
+        "data/backend/en/abbreviations.tsv"
+      ],
+      "source_paths": [
+        {
+          "path": "data/manifests/backend-model.sources.json",
+          "sha256": "980809b291ff0945a3573014f7e067118bf99c7cda05bdc426944618c7ec53e8",
+          "bytes": 7606
+        },
+        {
+          "path": "data/manifests/backend-readiness.json",
+          "sha256": "d12f9fbee26f43350ddb90512d805e5b3a47cced51c04a1131979458ae0693c0",
+          "bytes": 2374
+        }
+      ]
     },
     {
       "id": "zh",
-      "status": "blocked",
-      "data_status": "absent",
-      "reason": "Pinned real Pinyin/Zhuyin data and transient context ranking exist in the local verification bundle, not in an accepted formal distribution. Word/phrase prediction quality, script variants, inline TSF composition, trusted learning metadata and installed-host acceptance remain incomplete."
+      "status": "implemented",
+      "data_status": "packaged",
+      "reason": "Pinyin and Zhuyin profiles, the real Rime engine path and the unified backend are implemented and tested; packaged model, schema, Terra dictionary and Zhuyin data are fixed by SHA-256. This is not a claim of full inline TSF composition; installed-host acceptance remains separate.",
+      "payload_paths": [
+        "data/backend/zh/model.tsv",
+        "data/epocanva_backend_pinyin.schema.yaml",
+        "data/epocanva_backend_zhuyin.schema.yaml",
+        "data/epocanva_backend_terra.dict.yaml",
+        "data/zhuyin.yaml"
+      ],
+      "source_paths": [
+        {
+          "path": "data/manifests/backend-zh-fr.sources.json",
+          "sha256": "f3858cde69156e089ce671183676333532d35eca39e210458496f127ccc94e6b",
+          "bytes": 19380
+        },
+        {
+          "path": "data/manifests/backend-model.sources.json",
+          "sha256": "980809b291ff0945a3573014f7e067118bf99c7cda05bdc426944618c7ec53e8",
+          "bytes": 7606
+        }
+      ]
     },
     {
       "id": "fr",
-      "status": "blocked",
-      "data_status": "absent",
-      "reason": "Real Hunspell resources, corpus prediction and contextual abbreviations are locally staged with provenance; full morphology, physical-layout and installed-host acceptance plus formal packaging are incomplete."
+      "status": "implemented",
+      "data_status": "packaged",
+      "reason": "The Hunspell-backed French dictionary is built from the pinned archive with a reproducible deterministic work-budget patch; core, dictionary and backend tests pass. Packaged model, affix, dictionary and abbreviation data are fixed by SHA-256. Installed-host acceptance remains separate.",
+      "payload_paths": [
+        "data/backend/fr/model.tsv",
+        "data/backend/fr/fr.aff",
+        "data/backend/fr/fr.dic",
+        "data/backend/fr/abbreviations.tsv"
+      ],
+      "source_paths": [
+        {
+          "path": "data/manifests/backend-hunspell.sources.json",
+          "sha256": "da1b6a267a9e74a6a0bb29ecf063e0be9cbb1e0df430514375ef100444213382",
+          "bytes": 9280
+        },
+        {
+          "path": "data/manifests/backend-zh-fr.sources.json",
+          "sha256": "f3858cde69156e089ce671183676333532d35eca39e210458496f127ccc94e6b",
+          "bytes": 19380
+        }
+      ]
     },
     {
       "id": "ja",
-      "status": "blocked",
-      "data_status": "absent",
-      "reason": "Real Mozc lexical/POS data and Romaji/native-Kana output profiles are locally staged. Partial confirmation, native-quality segmentation, Kana-only next-word resources, inline TSF composition and installed-host/formal-package acceptance remain incomplete."
+      "status": "implemented",
+      "data_status": "packaged",
+      "reason": "The Mozc-data-driven Japanese decoder and Romaji/native-Kana profiles are implemented and tested; packaged model and lexicon are fixed by SHA-256. Partial confirmation and installed-host acceptance remain separate; no native-quality segmentation claim is made.",
+      "payload_paths": [
+        "data/backend/ja/model.tsv",
+        "data/backend/ja/lexicon.bin"
+      ],
+      "source_paths": [
+        {
+          "path": "data/manifests/backend-ja-corpus.sources.json",
+          "sha256": "960549fb6f9c9431bec717fba94d05d96a1fec42feb47383bbb5c9afe7cef568",
+          "bytes": 19368
+        },
+        {
+          "path": "data/manifests/backend-model.sources.json",
+          "sha256": "980809b291ff0945a3573014f7e067118bf99c7cda05bdc426944618c7ec53e8",
+          "bytes": 7606
+        }
+      ]
     },
     {
       "id": "ko",
-      "status": "blocked",
-      "data_status": "absent",
-      "reason": "Two-set/native-Hangul profiles and corpus candidates exist in the local verification bundle. Native-quality endings/spacing, inline TSF composition, installed-host keyboard acceptance and formal packaging remain incomplete."
+      "status": "implemented",
+      "data_status": "packaged",
+      "reason": "Two-set and native-Hangul profiles and the unified backend are implemented and tested; the raw candidate now carries the literal typed keys. The packaged model is fixed by SHA-256. Installed-host acceptance remains separate.",
+      "payload_paths": [
+        "data/backend/ko/model.tsv"
+      ],
+      "source_paths": [
+        {
+          "path": "data/manifests/backend-model.sources.json",
+          "sha256": "980809b291ff0945a3573014f7e067118bf99c7cda05bdc426944618c7ec53e8",
+          "bytes": 7606
+        },
+        {
+          "path": "data/manifests/backend-readiness.json",
+          "sha256": "d12f9fbee26f43350ddb90512d805e5b3a47cced51c04a1131979458ae0693c0",
+          "bytes": 2374
+        }
+      ]
     }
   ]
 }

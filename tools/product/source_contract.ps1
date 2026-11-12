@@ -215,6 +215,11 @@ function Get-ProductCorrespondingSourceFiles {
     # The current package policy also pins generated product data/provenance and
     # notice bytes. Read those explicit sources only, never enumerate build/.
     $policy = Join-Path $root 'data/manifests/product-package-files.inc'
+    $backendPolicyOrigins = @(
+        'build/product-resources/product/data/epocanva_backend_pinyin.schema.yaml',
+        'build/product-resources/product/data/epocanva_backend_zhuyin.schema.yaml',
+        'build/product-resources/product/data/epocanva_backend_terra.dict.yaml',
+        'build/product-resources/product/data/zhuyin.yaml')
     foreach ($line in Get-Content -LiteralPath $policy -Encoding UTF8) {
         if (-not $line.Trim() -or $line.TrimStart().StartsWith('//')) { continue }
         if ($line -cnotmatch '^EPOCANVA_PACKAGE_FILE\("([^\"]+)",\s*"([^\"]*)",\s*"([^\"]*)",\s*(\d+)\)$') {
@@ -225,7 +230,9 @@ function Get-ProductCorrespondingSourceFiles {
         if ($origin.StartsWith('build/', [StringComparison]::Ordinal) -and
                 $origin -cnotin @('build/product-data/epocanva_en_alpha.tsv',
                     'build/product-data/epocanva_en_alpha.provenance.txt', "$boostRoot/LICENSE_1_0.txt",
-                    "$dataRoot/alt12dicts/README", "$dataRoot/alt12dicts/README-orig")) {
+                    "$dataRoot/alt12dicts/README", "$dataRoot/alt12dicts/README-orig") -and
+                -not $origin.StartsWith('build/product-resources/product/data/backend/', [StringComparison]::Ordinal) -and
+                $origin -cnotin $backendPolicyOrigins) {
             throw "Unreviewed generated source location: $origin"
         }
         Add-SourcePath $origin
@@ -233,6 +240,27 @@ function Get-ProductCorrespondingSourceFiles {
         if ($hash -cnotmatch '^[0-9a-f]{64}$' -or $byteCount -le 0 -or
                 $actual.sha256 -cne $hash -or $actual.bytes -ne $byteCount) {
             throw "Required package source differs from current policy: $origin"
+        }
+    }
+    # LGPL-2.1 corresponding source for the statically linked Hunspell library:
+    # the pinned upstream files plus the project patch (already tracked under
+    # third_party/) reconstruct the exact patched library. The manifest is the
+    # single hash authority; the archive is never edited in place.
+    $frManifestPath = Join-Path $root 'data/manifests/backend-hunspell.sources.json'
+    $frManifest = Get-Content -LiteralPath $frManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $frRevision = [string]$frManifest.hunspell.revision
+    $frRoot = "build/backend-french-dependency/$([string]$frManifest.hunspell.archive_root)"
+    if ($frRevision -cnotmatch '^[0-9a-f]{40}$' -or -not $frManifest.hunspell.patch.path) {
+        throw 'Unsupported Hunspell corresponding-source manifest.'
+    }
+    foreach ($group in @('library_files', 'license_files')) {
+        foreach ($entry in @($frManifest.hunspell.$group)) {
+            $relative = "$frRoot/$([string]$entry.path)"
+            Add-SourcePath $relative
+            $actual = Get-ProductSourceFileRecord $root $relative
+            if ($actual.sha256 -cne [string]$entry.sha256 -or $actual.bytes -le 0) {
+                throw "Pinned Hunspell source differs: $relative"
+            }
         }
     }
     foreach ($path in @('build/product-data/epocanva_en_alpha.tsv', 'build/product-data/epocanva_en_alpha.provenance.txt')) {

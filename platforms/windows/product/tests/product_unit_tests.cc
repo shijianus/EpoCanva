@@ -471,22 +471,22 @@ void TestProductPayloadPolicy(const std::filesystem::path& root,
   Check(!collect().package_ready, "listing an extra file still violates exact policy");
   std::error_code ec;
   std::filesystem::remove(extra, ec);
-  // An internal diagnostics package may add the reviewed backend runtime payload;
-  // the same extras must never be accepted by a public candidate.
+  // The reviewed five-language runtime payload is part of the fixed policy.
+  // An additional unreviewed backend file is still limited to internal-only.
   manifest = complete;
-  const auto backend_resources = package / "data" / "backend" / "resources.tsv";
-  std::filesystem::create_directories(backend_resources.parent_path(), ec);
-  Check(WriteTextAtomically(backend_resources, "test backend index\n", &why),
-        "create internal backend payload");
-  ManifestEntry backend_entry;
-  backend_entry.relative_path = "data/backend/resources.tsv";
-  Check(Sha256File(backend_resources, &backend_entry.sha256, &backend_entry.bytes, &why),
-        "hash internal backend payload");
-  manifest.files.push_back(backend_entry);
+  const auto backend_extra = package / "data" / "backend" / "unreviewed.bin";
+  std::filesystem::create_directories(backend_extra.parent_path(), ec);
+  Check(WriteTextAtomically(backend_extra, "test backend extra\n", &why),
+        "create unreviewed backend extra");
+  ManifestEntry backend_extra_entry;
+  backend_extra_entry.relative_path = "data/backend/unreviewed.bin";
+  Check(Sha256File(backend_extra, &backend_extra_entry.sha256, &backend_extra_entry.bytes, &why),
+        "hash unreviewed backend extra");
+  manifest.files.push_back(backend_extra_entry);
   write_manifest();
-  Check(collect().package_ready, "internal-only package accepts a backend runtime payload");
+  Check(collect().package_ready, "internal-only package accepts an additional backend runtime file");
   Check(ValidateProductPayloadPolicy(manifest, &why),
-        "internal backend payload passes payload policy");
+        "internal backend extra passes payload policy");
   manifest.distribution_policy = "public-candidate";
   write_manifest();
   Check(!ValidateProductPayloadPolicy(manifest, &why),
@@ -494,7 +494,7 @@ void TestProductPayloadPolicy(const std::filesystem::path& root,
   manifest.distribution_policy = "internal-only";
   manifest.files.pop_back();
   write_manifest();
-  std::filesystem::remove(backend_resources, ec);
+  std::filesystem::remove(backend_extra, ec);
   manifest = complete;
   manifest.commit += "-wrong";
   write_manifest();
@@ -522,6 +522,9 @@ void TestProductPayloadPolicy(const std::filesystem::path& root,
         report.find("path_exception=none\n") != std::string::npos &&
         report.find("readiness_scope=local-package-integrity-only\n") != std::string::npos,
         "diagnosis distinguishes local integrity from release acceptance");
+  // The fixture mirrors the full five-language payload; remove it so the
+  // remaining suite does not inherit a large synchronized-volume write burst.
+  std::filesystem::remove_all(package, ec);
 }
 
 void TestVersionAndIcon(const std::filesystem::path& exe,

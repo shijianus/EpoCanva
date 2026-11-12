@@ -220,13 +220,17 @@ foreach ($entry in $backendEntries) {
     Assert-FixedFile $destination $entry
 }
 $pathException = if ($InternalAllowEmbeddedBuildPaths) { 'embedded-build-paths' } else { 'none' }
+$fixedBackendRuntimeCount = @($entries | Where-Object {
+    $_.Path -like 'data/backend/*' -or $_.Path -like 'data/epocanva_backend_*' -or
+        $_.Path -eq 'data/zhuyin.yaml'
+}).Count
 $versionText = @(
     'EpoCanva Windows Multilingual Alpha',
     "Version: $version",
     "Commit: $commit",
     "Acceptance-profile: $AcceptanceProfile",
     "Distribution-policy: $DistributionPolicy",
-    "Backend-runtime-files: $($backendEntries.Count)",
+    "Backend-runtime-files: $($fixedBackendRuntimeCount + $backendEntries.Count)",
     "Path-exception: $pathException",
     'Built from the verified receipt and current product payload policy.',
     'Runtime network I/O: none by design. See NOTICE.txt.'
