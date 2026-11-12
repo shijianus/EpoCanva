@@ -37,7 +37,7 @@ endif()
 if(EXISTS "${EPOCANVA_HUNSPELL_ROOT}/.git")
   message(FATAL_ERROR "Hunspell must be a verified source archive, not a nested Git repository.")
 endif()
-set(_fr_native_sources)
+set(_fr_verified_paths)
 foreach(_fr_group library_files license_files)
   string(JSON _fr_count LENGTH "${_fr_json}" hunspell ${_fr_group})
   math(EXPR _fr_last "${_fr_count} - 1")
@@ -54,13 +54,74 @@ foreach(_fr_group library_files license_files)
     endif()
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_fr_file}")
     if(_fr_group STREQUAL "library_files")
-      list(APPEND _fr_native_sources "${_fr_file}")
+      list(APPEND _fr_verified_paths "${_fr_path}")
     endif()
   endforeach()
 endforeach()
 
+# Deterministic-candidate patch. The upstream archive is never edited in place:
+# a verified copy is made under this build tree and the pinned patch is applied
+# with `git apply`, so the pristine dependency stays byte-identical and the
+# modification is reproducible from the manifest's patch hash.
+string(JSON _fr_patch_path GET "${_fr_json}" hunspell patch path)
+string(JSON _fr_patch_hash GET "${_fr_json}" hunspell patch sha256)
+string(JSON _fr_patch_bytes GET "${_fr_json}" hunspell patch bytes)
+set(_fr_patch "${EPOCANVA_FR_REPO}/${_fr_patch_path}")
+if(NOT EXISTS "${_fr_patch}")
+  message(FATAL_ERROR "Pinned Hunspell patch is unavailable: ${_fr_patch_path}")
+endif()
+file(SHA256 "${_fr_patch}" _fr_actual_patch_hash)
+file(SIZE "${_fr_patch}" _fr_actual_patch_bytes)
+if(NOT _fr_actual_patch_hash STREQUAL _fr_patch_hash OR
+   NOT _fr_actual_patch_bytes EQUAL _fr_patch_bytes)
+  message(FATAL_ERROR "Hunspell patch SHA-256/byte count mismatch.")
+endif()
+set(_fr_patched_root "${CMAKE_CURRENT_BINARY_DIR}/hunspell-patched")
+set(_fr_patch_stamp "${CMAKE_CURRENT_BINARY_DIR}/hunspell-patched.stamp")
+set(_fr_needs_patch TRUE)
+if(EXISTS "${_fr_patch_stamp}" AND EXISTS "${_fr_patched_root}/src/hunspell/atypes.hxx")
+  file(READ "${_fr_patch_stamp}" _fr_stamp_hash)
+  string(STRIP "${_fr_stamp_hash}" _fr_stamp_hash)
+  if(_fr_stamp_hash STREQUAL _fr_patch_hash)
+    set(_fr_needs_patch FALSE)
+  endif()
+endif()
+if(_fr_needs_patch)
+  file(REMOVE_RECURSE "${_fr_patched_root}")
+  file(MAKE_DIRECTORY "${_fr_patched_root}")
+  file(COPY "${EPOCANVA_HUNSPELL_ROOT}/src" DESTINATION "${_fr_patched_root}")
+  file(RELATIVE_PATH _fr_patched_rel "${EPOCANVA_FR_REPO}" "${_fr_patched_root}")
+  file(TO_CMAKE_PATH "${_fr_patched_rel}" _fr_patched_rel)
+  execute_process(
+    COMMAND git -C "${EPOCANVA_FR_REPO}" apply --whitespace=nowarn
+            "--directory=${_fr_patched_rel}" "${_fr_patch}"
+    RESULT_VARIABLE _fr_patch_result
+    OUTPUT_VARIABLE _fr_patch_stdout
+    ERROR_VARIABLE _fr_patch_stderr)
+  if(NOT _fr_patch_result EQUAL 0)
+    message(FATAL_ERROR "Applying the verified Hunspell patch failed (exit ${_fr_patch_result}): ${_fr_patch_stderr}")
+  endif()
+  foreach(_fr_name hunspell.cxx affixmgr.cxx suggestmgr.cxx)
+    file(READ "${_fr_patched_root}/src/hunspell/${_fr_name}" _fr_patched_text)
+    string(FIND "${_fr_patched_text}" "std::chrono::steady_clock::now()" _fr_wall_clock)
+    if(NOT _fr_wall_clock EQUAL -1)
+      message(FATAL_ERROR "Hunspell patch left a wall-clock suggestion cutoff: ${_fr_name}")
+    endif()
+    string(FIND "${_fr_patched_text}" "epocanva_det_clock::now()" _fr_det_clock)
+    if(_fr_det_clock EQUAL -1)
+      message(FATAL_ERROR "Hunspell patch did not install the deterministic clock: ${_fr_name}")
+    endif()
+  endforeach()
+  file(WRITE "${_fr_patch_stamp}" "${_fr_patch_hash}\n")
+endif()
+
+set(_fr_native_sources)
+foreach(_fr_path IN LISTS _fr_verified_paths)
+  list(APPEND _fr_native_sources "${_fr_patched_root}/${_fr_path}")
+endforeach()
+
 add_library(epocanva_hunspell STATIC ${_fr_native_sources})
-target_include_directories(epocanva_hunspell PRIVATE "${EPOCANVA_HUNSPELL_ROOT}/src/hunspell")
+target_include_directories(epocanva_hunspell PRIVATE "${_fr_patched_root}/src/hunspell")
 target_compile_definitions(epocanva_hunspell PRIVATE HUNSPELL_STATIC BUILDING_LIBHUNSPELL
   _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 # Explicitly keep HUNSPELL_WARNING_ON off. It can print raw query text from
@@ -75,7 +136,7 @@ add_library(epocanva_french_dictionary STATIC dictionary.cc dictionary.h)
 target_include_directories(epocanva_french_dictionary PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}" "${EPOCANVA_FR_REPO}")
 target_include_directories(epocanva_french_dictionary PRIVATE
-  "${EPOCANVA_HUNSPELL_ROOT}/src/hunspell")
+  "${_fr_patched_root}/src/hunspell")
 target_compile_definitions(epocanva_french_dictionary PRIVATE HUNSPELL_STATIC
   WINVER=0x0A00 _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(epocanva_french_dictionary PRIVATE /utf-8 /permissive-

@@ -73,9 +73,24 @@ this document stays the single description of what exists:
   over the full menu (their denominator includes the raw row), and the
   evaluator additionally records `suggestion_top1`/`suggestion_top3`/
   `suggestion_mrr` over the menu with raw-kind rows excluded, which track
-  suggestion ordering directly. For ko two-set, the "raw" row carries the
-  composed Hangul rather than the typed romanization keys, so `raw_present_rate`
-  is a real per-language property, not a constant.
+  suggestion ordering directly. For ko two-set, the raw row now carries the
+  literal typed keys (for example `dkssud`); the composed Hangul is a
+  conversion candidate, so selecting raw never commits text the user did not
+  type. `raw_present_rate` and `raw_first_rate` are therefore checked
+  properties for every language, not constants.
+- The qualification seed and bootstrap replicate count are frozen in
+  `quality-policy-v2.json` (`qualification.seed`,
+  `qualification.bootstrap_replicates`); the evaluator defaults read those
+  fields and the candidate-quality runner passes them explicitly. Changing the
+  policy changes its SHA-256, so earlier reports cannot silently back a new
+  protocol.
+- The pinned Hunspell dependency is patched by
+  `third_party/patches/0001-hunspell-deterministic-work-clock.patch`: every
+  suggestion/affix cutoff reads a per-thread work-unit clock instead of wall
+  time, so identical input truncates at an identical operation count and the
+  published menu is reproducible under scheduler or I/O load. The upstream
+  archive is applied to a verified build-tree copy; `backend-hunspell.sources.json`
+  pins the patch hash.
 - The evaluator refuses any artifact path that does not resolve strictly
   inside the repository's `build/`; the runs directory (which carries
   candidate surfaces) lives beside the report.

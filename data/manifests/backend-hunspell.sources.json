@@ -16,6 +16,14 @@
     "license_choice": "LGPL-2.1-or-later",
     "license_basis": "license.hunspell lines 41-51 and src/hunspell/hunspell.hxx lines 23-33 explicitly permit GNU LGPL Version 2.1 or later as an alternative to GPL-2.0-or-later or MPL-1.1. All upstream notices remain unmodified. MySpell notice and other file-level notices also retained.",
     "file_specific_notices": "phonet.cxx/phonet.hxx retain Bjoern Jacke's LGPL version 2.1 wording and the author's 2007-07-26 release-under-MPL/GPL/LGPL-tri-license note. Do not erase that wording or independently assert it says 'or later'. Preserve every notice and satisfy the LGPL 2.1 corresponding-source/relink conditions for the current static link.",
+    "patch": {
+      "path": "third_party/patches/0001-hunspell-deterministic-work-clock.patch",
+      "sha256": "3013be1428e142228cb4dd272149e294924b0222ba6db0f52b753b53864f964c",
+      "bytes": 23013,
+      "purpose": "Replace wall-clock suggestion cutoffs with a deterministic per-thread work-unit budget so identical input, dictionary and configuration produce the identical ordered candidate set regardless of scheduler or I/O load. Applied by engine/french_dictionary/CMakeLists.txt to a verified build-tree copy; the upstream checkout stays byte-clean.",
+      "upstream_checkout_modified": false,
+      "application": "git apply --whitespace=nowarn to build/<preset>/hunspell-patched/src"
+    },
     "license_files": [
       { "path": "COPYING", "sha256": "640d90f6ee401241ff62834d0d1b33f83049e99b8bfdfa04ed1b0a1635dde3e7" },
       { "path": "COPYING.LESSER", "sha256": "7c6699c75f87b52bdc542db26d6b1b92892577cda46e20eceb79e2790a1c291b" },

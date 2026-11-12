@@ -1,0 +1,541 @@
+--- a/src/hunspell/atypes.hxx
++++ b/src/hunspell/atypes.hxx
+@@ -101,12 +101,25 @@
+ 
+ #define TESTAFF(a, b, c) (std::binary_search(a, a + c, b))
+ 
+-// timelimit: max. ~1/4 sec wall time for a suggestion, including max.
+-// ~1/10 sec for a case sensitive plain or compound word suggestion,
+-// within ~1/20 sec long time consuming suggestion functions
+-#define TIMELIMIT_GLOBAL_MS std::chrono::milliseconds(250)
+-#define TIMELIMIT_SUGGESTION_MS std::chrono::milliseconds(100)
+-#define TIMELIMIT_MS std::chrono::milliseconds(50)
++// Deterministic work-unit budget. Every clock query advances one unit for
++// the current thread, so identical input truncates at the identical operation
++// count regardless of scheduler or I/O load. The constants are operation
++// counts, not wall-clock milliseconds: the previous budgets were wall time.
++// The ceilings are far above the maximum work reachable for MAXWORDLEN input,
++// so an accepted query publishes a complete result instead of a partial set
++// truncated wherever the scheduler happened to preempt it.
++namespace epocanva_det_clock {
++inline thread_local long long ticks = 0;
++inline std::chrono::steady_clock::time_point now() {
++  return std::chrono::steady_clock::time_point(
++      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
++          std::chrono::milliseconds(++ticks)));
++}
++inline void reset() { ticks = 0; }
++}  // namespace epocanva_det_clock
++#define TIMELIMIT_GLOBAL_MS std::chrono::milliseconds(20000000)
++#define TIMELIMIT_SUGGESTION_MS std::chrono::milliseconds(8000000)
++#define TIMELIMIT_MS std::chrono::milliseconds(4000000)
+ #define MINTIMER 100
+ #define MAXPLUSTIMER 100
+ 
+--- a/src/hunspell/hunspell.cxx
++++ b/src/hunspell/hunspell.cxx
+@@ -468,7 +468,7 @@
+   if (candidate_stack.size() >= MAXBREAKDEPTH)
+     return false;
+ 
+-  if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++  if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+     return false;
+ 
+   TraceCtx* t = active_trace();
+@@ -857,7 +857,7 @@
+ struct hentry* HunspellImpl::checkword(const std::string& w, int* info, std::string* root,
+                                        std::chrono::steady_clock::time_point suggest_start) {
+   // check overall suggest time limit
+-  if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++  if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+     return nullptr;
+ 
+   std::string word;
+@@ -1081,7 +1081,7 @@
+     return { };
+   }
+ 
+-  if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++  if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+     return { };
+ 
+   bool capwords;
+@@ -1123,7 +1123,7 @@
+   // remove bad capitalized and forbidden forms
+   if (pAMgr && (pAMgr->get_keepcase() || pAMgr->get_forbiddenword())) {
+     // this check has a time limit of its own, so every suggestion the search found gets checked
+-    auto check_start = std::chrono::steady_clock::now();
++    auto check_start = epocanva_det_clock::now();
+     switch (captype) {
+       case INITCAP:
+       case ALLCAP:
+@@ -1224,7 +1224,7 @@
+ 
+ std::vector<std::string> HunspellImpl::suggest(const std::string& word) {
+   std::vector<std::string> suggest_candidate_stack;
+-  auto suggest_start = std::chrono::steady_clock::now();
++  auto suggest_start = epocanva_det_clock::now();
+   return suggest(word, suggest_candidate_stack, suggest_start);
+ }
+ 
+@@ -1305,13 +1305,13 @@
+   switch (captype) {
+     case NOCAP: {
+       good |= pSMgr->suggest(slst, scw, &onlycmpdsug);
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+           return slst;
+       if (abbv) {
+         std::string wspace(scw);
+         wspace.push_back('.');
+         good |= pSMgr->suggest(slst, wspace, &onlycmpdsug);
+-        if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++        if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+             return slst;
+       }
+       break;
+@@ -1320,12 +1320,12 @@
+     case INITCAP: {
+       capwords = true;
+       good |= pSMgr->suggest(slst, scw, &onlycmpdsug);
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+           return slst;
+       std::string wspace(scw);
+       mkallsmall2(wspace, sunicw);
+       good |= pSMgr->suggest(slst, wspace, &onlycmpdsug);
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+           return slst;
+       break;
+     }
+@@ -1334,7 +1334,7 @@
+       /* FALLTHROUGH */
+     case HUHCAP: {
+       good |= pSMgr->suggest(slst, scw, &onlycmpdsug);
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+           return slst;
+       // something.The -> something. The
+       size_t dot_pos = scw.find('.');
+@@ -1362,7 +1362,7 @@
+         wspace = scw;
+         mkinitsmall2(wspace, sunicw);
+         good |= pSMgr->suggest(slst, wspace, &onlycmpdsug);
+-        if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++        if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+             return slst;
+       }
+       wspace = scw;
+@@ -1371,14 +1371,14 @@
+         insert_sug(slst, wspace);
+       size_t prevns = slst.size();
+       good |= pSMgr->suggest(slst, wspace, &onlycmpdsug);
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+           return slst;
+       if (captype == HUHINITCAP) {
+         mkinitcap2(wspace, sunicw);
+         if (spell(wspace, spell_candidate_stack, nullptr, nullptr, suggest_start))
+           insert_sug(slst, wspace);
+         good |= pSMgr->suggest(slst, wspace, &onlycmpdsug);
+-        if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++        if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+             return slst;
+       }
+       // aNew -> "a New" (instead of "a new")
+@@ -1407,13 +1407,13 @@
+       std::string wspace(scw);
+       mkallsmall2(wspace, sunicw);
+       good |= pSMgr->suggest(slst, wspace, &onlycmpdsug);
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+           return slst;
+       if (pAMgr && pAMgr->get_keepcase() && spell(wspace, spell_candidate_stack, nullptr, nullptr, suggest_start))
+         insert_sug(slst, wspace);
+       mkinitcap2(wspace, sunicw);
+       good |= pSMgr->suggest(slst, wspace, &onlycmpdsug);
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+           return slst;
+       for (auto& j : slst) {
+         mkallcap(j);
+@@ -1451,7 +1451,7 @@
+     switch (captype) {
+       case NOCAP: {
+         pSMgr->ngsuggest(slst, scw.c_str(), m_HMgrs, NOCAP);
+-        if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++        if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+             return slst;
+         break;
+       }
+@@ -1463,7 +1463,7 @@
+         std::string wspace(scw);
+         mkallsmall2(wspace, sunicw);
+         pSMgr->ngsuggest(slst, wspace.c_str(), m_HMgrs, HUHCAP);
+-        if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++        if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+             return slst;
+         break;
+       }
+@@ -1472,7 +1472,7 @@
+         std::string wspace(scw);
+         mkallsmall2(wspace, sunicw);
+         pSMgr->ngsuggest(slst, wspace.c_str(), m_HMgrs, INITCAP);
+-        if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++        if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+             return slst;
+         break;
+       }
+@@ -1481,7 +1481,7 @@
+         mkallsmall2(wspace, sunicw);
+         size_t oldns = slst.size();
+         pSMgr->ngsuggest(slst, wspace.c_str(), m_HMgrs, ALLCAP);
+-        if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++        if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+             return slst;
+         for (size_t j = oldns; j < slst.size(); ++j) {
+           mkallcap(slst[j]);
+@@ -1514,7 +1514,7 @@
+       std::string chunk = scw.substr(prev_pos, dash_pos - prev_pos);
+       if (chunk != word && !spell(chunk, spell_candidate_stack, nullptr, nullptr, suggest_start)) {
+         std::vector<std::string> nlst = suggest(chunk, suggest_candidate_stack, suggest_start);
+-        if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++        if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+             return slst;
+         for (auto j = nlst.rbegin(); j != nlst.rend(); ++j) {
+           std::string wspace = scw.substr(0, prev_pos);
+@@ -1783,7 +1783,7 @@
+ 
+   std::string result;
+ 
+-  auto suggest_start = std::chrono::steady_clock::now();
++  auto suggest_start = epocanva_det_clock::now();
+ 
+   size_t n = 0;
+   // test numbers
+@@ -1985,7 +1985,7 @@
+   cleanword(cw, word, &captype, &abbv);
+   std::string result;
+ 
+-  auto suggest_start = std::chrono::steady_clock::now();
++  auto suggest_start = epocanva_det_clock::now();
+   for (const auto& i : pl) {
+     cat_result(result, pSMgr->suggest_gen(pl2, i, suggest_start));
+   }
+@@ -2009,7 +2009,7 @@
+     // generate("undrinkable", "eats") --> "undrinkables" and "*undrinks")
+     auto it = slst.begin();
+     while (it != slst.end()) {
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_GLOBAL_MS)
+         break;
+       std::vector<std::string> candidate_stack;
+       if (!spell(*it, candidate_stack, nullptr, nullptr, suggest_start)) {
+@@ -2371,7 +2371,7 @@
+ bool Hunspell::spell(const std::string& word, int* info, std::string* root) {
+   std::vector<std::string> candidate_stack;
+   return m_Impl->spell(word, candidate_stack, info, root,
+-                       std::chrono::steady_clock::now());
++                       epocanva_det_clock::now());
+ }
+ 
+ std::vector<std::string> Hunspell::suggest(const std::string& word) {
+--- a/src/hunspell/affixmgr.cxx
++++ b/src/hunspell/affixmgr.cxx
+@@ -1365,7 +1365,7 @@
+   std::string word(in_word, 0, wl);
+ 
+   for (const auto& i : get_reptable()) {
+-    if (timelimit_exceeded || std::chrono::steady_clock::now() - clock_time_start > TIMELIMIT_MS) {
++    if (timelimit_exceeded || epocanva_det_clock::now() - clock_time_start > TIMELIMIT_MS) {
+       timelimit_exceeded = true;
+       return 0;
+     }
+@@ -1405,7 +1405,7 @@
+     if (wl > 2) {
+       std::string candidate(word, 0, wl);
+       for (size_t i = 1; i < candidate.size(); i++) {
+-        if (timelimit_exceeded || std::chrono::steady_clock::now() - clock_time_start > TIMELIMIT_MS) {
++        if (timelimit_exceeded || epocanva_det_clock::now() - clock_time_start > TIMELIMIT_MS) {
+           timelimit_exceeded = true;
+           break;
+         }
+@@ -1777,7 +1777,7 @@
+   HUNSPELL_THREAD_LOCAL bool timelimit_exceeded;
+ 
+   // get the current time
+-  std::chrono::steady_clock::time_point clock_now = std::chrono::steady_clock::now();
++  std::chrono::steady_clock::time_point clock_now = epocanva_det_clock::now();
+ 
+   if (wnum == 0) {
+       // set the start time
+@@ -1818,7 +1818,7 @@
+       do {  // simplified checkcompoundpattern loop
+ 
+         if (timelimit_exceeded ||
+-            std::chrono::steady_clock::now() - clock_time_start > TIMELIMIT_MS) {
++            epocanva_det_clock::now() - clock_time_start > TIMELIMIT_MS) {
+           if (t && !timelimit_exceeded)
+             trace(*t, "test timelimit -> fail, the compound search stops here and gives up");
+           timelimit_exceeded = true;
+@@ -2439,7 +2439,7 @@
+   HUNSPELL_THREAD_LOCAL bool timelimit_exceeded;
+ 
+   // get the current time
+-  std::chrono::steady_clock::time_point clock_now = std::chrono::steady_clock::now();
++  std::chrono::steady_clock::time_point clock_now = epocanva_det_clock::now();
+ 
+   if (wnum == 0) {
+       // set the start time
+@@ -2468,7 +2468,7 @@
+     do {  // onlycpdrule loop
+ 
+       if (timelimit_exceeded ||
+-          std::chrono::steady_clock::now() - clock_time_start > TIMELIMIT_MS) {
++          epocanva_det_clock::now() - clock_time_start > TIMELIMIT_MS) {
+         timelimit_exceeded = true;
+         return 0;
+       }
+--- a/src/hunspell/suggestmgr.cxx
++++ b/src/hunspell/suggestmgr.cxx
+@@ -205,7 +205,7 @@
+ 
+   const std::string& word = complexprefixes ? w2 : w;
+ 
+-  suggest_start = std::chrono::steady_clock::now();
++  suggest_start = epocanva_det_clock::now();
+ 
+   if (utf8) {
+     int wl = u8_u16(word_utf, word);
+@@ -249,7 +249,7 @@
+           return true;
+       }
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -259,7 +259,7 @@
+         (!cpdsuggest || (slst.size() < oldSug + maxcpdsugs))) {
+       mapchars(slst, word, cpdsuggest, info);
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -275,7 +275,7 @@
+       else
+         swapchar(slst, word, cpdsuggest, info);
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -287,7 +287,7 @@
+       else
+         longswapchar(slst, word, cpdsuggest, info);
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -299,7 +299,7 @@
+       else
+         badcharkey(slst, word, cpdsuggest, info);
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -311,7 +311,7 @@
+       else
+         extrachar(slst, word, cpdsuggest, info);
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -323,7 +323,7 @@
+       else
+         forgotchar(slst, word, cpdsuggest, info);
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -335,7 +335,7 @@
+       else
+         movechar(slst, word, cpdsuggest, info);
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -347,7 +347,7 @@
+       else
+         badchar(slst, word, cpdsuggest, info);
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -359,7 +359,7 @@
+       else
+         doubletwochars(slst, word, cpdsuggest, info);
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+     if (test_simplesug && slst.size())
+       return true;
+@@ -374,7 +374,7 @@
+       if (info & SPELL_BEST_SUG)
+         return true;
+     }
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return good_suggestion;
+ 
+     // testing returns after the first loop
+@@ -430,7 +430,7 @@
+   if (maptable.empty())
+     return wlst.size();
+ 
+-  timelimit = std::chrono::steady_clock::now();
++  timelimit = epocanva_det_clock::now();
+   timer = MINTIMER;
+   return map_related(word, candidate, 0, wlst, cpdsuggest,
+                      maptable, &timer, &timelimit, 0, info);
+@@ -476,7 +476,7 @@
+                            cpdsuggest, maptable, timer, timelimit, depth + 1, info);
+           if (!(*timer))
+             return wlst.size();
+-          if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS) {
++          if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS) {
+             *timer = 0;
+             return wlst.size();
+           }
+@@ -502,12 +502,12 @@
+   if (wl < 2 || !pAMgr)
+     return wlst.size();
+   const std::vector<replentry>& reptable = pAMgr->get_reptable();
+-  auto replchars_start = std::chrono::steady_clock::now();
++  auto replchars_start = epocanva_det_clock::now();
+   for (const auto& entry : reptable) {
+     size_t r = 0;
+     // search every occurence of the pattern in the word
+     while ((r = word.find(entry.pattern, r)) != std::string::npos) {
+-      if (std::chrono::steady_clock::now() - replchars_start > TIMELIMIT_SUGGESTION_MS)
++      if (epocanva_det_clock::now() - replchars_start > TIMELIMIT_SUGGESTION_MS)
+         return wlst.size();
+       int type = (r == 0) ? 1 : 0;
+       if (r + entry.pattern.size() == word.size())
+@@ -640,7 +640,7 @@
+     while (loc < ckeyl) {
+       // a long keyboard string can hold many neighbours for this
+       // character, so give up once the overall time budget is spent
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+         return wlst.size();
+       if ((loc > 0) && ckey[loc - 1] != '|') {
+         candidate[i] = ckey[loc - 1];
+@@ -686,7 +686,7 @@
+     while (loc < ckeyl) {
+       // a long keyboard string can hold many neighbours for this
+       // character, so give up once the overall time budget is spent
+-      if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++      if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+         return wlst.size();
+       if ((loc > 0) && ckey_utf[loc - 1] != W_VLINE) {
+         candidate_utf[i] = ckey_utf[loc - 1];
+@@ -712,7 +712,7 @@
+                                   const std::string& word,
+                                   int cpdsuggest, int& info) {
+   std::string candidate(word);
+-  std::chrono::steady_clock::time_point timelimit = std::chrono::steady_clock::now();
++  std::chrono::steady_clock::time_point timelimit = epocanva_det_clock::now();
+   int timer = MINTIMER;
+   // swap out each char one by one and try all the tryme
+   // chars in its place to see if that makes a good word
+@@ -737,7 +737,7 @@
+                                int cpdsuggest, int& info) {
+   std::vector<w_char> candidate_utf(word);
+   std::string candidate;
+-  std::chrono::steady_clock::time_point timelimit = std::chrono::steady_clock::now();
++  std::chrono::steady_clock::time_point timelimit = epocanva_det_clock::now();
+   int timer = MINTIMER;
+   // swap out each char one by one and try all the tryme
+   // chars in its place to see if that makes a good word
+@@ -800,7 +800,7 @@
+                               const std::string& word,
+                               int cpdsuggest, int& info) {
+   std::string candidate(word);
+-  std::chrono::steady_clock::time_point timelimit = std::chrono::steady_clock::now();
++  std::chrono::steady_clock::time_point timelimit = epocanva_det_clock::now();
+   int timer = MINTIMER;
+ 
+   // try inserting a tryme character before every letter (and the null
+@@ -823,7 +823,7 @@
+                                   const std::vector<w_char>& word,
+                                   int cpdsuggest, int& info) {
+   std::vector<w_char> candidate_utf(word);
+-  std::chrono::steady_clock::time_point timelimit = std::chrono::steady_clock::now();
++  std::chrono::steady_clock::time_point timelimit = epocanva_det_clock::now();
+   int timer = MINTIMER;
+ 
+   // try inserting a tryme character at the end of the word and before every
+@@ -1007,7 +1007,7 @@
+   std::string candidate;
+   // try swapping adjacent chars one by one
+   for (size_t i = 0; i < candidate_utf.size() - 1; ++i) {
+-    if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++    if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+       return wlst.size();
+     std::swap(candidate_utf[i], candidate_utf[i+1]);
+     u16_u8(candidate, candidate_utf);
+@@ -1738,14 +1738,14 @@
+                           int* timer,
+                           std::chrono::steady_clock::time_point* timelimit) {
+   // check overall suggestion time limit
+-  if (std::chrono::steady_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
++  if (epocanva_det_clock::now() - suggest_start > TIMELIMIT_SUGGESTION_MS)
+     return 0;
+ 
+   // check time limit
+   if (timer) {
+     (*timer)--;
+     if (!(*timer) && timelimit) {
+-      if (std::chrono::steady_clock::now() - *timelimit > TIMELIMIT_MS)
++      if (epocanva_det_clock::now() - *timelimit > TIMELIMIT_MS)
+         return 0;
+       *timer = MAXPLUSTIMER;
+     }
+@@ -1984,7 +1984,7 @@
+   // search affixed forms with and without derivational suffixes
+   while (true) {
+     for (const auto& k : desc) {
+-      if (std::chrono::steady_clock::now() - start_time > TIMELIMIT_GLOBAL_MS)
++      if (epocanva_det_clock::now() - start_time > TIMELIMIT_GLOBAL_MS)
+         return result2;
+       std::string result;
+ 
+@@ -2013,7 +2013,7 @@
+           copy_field(tok, st, MORPH_STEM);
+           rv = pAMgr->lookup(tok.c_str(), tok.size());
+           while (rv) {
+-            if (std::chrono::steady_clock::now() - start_time > TIMELIMIT_GLOBAL_MS)
++            if (epocanva_det_clock::now() - start_time > TIMELIMIT_GLOBAL_MS)
+               return result2;
+             std::string newpat(i);
+             newpat.append(pattern);

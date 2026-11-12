@@ -147,7 +147,12 @@ librime 1.17.0（`33e78140…`）检出在 `third_party/librime/`（被 `.gitign
 
 | 编号 | 依赖 | commit | 目的 | 影响面 | 撤销方式 |
 | --- | --- | --- | --- | --- | --- |
-| — | — | — | 暂无补丁：上游检出到 P1.4 为止仍逐字节干净 | — | — |
+| `0001-hunspell-deterministic-work-clock.patch` | Hunspell | `7d725f1929a4189a3b8188649af6a6b3e302f469` | 把候选建议的墙钟截止（`TIMELIMIT_GLOBAL_MS=250`、`TIMELIMIT_SUGGESTION_MS=100`、`TIMELIMIT_MS=50`）换成每线程递增的确定性工作单元预算，使相同输入/词典/配置得到相同的有序候选集合 | `atypes.hxx` 定义确定性时钟与预算；`hunspell.cxx`、`affixmgr.cxx`、`suggestmgr.cxx` 的时间查询改读该时钟。不改变词典格式、候选生成顺序或 ABI；不修改上游检出 | 从 `engine/french_dictionary/CMakeLists.txt` 删除 patch 应用块并删除 `build/<preset>/hunspell-patched` 与 stamp；上游 archive 与 `backend-hunspell.sources.json` 的 pristine 哈希不变 |
+
+补丁由 `engine/french_dictionary/CMakeLists.txt` 在配置阶段校验 `data/manifests/backend-hunspell.sources.json`
+中的 `patch.sha256`/`bytes` 后，应用到 `build/<preset>/.../hunspell-patched/src` 的
+已验证副本；`build/backend-french-dependency/` 中的上游解压树保持逐字节干净。
+2026-11-12 的首次登记把原“暂无补丁”行替换为实际补丁；在此之前的 P1.4–P3 轮次确实没有补丁。
 
 规则见 `third_party/README.md`：上游检出保持字节干净，改动只以
 `third_party/patches/NNNN-<dep>-<purpose>.patch` 表达，且每条补丁都要在此表登记。
