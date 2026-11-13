@@ -1,8 +1,9 @@
 # 从零到可构建（bootstrap）
 
 本文给出在本机 Windows x64 + Visual Studio 环境下配置、构建并运行 EpoCanva 测试的步骤，
-以及**已实测确认**的阻塞与偏差。所有步骤不联网；工具的安装与 PATH 处理由开发者本人完成，
-仓库内不含也不调用任何在线安装器。
+以及**已实测确认**的阻塞与偏差。核心构建与测试步骤不联网；工具的安装与 PATH 处理由开发者
+本人完成。唯一的联网例外是可选安装器工具链的一次性 NuGet provisioning（§8），它不参与
+运行时，也不会被产品代码调用。仓库内不含也不调用任何在线安装器。
 
 采集方式说明：下文每条"可用/不可用"结论都来自本机真实命令输出，不是推断。
 未验证的条目会显式标注**未验证**。
@@ -191,7 +192,28 @@ JUnit 的执行名集合，将已声明的跳过项单独记录。内部候选�
 要求必要测试实际执行。源身份、cache、测试清单、测试结果与三份二进制哈希均写入收据。
 公开发行条件见 `docs/product/release-gate.md`，包完整性与许可批准是分开的判据。
 
-## 7. 故障排查
+## 7. 安装器工具链（可选，一次性联网 provisioning）
+
+内部验收的 MSI 使用 **WiX Toolset 6.0.2** 的 .NET tool。它不是运行时依赖，也不进入
+产品包；只在构建安装器时使用。provisioning 需要一次 NuGet 网络访问，之后构建本身离线：
+
+```powershell
+dotnet tool install --tool-path build/_local/wix-tool wix --version 6.0.2
+build/_local/wix-tool/wix.exe --version   # 期望 6.0.2+...
+```
+
+- 工具安装在 git-ignored 的 `build/_local/wix-tool`，不修改 Machine/User PATH，不要求管理员。
+- `tools/installer/build_msi.ps1` 记录构建器版本、`wix.exe` SHA-256、MSI SHA-256 和
+  逐文件载荷校验结果。
+- `tools/product/check_release.ps1` 会在 PATH 之后发现 `build/_local/wix-tool/wix.exe` 或
+  `build/tools/wix/wix.exe`；`installer-toolchain` 仍要求真实构建器，`installer-artifact`
+  仍要求真实安装器文件，`installer-lifecycle` 仍要求真实执行证据。
+- 如果目标机器完全离线，可在一台有网络的机器 provision 后复制整个工具目录，并用
+  `build_msi.ps1 -WixPath <path>` 指向它；不要把工具二进制提交到仓库。
+- 本轮只构建并校验 MSI（`msiexec /a` 管理提取），**没有**在本机安装、注册 TSF 或执行
+  安装生命周期。安装/升级/修复/卸载/回滚仍需获授权的隔离环境。
+
+## 8. 故障排查
 
 | 症状 | 原因 | 处理 |
 | --- | --- | --- |

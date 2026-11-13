@@ -87,6 +87,35 @@ Every JUnit contains exactly one property each named `epocanva.version`, `epocan
 
 The central `data/manifests/language-readiness.json` is format 1, with exact `required_languages` and five unique `languages[]`. A completed language row has `id`, `status: "implemented"`, `data_status: "packaged"`, nonempty `payload_paths[]` (all fixed manifest payloads), and nonempty `source_paths[]` (file references matching actual sources). Initial `blocked` / `absent` / `incomplete` rows accurately prevent readiness. Tests must exercise real language behavior, not merely share these names.
 
+## Acceptance evidence producers
+
+The following scripts run real tests and write hash-bound `test-run` entries. They
+do not create owner, host, installer-lifecycle or signing records, and a runner
+that cannot execute its work exits nonzero rather than skipping.
+
+- `tools/product/run_english_acceptance.ps1` — six separately executed English
+  core capabilities plus the product TSF multi-session case. The latter is
+  cross-session consistency, not a real-application claim.
+- `tools/product/run_offline_privacy.ps1` — static import review, live TCP/UDP
+  endpoint observation of the product sink process tree, and a synthetic canary
+  searched through stdout, stderr and the isolated user-data tree, including a
+  password-scoped document. A missing monitoring cmdlet or `dumpbin` fails the
+  corresponding case.
+- `tests/reference_model` — the 100,000-edit × 5 fixed-seed aggregate protocol
+  with an independent Korean automaton, Japanese history/replay and TSF
+  `EditPlan` status models. It has a separate `--force-fail` negative control.
+- `tools/installer/build_helper.ps1`, `build_msi.ps1` and `record_installer.ps1`
+  — build the project-owned profile helper, a per-user x64 MSI from the verified
+  package manifest, and the top-level `installer` evidence reference. The MSI is
+  verified by administrative extraction; that is not an install or lifecycle
+  claim.
+
+`check_release.ps1` discovers a pinned installer builder under
+`build/_local/wix-tool` or `build/tools/wix` after PATH. The pinned location is a
+convenience for reproducible local builds; the `installer-artifact` gate still
+requires a real installer file and `installer-lifecycle` still requires executed
+install/upgrade/repair/uninstall/rollback/cleanup evidence.
+
 ## Corresponding Source producer/consumer contract
 
 `tools/product/stage_source.ps1` produces `<BuildDir>/corresponding-source.zip` and `<BuildDir>/source-manifest.json`. Shared `tools/product/source_contract.ps1` exposes `Get-ProductCorrespondingSourceFiles -RepoRoot`, returning sorted unique repository-relative forward-slash string paths; they are the exact ZIP entry names. Generated archives, manifests, receipts and reports never feed back into the product source fingerprint.

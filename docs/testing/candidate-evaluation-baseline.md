@@ -1,17 +1,27 @@
 # E6 candidate-menu evaluation baseline — design and minimal slice
 
-**Status**: the minimal baseline slice is implemented and was run once against
-the real staged resources (see `docs/reports/phase-e-quality-gates.md` for the
-recorded numbers). Committed in this slice: the Tier A synthetic corpus
-(`data/eval/candidate-v1/`, 15 cases whose expectations are pinned by existing
-assertions in `tests/backend/profiles.cc`), the native harness
-(`tests/candidate_evaluation/candidate_eval_cli.cc`), the evaluator
-(`tools/backend/evaluate_candidates.py`) and its unit tests
-(`tests/candidate_evaluation/test_evaluate_candidates.py`, registered as the
-`candidate_evaluation.contract` CTest). NOT implemented: the Tier B external
-corpus, the 1,001/500-case minimums, the warm-up query phase, and every part of
-the §9 E4 entry gate beyond those inputs. E4 (cross-language fusion) and E5
-(detection latching) must not start until the full gate exists and passes.
+**Status**: the measurement slice is implemented and has been run against the
+real staged resources; the newer E4 cross-language fusion and E5 detection
+latching code is also in the tree. The **formal candidate-quality gate is still
+BLOCKED**, and this document does not claim otherwise:
+
+- the committed corpus is the Tier A synthetic set in `data/eval/candidate-v1/`
+  with 15 cases whose expectations are pinned by existing assertions in
+  `tests/backend/profiles.cc`;
+- `data/eval/candidate-v1/tier-b.lock.json` has `status: "not_approved"` and no
+  approved languages, so no Tier B corpus satisfies the 1,001/1,001/1,001/1,001/500
+  minimums;
+- `data/eval/candidate-v1/quality-policy-v2.json` has
+  `absolute_quality.decision: "pending_product_owner"` and null Top-1/Top-3/MRR
+  thresholds.
+
+The evaluator, harness, deterministic work-budget patch and fresh-process
+protocol are real and are exercised by the committed tests. They measure the
+implementation honestly; they do not manufacture the missing corpus or owner
+approval. `candidate-quality` remains blocked until an approved corpus and the
+numeric thresholds exist and a qualification run on the exact candidate passes.
+The aggregate 100,000-edit × 5-seed reliability protocol is a separate test
+(`tests/reference_model`); it is not a natural-language quality claim.
 
 Deviations of the implemented slice from the design text below, recorded so
 this document stays the single description of what exists:
@@ -380,7 +390,8 @@ a pinned metric vector, so a broken metric cannot pass silently.
 
 ## 9. Quality gate to enter E4
 
-E4 may start only when **all** of these are recorded in a report:
+The E4/E5 implementation exists in the tree, but the quality gate may be
+declared passed only when **all** of these are recorded in a report:
 
 1. **Corpus**: Tier A green for all five languages; Tier B with at least 1,001
    cases for en/zh/fr/ja and 500 for ko, licence reviewed and SHA-256 recorded.

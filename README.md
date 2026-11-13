@@ -33,8 +33,16 @@ staging 校验的五语言运行资源，逐文件核对 SHA-256，并写出 `IN
 `build_product.ps1` + `stage_product.ps1 -BackendResourcesRoot <staged-root>`；当前生成的
 `build/windows-product/stage/EpoCanva-internal` 为 66 文件、171,994,763 bytes，
 `EpoCanva.exe --diagnose` 返回 `package=ready`/`manifest=ok`，设置窗口加载 13 个 profile。
-`check_release.ps1` 仍因 clean source、installer/toolchain、real-host、
-language-acceptance、证据绑定和公开数据授权而阻塞；内部候选包不是公开 release。
+`check_release.ps1` 仍因 clean source、candidate-quality 的语料/阈值审批、
+installer-lifecycle、real-host、language-acceptance 的 installed-host 以及公开数据授权而阻塞；
+内部候选包不是公开 release。2026-11-13 轮次新增了可执行的 100,000×5 参考模型压力协议
+（`tests/reference_model`）、分能力的英文验收生产者
+（`tools/product/run_english_acceptance.ps1`）、离线隐私生产者
+（`tools/product/run_offline_privacy.ps1`）以及基于 WiX 6.0.2 的每用户 MSI
+（`tools/installer/build_msi.ps1`）。这些工具只执行真实测试并写入哈希绑定的证据；
+它们没有、也不能把缺少授权的 real-host/lifecycle 或缺少审批的 candidate-quality 改成 PASS。
+本轮实际执行结果与剩余阻塞见 `docs/reports/acceptance-round-20261113.md` 和最终
+`build/windows-product/ACCEPTANCE-REPORT-<commit>.md`。
 `technical_ready`、`distribution_authorized`、`signature_verified`、`release_ready` 分开报告。
 包内文件校验通过不代表已获得分发许可或已完成系统输入验证。
 
