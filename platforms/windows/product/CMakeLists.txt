@@ -667,6 +667,25 @@ set_tests_properties(product.integration.sink_raw
   PROPERTIES TIMEOUT 660
              LABELS "windows;product;sink;keyboard;textstore;real;no-registration")
 
+# Sensitive-field and persistence canary. The canary is synthetic and fixed for
+# this CTest; the acceptance runner repeats the case with a fresh random canary
+# and scans the complete isolated user-data tree for it.
+add_test(
+  NAME product.integration.sink_privacy
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:epocanva_product_sink_tests>
+    -DCASE=product-sink-privacy
+    -DEXPECTED_EXIT=0
+    "-DMARKER=RESULT PASS"
+    -DMARKER_POLICY=require
+    "-DPASS_ARGS=--product-dll;$<TARGET_FILE:epocanva_tsf_direct_sink_test>;--rime-dll;${EPOCANVA_RIME_DLL};--data-dir;${CMAKE_CURRENT_LIST_DIR}/../../../data/product;--lexicon;${EPOCANVA_PRODUCT_LEXICON};--run-root;${_product_run}/sink-privacy;--mode;privacy"
+    -DTIMEOUT_SECONDS=300
+    -P ${_product_assert})
+set_tests_properties(product.integration.sink_privacy
+  PROPERTIES TIMEOUT 360
+             ENVIRONMENT "EPOCANVA_PRIVACY_CANARY=epocanvaprivacysynthetic"
+             LABELS "windows;product;sink;privacy;sensitive;no-registration")
+
 add_test(
   NAME product.integration.sink_engine_missing
   COMMAND ${CMAKE_COMMAND}

@@ -877,6 +877,32 @@ int PilotBudget(const std::filesystem::path& path) {
             << " build_ms=" << build_ms << " six_queries_ms=" << query_ms << " spelling_cells=" << total_cells << '\n';
   return Finish();
 }
+
+int RunCapability(std::string_view capability) {
+  // Each mode runs only the assertions for that capability. The release gate
+  // requires a separately executed case per capability, not one aggregate run
+  // relabelled seven times.
+  if (capability == "frequency") {
+    StableIdsAndFrequencyValidation();
+  } else if (capability == "context-learning") {
+    LearningAndPrediction();
+  } else if (capability == "morphology") {
+    MorphologyLiteralOracle();
+    ExactLemmaBeatsCompetingPrefixes();
+    AttestedMorphologyIdentities();
+  } else if (capability == "spelling") {
+    TwoEditSpellingAndKeyboard();
+    LayoutAwareSpelling();
+  } else if (capability == "segmentation") {
+    SegmentationOracleAndBoundaries();
+  } else if (capability == "abbreviation") {
+    ExpansionProtectionCompatibilityAndBudgets();
+  } else {
+    std::cerr << "unknown capability: " << capability << '\n';
+    return 2;
+  }
+  return Finish();
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -890,8 +916,13 @@ int main(int argc, char** argv) {
   if (argc == 3 && std::string_view(argv[1]) == "--pilot-budget") {
     return PilotBudget(std::filesystem::u8path(argv[2]));
   }
+  if (argc == 3 && std::string_view(argv[1]) == "--capability") {
+    return RunCapability(argv[2]);
+  }
   if (argc != 2 || std::string_view(argv[1]) != "--unit") {
-    std::cerr << "usage: epocanva_english_language_support_tests --unit|--forcefail|--pilot-budget <path>\n";
+    std::cerr << "usage: epocanva_english_language_support_tests "
+                 "--unit|--capability <frequency|context-learning|morphology|spelling|"
+                 "segmentation|abbreviation>|--forcefail|--pilot-budget <path>\n";
     return 2;
   }
   StableIdsAndFrequencyValidation();

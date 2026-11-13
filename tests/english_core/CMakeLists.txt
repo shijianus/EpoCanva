@@ -150,6 +150,28 @@ foreach(_case IN ITEMS unit forcefail bad_args)
     LABELS "english;core;unit;language-support")
 endforeach()
 
+# Per-capability executions used by the release-gate English evidence. Each
+# case runs only that capability's assertions, so a passing JUnit name is
+# backed by a real, separately executed test rather than a relabelled aggregate.
+foreach(_capability IN ITEMS frequency context-learning morphology spelling
+    segmentation abbreviation)
+  string(REPLACE "-" "_" _capability_id "${_capability}")
+  add_test(NAME english.core.capability_${_capability_id}
+    COMMAND ${CMAKE_COMMAND}
+      -DPROBE=$<TARGET_FILE:epocanva_english_language_support_tests>
+      -DCASE=language-capability-${_capability}
+      -DPROBE_ARG1=--capability
+      -DPROBE_ARG2=${_capability}
+      -DEXPECTED_EXIT=0
+      -DEXPECT_MARKER=TRUE
+      "-DMARKER=RESULT PASS"
+      -DTIMEOUT_SECONDS=120
+      -P ${EPOCANVA_ASSERT_PROBE_SCRIPT})
+  set_tests_properties(english.core.capability_${_capability_id} PROPERTIES
+    TIMEOUT 180 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/run"
+    LABELS "english;core;unit;language-support;capability")
+endforeach()
+
 # 4. P2.6 section 9, the core half of the spelling cost trial: --pilot-bench loads the
 #    generated 42,356-row pilot list and measures the one-edit pass per input class,
 #    asserting the outcome, the variant count (from the closed arithmetic form, not from

@@ -647,41 +647,86 @@ void Paths(const fs::path& base) {
   Cleanup(target);
 }
 
+// Security property under test: a caller root or data leaf that redirects
+// through a name-surrogate reparse point is refused, and the redirect target is
+// never written. Real symbolic links need SeCreateSymbolicLinkPrivilege (or
+// Developer Mode). That privilege is not part of an ordinary test run, so the
+// same property is exercised with fixtures an ordinary user can create on
+// NTFS: a directory junction is the same IO_REPARSE_TAG_MOUNT_POINT name
+// surrogate that CheckObject rejects, and a hardlink exercises the separate
+// nNumberOfLinks == 1 leaf policy while aliasing the external file bytes.
+// When the real symlink fixture is available it is used instead. The selected
+// fixture is printed, so the log never claims a symlink ran when it did not.
 int Symlinks(const fs::path& base) {
   const auto root = NewRoot(base, L"symlinks");
   const auto target = NewRoot(base, L"symlink-target");
   const auto catalog = TestCatalog();
   const auto symbolic = root / L"symbolic";
-  if (!::CreateSymbolicLinkW(symbolic.c_str(), target.c_str(),
-      SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+
+  bool real_directory_symlink = ::CreateSymbolicLinkW(symbolic.c_str(), target.c_str(),
+      SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+  if (!real_directory_symlink) {
     const DWORD error = ::GetLastError();
-    Cleanup(root);
-    Cleanup(target);
-    if (error == ERROR_PRIVILEGE_NOT_HELD) {
-      std::fprintf(stderr, "SKIP real symlink fixtures: Win32 1314; no elevation/configuration attempted\n");
-      return failures == 0 ? 77 : 1;
+    if (error != ERROR_PRIVILEGE_NOT_HELD) {
+      Check(false, "directory symbolic-link fixture creation");
+      Cleanup(root);
+      Cleanup(target);
+      return 1;
     }
-    Check(false, "directory symbolic-link fixture creation");
-    return 1;
+    if (!Junction(symbolic, target)) {
+      Check(false, "directory junction fixture creation");
+      Cleanup(root);
+      Cleanup(target);
+      return 1;
+    }
+    std::fprintf(stderr,
+        "NOTE real directory symlink unavailable (Win32 %lu); using an "
+        "unprivileged directory junction for the same name-surrogate rejection\n",
+        static_cast<unsigned long>(error));
+  } else {
+    std::fputs("NOTE using a real directory symlink fixture\n", stderr);
   }
   WindowsLearningRepository through_symbolic(symbolic);
   Expect(through_symbolic.Record(catalog, Confirmed(), allow), Status::kIoError,
          "symbolic caller root rejected");
-  Check(!fs::exists(StoreDirectory(target)), "symbolic target untouched");
-  Check(::RemoveDirectoryW(symbolic.c_str()) != FALSE, "symbolic fixture removed");
+  Check(!fs::exists(StoreDirectory(target)), "link target untouched");
+  Check(::RemoveDirectoryW(symbolic.c_str()) != FALSE, "link fixture removed");
+
   WindowsLearningRepository repository(root);
-  Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "symlink control baseline");
+  Expect(repository.Record(catalog, Confirmed(), allow), Status::kOk, "link control baseline");
   const auto data = Leaf(root, L".dat");
   Check(::DeleteFileW(data.c_str()) != FALSE, "prepare data leaf redirection fixture");
   const auto external = target / L"external.dat";
   WriteFixture(external, "external fixture must remain unchanged");
-  if (::CreateSymbolicLinkW(data.c_str(), external.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
-    Expect(repository.Record(catalog, Confirmed(), allow), Status::kIoError, "data leaf symbolic link rejected");
-    Expect(repository.Delete(catalog, true), Status::kIoError, "explicit deletion never follows data symlink");
-    Check(ReadFixture(external) == "external fixture must remain unchanged", "external data not altered");
+  if (::CreateSymbolicLinkW(data.c_str(), external.c_str(),
+          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+    std::fputs("NOTE using a real file symlink fixture\n", stderr);
+    Expect(repository.Record(catalog, Confirmed(), allow), Status::kIoError,
+           "data leaf symbolic link rejected");
+    Expect(repository.Delete(catalog, true), Status::kIoError,
+           "explicit deletion never follows data symlink");
+    Check(ReadFixture(external) == "external fixture must remain unchanged",
+          "external data not altered");
     Check(::DeleteFileW(data.c_str()) != FALSE, "data symlink fixture removed");
   } else {
-    Check(false, "file symbolic-link fixture creation");
+    const DWORD error = ::GetLastError();
+    if (error != ERROR_PRIVILEGE_NOT_HELD) {
+      Check(false, "file symbolic-link fixture creation");
+    } else if (!::CreateHardLinkW(data.c_str(), external.c_str(), nullptr)) {
+      Check(false, "file hardlink fixture creation");
+    } else {
+      std::fprintf(stderr,
+          "NOTE real file symlink unavailable (Win32 %lu); using an "
+          "unprivileged hardlink to the external file\n",
+          static_cast<unsigned long>(error));
+      Expect(repository.Record(catalog, Confirmed(), allow), Status::kIoError,
+             "multiply linked data leaf rejected");
+      Expect(repository.Delete(catalog, true), Status::kIoError,
+             "explicit deletion never follows a multiply linked data leaf");
+      Check(ReadFixture(external) == "external fixture must remain unchanged",
+            "external data not altered");
+      Check(::DeleteFileW(data.c_str()) != FALSE, "hardlink fixture removed");
+    }
   }
   Cleanup(root);
   Cleanup(target);

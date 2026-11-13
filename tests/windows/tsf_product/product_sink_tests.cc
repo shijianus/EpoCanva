@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1697,6 +1698,121 @@ bool RunRawInputCases(const Paths& paths) {
 
   EndCase(&test_case);
   return g_failures == 0;
+}
+
+// Reads every regular file below the isolated user root and searches for the
+// synthetic canary in UTF-8 and UTF-16LE form. The canary is never printed; the
+// caller records only the file count and a boolean.
+bool FindCanaryInUserRoot(const std::filesystem::path& user_root,
+                          const std::string& canary_utf8,
+                          std::size_t* files_scanned) {
+  std::string canary_utf16le;
+  canary_utf16le.reserve(canary_utf8.size() * 2);
+  for (char byte : canary_utf8) {
+    canary_utf16le.push_back(byte);
+    canary_utf16le.push_back('\0');
+  }
+  std::error_code ec;
+  for (std::filesystem::recursive_directory_iterator it(user_root, ec), end;
+       !ec && it != end; it.increment(ec)) {
+    std::error_code file_ec;
+    if (!it->is_regular_file(file_ec) || file_ec) continue;
+    const auto size = it->file_size(file_ec);
+    if (file_ec || size > 16u * 1024u * 1024u) continue;
+    std::ifstream stream(it->path(), std::ios::binary);
+    if (!stream) continue;
+    const std::string bytes((std::istreambuf_iterator<char>(stream)),
+                            std::istreambuf_iterator<char>());
+    ++*files_scanned;
+    if (bytes.find(canary_utf8) != std::string::npos ||
+        bytes.find(canary_utf16le) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool AnyLearningStoreFile(const std::filesystem::path& user_root) {
+  std::error_code ec;
+  for (std::filesystem::recursive_directory_iterator it(user_root, ec), end;
+       !ec && it != end; it.increment(ec)) {
+    std::error_code file_ec;
+    if (!it->is_regular_file(file_ec) || file_ec) continue;
+    const std::wstring name = it->path().filename().wstring();
+    const std::wstring extension = it->path().extension().wstring();
+    if (name.find(L"learning") != std::wstring::npos &&
+        (extension == L".dat" || extension == L".v2" || extension == L".tmp")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool RunPrivacyCanaryCase(const Paths& paths, const std::wstring& canary,
+                          const std::string& canary_utf8) {
+  const int failures_before = g_failures;
+
+  Case test_case;
+  TestDocumentOptions options;
+  if (!BeginCase(&test_case, paths.stage, paths.user_root, options, nullptr)) {
+    LocalCheck(false, "privacy: ordinary field host and activation");
+    EndCase(&test_case);
+    return false;
+  }
+  InputRoute route{test_case.host, test_case.doc, test_case.product.sink,
+                   test_case.doc->context()};
+  LocalCheck(ReadyToType(*test_case.host, test_case.product.sink, test_case.doc->context(),
+                         kEngineReadinessBudgetMs),
+             "privacy: ordinary field bound and resolved permission");
+  std::string error;
+  LocalCheck(SendTextHost(&route, canary, &error),
+             "privacy: ordinary canary stayed with the host: " + error);
+  LocalCheck(test_case.doc->text_utf16() == canary,
+             "privacy: ordinary field preserved every canary unit");
+  SeamCounters counters = {};
+  (void)test_case.seam.query(&counters);
+  LocalCheck(counters.host_text_keys > 0, "privacy: ordinary keys were host-owned");
+  LocalCheck(counters.internal_text_losses == 0,
+             "privacy: ordinary field reported zero internal text losses");
+
+  // Sensitive field: use a second document on the same already-running engine.
+  // Starting a second engine lifetime here would test activation, not privacy,
+  // and would leave a cold start in flight at process exit. The password scope
+  // must still make the product refuse the field while the host receives its
+  // own typed text.
+  TestDocumentOptions password;
+  password.scope_answer = epocanva::tsf::edit::test::TestScopeAnswer::kScopes;
+  password.input_scopes = {IS_PASSWORD};
+  TestDocument* password_doc = test_case.host->CreateDocument(password, &error);
+  if (password_doc == nullptr) {
+    LocalCheck(false, "privacy: password document creation: " + error);
+  } else {
+    epocanva::tsf::context::test::FocusCallResult focus;
+    const bool focused = SetThreadFocus(*test_case.host, password_doc, &focus, &error);
+    LocalCheck(focused, "privacy: password document focus: " + error);
+    if (focused) {
+      PumpSlice(*test_case.host, 500);
+      InputRoute password_route{test_case.host, password_doc, test_case.product.sink,
+                                password_doc->context()};
+      LocalCheck(SendTextHost(&password_route, canary, &error),
+                 "privacy: password canary stayed with the host: " + error);
+      LocalCheck(password_doc->text_utf16() == canary,
+                 "privacy: password field preserved every canary unit");
+    }
+  }
+  EndCase(&test_case);
+
+  // The canary must not appear in any persisted user-data byte. This is a real
+  // read of the post-run tree, not an inference from the absence of a logger.
+  std::size_t files_scanned = 0;
+  const bool leaked = FindCanaryInUserRoot(paths.user_root, canary_utf8, &files_scanned);
+  LocalCheck(!leaked, "privacy: canary absent from every persisted user-data file");
+  LocalCheck(files_scanned > 0, "privacy: persisted user-data files were actually scanned");
+  LocalCheck(!AnyLearningStoreFile(paths.user_root),
+             "privacy: no learning store file was written with recording disabled");
+  std::cout << "  [privacy] scanned_files=" << files_scanned
+            << " canary_present=" << (leaked ? 1 : 0) << std::endl;
+  return g_failures == failures_before;
 }
 
 bool RunPermissionCase(const Paths& paths, TestDocumentOptions options,
@@ -4788,7 +4904,7 @@ int main(int argc, char** argv) {
         << "usage error: --product-dll --rime-dll --data-dir --lexicon "
            "--run-root <absolute> [--mode input|engine-missing|engine-mismatch|candidate|"
            "multilingual-prediction|replacement-faults|suggestion-resync|continuous|capacity|"
-           "unload-contract|degraded-keys|startup|startup-lifecycle] "
+           "unload-contract|degraded-keys|startup|startup-lifecycle|privacy] "
            "[--watchdog-ms N]\n";
     return 2;
   }
@@ -4832,7 +4948,37 @@ int main(int argc, char** argv) {
   // explicitly instead of letting the default add expansion rows to their menus.
   settings.abbreviation_enabled = false;
 
-  if (mode == "lease") {
+  if (mode == "privacy") {
+    std::wstring why;
+    LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
+                            &why),
+               "privacy: product staged");
+    LocalCheck(PrepareUserRoot(user_root, settings, &why),
+               "privacy: settings and marker written");
+    wchar_t canary_buffer[256] = {};
+    const DWORD canary_units = ::GetEnvironmentVariableW(
+        L"EPOCANVA_PRIVACY_CANARY", canary_buffer,
+        static_cast<DWORD>(std::size(canary_buffer)));
+    bool canary_valid = canary_units > 0 && canary_units < std::size(canary_buffer);
+    for (DWORD index = 0; canary_valid && index < canary_units; ++index) {
+      const wchar_t unit = canary_buffer[index];
+      canary_valid = (unit >= L'a' && unit <= L'z') || (unit >= L'A' && unit <= L'Z') ||
+                     (unit >= L'0' && unit <= L'9');
+    }
+    LocalCheck(canary_valid,
+               "privacy: EPOCANVA_PRIVACY_CANARY is a nonempty ASCII alphanumeric value");
+    if (canary_valid) {
+      Paths paths;
+      paths.stage = stage;
+      paths.user_root = user_root;
+      paths.marker = marker;
+      paths.state = state;
+      paths.compiled = compiled;
+      const std::wstring canary(canary_buffer, canary_units);
+      const std::string canary_utf8 = epocanva::product::WideToUtf8(canary);
+      RunPrivacyCanaryCase(paths, canary, canary_utf8);
+    }
+  } else if (mode == "lease") {
     std::wstring why;
     LocalCheck(StageProduct(stage, product_dll, rime_dll, data_dir, lexicon, true,
                             &why),

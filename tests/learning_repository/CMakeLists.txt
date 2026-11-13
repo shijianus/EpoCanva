@@ -40,7 +40,9 @@ foreach(case persistence privacy revocation errors corruption feedback managemen
     TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/run"
     LABELS "learning;repository;windows")
 endforeach()
-set_tests_properties(learning.repository.symlinks PROPERTIES SKIP_RETURN_CODE 77)
+# The symlink case has no skipped outcome. A host without
+# SeCreateSymbolicLinkPrivilege runs the equivalent unprivileged junction and
+# hardlink fixtures, and the case log names the fixture actually used.
 foreach(mode force-failure invalid-mode)
   if(mode STREQUAL "force-failure")
     set(expected_exit 1)

@@ -292,6 +292,8 @@ if(EPOCANVA_BUILD_PRODUCT)
                    "${CMAKE_CURRENT_BINARY_DIR}/french_core_tests")
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/composition_core"
                    "${CMAKE_CURRENT_BINARY_DIR}/composition_core_tests")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/reference_model"
+                   "${CMAKE_CURRENT_BINARY_DIR}/reference_model_tests")
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/language_packages"
                    "${CMAKE_CURRENT_BINARY_DIR}/language_packages_tests")
   add_subdirectory(
