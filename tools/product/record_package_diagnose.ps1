@@ -55,7 +55,8 @@ if ((Split-Path -Parent $BuildDir) -ne $buildBase -or
         (Split-Path -Leaf $BuildDir) -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$') {
     Fail 'BuildDir must be exactly <repo>/build/<preset>' 2
 }
-if (-not $StageRoot) { $StageRoot = Join-Path $BuildDir 'stage\EpoCanva-internal' }
+$productVersion = (Get-Content -LiteralPath (Join-Path $script:repoRoot 'platforms\windows\product\VERSION') -Raw -Encoding UTF8).Trim()
+if (-not $StageRoot) { $StageRoot = Join-Path $BuildDir "stage\EpoCanva-$productVersion" }
 $StageRoot = [System.IO.Path]::GetFullPath($StageRoot).TrimEnd('\', '/')
 $stageBase = [System.IO.Path]::GetFullPath((Join-Path $BuildDir 'stage'))
 if ((Split-Path -Parent $StageRoot) -ne $stageBase) { Fail 'StageRoot must be directly below BuildDir/stage' 2 }

@@ -31,7 +31,7 @@ $EvidencePath = [IO.Path]::GetFullPath($EvidencePath)
 if (-not $InstallerManifest) { $InstallerManifest = Join-Path $BuildDir 'installer\installer-manifest.json' }
 $InstallerManifest = [IO.Path]::GetFullPath($InstallerManifest)
 
-. (Join-Path $PSScriptRoot 'acceptance_evidence.ps1')
+. (Join-Path $PSScriptRoot '..\product\acceptance_evidence.ps1')
 $identity = Get-AcceptanceIdentity -RepoRoot $RepoRoot -BuildDir $BuildDir -StageRoot $StageRoot
 if (-not (Test-Path -LiteralPath $InstallerManifest -PathType Leaf)) {
     Fail 'installer-manifest.json is missing; run tools/installer/build_msi.ps1' 3
@@ -45,6 +45,14 @@ if ($manifest.destination_commit -cne $identity.commit -or
         $manifest.acceptance_profile -cne $identity.acceptance_profile -or
         $manifest.distribution_policy -cne $identity.distribution_policy) {
     Fail 'The installer manifest identity differs from the current candidate' 4
+}
+if ($manifest.extraction.verified -ne $true -or $manifest.installer.helper_included -ne $true) {
+    Fail 'The installer manifest lacks a verified payload extraction or the TSF helper' 4
+}
+$payloadCount = @(Get-Content -LiteralPath (Join-Path $StageRoot 'package.manifest') -Encoding UTF8 |
+    Where-Object { $_ -cmatch '^file\t' }).Count
+if ([int]$manifest.installer.payload_files -ne $payloadCount) {
+    Fail 'The installer payload file count differs from the staged package manifest' 4
 }
 $installerPath = [IO.Path]::GetFullPath([string]$manifest.installer.path)
 if ((Split-Path -Parent $installerPath) -ne (Join-Path $BuildDir 'installer')) {
