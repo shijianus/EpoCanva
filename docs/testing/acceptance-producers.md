@@ -32,7 +32,10 @@ Executes six `--capability` cases against the real English core and one
 `english-capabilities` evidence entry. It exits nonzero on any failed case.
 
 The cross-session case is not a real Notepad/Chrome/Word run. The separate
-`real-host` gate is the only claim of real applications.
+`real-host` gate is the only claim of real applications. Aggregate English
+acceptance now also requires passing `real-host`, including its explicit
+`english-cross-app-consistency` case; a successful producer execution alone is
+not formal acceptance of all seven capabilities.
 
 ## Offline privacy
 
@@ -45,6 +48,10 @@ privacy mode with a fresh canary, polls TCP/UDP endpoints for the process tree,
 and scans stdout/stderr and the isolated user-data tree for the canary. Writes
 the four exact gate cases and the `offline-privacy` evidence entry. A missing
 `dumpbin` or network cmdlet fails the corresponding case; it is never skipped.
+This is controlled-process development evidence. Endpoint polling can miss
+short-lived events and does not establish installed-host privacy. The aggregate
+`offline-privacy` gate also requires authorized real-host sensitive-field
+acceptance, including applicable logs/temporary data and persistence lifecycle.
 
 ## Reference-model stress
 
@@ -54,9 +61,25 @@ build/<preset>/reference_model_tests/<Config>/epocanva_reference_model_stress_te
 ```
 
 Five fixed seeds, 100,000 edits each. The negative control is
-`--force-fail` (must exit 1). The CTest cases are
+`--force-fail` (must exit 1). The CTest cases include
 `composition.core.reference_model_stress` and
 `composition.core.reference_model_can_fail`.
+
+This suite covers Korean/Japanese composers and TSF EditPlan validation; it is
+not an independent model of the full host document editor. It does not yet
+provide minimized failing edit sequences or full document caret/selection/undo
+state comparison. Do not translate its passing result into the stronger
+`stress-reference-model` aggregate gate; that gate stays BLOCKED until a genuine
+producer satisfies its complete contract.
+
+## Installed-host soak and complete CI
+
+`host-soak` and `acceptance-ci-provenance` are mandatory fail-closed release
+gates. This checkout has no authorized installed-host soak producer or complete
+acceptance-runner execution. Their required measured-report contracts are in
+`docs/product/release-gate.md`. Missing authorization, absent reports, shortened
+runs, incomplete CI layers and mismatched commits remain BLOCKED. No passing
+reports or approvals are hand-created by these tools.
 
 ## Installer
 

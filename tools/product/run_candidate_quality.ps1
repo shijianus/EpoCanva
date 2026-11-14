@@ -150,7 +150,9 @@ $status = @(& git -C $script:repoRoot status --porcelain=v1 -uall)
 if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) { Fail 'qualification requires a clean source tree' 1 }
 
 $qualityPolicyPath = Join-Path $script:repoRoot 'data\eval\candidate-v1\quality-policy-v2.json'
-$corpusManifestPath = Join-Path $script:repoRoot 'data\eval\candidate-v1\manifest.json'
+$corpusManifestPath = (Get-Item -LiteralPath $Manifest -Force).FullName
+$Manifest = $corpusManifestPath
+$CasesDir = (Get-Item -LiteralPath $CasesDir -Force).FullName
 $backendManifestPath = Join-Path $script:repoRoot 'data\locale\backend-bindings.json'
 $languagePolicyPath = Join-Path $script:repoRoot 'data\manifests\language-readiness.json'
 $packagePolicyPath = Join-Path $script:repoRoot 'data\manifests\product-package-files.inc'
@@ -163,7 +165,12 @@ $tierBLockPath = Join-Path (Split-Path -Parent $qualityPolicyPath) ([string]$pol
 Assert-Leaf $tierBLockPath 'Tier B lock'
 
 $outputDir = Join-Path $BuildDir 'candidate-quality'
-if (Test-Path -LiteralPath $outputDir) { Remove-Item -LiteralPath $outputDir -Recurse -Force }
+if (Test-Path -LiteralPath $outputDir) {
+    # Preserve the previous result, including failures, rather than overwriting
+    # the only process log when this candidate is retried.
+    $archive = Join-Path $BuildDir ('candidate-quality-history-' + [guid]::NewGuid().ToString('N'))
+    Move-Item -LiteralPath $outputDir -Destination $archive -ErrorAction Stop
+}
 $null = New-Item -ItemType Directory -Path $outputDir -Force
 $reportPath = Join-Path $outputDir 'report.json'
 $junitPath = Join-Path $outputDir 'candidate-quality.junit.xml'
@@ -364,9 +371,11 @@ try {
 $allPassed = (@($caseResults.Values | Where-Object { -not $_[0] }).Count -eq 0)
 $entryExit = if ($allPassed -and $evaluatorExit -eq 0) { 0 } else { 1 }
 $runnerCommand = @($runnerPath, '-RepoRoot', $script:repoRoot, '-BuildDir', $BuildDir,
-    '-PackageManifest', $PackageManifest, '-Resources', $Resources, '-Harness', ([IO.Path]::GetFullPath($Harness)),
+    '-PackageManifest', ([IO.Path]::GetFullPath($PackageManifest)), '-CasesDir', $CasesDir, '-Manifest', $Manifest,
+    '-Resources', $Resources, '-Harness', ([IO.Path]::GetFullPath($Harness)),
     '-RimeDll', ([IO.Path]::GetFullPath($RimeDll)), '-RimeShared', $RimeShared,
-    '-EvidencePath', $EvidencePath, '-AcceptanceProfile', $AcceptanceProfile)
+    '-EvidencePath', $EvidencePath, '-AcceptanceProfile', $AcceptanceProfile, '-TimeoutSeconds', [string]$TimeoutSeconds)
+if ($BaselineReport) { $runnerCommand += @('-BaselineReport', ([IO.Path]::GetFullPath($BaselineReport))) }
 $entry = [ordered]@{
     id = 'candidate-quality'
     kind = 'test-run'

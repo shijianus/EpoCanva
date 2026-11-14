@@ -37,6 +37,13 @@ function ConvertTo-MsiVersion([string]$Version) {
     if ($major -gt 255 -or $minor -gt 255 -or $patch -gt 65535) { return '' }
     return "$major.$minor.$patch"
 }
+function Assert-WixVersion([string]$Version, [int]$ExitCode) {
+    # Pin the complete tool build, not any major-compatible 6.x installation.
+    # This checks identity output only; it is not package-origin authentication.
+    if ($ExitCode -ne 0 -or $Version -cne '6.0.2+b3f3403') {
+        throw 'The installer requires WiX 6.0.2+b3f3403; package provenance still requires independent verification.'
+    }
+}
 function XmlEscape([string]$Text) {
     return [Security.SecurityElement]::Escape($Text)
 }
@@ -76,9 +83,8 @@ if (-not $WixPath -or -not (Test-Path -LiteralPath $WixPath -PathType Leaf)) {
 }
 $WixPath = (Get-Item -LiteralPath $WixPath).FullName
 $wixVersion = (& $WixPath --version 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $wixVersion -notmatch '^6\.') {
-    Fail "The installer builder must be the pinned WiX 6.x; got '$wixVersion'" 3
-}
+try { Assert-WixVersion $wixVersion $LASTEXITCODE }
+catch { Fail $_.Exception.Message 3 }
 
 # The helper is project-owned and built separately from the product package.
 $helper = Join-Path $buildBase 'installer-tools\bin\Release\epocanva_tip_profile_helper.exe'

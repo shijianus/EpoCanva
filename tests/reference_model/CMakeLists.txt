@@ -65,3 +65,22 @@ add_test(
 set_tests_properties(composition.core.reference_model_can_fail PROPERTIES
   TIMEOUT 120
   LABELS "composition;core;offline;negative;reference-model")
+
+# A report is an acceptance artifact, so failure to create or flush it must fail
+# closed with the documented usage/report error code rather than leaving a false
+# success result. A directory path is guaranteed to be non-writable as a file.
+add_test(
+  NAME composition.core.reference_model_report_unwritable
+  COMMAND "${CMAKE_COMMAND}"
+    -DPROBE=$<TARGET_FILE:epocanva_reference_model_stress_tests>
+    -DPROBE_ARG1=--report
+    "-DPROBE_ARG2=${CMAKE_CURRENT_BINARY_DIR}"
+    -DEXPECTED_EXIT=2
+    -DEXPECT_MARKER=FALSE
+    "-DMARKER=RESULT PASS"
+    -DCASE=reference-model-report-unwritable
+    -DTIMEOUT_SECONDS=60
+    -P "${EPOCANVA_REFERENCE_ROOT}/tests/infrastructure/assert_probe.cmake")
+set_tests_properties(composition.core.reference_model_report_unwritable PROPERTIES
+  TIMEOUT 120
+  LABELS "composition;core;offline;negative;reference-model")

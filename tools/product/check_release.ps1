@@ -127,6 +127,118 @@ function Assert-Execution($Entry) {
         throw 'The exact executed command must be recorded as a nonempty string array.'
     }
 }
+function Test-HardAcceptanceReport([string]$Id, $Report, $Entry, $Bindings) {
+    # These are measured-evidence contracts, not approval records. The gate never
+    # executes an evidence command or infers an installed-host run from unit tests.
+    if ($Id -cnotin @('stress-reference-model', 'host-soak', 'acceptance-ci-provenance') -or
+            $Report.format -cne ('epocanva-' + $Id + '-v1')) { throw "Unsupported $Id report." }
+    foreach ($key in $Bindings.Keys) {
+        if ($Report.$key -isnot [string] -or $Report.$key -cne $Bindings[$key]) {
+            throw "$Id report differs from the current candidate: $key"
+        }
+    }
+    if ($Report.result -cne 'passed') { throw "$Id did not pass its measured protocol." }
+    if ([DateTimeOffset]::Parse($Report.started_utc) -ne [DateTimeOffset]::Parse($Entry.started_utc) -or
+            [DateTimeOffset]::Parse($Report.completed_utc) -ne [DateTimeOffset]::Parse($Entry.completed_utc)) {
+        throw "$Id report and execution timestamps disagree."
+    }
+    if ($Id -ceq 'stress-reference-model') {
+        $seeds = @('0x5eed000000000001', '0x5eed000000000002', '0x5eed000000000003',
+            '0x5eed000000000004', '0x5eed000000000005')
+        if ($Report.seeds -isnot [array] -or $Report.seeds.Count -ne $seeds.Count -or
+                $Report.total_ops -isnot [int] -or $Report.total_ops -ne 500000 -or
+                $Report.oracle -cne 'independent-editor-reference-model' -or
+                $Report.failure_reduction -cne 'replay-and-minimize') {
+            throw 'Stress requires the independent editor oracle, replay/minimization and all 500000 edits.'
+        }
+        foreach ($seed in $seeds) {
+            $rows = @($Report.seeds | Where-Object { $_.seed -ceq $seed })
+            if ($rows.Count -ne 1 -or $rows[0].operations -isnot [int] -or $rows[0].operations -ne 100000 -or
+                    $rows[0].mismatches -isnot [int] -or $rows[0].mismatches -ne 0) {
+                throw "Stress seed $seed was absent, shortened or failed."
+            }
+            $operationTotal = 0L
+            foreach ($operation in @('insert', 'delete', 'caret-utf16', 'selection-utf16', 'undo', 'invalid-state')) {
+                $count = $rows[0].operation_counts.$operation
+                if ($count -isnot [int] -or $count -lt 1) { throw "Stress did not execute $operation for $seed." }
+                $operationTotal += $count
+            }
+            if ($operationTotal -ne 100000) { throw "Stress operation counts disagree for $seed." }
+        }
+        $null = Read-Reference $Report.replay_log
+        $null = Read-Reference $Report.resource_samples
+        $null = Read-Reference $Report.negative_control
+    } elseif ($Id -ceq 'host-soak') {
+        $start = [DateTimeOffset]::Parse($Report.started_utc)
+        $end = [DateTimeOffset]::Parse($Report.completed_utc)
+        $duration = ($end - $start).TotalSeconds
+        $reportedDuration = $Report.duration_seconds
+        if ($duration -lt 1800 -or $reportedDuration -is [bool] -or
+                ($reportedDuration -isnot [int] -and $reportedDuration -isnot [long] -and $reportedDuration -isnot [double]) -or
+                [double]::IsNaN([double]$reportedDuration) -or [double]::IsInfinity([double]$reportedDuration) -or
+                [double]$reportedDuration -lt 1800 -or
+                [math]::Abs([double]$reportedDuration - $duration) -gt 1 -or
+                $Report.environment -cne 'authorized-isolated-interactive-windows' -or
+                $Report.installed -isnot [bool] -or $Report.installed -ne $true -or
+                $Report.activated -isnot [bool] -or $Report.activated -ne $true) {
+            throw 'Host soak requires at least 1800 measured seconds in an authorized installed/activated desktop.'
+        }
+        if ($Report.samples -isnot [array] -or $Report.samples.Count -lt 31) {
+            throw 'Host soak lacks continuous resource and input-progress samples.'
+        }
+        $previous = $start
+        $progress = -1L
+        $previousCpuSeconds = -1.0
+        foreach ($sample in $Report.samples) {
+            $time = [DateTimeOffset]::Parse($sample.utc)
+            if ($time -lt $previous -or ($time - $previous).TotalSeconds -gt 60 -or $time -gt $end -or
+                    $sample.completed_interactions -isnot [int] -or $sample.completed_interactions -le $progress) {
+                throw 'Host soak has a sampling gap or no continuous input/candidate progress.'
+            }
+            foreach ($metric in @('working_set_bytes', 'handles', 'cpu_seconds')) {
+                $value = $sample.$metric
+                if ($value -is [bool] -or ($value -isnot [int] -and $value -isnot [long] -and $value -isnot [double]) -or
+                        [double]::IsNaN([double]$value) -or [double]::IsInfinity([double]$value) -or [double]$value -lt 0) {
+                    throw "Host soak lacks a finite nonnegative $metric measurement."
+                }
+            }
+            if ([double]$sample.cpu_seconds -lt $previousCpuSeconds) { throw 'Host soak cumulative CPU time moved backwards.' }
+            $previousCpuSeconds = [double]$sample.cpu_seconds
+            $previous = $time
+            $progress = $sample.completed_interactions
+        }
+        if (($end - $previous).TotalSeconds -gt 60) { throw 'Host soak stopped monitoring before completion.' }
+        $null = Read-Reference $Report.isolation_authorization
+        $null = Read-Reference $Report.performance_approval
+        $null = Read-Reference $Report.host_observations
+    } elseif ($Id -ceq 'acceptance-ci-provenance') {
+        # Hashes make the downloaded GitHub API snapshots immutable, not authentic
+        # signatures. Their retrieval and approval remain auditable owner duties.
+        $runPath = Read-Reference $Report.github_run
+        $jobsPath = Read-Reference $Report.github_jobs
+        $run = Get-Content -LiteralPath $runPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $jobs = Get-Content -LiteralPath $jobsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($run.head_sha -cne $Bindings.commit -or $run.repository.full_name -cne 'shijianus/EpoCanva' -or
+                $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or
+                $run.id -is [bool] -or [long]$run.id -lt 1 -or
+                $run.event -cnotin @('push', 'workflow_dispatch') -or
+                $Report.run_id -ne $run.id -or $jobs.total_count -ne @($jobs.jobs).Count) {
+            throw 'Acceptance CI requires complete successful GitHub snapshots for this exact candidate.'
+        }
+        foreach ($name in @('contract-gate', 'root-unit-tests', 'backend', 'windows-product',
+                'windows-integration-acceptance', 'full-quality-stress-acceptance')) {
+            $rows = @($jobs.jobs | Where-Object { $_.name -ceq $name })
+            if ($rows.Count -ne 1 -or $rows[0].head_sha -cne $Bindings.commit -or
+                    $rows[0].status -cne 'completed' -or $rows[0].conclusion -cne 'success' -or
+                    [string]::IsNullOrWhiteSpace($rows[0].runner_name)) {
+                throw "Missing, stale, incomplete or nonpassing acceptance CI job: $name"
+            }
+        }
+        $null = Read-Reference $Report.artifact_manifest
+        $null = Read-Reference $Report.runner_authorization
+    }
+    return $true
+}
 function Get-CqProperty($Object, [string]$Name) {
     if ($null -eq $Object) { throw "candidate-quality input is missing $Name." }
     $property = $Object.PSObject.Properties[$Name]
@@ -848,14 +960,22 @@ Add-Gate 'installer-toolchain' {
 }
 
 $requiredTests = [ordered]@{
-    'installer-lifecycle' = @('install', 'upgrade', 'repair', 'uninstall', 'rollback', 'cleanup')
-    'real-host' = @('registration', 'test-start', 'notepad', 'chromium', 'word', 'sensitive-fields', 'cleanup')
+    'installer-lifecycle' = @('install', 'repeat-install', 'upgrade', 'repair', 'uninstall', 'rollback', 'cleanup',
+        'multi-user', 'registration', 'user-data-policy')
+    'real-host' = @('registration', 'test-start', 'notepad', 'chromium', 'word', 'sensitive-fields',
+        'english-cross-app-consistency', 'cleanup')
     'english-capabilities' = @('frequency', 'context-learning', 'morphology', 'spelling', 'segmentation', 'abbreviation', 'cross-app-consistency')
     'offline-privacy' = @('runtime-no-network', 'dependency-review', 'no-content-logging', 'sensitive-no-persistence')
     'language-acceptance' = @('en', 'zh', 'fr', 'ja', 'ko' | ForEach-Object {
         $language = $_
         'core', 'engine', 'tsf', 'installed-host' | ForEach-Object { "$language.$_" }
     })
+    'stress-reference-model' = @('seed-1', 'seed-2', 'seed-3', 'seed-4', 'seed-5', 'negative-control',
+        'replay-minimization', 'resource-growth')
+    'host-soak' = @('duration', 'notepad', 'chromium', 'word', 'language-switch', 'focus-switch',
+        'candidate-interaction', 'long-input', 'resource-growth', 'cleanup')
+    'acceptance-ci-provenance' = @('commit', 'runner', 'build-configuration', 'toolchain', 'junit',
+        'exit-codes', 'artifact-hashes', 'source-archive')
     'signing' = @('EpoCanva.exe', 'epocanva_tsf.dll', 'rime.dll', 'installer', 'publisher', 'timestamp', 'trust')
 }
 $requiredIds = @('project-license', 'lexicon-redistribution', 'package-diagnose') + @($requiredTests.Keys)
@@ -911,7 +1031,7 @@ foreach ($id in $requiredIds) {
                 'Recorded headless diagnosis succeeded with an explicit isolated user-data root; registration status is not release evidence.'
             } else {
                 if ($entry.kind -cne 'test-run') { throw 'An executed test-run with JUnit and a process log is required.' }
-                if ($id -in @('installer-lifecycle', 'signing', 'real-host', 'language-acceptance') -and $null -eq $installer) {
+                if ($id -in @('installer-lifecycle', 'signing', 'real-host', 'language-acceptance', 'host-soak', 'acceptance-ci-provenance') -and $null -eq $installer) {
                     throw 'Installer/signing/installed-host tests require the exact installer artifact.'
                 }
                 if ($id -eq 'language-acceptance' -and -not (Test-GatePassed 'language-readiness')) {
@@ -927,7 +1047,7 @@ foreach ($id in $requiredIds) {
                 $reportBindings = @{ version = $version; commit = $source.commit; source_sha256 = $source.source_sha256;
                     package_manifest_sha256 = $manifest.sha256; language_policy_sha256 = $languagePolicyHash;
                     acceptance_profile = $AcceptanceProfile }
-                if ($id -in @('installer-lifecycle', 'signing', 'real-host', 'language-acceptance')) {
+                if ($id -in @('installer-lifecycle', 'signing', 'real-host', 'language-acceptance', 'host-soak', 'acceptance-ci-provenance')) {
                     $reportBindings['installer_sha256'] = $evidence.installer.sha256
                 }
                 foreach ($key in $reportBindings.Keys) {
@@ -941,6 +1061,17 @@ foreach ($id in $requiredIds) {
                     if (@($cases | Where-Object { $_.GetAttribute('name') -ceq $qualifiedName }).Count -ne 1) {
                         throw "Missing/duplicate executed acceptance case: $qualifiedName"
                     }
+                }
+                if ($id -in @('stress-reference-model', 'host-soak', 'acceptance-ci-provenance')) {
+                    $reportPath = Read-Reference $entry.report
+                    $measured = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $null = Test-HardAcceptanceReport $id $measured $entry $reportBindings
+                }
+                if ($id -ceq 'english-capabilities' -and -not (Test-GatePassed 'real-host')) {
+                    throw 'English cross-app consistency requires installed Notepad/Chromium/Word evidence; controlled sessions alone are insufficient.'
+                }
+                if ($id -ceq 'offline-privacy' -and -not (Test-GatePassed 'real-host')) {
+                    throw 'Formal privacy acceptance requires the authorized installed-host sensitive-field run; import scans and controlled endpoint polling alone are insufficient.'
                 }
                 "$($cases.Count) executed passing cases with hashed runner, JUnit and process log: $id."
             }

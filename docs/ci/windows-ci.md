@@ -1,8 +1,10 @@
 # Minimal Windows CI — design and executable workflow
 
-**Status**: contract gate **enabled**; backend, product and nightly stress
-remain design-only. `.github/workflows/windows-ci.yml` now exists and implements
-section 3.1 on a GitHub-hosted `windows-latest` runner. It registers only the
+**Status**: contract gate and serial hosted `root-unit-tests` are implemented;
+backend, product, installed-host acceptance and full quality/stress acceptance
+remain design-only/BLOCKED. The new root job has not yet executed remotely for
+this working-tree change. `.github/workflows/windows-ci.yml` uses the official
+`windows-2022` image and a non-gating `windows-latest` canary. It registers only
 jobs that need no external Tier 2 build inputs. The section 3.2–3.4 jobs require
 the self-hosted runner with the hash-pinned immutable input cache from section 2;
 they are still not enabled, and enabling them is a separate reviewed change.
@@ -42,6 +44,20 @@ this document stays the single description of what runs:
   self-hosted nightly stress, which is not enabled.
 - The hosted runner sets `core.autocrlf=false`/`core.eol=lf` before checkout;
   `.gitattributes` `eol=lf` already forces LF, so this is defensive.
+
+The hosted root job runs after `contract-gate`, configures/builds every root
+Debug target, exports the actual CTest registration, executes the complete suite
+serially, and checks the exact registered/executed name set with zero failures,
+errors or skipped cases using `tools/ci/verify_root_junit.py`. Logs, commit,
+runner/image/tool versions, process exit codes and JUnit are uploaded even on
+failure. This is a root-unit layer, not backend/product/installed-host acceptance.
+No untrusted pull request is sent to a privileged self-hosted runner.
+
+The aggregate release gate now requires `acceptance-ci-provenance` for the exact
+candidate with all six layers/jobs (`contract-gate`, `root-unit-tests`, `backend`,
+`windows-product`, `windows-integration-acceptance`,
+`full-quality-stress-acceptance`). Missing infrastructure or jobs remain BLOCKED;
+the new hosted job does not waive or fabricate any of them.
 
 ## 1. Constraints that shape the pipeline
 

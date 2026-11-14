@@ -52,26 +52,64 @@ function Find-Dumpbin {
     if ($null -ne $onPath) { return $onPath.Source }
     return ''
 }
+function Get-PrivacyScanFiles([string]$Root) {
+    $directory = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
+    if (-not $directory.PSIsContainer) { throw 'Privacy scan root is not a directory.' }
+    $pending = [Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($directory.FullName)
+    while ($pending.Count -gt 0) {
+        $path = $pending.Dequeue()
+        $current = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Privacy scan cannot follow a reparse point.'
+        }
+        foreach ($item in (Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Privacy scan cannot follow a reparse point.'
+            }
+            if ($item.PSIsContainer) { $pending.Enqueue($item.FullName) }
+            else { $item }
+        }
+    }
+}
 function Find-CanaryInTree([string]$Root, [string]$Needle, [ref]$FilesScanned) {
-    $utf16 = -join ($Needle.ToCharArray() | ForEach-Object { [string]$_ + [char]0 })
-    foreach ($item in (Get-ChildItem -LiteralPath $Root -Recurse -File -Force -ErrorAction SilentlyContinue)) {
-        if ($item.Length -gt 16MB) { continue }
-        try { $bytes = [IO.File]::ReadAllBytes($item.FullName) } catch { continue }
-        ++$FilesScanned.Value
-        $text = [Text.Encoding]::UTF8.GetString($bytes)
-        if ($text.Contains($Needle) -or $text.Contains($utf16)) { return $item.FullName }
-        $unicode = [Text.Encoding]::Unicode.GetString($bytes)
-        if ($unicode.Contains($Needle)) { return $item.FullName }
+    if (-not $Needle) { throw 'Privacy scan requires a nonempty canary.' }
+    # Canary characters are ASCII. Latin-1 preserves every byte, including the
+    # UTF-16LE zero bytes, without decoder boundary or replacement ambiguity.
+    $encoding = [Text.Encoding]::GetEncoding(28591)
+    $utf16 = $encoding.GetString([Text.Encoding]::Unicode.GetBytes($Needle))
+    $overlapBytes = [math]::Max($Needle.Length, $utf16.Length) - 1
+    $buffer = New-Object byte[] 65536
+    foreach ($item in @(Get-PrivacyScanFiles $Root)) {
+        $stream = [IO.File]::Open($item.FullName, [IO.FileMode]::Open,
+            [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $carry = ''
+            while (($readBytes = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $text = $carry + $encoding.GetString($buffer, 0, $readBytes)
+                if ($text.Contains($Needle) -or $text.Contains($utf16)) { return $item.FullName }
+                $carry = $text.Substring([math]::Max(0, $text.Length - $overlapBytes))
+            }
+            ++$FilesScanned.Value
+        } finally { $stream.Dispose() }
     }
     return ''
 }
 function Find-LearningStoreFile([string]$Root) {
-    foreach ($item in (Get-ChildItem -LiteralPath $Root -Recurse -File -Force -ErrorAction SilentlyContinue)) {
-        if ($item.Name -match 'learning' -and $item.Extension -in @('.dat', '.v2', '.tmp')) {
+    foreach ($item in @(Get-PrivacyScanFiles $Root)) {
+        if ($item.Name -match 'learning' -and $item.Extension -in @('.dat', '.v2', '.tmp', '.bak', '.corrupt')) {
             return $item.FullName
         }
     }
     return ''
+}
+function Write-PrivacyProcessLog([string]$Path, [string]$Header, [string]$Stdout,
+        [string]$Stderr, [string]$Canary) {
+    if (-not $Canary) { throw 'Privacy log redaction requires a canary.' }
+    $redacted = [regex]::Replace(($Stdout + $Stderr), [regex]::Escape($Canary),
+        '[REDACTED]', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    [IO.File]::AppendAllText($Path, ($Header + "`n" + $redacted + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
 }
 function Invoke-ObservedPrivacyRun {
     param(
@@ -102,6 +140,8 @@ function Invoke-ObservedPrivacyRun {
         ($null -ne (Get-Command Get-NetUDPEndpoint -ErrorAction SilentlyContinue))
     if (-not $monitoringAvailable) { $networkSeen = $true }
     $endpointSamples = 0
+    $observationSamples = 0
+    $timedOut = $false
     $knownPids = @()
     $lastTreeRefresh = [DateTime]::MinValue
     $null = $process.Start()
@@ -110,33 +150,43 @@ function Invoke-ObservedPrivacyRun {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while (-not $process.HasExited) {
         if ([DateTime]::UtcNow -gt $deadline) {
+            $timedOut = $true
             try { $process.Kill() } catch { }
             break
         }
-        if (([DateTime]::UtcNow - $lastTreeRefresh).TotalMilliseconds -ge 1000) {
-            $lastTreeRefresh = [DateTime]::UtcNow
-            $knownPids = @($process.Id)
-            $queue = [System.Collections.Generic.Queue[int]]::new()
-            $queue.Enqueue($process.Id)
-            while ($queue.Count -gt 0) {
-                $parent = $queue.Dequeue()
-                $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$parent" -ErrorAction SilentlyContinue)
-                foreach ($child in $children) {
-                    if ($knownPids -notcontains [int]$child.ProcessId) {
-                        $knownPids += [int]$child.ProcessId
-                        $queue.Enqueue([int]$child.ProcessId)
+        try {
+            if (([DateTime]::UtcNow - $lastTreeRefresh).TotalMilliseconds -ge 1000) {
+                $lastTreeRefresh = [DateTime]::UtcNow
+                # Retain discovered descendants until the run ends; a parent
+                # exiting must not silently remove its child from observation.
+                if ($knownPids -notcontains $process.Id) { $knownPids += $process.Id }
+                $tree = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+                $added = $true
+                while ($added) {
+                    $added = $false
+                    foreach ($child in $tree) {
+                        if ($knownPids -contains [int]$child.ParentProcessId -and
+                                $knownPids -notcontains [int]$child.ProcessId) {
+                            $knownPids += [int]$child.ProcessId
+                            $added = $true
+                        }
                     }
                 }
             }
-        }
-        foreach ($processId in $knownPids) {
-            if (-not $monitoringAvailable) { break }
-            $tcp = @(Get-NetTCPConnection -OwningProcess $processId -ErrorAction SilentlyContinue)
-            $udp = @(Get-NetUDPEndpoint -OwningProcess $processId -ErrorAction SilentlyContinue)
-            if ($tcp.Count -gt 0 -or $udp.Count -gt 0) {
-                $networkSeen = $true
-                $endpointSamples += ($tcp.Count + $udp.Count)
+            if ($monitoringAvailable) {
+                # Query the tables, not a possibly absent per-process CIM
+                # instance. Query failures are not evidence of zero endpoints.
+                $tcp = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $knownPids -contains [int]$_.OwningProcess })
+                $udp = @(Get-NetUDPEndpoint -ErrorAction Stop | Where-Object { $knownPids -contains [int]$_.OwningProcess })
+                ++$observationSamples
+                if ($tcp.Count -gt 0 -or $udp.Count -gt 0) {
+                    $networkSeen = $true
+                    $endpointSamples += ($tcp.Count + $udp.Count)
+                }
             }
+        } catch {
+            $monitoringAvailable = $false
+            $networkSeen = $true
         }
         Start-Sleep -Milliseconds 100
     }
@@ -150,13 +200,13 @@ function Invoke-ObservedPrivacyRun {
     $completed = [DateTimeOffset]::UtcNow
     $directory = Split-Path -Parent $LogPath
     if ($directory) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
-    [IO.File]::AppendAllText($LogPath,
-        ("===== offline-privacy product run | exit=$exitCode | started=$($started.ToString('o')) | completed=$($completed.ToString('o')) =====`n" +
-         $stdout + $stderr + "`n"),
-        (New-Object System.Text.UTF8Encoding($false)))
+    if ($observationSamples -eq 0) { $monitoringAvailable = $false }
+    Write-PrivacyProcessLog -Path $LogPath `
+        -Header "===== offline-privacy product run | exit=$exitCode | started=$($started.ToString('o')) | completed=$($completed.ToString('o')) =====" `
+        -Stdout $stdout -Stderr $stderr -Canary ([string]$Environment['EPOCANVA_PRIVACY_CANARY'])
     return [pscustomobject]@{
         exit_code = [int]$exitCode
-        passed = ($exitCode -eq 0 -and (($stdout + $stderr) -match 'RESULT PASS'))
+        passed = (-not $timedOut -and $exitCode -eq 0 -and (($stdout + $stderr) -match 'RESULT PASS'))
         seconds = $watch.Elapsed.TotalSeconds
         started_utc = $started
         completed_utc = $completed
@@ -199,6 +249,9 @@ $rimeDll = @($identity.receipt.binaries | Where-Object { $_.name -eq 'rime' })[0
 $dataDir = Join-Path $RepoRoot 'data\product'
 $lexicon = Join-Path $RepoRoot 'build\product-data\epocanva_en_alpha.tsv'
 $outputDir = Join-Path $BuildDir 'offline-privacy'
+if (Test-Path -LiteralPath $outputDir) {
+    Move-Item -LiteralPath $outputDir -Destination (Join-Path $BuildDir ('offline-privacy-history-' + [guid]::NewGuid().ToString('N'))) -ErrorAction Stop
+}
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 $logPath = Join-Path $outputDir 'process.log'
 $junitPath = Join-Path $outputDir 'offline-privacy.junit.xml'
@@ -282,9 +335,7 @@ $filesScanned = 0
 $treeHit = ''
 # Scan the whole isolated run root. It contains only this test's staged product
 # and synthetic user data, so a hit anywhere is a persistence/logging failure.
-if (Test-Path -LiteralPath $runRoot) {
-    $treeHit = Find-CanaryInTree -Root $runRoot -Needle $Canary -FilesScanned ([ref]$filesScanned)
-}
+$treeHit = Find-CanaryInTree -Root $runRoot -Needle $Canary -FilesScanned ([ref]$filesScanned)
 $capturedHasCanary = $captured.Contains($Canary)
 $noContentLogging = $privacy.passed -and -not $capturedHasCanary -and -not $treeHit
 $cases.Add([pscustomobject]@{

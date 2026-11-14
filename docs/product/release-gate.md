@@ -54,6 +54,9 @@ The native `--diagnose` report's `package=ready` means **local package integrity
 - Languages: the exact ordered required set is `en,zh,fr,ja,ko`. A central status field cannot by itself satisfy this gate. Each language needs actual data in the fixed package policy, current hashed source references and real core/engine/TSF/installed-host test results. Full English frequency/context learning/morphology/spelling/segmentation/abbreviation/cross-app tests remain separately mandatory.
 - Installation and real hosts: exact installer artifact, available builder and actual install/upgrade/repair/uninstall/rollback/cleanup, real Notepad/Chromium/Word input, sensitive-field and cleanup evidence. Registration alone or core algorithms alone do not count.
 - Privacy/offline: actual runtime and dependency review plus no-content-logging and sensitive-no-persistence evidence. Windows' ordinary in-process TSF DLL guarantee is architectural; it is not an OS network sandbox. Android can enforce absence of network permission by omitting `android.permission.INTERNET`. This Windows checker does not certify an Android build.
+- Reference-model stress: `stress-reference-model` is mandatory. Its measured report must contain all five fixed seeds with exactly 100,000 edits each, an independent editor oracle, insert/delete/UTF-16 caret/UTF-16 selection/undo/invalid-state coverage per seed, replay/minimization, resource samples and a negative control. The existing Korean/Japanese/EditPlan stress suite is useful component evidence, but does not by itself satisfy this complete-editor contract.
+- Installed-host soak: `host-soak` requires at least 1,800 measured seconds in an authorized isolated interactive Windows desktop, installed and activated input, continuous input/candidate progress and resource samples no more than 60 seconds apart, approved performance criteria, host observations and cleanup. Sleeping for thirty minutes is not soak evidence.
+- Acceptance CI: `acceptance-ci-provenance` requires successful, exact-commit GitHub run/jobs snapshots for all six required layers/jobs, an artifact manifest and runner authorization. Contract-only CI or an older successful commit cannot satisfy product acceptance. The checker performs no network access; hashing API snapshots binds their bytes but does not authenticate the retrieval or authorize a runner.
 - Stable inputs: current source, receipt, policy, licence/language decisions, manifest, all payloads, source archive and referenced evidence are rechecked before reporting.
 
 ## Release evidence format 2
@@ -78,12 +81,48 @@ Every JUnit contains exactly one property each named `epocanva.version`, `epocan
 
 | Entry ID | Required case suffixes (each fully named `<id>.<suffix>`) |
 | --- | --- |
-| `installer-lifecycle` | `install`, `upgrade`, `repair`, `uninstall`, `rollback`, `cleanup` |
-| `real-host` | `registration`, `test-start`, `notepad`, `chromium`, `word`, `sensitive-fields`, `cleanup` |
+| `installer-lifecycle` | `install`, `repeat-install`, `upgrade`, `repair`, `uninstall`, `rollback`, `cleanup`, `multi-user`, `registration`, `user-data-policy` |
+| `real-host` | `registration`, `test-start`, `notepad`, `chromium`, `word`, `sensitive-fields`, `english-cross-app-consistency`, `cleanup` |
 | `english-capabilities` | `frequency`, `context-learning`, `morphology`, `spelling`, `segmentation`, `abbreviation`, `cross-app-consistency` |
 | `offline-privacy` | `runtime-no-network`, `dependency-review`, `no-content-logging`, `sensitive-no-persistence` |
 | `language-acceptance` | For each of `en`, `zh`, `fr`, `ja`, `ko`: `<language>.core`, `<language>.engine`, `<language>.tsf`, `<language>.installed-host` |
+| `stress-reference-model` | `seed-1` … `seed-5`, `negative-control`, `replay-minimization`, `resource-growth` |
+| `host-soak` | `duration`, `notepad`, `chromium`, `word`, `language-switch`, `focus-switch`, `candidate-interaction`, `long-input`, `resource-growth`, `cleanup` |
+| `acceptance-ci-provenance` | `commit`, `runner`, `build-configuration`, `toolchain`, `junit`, `exit-codes`, `artifact-hashes`, `source-archive` |
 | `signing` | `EpoCanva.exe`, `epocanva_tsf.dll`, `rime.dll`, `installer`, `publisher`, `timestamp`, `trust` |
+
+The three hard-acceptance entries additionally require a hash-bound `report` with
+`format: epocanva-<entry-id>-v1`, all matching JUnit identity bindings, `result`,
+`started_utc` and `completed_utc` exactly matching the recorded execution.
+`host-soak` and `acceptance-ci-provenance` also bind the exact installer SHA-256.
+Missing, failed, shortened, timed-out, unexecuted or mismatched evidence remains
+BLOCKED; adding these contracts does not manufacture a passing producer.
+
+For `stress-reference-model`, `seeds[]` contains the five fixed hexadecimal seed
+IDs, integer `operations: 100000`, integer `mismatches: 0` and positive integer
+`operation_counts` for each required operation. `total_ops` is 500000,
+`oracle` is `independent-editor-reference-model`, `failure_reduction` is
+`replay-and-minimize`; `replay_log`, `resource_samples`, `negative_control` are
+file references. The existing component stress report intentionally does not
+meet this schema until the missing editor/reduction coverage is implemented.
+
+For `host-soak`, `duration_seconds` agrees with elapsed timestamps and is at
+least 1800, `environment` is `authorized-isolated-interactive-windows`, and
+`installed`/`activated` are true. At least 31 `samples[]` record `utc`, increasing
+`completed_interactions`, `working_set_bytes`, `handles`, `cpu_seconds`.
+`isolation_authorization`, `performance_approval`, `host_observations` are file
+references. The schema enforces continuity and identity, not OS sandboxing or
+approval authenticity; actual thresholds and behavioral assertions belong in
+the authorized producer and approved test plan.
+
+For `acceptance-ci-provenance`, `github_run` and `github_jobs` reference complete
+GitHub REST run/jobs snapshots, `run_id` matches the successful completed run,
+and every required job (`contract-gate`, `root-unit-tests`, `backend`,
+`windows-product`, `windows-integration-acceptance`,
+`full-quality-stress-acceptance`) must have succeeded at this exact commit.
+`artifact_manifest` and `runner_authorization` are file references. A protected
+runner and controlled retrieval are still required; JSON fields are not signed
+attestations.
 
 The central `data/manifests/language-readiness.json` is format 1, with exact `required_languages` and five unique `languages[]`. A completed language row has `id`, `status: "implemented"`, `data_status: "packaged"`, nonempty `payload_paths[]` (all fixed manifest payloads), and nonempty `source_paths[]` (file references matching actual sources). Initial `blocked` / `absent` / `incomplete` rows accurately prevent readiness. Tests must exercise real language behavior, not merely share these names.
 
@@ -95,12 +134,18 @@ that cannot execute its work exits nonzero rather than skipping.
 
 - `tools/product/run_english_acceptance.ps1` — six separately executed English
   core capabilities plus the product TSF multi-session case. The latter is
-  cross-session consistency, not a real-application claim.
+  cross-session consistency, not a real-application claim. The aggregate
+  `english-capabilities` gate also requires passing `real-host`, including the
+  explicit installed-host `english-cross-app-consistency` case; this producer
+  alone cannot turn the seventh capability green.
 - `tools/product/run_offline_privacy.ps1` — static import review, live TCP/UDP
   endpoint observation of the product sink process tree, and a synthetic canary
   searched through stdout, stderr and the isolated user-data tree, including a
   password-scoped document. A missing monitoring cmdlet or `dumpbin` fails the
-  corresponding case.
+  corresponding case. This controlled-process polling is development evidence,
+  not proof that no transient network event occurred in installed applications.
+  The aggregate privacy gate additionally requires authorized `real-host`
+  sensitive-field acceptance; static imports and this producer cannot replace it.
 - `tests/reference_model` — the 100,000-edit × 5 fixed-seed aggregate protocol
   with an independent Korean automaton, Japanese history/replay and TSF
   `EditPlan` status models. It has a separate `--force-fail` negative control.

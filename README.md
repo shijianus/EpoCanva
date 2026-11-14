@@ -46,6 +46,22 @@ installer-lifecycle、real-host、language-acceptance 的 installed-host 以及�
 `technical_ready`、`distribution_authorized`、`signature_verified`、`release_ready` 分开报告。
 包内文件校验通过不代表已获得分发许可或已完成系统输入验证。
 
+### 2026-11-14 验收加固轮次
+
+本轮从 `0b449da52dcb80660928ee10b45ec1df570c7810` 开始。旧的
+`39176fc` readiness、`8e7b8b4` CI 与历史二进制不能作为本轮证据。
+发布检查现在额外强制 `stress-reference-model`、`host-soak`、
+`acceptance-ci-provenance`：缺失、未执行、时间不足或提交不一致都保持阻塞。
+已有日/韩组字和 EditPlan 的 500,000 操作测试属于组件压力覆盖，不能替代完整
+编辑参考模型、失败序列最小化或真实宿主 soak。英文同进程多会话测试也不能
+独立证明跨 Notepad、Chrome、Word 一致性。
+
+当前不是已验收版本。Tier B 语料及质量/性能阈值仍须真实审批；本工作区是
+同步目录，未获得在此安装/注册输入法或运行真实宿主生命周期测试的隔离授权。
+所有本轮命令、实际退出码和未完成事项会记录到
+`docs/reports/acceptance-round-20261114.md` 及 `build/acceptance-20261114/`。
+不得把本轮门禁新增代码或组件测试通过写成 `INTERNAL_ACCEPTANCE_COMPLETE`。
+
 ## 现在能做什么，不能做什么
 
 已具备五语言离线 n-gram 模型、真实 Rime 中文词典、Hunspell 法文字典、Mozc 数据驱动的日文解码和韩文两套式组字。后端不是只查询前缀：上下文会影响补全、下一词和多词缩写展开，候选选择采用独立的宿主提交确认协议。2026-11-05 复审把上下文缩写展开改为新装默认开启（`abbreviation_enabled=1`），否则新用户只能看到前缀补全，当前缩写结合上下文的路径形同未交付；拼写、形态和二次编辑建议仍是显式 opt-in。中文简拼（如 `nh` → 你好）由来自身份校验 Terra 词典的有界声母/汉字索引加字符模型解码，合法全拼仍由 Rime 处理；`NEXT_WORD` 只返回词，不再让标点占据下一词首位。

@@ -480,6 +480,9 @@ PlanExpectation ExpectReplace(const epocanva::tsf::edit::ContextIdentity& contex
 
 struct Failure {
   bool failed = false;
+  std::uint64_t seed = 0;
+  std::size_t op = 0;
+  std::string category;
   std::string detail;
 };
 
@@ -515,6 +518,9 @@ void RecordFailure(Failure* failure, std::uint64_t seed, std::size_t op, const c
                    const std::string& detail) {
   if (failure->failed) return;
   failure->failed = true;
+  failure->seed = seed;
+  failure->op = op;
+  failure->category = category;
   char prefix[160];
   std::snprintf(prefix, sizeof(prefix), "seed=0x%016llx op=%zu category=%s: ",
                 static_cast<unsigned long long>(seed), op, category);
@@ -839,6 +845,7 @@ bool RunSeed(std::uint64_t seed, std::size_t operations, SeedStatistics* statist
       RunPlanOp(&rng, failure, seed, op, &checks, &last_plan_sequence);
       ++statistics->plan_ops;
     }
+    statistics->operations = op + 1;
     if (failure->failed) break;
     if ((op + 1) % 10000 == 0) {
       const std::size_t working_set = CurrentWorkingSet();
@@ -870,7 +877,6 @@ bool RunSeed(std::uint64_t seed, std::size_t operations, SeedStatistics* statist
       }
     }
   }
-  statistics->operations = failure->failed ? 0 : operations;
   statistics->checks = checks;
   statistics->handles_end = CurrentHandleCount();
   statistics->final_working_set_bytes = CurrentWorkingSet();
@@ -888,20 +894,38 @@ bool RunSeed(std::uint64_t seed, std::size_t operations, SeedStatistics* statist
   return !failure->failed;
 }
 
-void WriteReport(const std::string& path, std::size_t ops_per_seed,
+std::size_t TotalOperations(const std::vector<SeedStatistics>& seeds) {
+  std::size_t total = 0;
+  for (const auto& seed : seeds) total += seed.operations;
+  return total;
+}
+
+bool WriteReport(const std::string& path, std::size_t ops_per_seed,
                  const std::vector<SeedStatistics>& seeds, const Failure& failure,
                  bool passed) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (!out) return;
+  if (!out) return false;
   out << "{\n";
   out << "  \"format\": \"epocanva-reference-model-stress-v1\",\n";
   out << "  \"ops_per_seed\": " << ops_per_seed << ",\n";
   out << "  \"seed_count\": " << seeds.size() << ",\n";
-  out << "  \"total_ops\": " << (ops_per_seed * seeds.size()) << ",\n";
+  out << "  \"total_ops\": " << TotalOperations(seeds) << ",\n";
   out << "  \"result\": \"" << (passed ? "passed" : "failed") << "\",\n";
   out << "  \"failure\": ";
   if (failure.failed) {
     out << "\"" << (failure.detail.find('"') == std::string::npos ? failure.detail : "mismatch") << "\",\n";
+  } else {
+    out << "null,\n";
+  }
+  out << "  \"first_failure\": ";
+  if (failure.failed) {
+    const std::size_t replay_operations =
+        failure.op < ops_per_seed ? failure.op + 1 : ops_per_seed;
+    out << "{\"seed\": \"0x" << std::hex << failure.seed << std::dec
+        << "\", \"op\": " << failure.op << ", \"category\": \""
+        << failure.category << "\", \"replay\": {\"seed\": \"0x"
+        << std::hex << failure.seed << std::dec << "\", \"ops\": "
+        << replay_operations << "}},\n";
   } else {
     out << "null,\n";
   }
@@ -918,6 +942,10 @@ void WriteReport(const std::string& path, std::size_t ops_per_seed,
     out << (index + 1 == seeds.size() ? "\n" : ",\n");
   }
   out << "  ]\n}\n";
+  out.flush();
+  if (!out) return false;
+  out.close();
+  return !out.fail();
 }
 
 void PrintUsage() {
@@ -981,36 +1009,42 @@ int main(int argc, char** argv) {
   } else {
     seeds.assign(std::begin(kSeeds), std::end(kSeeds));
   }
-  std::vector<SeedStatistics> statistics(seeds.size());
+  std::vector<SeedStatistics> statistics;
+  statistics.reserve(seeds.size());
   Failure failure;
   bool passed = true;
   for (std::size_t index = 0; index < seeds.size(); ++index) {
     failure = {};
-    passed = RunSeed(seeds[index], ops_per_seed, &statistics[index], &failure) && passed;
+    statistics.emplace_back();
+    passed = RunSeed(seeds[index], ops_per_seed, &statistics.back(), &failure) && passed;
     if (!quiet) {
       std::printf("seed=0x%016llx ops=%zu checks=%zu duration_ms=%llu handles=%zu->%zu "
                   "peak_ws=%zu final_ws=%zu %s\n",
                   static_cast<unsigned long long>(seeds[index]),
-                  statistics[index].operations, statistics[index].checks,
-                  static_cast<unsigned long long>(statistics[index].duration_ms),
-                  statistics[index].handles_start, statistics[index].handles_end,
-                  statistics[index].peak_working_set_bytes,
-                  statistics[index].final_working_set_bytes,
+                  statistics.back().operations, statistics.back().checks,
+                  static_cast<unsigned long long>(statistics.back().duration_ms),
+                  statistics.back().handles_start, statistics.back().handles_end,
+                  statistics.back().peak_working_set_bytes,
+                  statistics.back().final_working_set_bytes,
                   failure.failed ? "FAIL" : "PASS");
     }
     if (failure.failed) {
       std::fprintf(stderr, "REFERENCE MODEL FAILURE: %s\n", failure.detail.c_str());
       std::fprintf(stderr, "Replay: --seed 0x%016llx --ops %zu\n",
-                   static_cast<unsigned long long>(seeds[index]), ops_per_seed);
+                   static_cast<unsigned long long>(failure.seed), ops_per_seed);
       break;
     }
   }
-  if (!report_path.empty()) WriteReport(report_path, ops_per_seed, statistics, failure, passed);
+  if (!report_path.empty() &&
+      !WriteReport(report_path, ops_per_seed, statistics, failure, passed)) {
+    std::fprintf(stderr, "REFERENCE MODEL REPORT WRITE FAILURE: %s\n", report_path.c_str());
+    return 2;
+  }
   if (!passed) {
     std::printf("RESULT FAIL\n");
     return 1;
   }
   std::printf("RESULT PASS seeds=%zu ops_per_seed=%zu total_ops=%zu\n",
-              seeds.size(), ops_per_seed, seeds.size() * ops_per_seed);
+              statistics.size(), ops_per_seed, TotalOperations(statistics));
   return 0;
 }

@@ -47,18 +47,15 @@ this document stays the single description of what exists:
   replay requires the reviewed ranked shared data
   (`build/backend-chinese-ranked/shared`), which the harness copies into an
   isolated work tree so the staged inputs stay immutable.
-- There is no 20-query warm-up phase; `latency_ms.warm` aggregates every query
-  except the single cold first query of each language, and the report records
-  `warmup_queries: 0` so the numbers are not mistaken for the designed
-  post-warm-up regime.
-- `wrong_language_rate` is **not observable** at the public v1 candidate ABI:
-  candidates carry no per-candidate language attribution, so the report
-  records `wrong_language_rate: null` and a `not_observable` status. It is
-  never written as 0.0, and no Unicode script heuristic substitutes for a
-  measurement. The quality policy's `wrong_language_observable` predicate is
-  therefore not evaluable, which caps policy v1 at `not_evaluable`/`failed`
-  — a gate cannot pass on an unobservable mandatory predicate, and
-  qualification mode exits nonzero until E4 exposes candidate language.
+- Formal qualification reads the warm-up count from `quality-policy-v2.json`
+  (`warmup_queries: 20`) and passes it explicitly to the evaluator/harness.
+  A baseline experiment may explicitly request 0; its results are not the
+  formal post-warm-up protocol and must retain the actual count in identity.
+- The public v1 ABI still has no per-candidate language attribution. The native
+  evaluation-only backend now exposes internal candidate `language_tag`
+  observations in result schema v3; the evaluator computes wrong-language rate
+  from those fields, not a Unicode script heuristic. Missing required
+  observations fail closed rather than being recorded as zero.
 - The evaluator is fail-closed (`--mode baseline|qualification`): a
   quality_gate block with versioned mandatory predicates and statuses
   `failed`/`not_evaluable`/`passed` (`met` true only when `passed`);
@@ -312,8 +309,9 @@ For each case it:
 `--load-only` opens the session, loads resources, reports wall time and peak
 working set, then exits without reading cases.
 
-The harness is not implemented in this round. The command is the target
-interface, not a claim that it runs.
+The native harness is implemented at
+`tests/candidate_evaluation/candidate_eval_cli.cc`, built when the backend target
+is available. Its presence is not evidence that qualification ran or passed.
 
 ## 7. Evaluator and report
 
@@ -376,11 +374,11 @@ python -B tools/backend/evaluate_candidates.py \
   --cases data/eval/candidate-v1/cases \
   --manifest data/eval/candidate-v1/manifest.json \
   --resources build/product-resources/product \
-  --harness build/backend-service/Release/epocanva_candidate_eval_cli.exe \
+  --harness build/backend-service/candidate-evaluation-tests/Release/epocanva_candidate_eval_cli.exe \
+  --rime-dll build/librime-english/rime/install/lib/rime.dll \
+  --rime-shared build/backend-chinese-ranked/shared \
   --output build/candidate-eval/report.json \
-  --repeat 2 --fresh-run \
-  --min-cases-en 1001 --min-cases-zh 1001 --min-cases-fr 1001 \
-  --min-cases-ja 1001 --min-cases-ko 500
+  --mode baseline --runs 3 --repeat 3 --warmup-queries 20
 
 python -B -m unittest tests.candidate_evaluation.test_evaluate_candidates
 ```
@@ -414,5 +412,7 @@ declared passed only when **all** of these are recorded in a report:
 7. **No ABI/schema change**: the public C ABI and learning schema are unchanged;
    E4 identity/dedup uses the internal contract only.
 
-Until this report exists, E4 and E5 remain NOT_IMPLEMENTED. A green unit test or
-a synthetic 100-case smoke run is not this gate.
+Until a valid qualification report exists, E4/E5 remain NOT_ACCEPTED, even
+though implementation exists. A green unit test, baseline report or synthetic
+smoke run is not this gate. Current Tier B and absolute thresholds remain
+unapproved; no command example supplies those approvals.
