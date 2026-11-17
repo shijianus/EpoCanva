@@ -307,6 +307,57 @@ function Test-CandidateQualityPolicy($Policy) {
     }
     return $languages
 }
+function Test-CandidateTierBApproval($Lock, $Policy, $Manifest, [string]$ManifestSha256) {
+    # A report's claim and matching lock hash cannot approve an unapproved lock.
+    # Recompute approval from the CURRENT lock and CURRENT corpus manifest.
+    if ((Get-CqProperty $Lock 'format') -cne 'epocanva-candidate-tier-b-lock-v1' -or
+            (Get-CqProperty $Lock 'version') -isnot [int] -or
+            (Get-CqProperty $Lock 'version') -ne 1 -or
+            (Get-CqProperty $Lock 'status') -cne 'approved' -or
+            (Get-CqProperty $Manifest 'tier') -cne 'B') {
+        throw 'candidate-quality requires a currently approved Tier B lock and explicit Tier B manifest.'
+    }
+    $languages = @(Get-CqProperty $Policy 'languages')
+    $entries = Get-CqProperty $Lock 'languages'
+    $names = @($entries.PSObject.Properties.Name)
+    if ($names.Count -ne $languages.Count -or
+            @(Compare-Object ($names | Sort-Object) ($languages | Sort-Object)).Count -ne 0) {
+        throw 'Tier B approval does not cover exactly the required languages.'
+    }
+    foreach ($language in $languages) {
+        $row = Get-CqProperty $entries $language
+        foreach ($field in @('source', 'license', 'approval_reference')) {
+            $value = Get-CqProperty $row $field
+            if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) {
+                throw "Tier B $language lacks an attributable $field."
+            }
+        }
+        $path = Get-CqProperty $row 'path'
+        if ($path -isnot [string] -or $path -cne ('data/eval/candidate-v1/cases/' + $language + '.jsonl') -or
+                (Get-CqProperty $row 'license_conclusion') -cne 'approved_for_evaluation' -or
+                (Get-CqProperty $row 'no_user_content') -isnot [bool] -or
+                (Get-CqProperty $row 'no_user_content') -ne $true) {
+            throw "Tier B $language path, licence or privacy approval is invalid."
+        }
+        $count = Get-CqNumber $row 'case_count'
+        if ($count -lt 1 -or $count -ne [math]::Floor($count) -or
+                $count -ne (Get-CqNumber (Get-CqProperty $Manifest 'case_count') $language)) {
+            throw "Tier B $language case count differs from the current manifest."
+        }
+        $digest = Get-CqProperty $row 'sha256'
+        if ($digest -isnot [string] -or $digest -cnotmatch '^[0-9a-f]{64}$' -or
+                $digest -cne (Get-CqProperty (Get-CqProperty $Manifest 'corpus_sha256') ($language + '.jsonl')) -or
+                (Get-CqProperty $row 'manifest_sha256') -cne $ManifestSha256) {
+            throw "Tier B $language corpus/manifest binding differs from the current inputs."
+        }
+        $reproduction = Get-CqProperty $row 'reproduction'
+        $reference = Get-CqProperty $reproduction 'reference'
+        if ((Get-CqProperty $reproduction 'kind') -cnotin @('approved_fixed_input', 'reproducible_generation') -or
+                $reference -isnot [string] -or [string]::IsNullOrWhiteSpace($reference)) {
+            throw "Tier B $language reproduction record is absent."
+        }
+    }
+}
 function Test-CandidateQualityEvidence {
     [CmdletBinding()]
     param(
@@ -315,12 +366,15 @@ function Test-CandidateQualityEvidence {
         $Execution,
         [hashtable]$Bindings,
         $Policy,
+        $TierBLock,
+        $CorpusManifest,
         [datetimeoffset]$CommitTimeUtc
     )
     # Fail-closed validation of the qualification run. Every mandatory
     # predicate is recomputed from the report and the current input hashes;
     # quality_gate.status alone is never trusted.
     $languages = Test-CandidateQualityPolicy $Policy
+    Test-CandidateTierBApproval $TierBLock $Policy $CorpusManifest $Bindings['corpus_manifest_sha256']
     Assert-Execution $Execution
     $started = [DateTimeOffset]::Parse((Get-CqProperty $Execution 'started_utc'))
     if ($started -lt $CommitTimeUtc) {
@@ -424,27 +478,39 @@ function Test-CandidateQualityEvidence {
     foreach ($language in $languages) {
         $values = Get-CqProperty $perLanguage $language
         $minimum = Get-CqNumber $policyMinimums $language
-        if ((Get-CqNumber $values 'cases') -lt $minimum -or (Get-CqProperty $values 'minimum_cases_met') -ne $true) {
+        $caseCount = Get-CqNumber $values 'cases'
+        if ($caseCount -lt $minimum -or $caseCount -ne [math]::Floor($caseCount) -or
+                $caseCount -ne (Get-CqNumber (Get-CqProperty $CorpusManifest 'case_count') $language) -or
+                (Get-CqNumber $values 'measured_cases') -ne $caseCount -or
+                (Get-CqProperty $values 'minimum_cases_met') -ne $true) {
             throw "candidate-quality sample shortfall for $language."
+        }
+        $absolute = Get-CqProperty $Policy 'absolute_quality'
+        foreach ($field in @('top1', 'top3', 'mrr', 'suggestion_top1', 'suggestion_top3', 'suggestion_mrr')) {
+            $rate = Get-CqRate $values $field 0 1
+            if ($field -in @('top1', 'top3', 'mrr') -and
+                    $rate -lt (Get-CqRate $absolute ($field + '_min') 0 1)) {
+                throw "candidate-quality measured $field is below the approved threshold for $language."
+            }
         }
         foreach ($field in @('deterministic_case_rate', 'in_process_repeat_deterministic_rate',
                 'cross_process_deterministic_rate')) {
-            if ((Get-CqNumber $values $field) -lt (Get-CqNumber $thresholds 'deterministic_case_rate_min')) {
+            if ((Get-CqRate $values $field 0 1) -lt (Get-CqRate $thresholds 'deterministic_case_rate_min' 0 1)) {
                 throw "candidate-quality determinism failed for $language."
             }
         }
         foreach ($field in @('raw_present_rate', 'raw_first_rate')) {
-            $rate = Get-CqProperty $values $field
-            if ($null -eq $rate -or [double]$rate -lt (Get-CqNumber $thresholds ($field + '_min'))) {
+            $rate = Get-CqRate $values $field 0 1
+            if ($rate -lt (Get-CqRate $thresholds ($field + '_min') 0 1)) {
                 throw "candidate-quality raw contract failed for $language."
             }
         }
-        $empty = Get-CqProperty $values 'empty_menu_rate'
-        if ($null -eq $empty -or [double]$empty -gt (Get-CqNumber $thresholds 'empty_menu_rate_max')) {
+        $empty = Get-CqRate $values 'empty_menu_rate' 0 1
+        if ($empty -gt (Get-CqRate $thresholds 'empty_menu_rate_max' 0 1)) {
             throw "candidate-quality empty-menu contract failed for $language."
         }
-        $wrong = Get-CqProperty $values 'wrong_language_rate'
-        if ($null -eq $wrong -or [double]$wrong -gt (Get-CqNumber $thresholds 'wrong_language_rate_max')) {
+        $wrong = Get-CqRate $values 'wrong_language_rate' 0 1
+        if ($wrong -gt (Get-CqRate $thresholds 'wrong_language_rate_max' 0 1)) {
             throw "candidate-quality wrong-language rate failed for $language."
         }
         $observability = Get-CqProperty $values 'wrong_language_observability'
@@ -452,13 +518,13 @@ function Test-CandidateQualityEvidence {
             throw "candidate-quality language attribution is not observable for $language."
         }
         $latency = Get-CqProperty $values 'latency_ms'
-        if ($null -eq (Get-CqProperty $latency 'cold')) { throw "candidate-quality cold latency is missing for $language." }
+        if ((Get-CqNumber $latency 'cold') -lt 0) { throw "candidate-quality cold latency is invalid for $language." }
         $warm = Get-CqProperty $latency 'warm'
         foreach ($field in @('p50', 'p95', 'p99')) {
-            if ($null -eq (Get-CqProperty $warm $field)) { throw "candidate-quality warm $field is missing for $language." }
+            if ((Get-CqNumber $warm $field) -lt 0) { throw "candidate-quality warm $field is invalid for $language." }
         }
-        if ($null -eq (Get-CqProperty $values 'peak_working_set_bytes') -or
-                $null -eq (Get-CqProperty $values 'resource_load_ms')) {
+        if ((Get-CqNumber $values 'peak_working_set_bytes') -le 0 -or
+                (Get-CqNumber $values 'resource_load_ms') -lt 0) {
             throw "candidate-quality memory/load record is missing for $language."
         }
     }
@@ -916,6 +982,26 @@ Add-Gate 'candidate-quality' {
     $policyDocument = Get-Content -LiteralPath $qualityPolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $tierBLockPath = Join-Path (Split-Path -Parent $qualityPolicyPath) ([string]$policyDocument.tier_b_lock)
     Assert-PlainPath $tierBLockPath $RepoRoot
+    $tierBLockDocument = Get-Content -LiteralPath $tierBLockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $corpusManifestDocument = Get-Content -LiteralPath $corpusManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    # Verify the actual approved corpus bytes; a manifest is not evidence that
+    # its listed files still exist, match, or retain the approved provenance.
+    foreach ($language in @($policyDocument.languages)) {
+        $corpusPath = Join-Path $RepoRoot ('data/eval/candidate-v1/cases/' + $language + '.jsonl')
+        Assert-PlainPath $corpusPath $RepoRoot
+        if ((Get-Sha256 $corpusPath) -cne $corpusManifestDocument.corpus_sha256.($language + '.jsonl')) {
+            throw "Current Tier B corpus bytes differ for $language."
+        }
+        $approvedRow = Get-CqProperty (Get-CqProperty $tierBLockDocument 'languages') $language
+        $caseCount = 0
+        foreach ($line in [IO.File]::ReadLines($corpusPath)) {
+            $case = $line | ConvertFrom-Json
+            if ($case.language -cne $language -or $case.source -cne $approvedRow.source -or
+                    $case.license -cne $approvedRow.license) { throw "Tier B provenance differs for $language." }
+            ++$caseCount
+        }
+        if ($caseCount -ne $approvedRow.case_count) { throw "Actual Tier B case count differs for $language." }
+    }
     $bindings = @{
         version = $version
         commit = $source.commit
@@ -940,7 +1026,8 @@ Add-Gate 'candidate-quality' {
     if ($LASTEXITCODE -ne 0 -or -not $commitTimeText) { throw 'Cannot determine the candidate commit timestamp.' }
     $commitTime = [DateTimeOffset]::Parse($commitTimeText)
     $null = Test-CandidateQualityEvidence -Report $reportDocument -JUnitCases $cases -Execution $entry `
-        -Bindings $bindings -Policy $policyDocument -CommitTimeUtc $commitTime
+        -Bindings $bindings -Policy $policyDocument -TierBLock $tierBLockDocument `
+        -CorpusManifest $corpusManifestDocument -CommitTimeUtc $commitTime
     'Qualification exited 0, its report passed every recomputed gate, and samples/contracts/determinism bind this candidate.'
 }
 

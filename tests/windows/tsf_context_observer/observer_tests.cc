@@ -621,6 +621,13 @@ int RunRealFocus() {
     // the caller and is released here whether or not the association succeeded.
     ReleaseAssociatedDocumentManager(previous);
 
+    // AssociateFocus alone establishes an association, not a Win32 focus
+    // transition. Drive and observe the actual test window's keyboard focus.
+    ::SetFocus(window);
+    Check(::GetFocus() == window,
+          "real-focus: the associated test window has Win32 keyboard focus", "");
+    PumpMessagesFor(*env.host, 400);
+
     const ObserverDriveResult associated =
         PumpUntilSettled(*env.observer, *env.host, 20000);
     const ContextObserverSnapshot after_associate = env.observer->Snapshot();
@@ -629,7 +636,8 @@ int RunRealFocus() {
           "real-focus: AssociateFocus on a visible window delivered OnSetFocus",
           DescribeObserverSnapshot(after_associate));
     const ContextIdRecord record_b = ObserveRecord(*env.registry, doc_b);
-    window_bound_b = associated.settled && after_associate.has_published_target &&
+    window_bound_b = window_on_set_focus && associated.settled &&
+                     after_associate.has_published_target &&
                      env.sink.last_target().context_id == record_b.context_id;
     Check(window_bound_b,
           "real-focus: the OnSetFocus path bound document B",
@@ -662,6 +670,8 @@ int RunRealFocus() {
       if (expected_unknown != nullptr) expected_unknown->Release();
       cleared->Release();
     }
+    ::SetFocus(nullptr);
+    PumpMessagesFor(*env.host, 400);
     const ObserverDriveResult cleared_state =
         PumpUntilSettled(*env.observer, *env.host, 20000);
     const ContextObserverSnapshot after_clear = env.observer->Snapshot();
@@ -708,7 +718,7 @@ int RunRealFocus() {
   std::printf(
       "[observer-win] RESULT ENV-LIMITED real focus notification not delivered: "
       "SetFocus changed GetFocus but TSF sent no OnSetFocus to this thread's sink\n");
-  return kExitEnvironmentLimited;
+  return FinishEnvironmentLimited();
 }
 
 // --- 9. shutting down with a deferred real read -----------------------------------------
@@ -861,6 +871,20 @@ int RunResourceBalance() {
   Check(cleanup.store_instances_alive == 0 && cleanup.advised_store_sinks_alive == 0 &&
             cleanup.forced_store_sink_releases == 0,
         "balance: no store, advised sink or forced release", "");
+  // Keep window ownership separate from the controlled document-manager
+  // teardown above: a real focus window can cause TSF to create its own manager.
+  // Every original document/COM cleanup assertion must still pass first.
+  std::string focus_error;
+  Check(EnsureTestThreadFocus(&focus_error),
+        "balance: focus helper created", focus_error);
+  const HWND focus_window = TestThreadFocusWindow();
+  bool reused_window = focus_window != nullptr && ::IsWindow(focus_window);
+  for (int cycle = 0; cycle < 128; ++cycle) {
+    reused_window = EnsureTestThreadFocus(&focus_error) && reused_window &&
+                    TestThreadFocusWindow() == focus_window;
+  }
+  Check(reused_window, "balance: repeated focus setup reuses one owned HWND",
+        focus_error);
   return Finish();
 }
 
@@ -1171,6 +1195,10 @@ int RunTargetPolicyPure() {
 }
 
 int RunObserverCase(const std::string& case_name) {
+  if (case_name == "environment-failure") {
+    Check(false, "intentional failed assertion before environmental classification", "");
+    return FinishEnvironmentLimited();
+  }
   if (case_name == "registry-identity") return RunRegistryIdentity();
   if (case_name == "initial-binding") return RunInitialBinding();
   if (case_name == "push-pop-top") return RunPushPopTop();

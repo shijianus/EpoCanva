@@ -103,6 +103,15 @@ set_tests_properties(
              SKIP_RETURN_CODE 77
              LABELS "windows;tsf;context;observer;focus;real;environment-limited")
 
+add_test(NAME windows.tsf_context_observer.environment_failure
+  COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:tsf_context_observer_tests> -DCASE=environment-failure
+    -DEXPECTED_EXIT=5 "-DMARKER=RESULT PASS" -DMARKER_POLICY=forbid
+    "-DPASS_ARGS=--case;environment-failure" -DTIMEOUT_SECONDS=120
+    -P ${_observer_assert})
+set_tests_properties(windows.tsf_context_observer.environment_failure PROPERTIES
+  TIMEOUT 180 LABELS "windows;tsf;context;observer;negative")
+
 # 9. Shutdown with a deferred real read: the late callback runs on orphaned state.
 epocanva_add_observer_case(
   windows.tsf_context_observer.shutdown_late_read shutdown-late-read)

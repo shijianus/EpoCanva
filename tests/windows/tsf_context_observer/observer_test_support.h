@@ -52,6 +52,8 @@ void CheckDocText(const std::wstring& actual, const std::wstring& expected,
 std::string DescribeObserverSnapshot(const ContextObserverSnapshot& snapshot);
 std::string DescribeSelection(const SelectionSnapshot& selection);
 int Finish();
+// Environmental limitations never override assertions that already failed.
+int FinishEnvironmentLimited();
 
 // --- recording sink (values only) -------------------------------------------------------
 

@@ -146,7 +146,9 @@ Invoke-Logged 'ctest' 'ctest' @('--test-dir', $BuildDir, '-C', $Configuration,
 $cases = @($testReport.SelectNodes('//testcase'))
 $skipped = @($cases | Where-Object { $null -ne $_.SelectSingleNode('skipped') })
 $failed = @($cases | Where-Object { $null -ne $_.SelectSingleNode('failure') -or $null -ne $_.SelectSingleNode('error') })
-if ($cases.Count -eq 0 -or $failed.Count -ne 0) { Fail 'CTest report is empty or contains failures' 8 }
+if ($cases.Count -eq 0 -or $failed.Count -ne 0 -or $skipped.Count -ne 0) {
+    Fail 'CTest report is empty or contains failures or skipped tests; no verified receipt issued' 8
+}
 $executed = @($cases | ForEach-Object { $_.GetAttribute('name') })
 if ($executed.Count -ne $registered.Count -or
     @($executed | Sort-Object -Unique).Count -ne $executed.Count -or

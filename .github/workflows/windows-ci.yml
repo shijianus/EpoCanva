@@ -200,13 +200,31 @@ jobs:
           if ($code -ne 0) { throw "root build failed: $code" }
       - name: Execute complete root inventory with zero skips
         run: |
-          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug --show-only=json-v1 | Set-Content build/vs2022-x64-debug/ci/registered.json -Encoding utf8
+          # CTest resolves a relative --output-junit against its own --test-dir,
+          # not against the caller's working directory (verified with CMake
+          # 3.31.6: "--output-junit build/x/ci/ctest.xml" plus
+          # "--test-dir build/x" writes build/x/build/x/ci/ctest.xml). Every
+          # evidence path below is therefore absolute, and the JUnit file is
+          # proven to exist at the absolute path before it is verified, so a
+          # misplaced report can never be reported as an absent-evidence error.
+          $ci = [IO.Path]::GetFullPath((Join-Path $PWD 'build/vs2022-x64-debug/ci'))
+          $registered = Join-Path $ci 'registered.json'
+          $junit = Join-Path $ci 'ctest.xml'
+          $log = Join-Path $ci 'ctest.log'
+          if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit -Force }
+          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug --show-only=json-v1 | Set-Content $registered -Encoding utf8
           if ($LASTEXITCODE -ne 0) { throw "root inventory failed" }
-          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug --no-tests=error --output-on-failure --output-junit build/vs2022-x64-debug/ci/ctest.xml *> build/vs2022-x64-debug/ci/ctest.log
+          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug --no-tests=error --output-on-failure --output-junit $junit *> $log
           $code=$LASTEXITCODE
-          "ctest exit=$code" | Add-Content build/vs2022-x64-debug/ci/commands.log
+          "ctest exit=$code" | Add-Content (Join-Path $ci 'commands.log')
           if ($code -ne 0) { throw "root CTest failed: $code" }
-          python -B tools/ci/verify_root_junit.py --registered build/vs2022-x64-debug/ci/registered.json --junit build/vs2022-x64-debug/ci/ctest.xml
+          if (-not (Test-Path -LiteralPath $junit -PathType Leaf)) {
+            throw "root JUnit was not written at the absolute evidence path: $junit"
+          }
+          if ((Get-Item -LiteralPath $junit).Length -eq 0) {
+            throw "root JUnit is empty: $junit"
+          }
+          python -B tools/ci/verify_root_junit.py --registered $registered --junit $junit
           if ($LASTEXITCODE -ne 0) { throw "root JUnit/inventory verification failed" }
           if (git status --porcelain --untracked-files=all) { throw "root suite changed source files" }
       - name: Preserve root execution evidence

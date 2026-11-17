@@ -12,5 +12,5 @@ add_test(NAME ci_gate.contract
   COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
     -s "${CMAKE_CURRENT_LIST_DIR}" -p "test_*.py" -v)
 set_tests_properties(ci_gate.contract PROPERTIES
-  TIMEOUT 300 ENVIRONMENT "PYTHONIOENCODING=utf-8"
+  TIMEOUT 300 ENVIRONMENT "PYTHONIOENCODING=utf-8;EPOCANVA_CTEST=${CMAKE_CTEST_COMMAND}"
   LABELS "ci;gate;contract;negative;contract-gate")

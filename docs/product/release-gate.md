@@ -23,6 +23,11 @@ The checker reads files and discovers tools on PATH. It creates only `<BuildDir>
 
 Exit `0` means `acceptance_ready=true`, not necessarily `release_ready=true`. Exit `1` means profile acceptance is blocked. Exit `2` means an invalid output boundary or failed report write. A previous report must not be reused after an error or changed inputs.
 
+The product build producer and receipt consumer both require the complete suite
+with zero skipped or failed cases. Test counts must be integers and passed must
+equal total. Source/engine identity generation fails immediately on an unreadable,
+failed or empty file digest, including when a caller uses Continue error handling.
+
 The report has `format: 2`, `checks[]` with `id`, `category` (`technical`, `distribution`, `signature`), `status` (`passed`, `blocked`, `not_required`) and `detail`. `blockers[]` lists every blocked check; `acceptance_blockers[]` includes only blockers required by the selected profile. Internal unsigned acceptance omits signing only. Without signing evidence it reports `signing_status=not_required` and `signature_verified=false`. Any supplied signing evidence is checked; failures remain visible. Public owner records remain separately blocked until supplied. No manual boolean can waive missing technical evidence.
 
 ## Package format 2
@@ -127,6 +132,15 @@ attestations.
 The central `data/manifests/language-readiness.json` is format 1, with exact `required_languages` and five unique `languages[]`. A completed language row has `id`, `status: "implemented"`, `data_status: "packaged"`, nonempty `payload_paths[]` (all fixed manifest payloads), and nonempty `source_paths[]` (file references matching actual sources). Initial `blocked` / `absent` / `incomplete` rows accurately prevent readiness. Tests must exercise real language behavior, not merely share these names.
 
 ## Acceptance evidence producers
+
+Candidate quality revalidates the current Tier B lock and manifest, not only the
+report's claimed approval status. It checks explicit Tier B, approved per-language
+provenance, licence/reproduction references, corpus/manifest byte hashes and
+actual case counts. The consumer recomputes Top-1/Top-3/MRR against the approved
+policy and rejects nonnumeric, nonfinite or out-of-range rates even when report
+predicates say `passed`. Parser fixtures are synthetic and confer no approval.
+The repository's real Tier B lock remains `not_approved`; absolute thresholds
+remain `pending_product_owner`. Missing approvals block acceptance.
 
 The following scripts run real tests and write hash-bound `test-run` entries. They
 do not create owner, host, installer-lifecycle or signing records, and a runner

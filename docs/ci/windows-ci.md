@@ -2,8 +2,18 @@
 
 **Status**: contract gate and serial hosted `root-unit-tests` are implemented;
 backend, product, installed-host acceptance and full quality/stress acceptance
-remain design-only/BLOCKED. The new root job has not yet executed remotely for
-this working-tree change. `.github/workflows/windows-ci.yml` uses the official
+remain design-only/BLOCKED. At branch HEAD `80cb0bb`, windows-ci #14
+([run 43570509740](https://github.com/shijianus/EpoCanva/actions/runs/43570509740))
+failed in `root-unit-tests`: all 103 CTest cases passed (CTest exit 0), but the
+verifier exited 1 because the relative JUnit path was resolved under the test
+directory twice. The working-tree repair uses an absolute evidence directory,
+removes stale JUnit, and requires a nonempty new report before validation.
+`tests/ci_gate/test_workflow_evidence_paths.py` reproduces the old failure with
+real CTest and verifies the corrected path, including a path containing spaces.
+There is no new clean candidate SHA or remote success for this repair yet.
+Raw API snapshots, job log and artifact are under the local audit evidence
+directory `build/acceptance-audit-20261116/`; historical successes cannot replace
+current-candidate execution. `.github/workflows/windows-ci.yml` uses the official
 `windows-2022` image and a non-gating `windows-latest` canary. It registers only
 jobs that need no external Tier 2 build inputs. The section 3.2–3.4 jobs require
 the self-hosted runner with the hash-pinned immutable input cache from section 2;
@@ -115,7 +125,8 @@ build/product-data/epocanva_en_alpha.tsv
 A `resources` job (not shown as a per-PR job) builds or refreshes this cache
 from the pinned sources, verifies every file against the SHA-256 values already
 recorded in the test sources/manifests, and publishes `inputs.sha256`. Every
-downstream job runs `tools/ci/verify_inputs.ps1` (to be added with the workflow)
+downstream job must run the existing `tools/ci/verify_inputs.ps1` against
+`tools/ci/inputs.lock.json`
 and fails before building when a hash differs. A cache refresh is an explicit
 maintainer action, never an automatic download during a test job.
 
@@ -173,9 +184,11 @@ The gate does not need the external input cache.
 2. Configure `platforms/windows/engine_bridge` with
    `EPOCANVA_BUILD_PRODUCT=ON`, the backend resource root, the product lexicon,
    the English Rime DLL and `EPOCANVA_PRODUCT_WITH_FRENCH_DICTIONARY=ON`.
-3. Build Release, run the full 235-test suite serially. Two environment-limited
-   skips (`learning.repository.symlinks`, `windows.tsf_context_observer.real_focus`)
-   are reported as skips, never as passes.
+3. Build Release and run the complete current registered suite serially. Compare
+   executed names to the exported inventory; historical test counts are not a
+   completeness check. Formal acceptance requires zero failures and zero skips.
+   Missing symlink privileges or real focus coverage block acceptance. An
+   environment-limited return must never conceal an already failed assertion.
 4. Upload `build/windows-product/product-build-receipt.json` on success.
 5. `git status --porcelain` must be empty.
 

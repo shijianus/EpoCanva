@@ -6,8 +6,24 @@ param(
 
 Set-StrictMode -Version Latest
 
+function Get-ProductIdentityFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    $ErrorActionPreference = 'Stop'
+    $stream = [IO.File]::OpenRead($Path)
+    $algorithm = $null
+    try {
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($null -ne $algorithm) { $algorithm.Dispose() }
+        $stream.Dispose()
+    }
+}
+
 function Get-ProductSourceIdentity {
     param([Parameter(Mandatory)][string]$RepoRoot)
+    # Never inherit a caller's Continue/Ignore policy for identity failures.
+    $ErrorActionPreference = 'Stop'
     $root = (Get-Item -LiteralPath $RepoRoot).FullName
     $head = (& git -C $root rev-parse HEAD)
     if ($LASTEXITCODE -ne 0) { throw 'Cannot determine source HEAD.' }
@@ -28,7 +44,8 @@ function Get-ProductSourceIdentity {
             $rows.Add("$relative`tmissing")
             continue
         }
-        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = Get-ProductIdentityFileSha256 -Path $path
+        if ($hash -isnot [string] -or $hash -cnotmatch '^[0-9a-f]{64}$') { throw 'Source file digest is absent or invalid.' }
         $rows.Add("$relative`t$hash")
     }
     if ($rows.Count -eq 0) { throw 'Source input list is empty.' }
@@ -51,6 +68,7 @@ function Get-ProductSourceIdentity {
 
 function Get-ProductEngineIdentity {
     param([Parameter(Mandatory)][string]$RepoRoot)
+    $ErrorActionPreference = 'Stop'
     $root = (Get-Item -LiteralPath $RepoRoot).FullName
     $paths = @(& git -c core.quotepath=false -C $root ls-files --cached --others --exclude-standard -- engine tools/cmake tools/build_librime_baseline.ps1 tools/product/build_identity.ps1 third_party/sources.lock.json)
     if ($LASTEXITCODE -ne 0 -or $paths.Count -eq 0) { throw 'Cannot enumerate engine source inputs.' }
@@ -58,7 +76,8 @@ function Get-ProductEngineIdentity {
     foreach ($relative in ($paths | Sort-Object -Unique)) {
         $file = Join-Path $root $relative
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing engine source: $relative" }
-        $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = Get-ProductIdentityFileSha256 -Path $file
+        if ($hash -isnot [string] -or $hash -cnotmatch '^[0-9a-f]{64}$') { throw 'Engine file digest is absent or invalid.' }
         $rows.Add("$relative`t$hash")
     }
     $upstream = Join-Path $root 'third_party\librime'
@@ -81,10 +100,11 @@ function Get-ProductEngineIdentity {
 
 function Assert-ProductEngineReceipt {
     param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$RimeDll)
+    $ErrorActionPreference = 'Stop'
     $path = Join-Path $RepoRoot 'build\librime-english\engine-build-receipt.json'
     $receipt = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
     $identity = Get-ProductEngineIdentity -RepoRoot $RepoRoot
-    $hash = (Get-FileHash -LiteralPath $RimeDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-ProductIdentityFileSha256 -Path $RimeDll
     if ($receipt.format -ne 1 -or $receipt.status -ne 'built' -or
         $receipt.source_sha256 -ne $identity.source_sha256 -or $receipt.rime_sha256 -ne $hash -or
         $receipt.flags.logging -ne $false -or $receipt.flags.external_plugins -ne $false -or
@@ -100,6 +120,7 @@ function Assert-ProductBuildReceipt {
         [Parameter(Mandatory)][string]$BuildDir,
         [Parameter(Mandatory)][string]$RimeDll
     )
+    $ErrorActionPreference = 'Stop'
     $path = Join-Path $BuildDir 'product-build-receipt.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw 'No successful product build receipt. Run tools/product/build_product.ps1 with tests.'
@@ -111,7 +132,7 @@ function Assert-ProductBuildReceipt {
         throw 'Product build receipt is not a verified non-trace Release build.'
     }
     $cachePath = Join-Path $BuildDir 'CMakeCache.txt'
-    $cacheHash = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $cacheHash = Get-ProductIdentityFileSha256 -Path $cachePath
     $cache = @(Get-Content -LiteralPath $cachePath -Encoding UTF8)
     if ($receipt.cache_sha256 -ne $cacheHash -or
         @($cache | Where-Object { $_ -eq 'EPOCANVA_PRODUCT_TRACE:BOOL=OFF' }).Count -ne 1) {
@@ -123,10 +144,12 @@ function Assert-ProductBuildReceipt {
         $receipt.source.commit -ne $current.commit) {
         throw 'Source changed after product verification. Rebuild and retest before staging.'
     }
-    if ($receipt.tests.total -le 0 -or $receipt.tests.passed -le 0 -or
-        $receipt.tests.failed -ne 0 -or
-        $receipt.tests.total -ne ($receipt.tests.passed + $receipt.tests.skipped)) {
-        throw 'Product test receipt has missing or failed tests.'
+    foreach ($field in @('total', 'passed', 'skipped', 'failed')) {
+        if ($receipt.tests.$field -isnot [int]) { throw 'Product test counts require typed integers.' }
+    }
+    if ($receipt.tests.total -le 0 -or $receipt.tests.passed -ne $receipt.tests.total -or
+        $receipt.tests.failed -ne 0 -or $receipt.tests.skipped -ne 0) {
+        throw 'Product test receipt has missing, failed or skipped tests.'
     }
     $expected = @{
         exe = (Join-Path $BuildDir 'product\bin\EpoCanva.exe')
@@ -138,7 +161,7 @@ function Assert-ProductBuildReceipt {
         if ($entries.Count -ne 1) { throw "Build receipt lacks a unique $key binary." }
         $binary = $entries[0]
         $file = Get-Item -LiteralPath $expected[$key]
-        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = Get-ProductIdentityFileSha256 -Path $file.FullName
         if ($hash -ne $binary.sha256 -or $file.Length -ne $binary.bytes) {
             throw "Binary changed after product tests: $key"
         }

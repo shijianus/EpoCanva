@@ -38,11 +38,13 @@ def _finite(value: Any, where: str, maximum: float | None = None) -> None:
 def validate_policy(policy: Any) -> dict[str, Any]:
     _keys(policy, {"format", "version", "languages", "qualification", "minimum_cases",
                    "thresholds", "regression", "invariants", "absolute_quality", "tier_b_lock"}, "policy")
-    if policy["format"] != "epocanva-candidate-quality-policy-v2" or policy["version"] != 2:
+    if (policy["format"] != "epocanva-candidate-quality-policy-v2" or
+            type(policy["version"]) is not int or policy["version"] != 2):
         raise PolicyError("unsupported quality policy schema")
     languages = policy["languages"]
-    if (not isinstance(languages, list) or not languages or len(set(languages)) != len(languages)
-            or any(not isinstance(item, str) or not re.fullmatch(r"[a-z]{2}", item) for item in languages)):
+    if (not isinstance(languages, list) or not languages or
+            any(not isinstance(item, str) or not re.fullmatch(r"[a-z]{2}", item) for item in languages) or
+            len(set(languages)) != len(languages)):
         raise PolicyError("policy languages must be unique primary language tags")
     _keys(policy["qualification"], {"runs", "repeat", "warmup_queries", "seed",
                                     "bootstrap_replicates"}, "qualification")
@@ -112,7 +114,8 @@ def validate_tier_b_lock(path: Path, *, policy: dict[str, Any], cases_dir: Path,
     except (OSError, ValueError) as exc:
         raise PolicyError("Tier B lock is unreadable") from exc
     _keys(lock, {"format", "version", "status", "languages"}, "Tier B lock")
-    if lock["format"] != "epocanva-candidate-tier-b-lock-v1" or lock["version"] != 1:
+    if (lock["format"] != "epocanva-candidate-tier-b-lock-v1" or
+            type(lock["version"]) is not int or lock["version"] != 1):
         raise PolicyError("unsupported Tier B lock schema")
     if lock["status"] == "not_approved":
         if lock["languages"] != {}:

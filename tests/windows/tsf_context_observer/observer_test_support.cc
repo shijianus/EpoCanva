@@ -24,6 +24,22 @@ const CLSID kExternalClientClsid =
 
 constexpr wchar_t kVisibleWindowClass[] = L"EpoCanvaP310ObserverTestWindow";
 
+struct ThreadFocusWindowOwner {
+  HWND window = nullptr;
+  ~ThreadFocusWindowOwner() {
+    if (window != nullptr && ::IsWindow(window)) {
+      ::DestroyWindow(window);
+    }
+  }
+};
+
+ThreadFocusWindowOwner& FocusWindowOwner() {
+  // HWND ownership belongs to the creating thread. Keep one reusable window
+  // and release it on that thread, including when a test returns early.
+  static thread_local ThreadFocusWindowOwner owner;
+  return owner;
+}
+
 std::string HrText(HRESULT hr) {
   char buffer[24] = {};
   std::snprintf(buffer, sizeof(buffer), "0x%08lX",
@@ -309,6 +325,10 @@ int Finish() {
   return kExitCheckFailed;
 }
 
+int FinishEnvironmentLimited() {
+  return g_failed == 0 ? kExitEnvironmentLimited : Finish();
+}
+
 // --- recording sink -----------------------------------------------------------------------
 
 void RecordingSink::OnTargetLost(ContextDropReason reason) {
@@ -559,12 +579,14 @@ HWND TestThreadFocusWindow() {
   // P3.13 test scaffolding only. One off-screen, real top-level window on this STA; SetFocus
   // on it is the Win32 thread-focus fact the production guard records as
   // "win32-thread-focus-revalidation". No TSF notification is synthesized.
-  static HWND window = nullptr;
-  return window;
+  return FocusWindowOwner().window;
 }
 
 bool EnsureTestThreadFocus(std::string* error) {
-  HWND window = TestThreadFocusWindow();
+  HWND& window = FocusWindowOwner().window;
+  if (window != nullptr && !::IsWindow(window)) {
+    window = nullptr;
+  }
   if (window == nullptr) {
     HINSTANCE instance = ::GetModuleHandleW(nullptr);
     WNDCLASSEXW window_class = {};

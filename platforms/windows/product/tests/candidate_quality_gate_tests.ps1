@@ -37,7 +37,7 @@ $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($checker, [ref]$tokens, [ref]$errors)
 Check ($errors.Count -eq 0) 'production gate parses under the installed PowerShell'
 foreach ($name in @('Get-CqProperty', 'Get-CqNumber', 'Get-CqRate', 'Test-CandidateQualityPolicy',
-        'Test-CandidateQualityEvidence', 'Read-PassingJUnit', 'Assert-Execution')) {
+        'Test-CandidateTierBApproval', 'Test-CandidateQualityEvidence', 'Read-PassingJUnit', 'Assert-Execution')) {
     $functionAst = $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if ($functionAst.Count -ne 1) { throw "Missing production validator $name" }
     . ([scriptblock]::Create($functionAst[0].Extent.Text))
@@ -94,6 +94,8 @@ function New-Report($Bindings, $Policy) {
     foreach ($language in $languages) {
         $perLanguage[$language] = [pscustomobject]@{
             cases = 2; measured_cases = 2; minimum_cases_met = $true
+            top1 = 0.6; top3 = 0.8; mrr = 0.7
+            suggestion_top1 = 0.6; suggestion_top3 = 0.8; suggestion_mrr = 0.7
             deterministic_case_rate = 1.0
             in_process_repeat_deterministic_rate = 1.0
             cross_process_deterministic_rate = 1.0
@@ -172,7 +174,54 @@ $requiredCases = @('candidate-quality.qualification', 'candidate-quality.coverag
 $cases = New-JUnit $bindings $requiredCases
 $execution = New-Execution $started
 
+# Synthetic approval fixtures exercise the parser only. No product approval is
+# written, and the committed lock remains not_approved.
+$approvalRows = [ordered]@{}
+$manifestCounts = [ordered]@{}
+$manifestHashes = [ordered]@{}
+foreach ($language in $languages) {
+    $manifestCounts[$language] = 2
+    $manifestHashes[$language + '.jsonl'] = ('a' * 64)
+    $approvalRows[$language] = [pscustomobject]@{
+        path = ('data/eval/candidate-v1/cases/' + $language + '.jsonl')
+        sha256 = ('a' * 64); manifest_sha256 = $bindings['corpus_manifest_sha256']; case_count = 2
+        source = 'synthetic-unit'; license = 'AGPL-3.0-only'; license_conclusion = 'approved_for_evaluation'
+        approval_reference = 'synthetic-parser-fixture-only'; no_user_content = $true
+        reproduction = [pscustomobject]@{ kind = 'approved_fixed_input'; reference = 'synthetic-parser-fixture-only' }
+    }
+}
+$approvedLock = [pscustomobject]@{ format = 'epocanva-candidate-tier-b-lock-v1'; version = 1
+    status = 'approved'; languages = [pscustomobject]$approvalRows }
+$approvedManifest = [pscustomobject]@{ tier = 'B'; case_count = [pscustomobject]$manifestCounts
+    corpus_sha256 = [pscustomobject]$manifestHashes }
+$PSDefaultParameterValues['Test-CandidateQualityEvidence:TierBLock'] = $approvedLock
+$PSDefaultParameterValues['Test-CandidateQualityEvidence:CorpusManifest'] = $approvedManifest
+
 Expect-Accept { Test-CandidateQualityEvidence -Report $report -JUnitCases $cases -Execution $execution -Bindings $bindings -Policy $policy -CommitTimeUtc $commitTime } 'valid evidence passes'
+
+$unapprovedLock = Get-Content (Join-Path $repo 'data/eval/candidate-v1/tier-b.lock.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+Expect-Reject { Test-CandidateQualityEvidence -Report $report -JUnitCases $cases -Execution $execution -Bindings $bindings -Policy $policy -TierBLock $unapprovedLock -CommitTimeUtc $commitTime } 'forged passing report cannot approve the current not_approved lock'
+Expect-Reject { Test-CandidateQualityEvidence -Report $report -JUnitCases $cases -Execution $execution -Bindings $bindings -Policy $policy -TierBLock $null -CommitTimeUtc $commitTime } 'absent current lock rejected despite report claiming passed'
+$tierAManifest = $approvedManifest | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+$tierAManifest.tier = 'A'
+Expect-Reject { Test-CandidateTierBApproval $approvedLock $policy $tierAManifest $bindings['corpus_manifest_sha256'] } 'Tier A manifest cannot be promoted by a report'
+foreach ($field in @('case_count', 'sha256', 'manifest_sha256', 'approval_reference', 'no_user_content')) {
+    $changedApproval = $approvedLock | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $changedApproval.languages.en.$field = switch ($field) { 'case_count' { 3 }; 'no_user_content' { $false }; 'approval_reference' { '' }; default { '9' * 64 } }
+    Expect-Reject { Test-CandidateTierBApproval $changedApproval $policy $approvedManifest $bindings['corpus_manifest_sha256'] } "current approval tamper rejected: $field"
+}
+foreach ($field in @('top1', 'top3', 'mrr')) {
+    $belowThreshold = New-Report $bindings $policy
+    $belowThreshold.per_language.en.$field = 0.01
+    Expect-Reject { Test-CandidateQualityEvidence -Report $belowThreshold -JUnitCases $cases -Execution $execution -Bindings $bindings -Policy $policy -CommitTimeUtc $commitTime } "forged passing predicate cannot bless measured $field below threshold"
+}
+foreach ($field in @('top1', 'suggestion_mrr', 'raw_first_rate', 'wrong_language_rate', 'deterministic_case_rate')) {
+    foreach ($invalid in @([double]::NaN, [double]::PositiveInfinity, -0.1, 1.1, $true, '1.0')) {
+        $invalidRate = New-Report $bindings $policy
+        $invalidRate.per_language.en.$field = $invalid
+        Expect-Reject { Test-CandidateQualityEvidence -Report $invalidRate -JUnitCases $cases -Execution $execution -Bindings $bindings -Policy $policy -CommitTimeUtc $commitTime } "invalid measured rate rejected: $field"
+    }
+}
 
 Expect-Reject { Test-CandidateQualityEvidence -Report $null -JUnitCases $cases -Execution $execution -Bindings $bindings -Policy $policy -CommitTimeUtc $commitTime } 'missing report rejected'
 $badExit = New-Execution $started 1

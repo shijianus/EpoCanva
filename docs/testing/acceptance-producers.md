@@ -72,6 +72,25 @@ state comparison. Do not translate its passing result into the stronger
 `stress-reference-model` aggregate gate; that gate stays BLOCKED until a genuine
 producer satisfies its complete contract.
 
+`tests/editor_reference_model` now adds a separate full-document oracle against
+the production TSF edit layer, using the real system TSF manager and a controlled
+text store. The oracle stores Unicode scalars independently of the writer's
+UTF-16 code units. `editor.reference_model.stress` executes five fixed seeds with
+100000 operations each: insertion/composition, deletion/cancel, UTF-16 caret and
+selection, controlled-application undo, and invalid states (malformed UTF-8,
+surrogate-interior caret, deferred stale/revoked requests). It compares full
+document state after each operation. Noncollapsed selection edits exercise the
+current safe-refusal contract, not implemented selection replacement.
+
+`editor.reference_model.replay_minimization` detects an omitted-write mutation,
+minimizes it to one operation, persists and replays that failure, and checks the
+unmutated operation succeeds. `--replay <file>` reruns synthetic numeric edit
+sequences; malformed replay input is rejected. `--force-fail` exits 1 and an
+unwritable report exits 2. Reports contain resource samples and explicitly state
+`installed_host_acceptance: false`. These raw measurements are not yet a
+package/JUnit-bound `stress-reference-model` acceptance entry, and do not certify
+installed application undo or cross-host behavior.
+
 ## Installed-host soak and complete CI
 
 `host-soak` and `acceptance-ci-provenance` are mandatory fail-closed release
