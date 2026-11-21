@@ -214,7 +214,7 @@ $runLog = Join-Path $outDir 'run.log'
 Add-AcceptanceEvidenceEntry -EvidencePath $EvidencePath -Identity $identity `
     -EntryId 'stress-reference-model' -RunnerPath $Harness `
     -LogPath $runLog -JUnitPath $junitPath `
-    -StartedUtc $positiveStart -CompletedUtc ([DateTimeOffset]::UtcNow) `
+    -StartedUtc $positiveStart -CompletedUtc $positiveEnd `
     -ExitCode $positiveExit -Command $command -ReportPath $reportPath
 Write-Host "stress-reference-model: 500000 operations across five seeds; negative control detected the mutant."
 Write-Host "Entry bound to $EvidencePath"

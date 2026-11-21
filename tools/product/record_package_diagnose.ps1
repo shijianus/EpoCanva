@@ -93,15 +93,16 @@ if (Test-Path -LiteralPath $userRoot) {
 }
 New-Item -ItemType Directory -Path $userRoot -Force | Out-Null
 
-$started = (Get-Date).ToUniversalTime().ToString('o')
-$previous = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-try {
-    & $stageExe --diagnose $reportPath --user-data-root $userRoot
-    $exitCode = $LASTEXITCODE
-} finally { $ErrorActionPreference = $previous }
-$completed = (Get-Date).ToUniversalTime().ToString('o')
-if ($null -eq $exitCode) { Fail 'the diagnosis produced no process exit code' 5 }
+$started = [DateTimeOffset]::UtcNow
+# EpoCanva.exe is a GUI-subsystem binary: PowerShell's & returns immediately and
+# the report would be hashed mid-write. Start-Process -Wait is required.
+$diagnose = Start-Process -FilePath $stageExe `
+    -ArgumentList @('--diagnose', ('"' + $reportPath + '"'), '--user-data-root', ('"' + $userRoot + '"')) `
+    -Wait -PassThru -NoNewWindow `
+    -RedirectStandardOutput (Join-Path $BuildDir 'diagnose-stdout.log') `
+    -RedirectStandardError (Join-Path $BuildDir 'diagnose-stderr.log')
+$exitCode = $diagnose.ExitCode
+$completed = [DateTimeOffset]::UtcNow
 if ($exitCode -ne 0) { Fail "the diagnosis failed with exit $exitCode" 5 }
 if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) { Fail 'the diagnosis wrote no report' 5 }
 
