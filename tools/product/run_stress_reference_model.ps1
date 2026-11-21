@@ -203,9 +203,17 @@ $junitPath = Join-Path $outDir 'stress-reference-model.junit.xml'
 Write-AcceptanceJUnit -Path $junitPath -SuiteName 'stress-reference-model' -Cases $cases -Identity $identity
 
 $command = @($Harness, '--report', $measureReport)
+# The evidence contract requires one hash-bound process log for the entry.
+$runLog = Join-Path $outDir 'run.log'
+[IO.File]::WriteAllText($runLog,
+    ('=== positive protocol | exit=' + $positiveExit + ' ===' + [Environment]::NewLine) +
+    ((Get-Content -LiteralPath (Join-Path $outDir 'positive-stdout.log') -Raw -Encoding UTF8)) +
+    ('=== negative control | exit=' + $negativeExit + ' ===' + [Environment]::NewLine) +
+    ((Get-Content -LiteralPath (Join-Path $outDir 'negative-stdout.log') -Raw -Encoding UTF8)),
+    (New-Object System.Text.UTF8Encoding($false)))
 Add-AcceptanceEvidenceEntry -EvidencePath $EvidencePath -Identity $identity `
     -EntryId 'stress-reference-model' -RunnerPath $Harness `
-    -LogPath (Join-Path $outDir 'run.log') -JUnitPath $junitPath `
+    -LogPath $runLog -JUnitPath $junitPath `
     -StartedUtc $positiveStart -CompletedUtc ([DateTimeOffset]::UtcNow) `
     -ExitCode $positiveExit -Command $command -ReportPath $reportPath
 Write-Host "stress-reference-model: 500000 operations across five seeds; negative control detected the mutant."
