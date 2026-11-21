@@ -84,8 +84,15 @@ $imageDir = Join-Path $BuildDir 'bootstrapper'
 New-Item -ItemType Directory -Force -Path $imageDir | Out-Null
 $cl = (Get-Command cl.exe).Source
 $image = Join-Path $imageDir 'epocanva_setup_image.exe'
+# The digest reaches the compiler through a generated identity header: cl strips quotes
+# from /D defines and response files alike, so a quoted hex digest cannot survive any
+# command-line path. The header is written next to the image and found via /I.
+$identityHeader = Join-Path $imageDir 'epocanva_embedded_identity.h'
+[System.IO.File]::WriteAllText($identityHeader,
+    ('#define EPOCANVA_EMBEDDED_MSI_SHA256 "' + $msiSha + '"' + [Environment]::NewLine),
+    (New-Object System.Text.UTF8Encoding($false)))
 & $cl /nologo /std:c++17 /permissive- /utf-8 /W4 /EHsc /O2 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN `
-    "/DEPOCANVA_EMBEDDED_MSI_SHA256=$msiSha" `
+    ('/I' + $imageDir) `
     /Fe:$image (Join-Path $RepoRoot 'tools\installer\bootstrapper.cc') /link /SUBSYSTEM:WINDOWS
 if ($LASTEXITCODE -ne 0) { Fail "bootstrapper compile failed with exit $LASTEXITCODE" 5 }
 

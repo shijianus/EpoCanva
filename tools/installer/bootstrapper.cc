@@ -10,13 +10,20 @@
 #include <string>
 #include <vector>
 
-#pragma comment(lib, "bcrypt.lib")
-#pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "user32.lib")
-
+// The bootstrapper build generates this header beside the image (build_bootstrapper.ps1)
+// because command-line /D defines cannot carry a quoted digest through cl reliably.
+// A compile without the generated header falls back to the empty digest, which fails
+// HexDigest and therefore refuses to install — the fail-closed default.
+#if __has_include("epocanva_embedded_identity.h")
+#include "epocanva_embedded_identity.h"
+#endif
 #ifndef EPOCANVA_EMBEDDED_MSI_SHA256
 #define EPOCANVA_EMBEDDED_MSI_SHA256 ""
 #endif
+
+#pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "user32.lib")
 
 namespace {
 constexpr std::array<std::uint8_t, 8> kMagic{{'E','P','O','I','N','S','T','1'}};
