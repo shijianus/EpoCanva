@@ -52,12 +52,14 @@ $outDir = Join-Path $BuildDir 'stress-reference-model'
 if (Test-Path -LiteralPath $outDir) { Remove-Item -LiteralPath $outDir -Recurse -Force }
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-# Positive protocol: five fixed seeds x 100000 operations.
+# Positive protocol: five fixed seeds x 100000 operations. Start-Process joins
+# ArgumentList without quoting, so every path argument carries its own quotes.
 $positiveStart = [DateTimeOffset]::UtcNow
 $measureReport = Join-Path $outDir 'measurements.json'
 $replayPrefix = Join-Path $outDir 'operations'
+$positiveArguments = @('--report', ('"' + $measureReport + '"'), '--replay', ('"' + $replayPrefix + '"'))
 $positive = Start-Process -FilePath $Harness `
-    -ArgumentList @('--report', $measureReport, '--replay', $replayPrefix) `
+    -ArgumentList $positiveArguments `
     -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $outDir 'positive-stdout.log') `
     -RedirectStandardError (Join-Path $outDir 'positive-stderr.log')
 $positiveExit = $positive.ExitCode
@@ -85,8 +87,10 @@ if ($totalOps -ne 500000) { Fail "total operations $totalOps is not 500000" 5 }
 # Negative control: the harness must detect an omitted-write mutant and exit nonzero.
 $negativeStart = [DateTimeOffset]::UtcNow
 $negativeReport = Join-Path $outDir 'negative-control.json'
+$negativeArguments = @('--force-fail', '--report', ('"' + $negativeReport + '"'),
+    '--replay', ('"' + (Join-Path $outDir 'negative') + '"'))
 $negative = Start-Process -FilePath $Harness `
-    -ArgumentList @('--force-fail', '--report', $negativeReport, '--replay', (Join-Path $outDir 'negative')) `
+    -ArgumentList $negativeArguments `
     -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $outDir 'negative-stdout.log') `
     -RedirectStandardError (Join-Path $outDir 'negative-stderr.log')
 $negativeExit = $negative.ExitCode
