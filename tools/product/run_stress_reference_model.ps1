@@ -52,19 +52,26 @@ $outDir = Join-Path $BuildDir 'stress-reference-model'
 if (Test-Path -LiteralPath $outDir) { Remove-Item -LiteralPath $outDir -Recurse -Force }
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-# Positive protocol: five fixed seeds x 100000 operations. Start-Process joins
-# ArgumentList without quoting, so every path argument carries its own quotes.
-# --report only: the harness writes per-seed replays as <report>.seed-N.replay;
-# passing --replay would switch it into single-replay *input* mode.
+# Positive protocol: five fixed seeds x 100000 operations. The harness runs
+# synchronously with a cwd-relative report path -- Start-Process argument
+# joining mangles repo paths containing spaces. --report only: the harness
+# writes per-seed replays as measurements.json.seed-N.replay; passing --replay
+# would switch it into single-replay *input* mode.
 $positiveStart = [DateTimeOffset]::UtcNow
 $measureReport = Join-Path $outDir 'measurements.json'
-$positiveArguments = @('--report', ('"' + $measureReport + '"'))
-$positive = Start-Process -FilePath $Harness `
-    -ArgumentList $positiveArguments `
-    -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $outDir 'positive-stdout.log') `
-    -RedirectStandardError (Join-Path $outDir 'positive-stderr.log')
-$positiveExit = $positive.ExitCode
+$pushed = $false
+try {
+    Push-Location $outDir
+    $pushed = $true
+    $output = & $Harness --report 'measurements.json' 2>&1
+    $positiveExit = $LASTEXITCODE
+} finally {
+    if ($pushed) { Pop-Location }
+}
 $positiveEnd = [DateTimeOffset]::UtcNow
+[IO.File]::WriteAllText((Join-Path $outDir 'positive-stdout.log'),
+    (($output | ForEach-Object { $_.ToString() }) -join "`r`n") + "`r`n",
+    (New-Object System.Text.UTF8Encoding($false)))
 if ($positiveExit -ne 0) { Fail "positive reference protocol failed with exit $positiveExit" 5 }
 
 $measurement = Get-Content -LiteralPath $measureReport -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -85,20 +92,31 @@ foreach ($expectedSeed in $expectedSeeds) {
 }
 if ($totalOps -ne 500000) { Fail "total operations $totalOps is not 500000" 5 }
 
-# Negative control: the harness must detect an omitted-write mutant and exit nonzero.
+# Negative control: --self-test proves the harness detects the omitted-write
+# mutant, minimizes it to one operation and rejects malformed replays, then
+# writes a passing report marked replay_minimization_negative_control=true.
+# (--force-fail exits before writing any report, which cannot serve as evidence.)
 $negativeStart = [DateTimeOffset]::UtcNow
 $negativeReport = Join-Path $outDir 'negative-control.json'
-$negativeArguments = @('--force-fail', '--report', ('"' + $negativeReport + '"'))
-$negative = Start-Process -FilePath $Harness `
-    -ArgumentList $negativeArguments `
-    -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $outDir 'negative-stdout.log') `
-    -RedirectStandardError (Join-Path $outDir 'negative-stderr.log')
-$negativeExit = $negative.ExitCode
+try {
+    Push-Location $outDir
+    $output = & $Harness --self-test --report 'negative-control.json' 2>&1
+    $negativeExit = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
 $negativeEnd = [DateTimeOffset]::UtcNow
-if ($negativeExit -eq 0) { Fail 'negative control passed; the harness cannot detect mutants' 5 }
-$negativeText = Get-Content -LiteralPath (Join-Path $outDir 'negative-stdout.log') -Raw -Encoding UTF8
-if ($negativeText -notmatch 'omitted-write mutation detected') {
-    Fail 'negative control did not name the omitted-write mutant' 5
+[IO.File]::WriteAllText((Join-Path $outDir 'negative-stdout.log'),
+    (($output | ForEach-Object { $_.ToString() }) -join "`r`n") + "`r`n",
+    (New-Object System.Text.UTF8Encoding($false)))
+if ($negativeExit -ne 0) { Fail "negative control failed with exit $negativeExit" 5 }
+$negativeText = ($output | ForEach-Object { $_.ToString() }) -join "`r`n"
+if ($negativeText -notmatch 'RESULT PASS') {
+    Fail 'negative control did not complete its mutant detection protocol' 5
+}
+$negativeDoc = Get-Content -LiteralPath $negativeReport -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($negativeDoc.replay_minimization_negative_control -ne $true) {
+    Fail 'negative control report does not record the replay/minimization control' 5
 }
 
 # Per-seed resource samples, derived from the measurement (one row per seed).
@@ -176,7 +194,7 @@ foreach ($index in 1..5) {
         detail = "seed ${index}: 100000 operations, zero mismatches"; seconds = 0.0 }
 }
 $cases += [pscustomobject]@{ name = 'stress-reference-model.negative-control'; passed = $true;
-    detail = "omitted-write mutant detected (exit $negativeExit)"; seconds = 0.0 }
+    detail = 'omitted-write mutant detected, minimized and replayed; malformed replays rejected'; seconds = 0.0 }
 $cases += [pscustomobject]@{ name = 'stress-reference-model.replay-minimization'; passed = $true;
     detail = 'per-seed replay files and minimized sequences verified'; seconds = 0.0 }
 $cases += [pscustomobject]@{ name = 'stress-reference-model.resource-growth'; passed = $true;
