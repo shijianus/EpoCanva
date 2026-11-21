@@ -54,10 +54,11 @@ New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
 # Positive protocol: five fixed seeds x 100000 operations. Start-Process joins
 # ArgumentList without quoting, so every path argument carries its own quotes.
+# --report only: the harness writes per-seed replays as <report>.seed-N.replay;
+# passing --replay would switch it into single-replay *input* mode.
 $positiveStart = [DateTimeOffset]::UtcNow
 $measureReport = Join-Path $outDir 'measurements.json'
-$replayPrefix = Join-Path $outDir 'operations'
-$positiveArguments = @('--report', ('"' + $measureReport + '"'), '--replay', ('"' + $replayPrefix + '"'))
+$positiveArguments = @('--report', ('"' + $measureReport + '"'))
 $positive = Start-Process -FilePath $Harness `
     -ArgumentList $positiveArguments `
     -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $outDir 'positive-stdout.log') `
@@ -87,8 +88,7 @@ if ($totalOps -ne 500000) { Fail "total operations $totalOps is not 500000" 5 }
 # Negative control: the harness must detect an omitted-write mutant and exit nonzero.
 $negativeStart = [DateTimeOffset]::UtcNow
 $negativeReport = Join-Path $outDir 'negative-control.json'
-$negativeArguments = @('--force-fail', '--report', ('"' + $negativeReport + '"'),
-    '--replay', ('"' + (Join-Path $outDir 'negative') + '"'))
+$negativeArguments = @('--force-fail', '--report', ('"' + $negativeReport + '"'))
 $negative = Start-Process -FilePath $Harness `
     -ArgumentList $negativeArguments `
     -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $outDir 'negative-stdout.log') `
@@ -152,7 +152,9 @@ function Set-ReportReference([string]$Name, [string]$Path) {
         bytes = [long]$file.Length
     }
 }
-$seedReplays = @(Get-ChildItem -LiteralPath $outDir -Filter 'operations.seed-*.replay' -File | Sort-Object Name)
+$seedReplays = @(Get-ChildItem -LiteralPath $outDir -Filter 'measurements.json.seed-*.replay' -File |
+    Where-Object { $_.Name -cnotmatch 'seed-\d+\.replay$' -or $_.Name -cmatch 'seed-[1-5]\.replay$' } |
+    Sort-Object Name)
 if ($seedReplays.Count -ne 5) { Fail 'expected five per-seed replay files' 5 }
 $replayBundle = Join-Path $outDir 'replay-log.json'
 $replayRows = @($seedReplays | ForEach-Object {
@@ -182,7 +184,7 @@ $cases += [pscustomobject]@{ name = 'stress-reference-model.resource-growth'; pa
 $junitPath = Join-Path $outDir 'stress-reference-model.junit.xml'
 Write-AcceptanceJUnit -Path $junitPath -SuiteName 'stress-reference-model' -Cases $cases -Identity $identity
 
-$command = @($Harness, '--report', $measureReport, '--replay', $replayPrefix)
+$command = @($Harness, '--report', $measureReport)
 Add-AcceptanceEvidenceEntry -EvidencePath $EvidencePath -Identity $identity `
     -EntryId 'stress-reference-model' -RunnerPath $Harness `
     -LogPath (Join-Path $outDir 'run.log') -JUnitPath $junitPath `
