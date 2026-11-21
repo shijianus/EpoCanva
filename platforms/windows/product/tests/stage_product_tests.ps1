@@ -35,6 +35,9 @@ function Get-Hash([string]$Path) {
 }
 function New-Fixture([string]$Name) {
     $root = Join-Path $fixtureRoot $Name
+    # The RunRoot persists across CTest invocations; a leftover fixture (its staged
+    # output included) must never leak into this run. Rebuild every fixture from scratch.
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     $product = Join-Path $root 'build/preset'
     $policy = Join-Path $root 'data/manifests/product-package-files.inc'
     $resourceSource = Join-Path $root 'data/backend/resources.tsv'
