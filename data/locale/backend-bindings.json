@@ -96,7 +96,7 @@
       "keyboard_layout_value": 1,
       "variant_id": "zh-zhuyin",
       "scheme_id": "zhuyin",
-      "scheme_implementation": "unverified"
+      "scheme_implementation": "implemented"
     },
     {
       "numeric_id": 7,

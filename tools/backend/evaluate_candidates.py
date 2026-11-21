@@ -608,6 +608,26 @@ def validate_records_against_corpus(records: dict[str, list[dict[str, Any]]],
                         f"[{begin}, {end}) beyond the {raw_bytes}-byte raw input")
 
 
+# Admission is manifest-driven, never a hardcoded scheme name: a corpus case is
+# measured only when its binding's scheme_implementation is "implemented" in
+# data/locale/backend-bindings.json. An unverified scheme is excluded from the
+# metrics AND makes the run fail via the measured_scheme_admission gate
+# predicate, so a case can never be silently dropped from the report.
+IMPLEMENTED_SCHEME_STATE = "implemented"
+
+
+def implemented_schemes(bindings: dict[int, dict[str, Any]]) -> set[str]:
+    return {row["scheme_id"] for row in bindings.values()
+            if row.get("scheme_implementation") == IMPLEMENTED_SCHEME_STATE}
+
+
+def admitted_cases(cases: list[dict[str, Any]],
+                   schemes: set[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    measured = [case for case in cases if case["scheme"] in schemes]
+    excluded = [case for case in cases if case["scheme"] not in schemes]
+    return measured, excluded
+
+
 def menu_signature(repeat: dict[str, Any]) -> tuple:
     return tuple(
         (row.get("kind"), row.get("text_utf8"), tuple(row.get("lexeme_ids", [])),
@@ -813,6 +833,17 @@ def evaluate_quality_gate(*, per_language: dict[str, Any], failures: list[dict[s
             unmet_reasons.append({"predicate": name, "reason": reason})
         if status == "not_evaluable" and reason:
             not_evaluated.append({"predicate": name, "reason": reason})
+
+    # measured_scheme_admission -------------------------------------------------
+    # Admission comes from data/locale/backend-bindings.json: a corpus case
+    # whose scheme is unverified in the binding manifest is excluded from the
+    # metrics and recorded as a failure (evaluator_body), which fails this
+    # predicate. Silence is never admission.
+    admission_failures = [f"{entry['case_id']}: {entry['reason']}"
+                          for entry in failures
+                          if entry["reason"] == "scheme-not-implemented-in-binding-manifest"]
+    record("measured_scheme_admission",
+           "failed" if admission_failures else "passed", "; ".join(admission_failures))
 
     # minimum_samples -----------------------------------------------------------
     limits = policy["thresholds"]
@@ -1128,12 +1159,16 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     unverified: dict[str, dict[str, Any]] = {}
     observed_case_ids: dict[str, set[str]] = {}
     protocol: dict[str, Any] = {}
+    schemes = implemented_schemes(bindings)
     for language, runs in per_run.items():
         cases = corpus[language]
-        verified_cases = [case for case in cases if case["scheme"] != "zhuyin"]
-        zhuyin_cases = [case for case in cases if case["scheme"] == "zhuyin"]
-        if zhuyin_cases:
-            unverified["zhuyin"] = {"cases": len(zhuyin_cases), "reason": "scheme-unverified"}
+        verified_cases, excluded_cases = admitted_cases(cases, schemes)
+        for case in excluded_cases:
+            failures.append({"case_id": case["id"],
+                             "reason": "scheme-not-implemented-in-binding-manifest"})
+            scheme_state = unverified.setdefault(
+                case["scheme"], {"cases": 0, "reason": "scheme-unverified"})
+            scheme_state["cases"] += 1
 
         observed_case_ids[language] = set()
         for _, records_by_id in runs:

@@ -571,6 +571,15 @@ int RunRealFocus() {
   if (doc_b == nullptr) {
     return Finish();
   }
+  // Reset any desktop-level TSF focus left by a previous process before binding A. A fresh
+  // host can otherwise inherit the same document-manager focus and AssociateFocus will not
+  // produce a real OnSetFocus transition for the visible window.
+  const HRESULT reset_focus_hr =
+      env.host->thread_manager_for_test()->SetFocus(nullptr);
+  Check(SUCCEEDED(reset_focus_hr),
+        "real-focus: cleared stale TSF focus before binding A",
+        "hr=0x" + std::to_string(static_cast<unsigned long>(reset_focus_hr)));
+  PumpMessagesFor(*env.host, 100);
   if (!SubscribeAndBind(&env, env.doc_a, "real-focus")) {
     return Finish();
   }
@@ -608,6 +617,44 @@ int RunRealFocus() {
   bool window_bound_b = false;
   bool window_cleared = false;
   if (CreateVisibleTestWindow(&window, &window_error)) {
+    const auto activate_visible_window = [window]() {
+      const DWORD current_thread = ::GetCurrentThreadId();
+      const HWND foreground = ::GetForegroundWindow();
+      const DWORD foreground_thread = foreground == nullptr
+                                         ? 0
+                                         : ::GetWindowThreadProcessId(foreground, nullptr);
+      const bool attached = foreground_thread != 0 && foreground_thread != current_thread &&
+                            ::AttachThreadInput(foreground_thread, current_thread, TRUE) != FALSE;
+      ::ShowWindow(window, SW_SHOWNORMAL);
+      ::BringWindowToTop(window);
+      ::SetForegroundWindow(window);
+      ::SetActiveWindow(window);
+      ::SetFocus(window);
+      if (attached) {
+        ::AttachThreadInput(foreground_thread, current_thread, FALSE);
+      }
+      return ::GetFocus() == window;
+    };
+
+    // Restore document A before the visible-window transition. The earlier programmatic
+    // SetFocus(B) deliberately exercises the no-notification path. A real visible-window
+    // transition must still cross from A to B so TSF has a focus change to report, even
+    // when this case follows another TSF test in the same desktop session.
+    FocusCallResult restore_focus;
+    const bool restored = SetThreadFocus(*env.host, env.doc_a, &restore_focus,
+                                         &env.error);
+    Check(restored,
+          "real-focus: restored document A before visible-window transition",
+          env.error);
+    if (!restored) {
+      ::DestroyWindow(window);
+      return Finish();
+    }
+    // Put the visible window on the STA first. AssociateFocus on an already-focused
+    // window is the documented path that forces TSF to publish the newly associated manager.
+    Check(activate_visible_window(),
+          "real-focus: the test window has Win32 keyboard focus before association", "");
+    PumpMessagesFor(*env.host, 100);
     const std::uint64_t before_associate =
         env.observer->Snapshot().focus_notifications;
     ITfDocumentMgr* previous = nullptr;
@@ -621,12 +668,25 @@ int RunRealFocus() {
     // the caller and is released here whether or not the association succeeded.
     ReleaseAssociatedDocumentManager(previous);
 
-    // AssociateFocus alone establishes an association, not a Win32 focus
-    // transition. Drive and observe the actual test window's keyboard focus.
-    ::SetFocus(window);
-    Check(::GetFocus() == window,
+    // Reassert the real Win32 focus after the association. This does not synthesize a TSF
+    // callback. It only lets the OS deliver any transition that AssociateFocus requires.
+    Check(activate_visible_window(),
           "real-focus: the associated test window has Win32 keyboard focus", "");
-    PumpMessagesFor(*env.host, 400);
+    // TSF can defer the association's focus transition while another desktop window owns the
+    // input queue. Retry by toggling the actual Win32 focus a few times. Every attempt still
+    // depends on a real OnSetFocus callback and remains bounded.
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      if (attempt > 0 &&
+          env.observer->Snapshot().focus_notifications <= before_associate) {
+        ::SetFocus(nullptr);
+        PumpMessagesFor(*env.host, 100);
+        activate_visible_window();
+      }
+      PumpMessagesFor(*env.host, 400);
+      if (env.observer->Snapshot().focus_notifications > before_associate) {
+        break;
+      }
+    }
 
     const ObserverDriveResult associated =
         PumpUntilSettled(*env.observer, *env.host, 20000);

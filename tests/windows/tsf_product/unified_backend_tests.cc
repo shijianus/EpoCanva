@@ -181,6 +181,56 @@ int main(int argc, char** argv) {
                 captured.token_start_utf16 == 2,
             "internal apostrophe stays inside the current english token");
     }
+    // Technical markers attached to the token keep the whole run protected: the backend
+    // must never receive "hel" carved out of "user@example.hel" as an ordinary token, and
+    // no text from a protected run may reach the engine or the preference store.
+    struct ProtectedCase { const wchar_t* text; const char* name; };
+    const ProtectedCase protected_cases[] = {
+        {L"user@example.hel", "email"},
+        {L"https://example.com/hel", "url"},
+        {L"C:\\tmp\\hel", "path"},
+    };
+    for (const auto& technical : protected_cases) {
+      edit::test::TestDocumentOptions technical_options;
+      technical_options.initial_text_utf16 = technical.text;
+      technical_options.initial_selection_start_utf16 =
+          technical_options.initial_selection_end_utf16 =
+              static_cast<LONG>(technical_options.initial_text_utf16.size());
+      auto* technical_document = host->CreateDocument(technical_options, &error);
+      Check(technical_document != nullptr, "protected: document created");
+      if (technical_document == nullptr) continue;
+      coord::test::TestTargetRevalidator technical_target;
+      const auto technical_read = epocanva::tsf::product::ReadHostContext(
+          technical_document->context(), host->client_id(),
+          static_cast<LONG>(technical_options.initial_text_utf16.size()),
+          technical_target.CreateWriteGuard(), technical_document->context_id(), 1);
+      Check(technical_read.valid && technical_read.protected_run,
+            (std::string("protected: ") + technical.name +
+                " run is withheld from completion").c_str());
+      Check(technical_read.preceding_utf8.empty() && technical_read.token_utf8.empty() &&
+                technical_read.token_utf16.empty(),
+            (std::string("protected: ") + technical.name +
+                " run transmits no text to the backend").c_str());
+    }
+    // The control required by the acceptance brief: a sentence period followed by
+    // whitespace must not permanently disable suggestions for later tokens.
+    edit::test::TestDocumentOptions sentence;
+    sentence.initial_text_utf16 = L"hello. hel";
+    sentence.initial_selection_start_utf16 = sentence.initial_selection_end_utf16 =
+        static_cast<LONG>(sentence.initial_text_utf16.size());
+    auto* sentence_document = host->CreateDocument(sentence, &error);
+    Check(sentence_document != nullptr, "sentence: control document created");
+    if (sentence_document != nullptr) {
+      coord::test::TestTargetRevalidator sentence_target;
+      const auto sentence_read = epocanva::tsf::product::ReadHostContext(
+          sentence_document->context(), host->client_id(),
+          static_cast<LONG>(sentence.initial_text_utf16.size()),
+          sentence_target.CreateWriteGuard(), sentence_document->context_id(), 1);
+      Check(sentence_read.valid && !sentence_read.protected_run &&
+                sentence_read.token_utf8 == "hel" &&
+                sentence_read.preceding_utf8 == "hello. ",
+            "sentence: a period before whitespace keeps the token ordinary");
+    }
     // The reader may not acquire sensitive text even though the caller supplies an allowed
     // target guard. Field metadata is independently authoritative under the read cookie.
     edit::test::TestDocumentOptions secret; secret.initial_text_utf16 = L"never-read";

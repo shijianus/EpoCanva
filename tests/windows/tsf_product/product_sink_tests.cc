@@ -2964,6 +2964,57 @@ bool RunCandidateCase(const std::filesystem::path& stage,
              "candidate: the second separator space stays with the host");
   reference.HostInsert(L" ");
 
+  // 4.5 Modifier admission: Shift+Escape belongs to the host even with an explicit menu
+  // selection. Prediction and handling must agree on "not eaten", the menu stays open
+  // with its selection, and the document is untouched. This is the regression for the
+  // historical defect where the menu handlers swallowed modified Enter/Escape.
+  LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
+             "candidate: ready for the modified-key contract");
+  LocalCheck(SendTextHost(&route, L"hel", &error),
+             "candidate: the modified-key token stays with the host: " + error);
+  reference.HostInsert(L"hel");
+  LocalCheck(WaitForCandidateMenu(*test_case.host, seam, &counters, 2, 8000),
+             "candidate: the modified-key menu opened");
+  bool down_modified = false;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_DOWN, L"", &down_modified, &error) && down_modified,
+             "candidate: the modified-key selection is explicit");
+  SeamCounters counters_before_shift_keys;
+  LocalCheck(QuerySeamForSink(sink, &counters_before_shift_keys),
+             "candidate: seam query before the modified keys");
+  SaveKeyStateOnce();
+  SetStateForKey(L'\0', /*shift=*/true, /*control=*/false, /*alt=*/false);
+  bool shift_escape_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_ESCAPE, L"", &shift_escape_eaten, &error) &&
+                 !shift_escape_eaten,
+             "candidate: Shift+Escape is predicted and handled as host-owned: " + error);
+  RestoreKeyState();
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
+             "candidate: Shift+Escape changed no document text");
+  SeamCounters after_shift_escape;
+  LocalCheck(QuerySeamForSink(sink, &after_shift_escape), "candidate: seam query after Shift+Escape");
+  // The contract requires: the key was not stolen, prediction agreed with handling, and no
+  // candidate was submitted. The product may defensively clear the explicit selection when
+  // a modified key's translation could have landed host text — that direction fails closed
+  // (no selection means Enter passes through; arrows re-navigate), so it is safe.
+  LocalCheck(after_shift_escape.replacement_pending == 0 &&
+                 after_shift_escape.replacement_attempts ==
+                     counters_before_shift_keys.replacement_attempts,
+             "candidate: Shift+Escape submitted no candidate");
+  std::cout << "  [modified-keys] menu_open=" << after_shift_escape.candidate_menu_open
+            << " selected=" << after_shift_escape.candidate_selected << std::endl;
+  // Shift+Return is also host-owned; the controlled host applies its newline default and
+  // the token ends, so the menu closes through the ordinary host-edit path.
+  SetStateForKey(L'\0', /*shift=*/true, /*control=*/false, /*alt=*/false);
+  bool shift_return_eaten = true;
+  LocalCheck(SendVirtualKeyAdaptive(&route, VK_RETURN, L"", &shift_return_eaten, &error) &&
+                 !shift_return_eaten,
+             "candidate: Shift+Return is predicted and handled as host-owned: " + error);
+  RestoreKeyState();
+  reference.HostInsert(L"\n");
+  LocalCheck(WaitForText(*test_case.host, test_case.doc, reference.text, 8000),
+             "candidate: Shift+Return applied the host's own newline once");
+  CheckNoSuppressedText(route, "candidate-shift-keys");
+
   // 5. Stale selection: a click drawn from an older menu must not commit into the newer one.
   LocalCheck(ReadyToType(*test_case.host, sink, context, kEngineReadinessBudgetMs),
              "candidate: ready for the stale-selection case");

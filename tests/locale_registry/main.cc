@@ -189,8 +189,8 @@ void BuiltinResolutionTests() {
             loc::ResolutionStatus::kSchemeAbsent,
         "double pinyin is absent, not faked");
   Check(resolve("zh-Hans-CN", "zhuyin").status ==
-            loc::ResolutionStatus::kSchemeNotVerified,
-        "zhuyin on Simplified is unverified, not offered");
+            loc::ResolutionStatus::kResolved,
+        "Simplified zhuyin resolves on its controlled integration evidence");
   Check(resolve("zh-Hant-TW", "zhuyin").status ==
             loc::ResolutionStatus::kSchemeNotVerified,
         "traditional zhuyin is unverified");
@@ -332,7 +332,7 @@ constexpr std::array<ExpectedBinding, 13> kExpectedBindings{{
      "ko-KR", "two_set", "implemented"},
     {6, "zh-Hans-CN-pinyin", "zh", "EPOCANVA_BACKEND_ZH", 2, "EPOCANVA_BACKEND_ZHUYIN", 3,
      "EPOCANVA_BACKEND_OUTPUT_HANZI", 2, "EPOCANVA_BACKEND_KEYBOARD_US_QWERTY", 1,
-     "zh-zhuyin", "zhuyin", "unverified"},
+     "zh-zhuyin", "zhuyin", "implemented"},
     {7, "ja-JP-romaji", "ja", "EPOCANVA_BACKEND_JA", 4, "EPOCANVA_BACKEND_ROMAJI", 4,
      "EPOCANVA_BACKEND_OUTPUT_HIRAGANA", 3, "EPOCANVA_BACKEND_KEYBOARD_US_QWERTY", 1,
      "ja-JP", "romaji", "implemented"},
@@ -463,14 +463,25 @@ void BackendBindingTests() {
           "catalogue binding fields equal the exported row");
   }
 
-  // Unverified schemes stay unverified even though a binding and staging row
-  // exist. A resource file is not implementation evidence.
+  // The Simplified zhuyin binding is implemented on controlled integration
+  // evidence (tests/backend/profiles.cc); traditional zhuyin stays unverified.
   const auto zhuyin = std::find_if(rows.begin(), rows.end(), [](const auto& row) {
     return row.numeric_id == 6;
   });
-  Check(zhuyin != rows.end() && zhuyin->scheme_implementation == "unverified",
-        "zhuyin binding is exported as unverified");
+  Check(zhuyin != rows.end() && zhuyin->scheme_implementation == "implemented",
+        "Simplified zhuyin binding is exported as implemented");
   Check(zhuyin != rows.end() && zhuyin->scheme_id == "zhuyin", "zhuyin binding names its scheme");
+  const auto traditional = std::find_if(profiles.begin(), profiles.end(), [](const auto& profile) {
+    return FormatLanguageTag(profile.tag) == "zh-Hant-TW";
+  });
+  const auto traditional_zhuyin =
+      traditional == profiles.end()
+          ? profiles.front().schemes.end()
+          : std::find_if(traditional->schemes.begin(), traditional->schemes.end(),
+                         [](const auto& scheme) { return scheme.scheme_id == "zhuyin"; });
+  Check(traditional != profiles.end() && traditional_zhuyin != traditional->schemes.end() &&
+            traditional_zhuyin->implementation == loc::SchemeImplementation::kUnverified,
+        "traditional zhuyin stays unverified in the builtin catalogue");
 
   // Same language under different keyboard layouts or output modes is never
   // collapsed into one configuration.
@@ -556,9 +567,15 @@ void BackendBindingTests() {
   }
   {
     auto mutated = rows;
-    mutated[5].scheme_implementation = "implemented";
+    mutated[5].scheme_implementation = "unverified";
     validate(mutated, loc::BackendManifestError::kSchemeImplementationMismatch,
-             "unverified scheme cannot be relabelled implemented");
+             "implemented scheme cannot be downgraded to unverified");
+  }
+  {
+    auto mutated = rows;
+    mutated[0].scheme_implementation = "unverified";
+    validate(mutated, loc::BackendManifestError::kSchemeImplementationMismatch,
+             "implemented scheme cannot be relabelled unverified");
   }
   {
     auto mutated = rows;

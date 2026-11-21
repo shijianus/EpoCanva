@@ -1,5 +1,6 @@
 #include "host_context.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <utility>
 #include "module_lifetime.h"
@@ -67,6 +68,40 @@ std::size_t TokenStartUtf16(const std::wstring& text) {
   }
   return begin_utf16;
 }
+bool ProtectedMarker(wchar_t value) {
+  switch (value) {
+    case L'@': case L'.': case L':': case L'/': case L'\\':
+    case L'?': case L'&': case L'=': case L'#': case L'%': case L'+':
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::vector<std::size_t> ProtectedComponents(const std::wstring& text) {
+  std::vector<std::size_t> markers;
+  for (std::size_t index = 0; index < text.size(); ++index)
+    if (ProtectedMarker(text[index])) markers.push_back(index);
+  return markers;
+}
+
+// A run is protected when the last technical marker is inside the current token or is
+// attached to it without an intervening separator: "user@example.hel", "https://…/hel"
+// and "C:\tmp\hel" stay protected, while "hello. hel" — a sentence period followed by a
+// space — is an ordinary token and keeps suggestions. Markers buried in earlier context
+// behind whitespace never poison the current token.
+bool ProtectedRun(const std::wstring& text, const std::vector<std::size_t>& markers,
+                  std::size_t token_begin) {
+  if (markers.empty()) return false;
+  const std::size_t last = markers.back();
+  if (last >= token_begin) return true;
+  for (std::size_t index = last + 1; index < token_begin; ++index) {
+    const wchar_t unit = text[index];
+    if (unit == L' ' || unit == L'\t' || unit == L'\r' || unit == L'\n') return false;
+  }
+  return true;
+}
+
 class Reader final : public ITfEditSession {
  public:
   Reader(ITfContext* context, LONG caret, std::shared_ptr<context::TargetWriteGuard> guard,
@@ -118,6 +153,14 @@ class Reader final : public ITfEditSession {
     const std::size_t token_begin_utf16 = TokenStartUtf16(text);
     if (token_begin_utf16 == 0 && actual_begin != 0) return S_OK;
     if (text.size() > 512 && token_begin_utf16 == 0) return S_OK;
+    const auto markers = ProtectedComponents(text);
+    if (ProtectedRun(text, markers, token_begin_utf16)) {
+      // The bounded technical run is withheld from both completion and following context.
+      // Do not send its alphabetic prefix/suffix to the backend as ordinary text.
+      result.valid = true; result.protected_run = true; result.caret_utf16 = caret;
+      result.token_start_utf16 = actual_begin + static_cast<LONG>(token_begin_utf16);
+      return S_OK;
+    }
     auto preceding = text.substr(0, token_begin_utf16);
     if (preceding.size() > 512) preceding.erase(0, preceding.size() - 512);
     if (!preceding.empty() && preceding.front() >= 0xdc00 && preceding.front() <= 0xdfff)

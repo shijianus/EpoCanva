@@ -368,7 +368,8 @@ std::vector<LocaleProfile> BuiltinProfiles() {
       {Scheme("pinyin", SchemeImplementation::kImplemented,
               "engine/languages/zh/pinyin_initialism.cc"),
        Scheme("double_pinyin", SchemeImplementation::kAbsent, ""),
-       Scheme("zhuyin", SchemeImplementation::kUnverified, "")}));
+       Scheme("zhuyin", SchemeImplementation::kImplemented,
+              "tests/backend/profiles.cc")}));
   profiles.back().backend_bindings = {
       Binding(2, api::kLanguageZh, api::kInputPinyin, api::kOutputHanzi, api::kKeyboardUsQwerty, "zh-pinyin", "pinyin"),
       Binding(6, api::kLanguageZh, api::kInputZhuyin, api::kOutputHanzi, api::kKeyboardUsQwerty, "zh-zhuyin", "zhuyin"),

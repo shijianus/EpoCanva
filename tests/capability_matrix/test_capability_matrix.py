@@ -16,7 +16,10 @@
 #     not_implemented (format 1 hard rule; bump format and validator together);
 #   - language-level rows for languages that DO have bindings, and any positive
 #     status for the engine-less declared languages (es/de stay not_implemented);
-#   - the unverified zhuyin binding lacking its zhuyin-unverified note.
+#   - incoherence between a binding's locale-registry implementation state and
+#     its row statuses: an unverified scheme cannot claim a positive status,
+#     and an implemented scheme cannot claim not_implemented outside
+#     host_acceptance.
 # Every rule below is also exercised as a negative mutation, so the validator
 # cannot pass silently.
 from __future__ import annotations
@@ -83,9 +86,22 @@ def validate(matrix: dict, bindings: dict, repo_root: Path = REPO_ROOT) -> None:
             if language != binding_by_id[binding_id]["language_tag"]:
                 raise ValueError(f"binding_id {binding_id} language {language!r} does not match the manifest")
             binding = binding_by_id[binding_id]
-            if binding["scheme_implementation"] != "implemented" and "zhuyin-unverified" not in (note or ""):
-                raise ValueError("a row for a binding whose scheme is not implemented must carry the "
-                                 "zhuyin-unverified note")
+            if binding["scheme_implementation"] != "implemented":
+                # Status-vs-implementation coherence: a scheme the locale registry
+                # has not verified can never carry a positive capability status.
+                if status != "not_implemented":
+                    raise ValueError(
+                        f"binding_id {binding_id} scheme is not implemented in the locale registry; "
+                        f"only not_implemented is honest, found {status!r}")
+                if binding["scheme_id"] not in (note or ""):
+                    raise ValueError(
+                        f"a not_implemented row for unverified scheme {binding['scheme_id']!r} "
+                        "must name the scheme in its note")
+            elif status == "not_implemented" and dimension != "host_acceptance":
+                raise ValueError(
+                    f"binding_id {binding_id} scheme is implemented; a not_implemented {dimension!r} "
+                    "row contradicts the locale registry (host_acceptance may stay not_implemented "
+                    "pending real host evidence)")
         if status == "host_verified":
             raise ValueError("format 1 forbids host_verified claims; record a real registered host "
                              "acceptance and bump the format first")
@@ -152,12 +168,21 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(row["status"], "not_implemented")
 
     def test_unverified_scheme_binding_is_annotated(self) -> None:
+        # If an unverified binding ever reappears in the manifest, its rows must
+        # again be not_implemented with the scheme named in each note. With the
+        # current manifest (binding 6 implemented) this asserts the positive
+        # side: every binding-6 row except host_acceptance carries a positive
+        # status backed by the controlled integration evidence.
         unverified = [binding for binding in self.bindings["bindings"]
                       if binding["scheme_implementation"] != "implemented"]
-        self.assertEqual([binding["numeric_id"] for binding in unverified], [6])
-        for row in self.matrix["rows"]:
-            if row["binding_id"] == 6 and row["dimension"] != "host_acceptance":
-                self.assertIn("zhuyin-unverified", row["note"])
+        self.assertEqual(unverified, [])
+        zhuyin_rows = [row for row in self.matrix["rows"] if row["binding_id"] == 6]
+        self.assertEqual(
+            [row["status"] for row in zhuyin_rows],
+            ["integration_tested", "integration_tested", "integration_tested",
+             "not_implemented"])
+        for row in zhuyin_rows:
+            self.assertIn("zhuyin", row["note"])
 
     # ---- negative mutations: every rule must be able to fail ----
 
@@ -235,11 +260,38 @@ class MatrixTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate(matrix, self.bindings)
 
+    def test_negative_unverified_scheme_claims_positive_status(self) -> None:
+        # An unverified scheme must never carry a positive status, whatever its
+        # note says: demote binding 6 in the manifest and the integration_tested
+        # rows become incoherent claims.
+        bindings = copy.deepcopy(self.bindings)
+        for binding in bindings["bindings"]:
+            if binding["numeric_id"] == 6:
+                binding["scheme_implementation"] = "unverified"
+        with self.assertRaises(ValueError):
+            validate(self.matrix, bindings)
+
     def test_negative_unannotated_unverified_binding(self) -> None:
+        bindings = copy.deepcopy(self.bindings)
+        for binding in bindings["bindings"]:
+            if binding["numeric_id"] == 6:
+                binding["scheme_implementation"] = "unverified"
+        matrix = copy.deepcopy(self.matrix)
+        for row in matrix["rows"]:
+            if row["binding_id"] == 6:
+                row["status"] = "not_implemented"
+                row["note"] = "looks fine"
+        with self.assertRaises(ValueError):
+            validate(matrix, bindings)
+
+    def test_negative_implemented_scheme_claims_not_implemented(self) -> None:
+        # The mirror rule: an implemented scheme cannot hide behind
+        # not_implemented outside host_acceptance, so a stale downgrade is
+        # caught too.
         matrix = copy.deepcopy(self.matrix)
         for row in matrix["rows"]:
             if row["binding_id"] == 6 and row["dimension"] == "engine":
-                row["note"] = "looks fine"
+                row["status"] = "not_implemented"
                 break
         with self.assertRaises(ValueError):
             validate(matrix, self.bindings)

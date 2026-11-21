@@ -3,6 +3,7 @@
 
 #include <oleauto.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <mutex>
@@ -66,12 +67,20 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
 
   void SetData(const std::vector<std::wstring>& strings, int selected,
                ITfDocumentMgr* document, DWORD flags, std::uint64_t context_id,
-               std::uint64_t generation, LONG caret_utf16) {
+               std::uint64_t generation, LONG caret_utf16, UINT current_page) {
     strings_ = strings;
     selected_ = selected;
     context_id_ = context_id;
     generation_ = generation;
     caret_utf16_ = caret_utf16;
+    page_count_ = static_cast<UINT>(coordinator::CandidatePageCount(strings_.size()));
+    if (page_count_ == 0) {
+      current_page_ = 0;
+    } else if (current_page >= page_count_) {
+      current_page_ = page_count_ - 1;
+    } else {
+      current_page_ = current_page;
+    }
     if (document_ != nullptr) {
       document_->Release();
       document_ = nullptr;
@@ -226,26 +235,39 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
     if (page_count == nullptr) {
       return E_INVALIDARG;
     }
-    // The pinned product schema fits every menu on one page (1 raw + up to 7 completions,
-    // or 1 raw + up to 3 suggestions). The element exposes exactly the engine page it was
-    // given and never invents additional pages.
-    *page_count = 1;
-    if (size >= 1 && index != nullptr) {
-      index[0] = 0;
+    // The real page grid: kCandidatePageSize rows per page over the full item list.
+    // pIndex receives the first absolute index of each page, capped by the caller's
+    // buffer; puPageCnt always receives the true page count.
+    *page_count = page_count_;
+    if (index != nullptr && size >= 1) {
+      const UINT reported = size < page_count_ ? size : page_count_;
+      for (UINT page = 0; page < reported; ++page) {
+        index[page] = page * static_cast<UINT>(coordinator::kCandidatePageSize);
+      }
     }
     return S_OK;
   }
 
   HRESULT STDMETHODCALLTYPE SetPageIndex(UINT* index, UINT page_count) override {
-    (void)index;
-    return page_count == 1 ? S_OK : E_INVALIDARG;
+    if (index == nullptr || page_count != 1) {
+      return E_INVALIDARG;
+    }
+    // A host requests one page by passing its start index. Only exact page starts of
+    // this list's own grid are valid; anything else is refused, never clamped.
+    const UINT start = index[0];
+    if (start % static_cast<UINT>(coordinator::kCandidatePageSize) != 0 ||
+        start >= strings_.size()) {
+      return E_INVALIDARG;
+    }
+    current_page_ = start / static_cast<UINT>(coordinator::kCandidatePageSize);
+    return S_OK;
   }
 
   HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT* page) override {
     if (page == nullptr) {
       return E_INVALIDARG;
     }
-    *page = 0;
+    *page = current_page_;
     return S_OK;
   }
 
@@ -328,6 +350,8 @@ class CandidateUiElement final : public ITfCandidateListUIElementBehavior {
   ITfDocumentMgr* document_ = nullptr;
   DWORD flags_ = 0;
   int selected_ = -1;
+  UINT page_count_ = 0;
+  UINT current_page_ = 0;
   // The UI element manager may keep the element after EndUIElement; the module stays
   // loaded until its last Release reaches this object.
   epocanva::tsf::edit::ModuleObjectGuard module_guard_{
@@ -848,7 +872,7 @@ void CandidateUi::ReleaseElement() {
 }
 
 void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
-                         ITfContext* context, const RECT* anchor, int selected) {
+                         ITfContext* context, const RECT* anchor, int selected, int page) {
   if (bridge_ == nullptr) {
     return;
   }
@@ -864,17 +888,34 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
   }
   ++diagnostics_.updates;
   TraceStage("ui_update", static_cast<long long>(snapshot.items.size()));
+  // Presentation page view. The full list stays the selection authority; this slices the
+  // window to one kCandidatePageSize page and reports the real page grid on the element.
+  const std::size_t total_items = snapshot.items.size();
+  std::size_t page_count = coordinator::CandidatePageCount(total_items);
+  std::size_t page_value = page >= 0 ? static_cast<std::size_t>(page) : 0;
+  if (page_count == 0) page_value = 0;
+  else if (page_value >= page_count) page_value = page_count - 1;
+  const std::size_t page_begin = page_value * coordinator::kCandidatePageSize;
+  const std::size_t page_end = std::min(total_items, page_begin + coordinator::kCandidatePageSize);
+  int window_selected = -1;
+  if (selected >= 0 && static_cast<std::size_t>(selected) >= page_begin &&
+      static_cast<std::size_t>(selected) < page_end) {
+    window_selected = selected - static_cast<int>(page_begin);
+  }
   std::vector<std::wstring> strings;
-  strings.reserve(snapshot.items.size());
+  strings.reserve(total_items);
   std::vector<CandidateWindowItem> window_items;
-  window_items.reserve(snapshot.items.size());
-  for (const coordinator::CandidateItem& item : snapshot.items) {
+  window_items.reserve(page_end - page_begin);
+  for (std::size_t ordinal = 0; ordinal < total_items; ++ordinal) {
+    const coordinator::CandidateItem& item = snapshot.items[ordinal];
     strings.emplace_back(item.text_utf16_code_units.begin(),
                          item.text_utf16_code_units.end());
-    CandidateWindowItem window_item;
-    window_item.text = strings.back();
-    window_item.kind = item.kind;
-    window_items.push_back(std::move(window_item));
+    if (ordinal >= page_begin && ordinal < page_end) {
+      CandidateWindowItem window_item;
+      window_item.text = strings.back();
+      window_item.kind = item.kind;
+      window_items.push_back(std::move(window_item));
+    }
   }
   bool newly_begun = false;
   if (manager_ != nullptr) {
@@ -889,7 +930,8 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
     }
     if (!begun_) {
       element_->SetData(strings, selected, document, flags, snapshot.identity.context_id,
-                        snapshot.identity.generation, snapshot.caret_utf16);
+                        snapshot.identity.generation, snapshot.caret_utf16,
+                        static_cast<UINT>(page_value));
       BOOL show = TRUE;  // The TIP asks to present; the host writes its decision here.
       DWORD element_id = 0;
       const HRESULT began = manager_->BeginUIElement(element_, &show, &element_id);
@@ -912,7 +954,8 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
       TraceStage("ui_host_drawn", host_drawn_ ? 1 : 0);
     } else {
       element_->SetData(strings, selected, document, flags, snapshot.identity.context_id,
-                        snapshot.identity.generation, snapshot.caret_utf16);
+                        snapshot.identity.generation, snapshot.caret_utf16,
+                        static_cast<UINT>(page_value));
       const HRESULT updated = manager_->UpdateUIElement(element_id_);
       if (FAILED(updated)) {
         TraceStage("ui_update_failed", static_cast<long long>(updated));
@@ -983,8 +1026,9 @@ void CandidateUi::Update(const coordinator::CandidateSnapshot& snapshot,
     return;
   }
   TraceStage("ui_show_attempt", 1);
-  window_.Show(window_items, selected, snapshot.page_no, snapshot.page_size,
-               snapshot.is_last_page, *anchor);
+  window_.Show(window_items, window_selected, static_cast<int>(page_value),
+               static_cast<int>(coordinator::kCandidatePageSize),
+               page_value + 1 >= page_count, *anchor);
   TraceStage("ui_window_visible", window_.visible() ? 1 : 0);
   diagnostics_.window_created = window_.created();
   diagnostics_.window_visible = window_.visible();

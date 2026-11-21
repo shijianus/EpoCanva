@@ -37,17 +37,33 @@ if (-not (Test-Path -LiteralPath $InstallerManifest -PathType Leaf)) {
     Fail 'installer-manifest.json is missing; run tools/installer/build_msi.ps1' 3
 }
 $manifest = Get-Content -LiteralPath $InstallerManifest -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($manifest.format -ne 1) { Fail 'Unsupported installer manifest format' 4 }
+if ($manifest.format -ne 2) { Fail 'Unsupported installer manifest format; rebuild with the current build_msi.ps1' 4 }
 if ($manifest.package_manifest_sha256 -cne $identity.package_manifest_sha256) {
     Fail 'The installer was built from a different package manifest' 4
+}
+if ($manifest.package_manifest_bytes -ne (Get-Item -LiteralPath (Join-Path $StageRoot 'package.manifest')).Length) {
+    Fail 'The installer package manifest byte count differs from the staged package' 4
 }
 if ($manifest.destination_commit -cne $identity.commit -or
         $manifest.acceptance_profile -cne $identity.acceptance_profile -or
         $manifest.distribution_policy -cne $identity.distribution_policy) {
     Fail 'The installer manifest identity differs from the current candidate' 4
 }
-if ($manifest.extraction.verified -ne $true -or $manifest.installer.helper_included -ne $true) {
-    Fail 'The installer manifest lacks a verified payload extraction or the TSF helper' 4
+if ($manifest.extraction.verified -ne $true -or $manifest.installer.helper_included -ne $true -or
+        $manifest.installer.manifest_included -ne $true) {
+    Fail 'The installer manifest lacks a verified extraction, the package manifest or the TSF helper' 4
+}
+if ($manifest.install_directory -cne 'ProgramFiles64Folder/EpoCanva' -or
+        $manifest.installer.scope -cne 'per-machine' -or
+        $manifest.installer.architecture -cne 'x64') {
+    Fail 'The installer manifest does not record the approved per-machine x64 layout' 4
+}
+$helperReceipt = Get-Content -LiteralPath (Join-Path $RepoRoot 'build\installer-tools\helper-build.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($helperReceipt.format -ne 2 -or $helperReceipt.status -ne 'verified' -or
+        $manifest.helper.source_sha256 -cne $helperReceipt.source_sha256 -or
+        $manifest.helper.toolchain_sha256 -cne $helperReceipt.toolchain_sha256 -or
+        $manifest.helper.configuration_sha256 -cne $helperReceipt.configuration_sha256) {
+    Fail 'The installer helper receipt does not match the recorded helper identity' 4
 }
 $payloadCount = @(Get-Content -LiteralPath (Join-Path $StageRoot 'package.manifest') -Encoding UTF8 |
     Where-Object { $_ -cmatch '^file\t' }).Count

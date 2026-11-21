@@ -4,6 +4,7 @@
 #include <string>
 
 #include "key_admission.h"
+#include "menu_key_admission.h"
 
 namespace {
 
@@ -294,6 +295,66 @@ void TestFailures() {
         "the composition-full overflow is an explicit accepted failure");
 }
 
+void TestMenuKeyAdmission() {
+  using epocanva::tsf::product::DecideMenuKey;
+  using epocanva::tsf::product::MenuKeyRoute;
+  namespace input = ::epocanva::windows::input;
+
+  input::ModifierSnapshot plain;
+  input::ModifierSnapshot shifted;
+  shifted.shift = true;
+  input::ModifierSnapshot controlled;
+  controlled.control = true;
+  input::ModifierSnapshot alted;
+  alted.alt = true;
+  input::ModifierSnapshot winned;
+  winned.windows = true;
+
+  constexpr std::uint32_t kUp = 0x26, kDown = 0x28, kReturn = 0x0D, kEscape = 0x1B;
+
+  // An open menu with a selection owns unmodified navigation, acceptance and dismissal.
+  Check(DecideMenuKey(kUp, plain, true, true) == MenuKeyRoute::kNavigateUp,
+        "menu: unmodified Up navigates");
+  Check(DecideMenuKey(kDown, plain, true, true) == MenuKeyRoute::kNavigateDown,
+        "menu: unmodified Down navigates");
+  Check(DecideMenuKey(kReturn, plain, true, true) == MenuKeyRoute::kAcceptSelection,
+        "menu: unmodified Return with a selection accepts it");
+  Check(DecideMenuKey(kEscape, plain, true, true) == MenuKeyRoute::kDismiss,
+        "menu: unmodified Escape dismisses");
+
+  // Enter with no explicit selection stays with the host: the literal row is never implied.
+  Check(DecideMenuKey(kReturn, plain, true, false) == MenuKeyRoute::kPassThrough,
+        "menu: Return with no selection passes through");
+
+  // Every modifier passes the key to the host, including Shift on Return/Escape/Arrows —
+  // the historical defect was both handlers swallowing Shift+Enter/Shift+Escape.
+  for (const auto* modifiers : {&shifted, &controlled, &alted, &winned}) {
+    Check(DecideMenuKey(kReturn, *modifiers, true, true) == MenuKeyRoute::kPassThrough,
+          "menu: modified Return always passes through");
+    Check(DecideMenuKey(kEscape, *modifiers, true, true) == MenuKeyRoute::kPassThrough,
+          "menu: modified Escape always passes through");
+    Check(DecideMenuKey(kDown, *modifiers, true, true) == MenuKeyRoute::kPassThrough,
+          "menu: modified Down always passes through");
+    Check(DecideMenuKey(kUp, *modifiers, true, true) == MenuKeyRoute::kPassThrough,
+          "menu: modified Up always passes through");
+  }
+
+  // A closed or inactive menu owns nothing, even unmodified menu keys.
+  Check(DecideMenuKey(kDown, plain, false, true) == MenuKeyRoute::kPassThrough,
+        "menu: a closed menu passes arrows through");
+  Check(DecideMenuKey(kEscape, plain, false, true) == MenuKeyRoute::kPassThrough,
+        "menu: a closed menu passes Escape through");
+  Check(DecideMenuKey(kReturn, plain, false, true) == MenuKeyRoute::kPassThrough,
+        "menu: a closed menu passes Return through");
+
+  // Ordinary text keys are never menu keys.
+  constexpr std::uint32_t kLetterA = 0x41;
+  Check(DecideMenuKey(kLetterA, plain, true, true) == MenuKeyRoute::kPassThrough,
+        "menu: a letter is never a menu key");
+  Check(DecideMenuKey(kLetterA, shifted, true, true) == MenuKeyRoute::kPassThrough,
+        "menu: a shifted letter is never a menu key");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -307,6 +368,7 @@ int main(int argc, char** argv) {
   TestRawTextRunBoundary();
   TestRawCancelAccounting();
   TestFailures();
+  TestMenuKeyAdmission();
   if (g_failures != 0) {
     std::cout << "FAILED: " << g_failures << " check(s)\n";
     return 14;

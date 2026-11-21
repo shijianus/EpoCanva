@@ -365,11 +365,12 @@ class ResourceIndexTests(unittest.TestCase):
             (ROOT / stage.BACKEND_BINDINGS_PATH).read_bytes())
         self.assertEqual(len(bindings), 13)
         self.assertEqual(sorted(b["numeric_id"] for b in bindings), list(range(1, 14)))
-        # The zhuyin binding is exported with its real unverified state; a staged
-        # resource or binding never upgrades it to an implemented scheme.
+        # The zhuyin binding is exported with its real implemented state,
+        # admitted on controlled integration evidence; a staged resource or
+        # binding row never upgrades a scheme on its own.
         zhuyin = next(b for b in bindings if b["numeric_id"] == 6)
         self.assertEqual(zhuyin["scheme_id"], "zhuyin")
-        self.assertEqual(zhuyin["scheme_implementation"], "unverified")
+        self.assertEqual(zhuyin["scheme_implementation"], "implemented")
         self.assertTrue(all(b["scheme_implementation"] != "absent" for b in bindings))
 
     def test_manifest_rejects_drift_and_duplicate_configurations(self):

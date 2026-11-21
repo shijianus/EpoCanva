@@ -273,7 +273,7 @@ class ValidatorTests(unittest.TestCase):
             ("bool profile id", [mutated_case(profile_id=True)]),
             ("unknown binding", [mutated_case(profile_id=999)]),
             ("binding owns another language", [mutated_case(profile_id=3)]),
-            ("binding owns another scheme", [mutated_case(profile_id=2)]),
+            ("binding owns another scheme", [mutated_case(profile_id=6)]),
             ("empty raw_input", [mutated_case(raw_input="")]),
             ("control scalar in raw_input", [mutated_case(raw_input="he\tl")]),
             ("raw_input byte bound", [mutated_case(raw_input="x" * 4097)]),
@@ -307,6 +307,52 @@ class ValidatorTests(unittest.TestCase):
         # A literal backslash followed by 'u' is ordinary text data; the \uXXXX
         # ban is lexical on the raw JSON bytes, not a decoded-substring rule.
         self.validate([mutated_case(raw_input="h\\u00e9l")])
+
+    def test_implemented_scheme_admission_is_manifest_driven(self):
+        # zhuyin is a legal corpus case on binding 6 because the live bindings
+        # manifest now marks that scheme implemented: admission follows the
+        # manifest, not a hardcoded scheme-name list. The pinyin control keeps
+        # the assertion meaningful even if the zhuyin row is ever reverted.
+        zhuyin = mutated_case(id="zh-zhuyin-su3cl3-0004", language="zh", scheme="zhuyin",
+                              profile_id=6, raw_input="su3cl3", expected=["你好"],
+                              expected_languages=["zh"], group_id="zh-zhuyin-family-01")
+        seen: set[str] = set()
+        ev.validate_cases("zh", [zhuyin], self.bindings, seen)  # must not raise
+        schemes = ev.implemented_schemes(self.bindings)
+        self.assertIn("zhuyin", schemes)
+        self.assertIn("pinyin", schemes)
+        measured, excluded = ev.admitted_cases([zhuyin], schemes)
+        self.assertEqual(measured, [zhuyin])
+        self.assertEqual(excluded, [])
+
+    def test_unverified_scheme_is_excluded_and_fails_the_gate(self):
+        # A scheme the bindings manifest has not verified must never be
+        # silently skipped: the case is excluded from the measured set, a
+        # failure entry is recorded, and the fail-closed gate reports unmet.
+        bindings = {row["numeric_id"]: row
+                    for row in json.loads(BINDINGS_PATH.read_text(encoding="utf-8"))["bindings"]}
+        for row in bindings.values():
+            row["scheme_implementation"] = "unverified"
+        schemes = ev.implemented_schemes(bindings)
+        self.assertEqual(schemes, set())
+        case = mutated_case(id="zh-zhuyin-su3cl3-0004", language="zh", scheme="zhuyin",
+                            profile_id=6, raw_input="su3cl3", expected=["你好"],
+                            expected_languages=["zh"], group_id="zh-zhuyin-family-01")
+        measured, excluded = ev.admitted_cases([case], schemes)
+        self.assertEqual(measured, [])
+        self.assertEqual(excluded, [case])
+        gate = ev.evaluate_quality_gate(
+            per_language={"en": gate_language()}, failures=[
+                {"case_id": case["id"], "reason": "scheme-not-implemented-in-binding-manifest"}],
+            expected_case_ids=HEALTHY_IDS, observed_case_ids=HEALTHY_IDS,
+            protocol=HEALTHY_PROTOCOL)
+        self.assertEqual(gate["status"], "failed")
+        self.assertFalse(gate["met"])
+        admission = gate["predicates"]["measured_scheme_admission"]
+        self.assertEqual(admission["status"], "failed")
+        self.assertIn("scheme-not-implemented-in-binding-manifest", admission["reason"])
+        self.assertIn("measured_scheme_admission",
+                      [entry["predicate"] for entry in gate["unmet_reasons"]])
 
 
 class CorpusFileTests(unittest.TestCase):

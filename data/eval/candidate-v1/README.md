@@ -24,7 +24,7 @@ target of a pinned assertion that already exists in the verified backend suite
 | `zh-pinyin-nihao-0001` | 2 (zh pinyin) | `kConversions` row 4 (`nihao`→`你好`), Rime-owned row |
 | `zh-pinyin-nh-0002` | 2 | `PinyinInitialisms`: CONVERSION row with two admitted character ids |
 | `zh-pinyin-nh-context-0003` | 2 | `PinyinInitialisms`: same `nh` under imported context 我们; expectation presence, not rank |
-| `zh-zhuyin-su3cl3-0004` | 6 (zh zhuyin) | `kConversions` row 5; scheme stays `unverified` in the locale registry and is reported separately by the evaluator |
+| `zh-zhuyin-su3cl3-0004` | 6 (zh zhuyin) | `kConversions` row 5; the locale registry marks the scheme implemented on this controlled integration evidence, so the evaluator measures it |
 | `fr-prefix-francais-0001` | 3 (fr-FR AZERTY) | `kConversions` row 2 (`francais`→`français`) |
 | `fr-prefix-ecol-0002` | 3 | `kConversions` row 3 (`écol`→`école`) |
 | `fr-prefix-cafe-0003` | 3 | `Edits`: `Find(accented, "café", true)` — real admitted candidate for Unicode input |

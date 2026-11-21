@@ -40,6 +40,14 @@ void ProductTextController::PumpUnifiedHostContext() {
     host_context_read_owed_ = false;
     DismissCandidateMenu(); return;
   }
+  if (captured.protected_run) {
+    // The bounded host run contains technical markers (email/URL/path). The backend must
+    // never see its fragments: no completion, no next-word fallback, no preference read.
+    // The host keeps its text; suggestions resume on the next ordinary token.
+    host_context_read_owed_ = false;
+    DismissCandidateMenu();
+    return;
+  }
   engine::BackendWork work;
   work.operation = engine::BackendOperation::kObserveHostText;
   work.preceding_utf8 = captured.preceding_utf8;

@@ -24,6 +24,8 @@
 #include <windows.h>
 #include <msctf.h>
 #include <objbase.h>
+#include <winreg.h>
+#include <shellapi.h>
 
 #include <cstdio>
 #include <cwchar>
@@ -47,6 +49,29 @@ void PrintHr(const wchar_t* what, HRESULT hr) {
 
 bool SameGuid(const GUID& left, const GUID& right) {
   return ::IsEqualGUID(left, right) != FALSE;
+}
+std::wstring ReadInprocServer32(HKEY root);
+bool RegistrationOwnerMatches(const std::wstring& dll_path) {
+  if (dll_path.empty()) return false;
+  for (HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
+    const std::wstring base = std::wstring(L"Software\\Classes\\CLSID\\") + kProductClsidText;
+    HKEY key = nullptr;
+    const LONG opened = ::RegOpenKeyExW(root, base.c_str(), 0, KEY_READ, &key);
+    if (opened == ERROR_FILE_NOT_FOUND || opened == ERROR_PATH_NOT_FOUND) continue;
+    if (opened != ERROR_SUCCESS) return false;
+    wchar_t marker[64] = {};
+    DWORD marker_bytes = sizeof(marker);
+    DWORD marker_type = 0;
+    const LONG marker_status = ::RegQueryValueExW(key, L"EpoCanvaProduct", nullptr,
+        &marker_type, reinterpret_cast<BYTE*>(marker), &marker_bytes);
+    ::RegCloseKey(key);
+    const std::wstring server = ReadInprocServer32(root);
+    if (marker_status != ERROR_SUCCESS || marker_type != REG_SZ ||
+        std::wstring(marker) != L"epocanva_tsf" || server.empty() ||
+        ::CompareStringOrdinal(server.c_str(), -1, dll_path.c_str(), -1, TRUE) != CSTR_EQUAL) return false;
+    return true;
+  }
+  return false;
 }
 
 std::wstring ReadInprocServer32(HKEY root) {
@@ -135,35 +160,90 @@ void PrintState(const ProfileState& state) {
   PrintHr(L"GetActiveProfile", state.get_active_hr);
 }
 
-int Status() {
+int InvokeComRegistration(const std::wstring& dll_path, bool install);
+
+int Status(const std::wstring& dll_path) {
   PrintComRegistration();
   ITfInputProcessorProfileMgr* manager = ProfileManager();
-  if (manager == nullptr) {
-    return 1;
-  }
+  if (manager == nullptr) return 1;
   const ProfileState state = ReadState(manager);
   PrintState(state);
   manager->Release();
+  if (state.present && !dll_path.empty()) {
+    if (!RegistrationOwnerMatches(dll_path)) {
+      std::fwprintf(stderr, L"refusing foreign or mismatched COM registration\n");
+      return 4;
+    }
+    return 0;
+  }
   return 0;
 }
 
-int Register() {
-  ITfInputProcessorProfiles* profiles = Profiles();
-  if (profiles == nullptr) {
+int InvokeComRegistration(const std::wstring& dll_path, bool install) {
+  if (dll_path.empty()) return 2;
+  HMODULE module = ::LoadLibraryW(dll_path.c_str());
+  if (module == nullptr) {
+    std::fwprintf(stderr, L"LoadLibrary failed error=%lu\n", ::GetLastError());
     return 1;
   }
+  using RegistrationFn = HRESULT(STDAPICALLTYPE*)(void);
+  const auto entry = reinterpret_cast<RegistrationFn>(::GetProcAddress(
+      module, install ? "DllRegisterServer" : "DllUnregisterServer"));
+  if (entry == nullptr) {
+    ::FreeLibrary(module);
+    std::fwprintf(stderr, L"registration entry point is missing\n");
+    return 1;
+  }
+  const HRESULT result = entry();
+  PrintHr(install ? L"DllRegisterServer" : L"DllUnregisterServer", result);
+  ::FreeLibrary(module);
+  return SUCCEEDED(result) ? 0 : 1;
+}
+
+int Register(const std::wstring& dll_path) {
+  if (InvokeComRegistration(dll_path, true) != 0) return 1;
+  ITfInputProcessorProfiles* profiles = Profiles();
+  if (profiles == nullptr) {
+    (void)InvokeComRegistration(dll_path, false);
+    return 1;
+  }
+  ITfInputProcessorProfileMgr* manager = ProfileManager();
+  if (manager == nullptr) {
+    profiles->Release();
+    (void)InvokeComRegistration(dll_path, false);
+    return 1;
+  }
+  ProfileState before = ReadState(manager);
+  manager->Release();
+  if (before.present) {
+    PrintState(before);
+    profiles->Release();
+    return 0;
+  }
+
   HRESULT hr = profiles->Register(Clsid());
-  PrintHr(L"Register CLSID", hr);
-  if (SUCCEEDED(hr)) {
-    hr = profiles->AddLanguageProfile(
-        Clsid(), kEnglishUs, ProfileGuid(), kDescription,
-        static_cast<ULONG>(std::wcslen(kDescription)), nullptr, 0, 0);
-    PrintHr(L"AddLanguageProfile en-US", hr);
+  PrintHr(L"Register CLSID profile", hr);
+  if (FAILED(hr)) {
+    profiles->Release();
+    (void)InvokeComRegistration(dll_path, false);
+    return 1;
+  }
+  hr = profiles->AddLanguageProfile(
+      Clsid(), kEnglishUs, ProfileGuid(), kDescription,
+      static_cast<ULONG>(std::wcslen(kDescription)), nullptr, 0, 0);
+  PrintHr(L"AddLanguageProfile en-US", hr);
+  if (FAILED(hr)) {
+    const HRESULT rollback = profiles->Unregister(Clsid());
+    PrintHr(L"Rollback Unregister CLSID profile", rollback);
+    profiles->Release();
+    (void)InvokeComRegistration(dll_path, false);
+    return 1;
   }
   profiles->Release();
 
-  ITfInputProcessorProfileMgr* manager = ProfileManager();
+  manager = ProfileManager();
   if (manager == nullptr) {
+    (void)InvokeComRegistration(dll_path, false);
     return 1;
   }
   const ProfileState state = ReadState(manager);
@@ -171,27 +251,46 @@ int Register() {
   manager->Release();
   if (!state.present) {
     std::fwprintf(stderr, L"verification failed: the profile is still absent\n");
+    (void)InvokeComRegistration(dll_path, false);
     return 3;
   }
   return 0;
 }
 
-int Unregister() {
+int Unregister(const std::wstring& dll_path) {
+  ITfInputProcessorProfileMgr* manager = ProfileManager();
+  if (manager == nullptr) return 1;
+  const ProfileState before = ReadState(manager);
+  manager->Release();
+  if (!before.present) return InvokeComRegistration(dll_path, false);
   ITfInputProcessorProfiles* profiles = Profiles();
-  if (profiles == nullptr) {
+  if (profiles == nullptr) return 1;
+
+  HRESULT removed = profiles->RemoveLanguageProfile(Clsid(), kEnglishUs, ProfileGuid());
+  PrintHr(L"RemoveLanguageProfile", removed);
+  const HRESULT unregistered = SUCCEEDED(removed) ? profiles->Unregister(Clsid()) : removed;
+  if (SUCCEEDED(removed)) PrintHr(L"Unregister CLSID profile", unregistered);
+  if (FAILED(removed) || FAILED(unregistered)) {
+    ITfInputProcessorProfileMgr* rollback_manager = ProfileManager();
+    const ProfileState after_failure = rollback_manager == nullptr ? ProfileState{} : ReadState(rollback_manager);
+    if (rollback_manager != nullptr) rollback_manager->Release();
+    if (!after_failure.present) {
+      const HRESULT rollback = profiles->Register(Clsid());
+      PrintHr(L"Rollback Register CLSID profile", rollback);
+      if (SUCCEEDED(rollback)) {
+        const HRESULT add = profiles->AddLanguageProfile(
+            Clsid(), kEnglishUs, ProfileGuid(), kDescription,
+            static_cast<ULONG>(std::wcslen(kDescription)), nullptr, 0, 0);
+        PrintHr(L"Rollback AddLanguageProfile", add);
+      }
+    }
+    profiles->Release();
     return 1;
   }
-  HRESULT removed =
-      profiles->RemoveLanguageProfile(Clsid(), kEnglishUs, ProfileGuid());
-  PrintHr(L"RemoveLanguageProfile", removed);
-  const HRESULT unregistered = profiles->Unregister(Clsid());
-  PrintHr(L"Unregister CLSID", unregistered);
   profiles->Release();
 
-  ITfInputProcessorProfileMgr* manager = ProfileManager();
-  if (manager == nullptr) {
-    return 1;
-  }
+  manager = ProfileManager();
+  if (manager == nullptr) return 1;
   const ProfileState state = ReadState(manager);
   PrintState(state);
   manager->Release();
@@ -199,8 +298,9 @@ int Unregister() {
     std::fwprintf(stderr, L"verification failed: the profile is still present\n");
     return 3;
   }
-  return 0;
+  return InvokeComRegistration(dll_path, false);
 }
+
 
 int SetActive(bool active) {
   ITfInputProcessorProfileMgr* manager = ProfileManager();
@@ -238,7 +338,7 @@ int wmain(int argc, wchar_t** argv) {
   if (argc < 2) {
     std::fwprintf(stderr,
                   L"usage: epocanva_tip_profile_helper "
-                  L"register|unregister|activate|deactivate|status\n");
+                  L"register|unregister|status [installed-tsf-dll]\n");
     return 2;
   }
   const HRESULT com = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -248,16 +348,17 @@ int wmain(int argc, wchar_t** argv) {
   }
   int result = 2;
   const std::wstring command = argv[1];
+  const std::wstring dll_path = argc > 2 ? argv[2] : L"";
   if (command == L"register") {
-    result = Register();
+    result = Register(dll_path);
   } else if (command == L"unregister") {
-    result = Unregister();
-  } else if (command == L"activate") {
-    result = SetActive(true);
-  } else if (command == L"deactivate") {
-    result = SetActive(false);
+    result = Unregister(dll_path);
+  } else if (command == L"register-com") {
+    result = InvokeComRegistration(dll_path, true);
+  } else if (command == L"unregister-com") {
+    result = InvokeComRegistration(dll_path, false);
   } else if (command == L"status") {
-    result = Status();
+    result = Status(dll_path);
   } else {
     std::fwprintf(stderr, L"unknown command: %ls\n", argv[1]);
   }

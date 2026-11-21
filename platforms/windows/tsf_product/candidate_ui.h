@@ -130,9 +130,12 @@ class CandidateUi {
 
   // Copies one snapshot into the element (begin or update) and places the window when TSF
   // permits TIP drawing. `anchor` may be null: then the window is hidden, while the element
-  // still answers queries. `selected` < 0 means no explicit user selection.
+  // still answers queries. `selected` < 0 means no explicit user selection; it is the
+  // ABSOLUTE index in the full snapshot list. `page` is the presentation page (0-based,
+  // kCandidatePageSize rows per page); the window shows that page's slice and the element
+  // reports the matching page model. Out-of-range pages fall back to page 0.
   void Update(const coordinator::CandidateSnapshot& snapshot, ITfContext* context,
-              const RECT* anchor, int selected);
+              const RECT* anchor, int selected, int page = 0);
   // Applied from the next Update onward. The setting is read on the engine-start thread
   // and published atomically, so the STA never reads settings.ini during key handling.
   void SetDisplayPreference(CandidateDisplayPreference preference) {

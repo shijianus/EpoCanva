@@ -245,7 +245,7 @@ std::vector<CandidateWindowItem> WindowItems() {
   return items;
 }
 
-CandidateSnapshot MakeSnapshot() {
+CandidateSnapshot MakeSnapshot(std::size_t item_count = 8) {
   CandidateSnapshot snapshot;
   snapshot.valid = true;
   snapshot.version = 9;
@@ -253,21 +253,27 @@ CandidateSnapshot MakeSnapshot() {
   snapshot.generation = 7;
   snapshot.work_id = 3;
   snapshot.page_no = 0;
-  snapshot.page_size = 8;
+  snapshot.page_size = static_cast<int>(item_count);
   snapshot.is_last_page = true;
   snapshot.highlighted_page_index = 0;
-  std::size_t index = 0;
-  for (const CandidateWindowItem& item : WindowItems()) {
+  const wchar_t* texts[] = {L"hel", L"hello", L"help", L"held", L"hell", L"helix",
+                            L"helicopter", L"helo", L"helm", L"helloed", L"helper",
+                            L"healed", L"heeled", L"hailer", L"holed", L"hullo"};
+  for (std::size_t index = 0; index < item_count && index < 16; ++index) {
     epocanva::tsf::coordinator::CandidateItem candidate;
-    candidate.text_utf16_code_units.assign(item.text.begin(), item.text.end());
-    candidate.kind = item.kind;
+    candidate.text_utf16_code_units.assign(texts[index],
+                                           texts[index] + std::wcslen(texts[index]));
+    if (index == 0) {
+      candidate.kind = CandidateKind::kLiteral;
+    } else if (index == 7) {
+      candidate.kind = CandidateKind::kSpelling;
+      candidate.comment_utf16_code_units = u"spell";
+    } else {
+      candidate.kind = CandidateKind::kCompletion;
+    }
     candidate.page_index = index;
     candidate.menu_index = index;
-    if (item.kind == CandidateKind::kSpelling) {
-      candidate.comment_utf16_code_units = u"spell";
-    }
     snapshot.items.push_back(std::move(candidate));
-    ++index;
   }
   return snapshot;
 }
@@ -712,6 +718,117 @@ void TestDisplayStates(bool self_check_fail) {
   }
 }
 
+void TestPaging() {
+  const RECT anchor = {120, 120, 160, 150};
+
+  // 9 items: two real pages. The full list stays the selection authority; the element
+  // reports the page grid and the window shows exactly one page slice.
+  {
+    FakeUiElementManager* manager = new FakeUiElementManager();
+    manager->show = false;  // keep the TIP window out of the paging assertions
+    FakeHost host;
+    CandidateUi ui(1, &host, ::GetModuleHandleW(nullptr));
+    std::wstring why;
+    Check(ui.StartWithManagerForTest(manager, manager, &why),
+          "paging: controlled manager attached");
+    const CandidateSnapshot snapshot = MakeSnapshot(9);
+    ui.Update(snapshot, nullptr, &anchor, -1, 0);
+    if (manager->element != nullptr) {
+      ITfCandidateListUIElement* list = nullptr;
+      const HRESULT qi = manager->element->QueryInterface(
+          IID_ITfCandidateListUIElement, reinterpret_cast<void**>(&list));
+      Check(SUCCEEDED(qi) && list != nullptr, "paging: the element answers the list interface");
+      if (list != nullptr) {
+        UINT count = 0;
+        UINT page_count = 0;
+        UINT starts[4] = {};
+        UINT current = 99;
+        BSTR first = nullptr;
+        BSTR page_one_first = nullptr;
+        Check(SUCCEEDED(list->GetCount(&count)) && count == 9,
+              "paging: GetCount reports the full 9-item list");
+        Check(SUCCEEDED(list->GetPageIndex(starts, 4, &page_count)) &&
+                  page_count == 2 && starts[0] == 0 && starts[1] == 8,
+              "paging: the page grid is 2 pages starting at 0 and 8");
+        Check(SUCCEEDED(list->GetCurrentPage(&current)) && current == 0,
+              "paging: page 0 is current after the first update");
+        Check(SUCCEEDED(list->GetString(0, &first)) && first != nullptr &&
+                  std::wstring(first) == L"hel",
+              "paging: GetString serves the full list by absolute index");
+        ::SysFreeString(first);
+        Check(SUCCEEDED(list->GetString(8, &page_one_first)) && page_one_first != nullptr &&
+                  std::wstring(page_one_first) == L"helm",
+              "paging: the ninth row is reachable by its absolute index");
+        ::SysFreeString(page_one_first);
+        // The host can request page 1; an out-of-grid page is refused, never clamped.
+        UINT one = 8;
+        Check(SUCCEEDED(list->SetPageIndex(&one, 1)) &&
+                  SUCCEEDED(list->GetCurrentPage(&current)) && current == 1,
+              "paging: SetPageIndex accepts a real page start");
+        UINT bogus = 3;
+        Check(list->SetPageIndex(&bogus, 1) == E_INVALIDARG,
+              "paging: SetPageIndex refuses a non-page-start offset");
+        UINT beyond = 16;
+        Check(list->SetPageIndex(&beyond, 1) == E_INVALIDARG,
+              "paging: SetPageIndex refuses a start beyond the list");
+        list->Release();
+      }
+    } else {
+      Check(false, "paging: the manager received the element");
+    }
+    // Absolute selection 8 sits on page 1; the derived view must flip to it.
+    ui.Update(snapshot, nullptr, &anchor, 8, 1);
+    if (manager->element != nullptr) {
+      ITfCandidateListUIElement* list = nullptr;
+      if (SUCCEEDED(manager->element->QueryInterface(
+              IID_ITfCandidateListUIElement, reinterpret_cast<void**>(&list))) &&
+          list != nullptr) {
+        UINT current = 0;
+        UINT selection = 0;
+        BSTR selected_text = nullptr;
+        Check(SUCCEEDED(list->GetCurrentPage(&current)) && current == 1,
+              "paging: selecting row 8 flips the element view to page 1");
+        Check(SUCCEEDED(list->GetSelection(&selection)) && selection == 8,
+              "paging: the element selection is the absolute index 8");
+        Check(SUCCEEDED(list->GetString(8, &selected_text)) && selected_text != nullptr &&
+                  std::wstring(selected_text) == L"helm",
+              "paging: the selected absolute row names its text");
+        ::SysFreeString(selected_text);
+        list->Release();
+      }
+    }
+    // State-C window: the visible page slice only.
+    {
+      FakeHost window_host;
+      CandidateUi window_ui(1, &window_host, ::GetModuleHandleW(nullptr));
+      std::wstring window_why;
+      Check(window_ui.StartWithManagerForTest(nullptr, nullptr, &window_why),
+            "paging: state C UI started");
+      window_ui.Update(snapshot, nullptr, &anchor, 8, 1);
+      Check(window_ui.window_visible(), "paging: the page-1 window is visible");
+      const auto diagnostics = window_ui.Diagnostics();
+      Check(diagnostics.no_manager_draws >= 1, "paging: the page view drew");
+      window_ui.Update(MakeSnapshot(16), nullptr, &anchor, 3, 0);
+      Check(window_ui.window_visible(), "paging: a 16-item page 0 is visible");
+      window_ui.Stop();
+    }
+    ui.Stop();
+    manager->Release();
+  }
+
+  // Out-of-range page requests fall back instead of showing an empty window.
+  {
+    FakeHost window_host;
+    CandidateUi window_ui(1, &window_host, ::GetModuleHandleW(nullptr));
+    std::wstring why;
+    Check(window_ui.StartWithManagerForTest(nullptr, nullptr, &why),
+          "paging fallback: state C UI started");
+    window_ui.Update(MakeSnapshot(9), nullptr, &anchor, -1, 5);
+    Check(window_ui.window_visible(), "paging fallback: page 5 clamps to the last page");
+    window_ui.Stop();
+  }
+}
+
 void TestAnchorPolicy() {
   using epocanva::tsf::product::CandidateAnchorDecision;
   using epocanva::tsf::product::CandidateAnchorRetryBudget;
@@ -775,6 +892,7 @@ int main(int argc, char** argv) {
     TestLayout();
     TestWindow(screenshot);
     TestAnchorPolicy();
+    TestPaging();
     TestUiLifecycle();
     TestDisplayStates(false);
   }

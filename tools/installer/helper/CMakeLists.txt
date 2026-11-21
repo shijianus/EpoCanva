@@ -22,6 +22,6 @@ if(MSVC)
     /utf-8 /permissive- /Zc:__cplusplus /W4 /EHsc)
 endif()
 target_link_libraries(epocanva_tip_profile_helper PRIVATE
-  ole32 oleaut32 uuid advapi32)
+  ole32 oleaut32 uuid advapi32 shell32)
 set_target_properties(epocanva_tip_profile_helper PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

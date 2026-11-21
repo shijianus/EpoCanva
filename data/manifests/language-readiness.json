@@ -35,7 +35,7 @@
       "id": "zh",
       "status": "implemented",
       "data_status": "packaged",
-      "reason": "Pinyin and Zhuyin profiles, the real Rime engine path and the unified backend are implemented and tested; packaged model, schema, Terra dictionary and Zhuyin data are fixed by SHA-256. This is not a claim of full inline TSF composition; installed-host acceptance remains separate.",
+      "reason": "Pinyin and Zhuyin profiles, the real Rime engine path and the unified backend are implemented and tested; the zh-Hans-CN zhuyin scheme is admitted with controlled integration evidence (tests/backend/profiles.cc and the unified backend/TSF tests) while zh-Hant zhuyin stays unverified. Packaged model, schema, Terra dictionary and Zhuyin data are fixed by SHA-256. This is not a claim of full inline TSF composition; installed-host acceptance remains separate.",
       "payload_paths": [
         "data/backend/zh/model.tsv",
         "data/epocanva_backend_pinyin.schema.yaml",

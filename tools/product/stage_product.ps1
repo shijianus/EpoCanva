@@ -138,6 +138,7 @@ if ($BackendResourcesRoot) {
         Fail 'backend staging manifest lists no runtime files' 3
     }
     $hasResources = $false
+    $seenBackendPaths = @{}
     foreach ($row in $staging.files) {
         $relative = [string]$row.path
         if ($relative -like 'data/backend/provenance/*' -or $relative -eq 'data/backend/staging-manifest.json') {
@@ -146,21 +147,46 @@ if ($BackendResourcesRoot) {
         if ($relative -notmatch '^data/(backend/|epocanva_backend_[A-Za-z0-9_.-]+\.(schema\.yaml|dict\.yaml)$|zhuyin\.yaml$)') {
             Fail "unexpected backend payload path: $relative" 4
         }
+        if ($seenBackendPaths.ContainsKey($relative)) {
+            Fail "backend staging manifest repeats a payload path: $relative" 4
+        }
+        $seenBackendPaths[$relative] = $true
+        if ($row.sha256 -isnot [string] -or
+                ($row.bytes -isnot [int] -and $row.bytes -isnot [long])) {
+            Fail "invalid backend payload digest or byte count: $relative" 4
+        }
+        $manifestSha = [string]$row.sha256
+        $manifestBytes = [long]$row.bytes
+        if ($manifestSha -cnotmatch '^[0-9a-f]{64}$' -or $manifestBytes -le 0) {
+            Fail "invalid backend payload digest or byte count: $relative" 4
+        }
         if ($destinations.ContainsKey($relative)) {
-            Fail "backend payload duplicates a fixed policy destination: $relative" 2
+            $fixedRows = @($entries | Where-Object { $_.Path -ceq $relative })
+            if ($fixedRows.Count -ne 1 -or -not $fixedRows[0].Source -or
+                    $fixedRows[0].Sha256.Length -ne 64 -or $fixedRows[0].Bytes -le 0) {
+                Fail "backend payload overlaps a destination without a fixed content policy: $relative" 5
+            }
+            $fixed = $fixedRows[0]
+            if ($manifestSha -cne $fixed.Sha256 -or $manifestBytes -ne $fixed.Bytes) {
+                Fail "backend payload differs from fixed product policy: $relative" 5
+            }
+            $backendSource = Join-Path $BackendResourcesRoot ($relative -replace '/', '\')
+            Assert-FixedFile $backendSource $fixed
+            if ($relative -eq 'data/backend/resources.tsv') { $hasResources = $true }
+            continue
         }
         $destinations[$relative] = $true
         $backendEntries += [pscustomobject]@{
             Path = $relative
             Source = Join-Path $BackendResourcesRoot ($relative -replace '/', '\')
-            Sha256 = [string]$row.sha256
-            Bytes = [long]$row.bytes
+            Sha256 = $manifestSha
+            Bytes = $manifestBytes
         }
         if ($relative -eq 'data/backend/resources.tsv') { $hasResources = $true }
         Assert-FixedFile $backendEntries[-1].Source $backendEntries[-1]
     }
     if (-not $hasResources) { Fail 'backend payload has no data/backend/resources.tsv' 4 }
-    if ($backendEntries.Count -lt 1) { Fail 'backend payload lists no runtime files' 4 }
+    if ($seenBackendPaths.Count -lt 1) { Fail 'backend payload lists no runtime files' 4 }
 }
 $productBin = Join-Path $BuildDir 'product\bin'
 $sources = @{}

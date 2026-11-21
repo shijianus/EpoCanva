@@ -174,7 +174,7 @@
       "dimension": "engine",
       "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
       "language": "zh",
-      "note": "zhuyin-unverified: locale scheme_implementation is unverified; the locale registry resolves kSchemeNotVerified and no product profile exposes it",
+      "note": "zhuyin on zh-Hans-CN is implemented in the locale registry with controlled integration evidence (tests/backend/profiles.cc and the unified backend/TSF tests); host acceptance is a separate gate",
       "status": "integration_tested"
     },
     {
@@ -182,7 +182,7 @@
       "dimension": "resources",
       "evidence_ref": "docs/testing/backend-resource-staging.md",
       "language": "zh",
-      "note": "zhuyin-unverified: locale scheme_implementation is unverified; the locale registry resolves kSchemeNotVerified and no product profile exposes it; hash-pinned staged resources verified by the staging provenance gates",
+      "note": "zhuyin on zh-Hans-CN is implemented with controlled integration evidence; hash-pinned staged resources verified by the staging provenance gates",
       "status": "integration_tested"
     },
     {
@@ -190,7 +190,7 @@
       "dimension": "real_input_integration",
       "evidence_ref": "tests/backend/profiles.cc",
       "language": "zh",
-      "note": "zhuyin-unverified: locale scheme_implementation is unverified; the locale registry resolves kSchemeNotVerified and no product profile exposes it; real input to real candidates through the public backend ABI in the controlled test suite",
+      "note": "zhuyin on zh-Hans-CN is implemented: su3cl3→你好 through the real Rime schema, executor and coordinator in tests/backend/profiles.cc; controlled evidence only, no installed-host acceptance",
       "status": "integration_tested"
     },
     {
@@ -198,7 +198,7 @@
       "dimension": "host_acceptance",
       "evidence_ref": "docs/reports/phase-e-followup-implementation.md",
       "language": "zh",
-      "note": "zhuyin-unverified: locale scheme_implementation is unverified; the locale registry resolves kSchemeNotVerified and no product profile exposes it; no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
+      "note": "zhuyin on zh-Hans-CN is implemented in the locale registry with controlled integration evidence, but no real registered host acceptance exists for any binding; nothing in this phase is HOST_VERIFIED",
       "status": "not_implemented"
     },
     {

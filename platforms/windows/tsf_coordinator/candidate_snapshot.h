@@ -45,6 +45,15 @@ enum class CandidateKind : std::uint8_t {
 
 const char* DescribeCandidateKind(CandidateKind kind);
 
+// The product presents one page of at most this many rows; the full item list stays the
+// selection authority (absolute indices), and the page view is presentation only.
+inline constexpr std::size_t kCandidatePageSize = 8;
+
+// Number of presentation pages for a full item list. Zero items have zero pages.
+inline std::size_t CandidatePageCount(std::size_t item_count) {
+  return item_count == 0 ? 0 : (item_count + kCandidatePageSize - 1) / kCandidatePageSize;
+}
+
 // The engine's fixed comment for a spelling suggestion
 // (engine/rime_components/english/english_diagnostics.h:
 // EPOCANVA_ENGLISH_SPELLING_COMMENT). It is duplicated here because the coordinator does

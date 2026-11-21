@@ -1,5 +1,6 @@
 // EpoCanva W2 -- product STA controller implementation. See the header for the contract.
 #include "text_service_controller.h"
+#include "menu_key_admission.h"
 
 #include <algorithm>
 #include <atomic>
@@ -466,21 +467,12 @@ bool ProductTextController::PredictKey(WPARAM wparam, LPARAM lparam) {
   }
   // Only menu interaction is ever eaten. Every key that produces, deletes or ends original
   // text stays with the host: the product cannot lose what it never owned, and no queue,
-  // capacity or engine delay can become a text loss.
-  const std::uint32_t vk = key.event.virtual_key;
-  const bool plain_arrow = (vk == VK_UP || vk == VK_DOWN) &&
-                           !key.event.modifiers.control && !key.event.modifiers.alt &&
-                           !key.event.modifiers.shift && !key.event.modifiers.windows;
-  if (plain_arrow && CandidateKeysActive() && CandidatesOpen()) {
-    ++predicted_eaten_;
-    return true;
-  }
-  if (CandidateKeysActive() && CandidatesOpen() && vk == VK_RETURN &&
-      candidate_selection_ >= 0) {
-    ++predicted_eaten_;
-    return true;
-  }
-  if (CandidateKeysActive() && CandidatesOpen() && vk == VK_ESCAPE) {
+  // capacity or engine delay can become a text loss. The prediction and the actual handler
+  // share one admission predicate (menu_key_admission.h) so they can never disagree.
+  const MenuKeyRoute route = DecideMenuKey(key.event.virtual_key, key.event.modifiers,
+                                           CandidateKeysActive() && CandidatesOpen(),
+                                           candidate_selection_ >= 0);
+  if (route != MenuKeyRoute::kPassThrough) {
     ++predicted_eaten_;
     return true;
   }
@@ -531,19 +523,21 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
     return false;
   }
   // The only keys the product ever eats are menu interactions. They never change text.
+  // The admission predicate is the one shared with the prediction above: only unmodified
+  // Up/Down/Return/Escape on an open, active menu are menu keys, so Shift+Enter/Escape and
+  // every chord pass through to the host exactly as key_decision.h's policy requires.
   const std::uint32_t vk = key.event.virtual_key;
-  const bool plain_arrow = (vk == VK_UP || vk == VK_DOWN) &&
-                           !key.event.modifiers.control && !key.event.modifiers.alt &&
-                           !key.event.modifiers.shift && !key.event.modifiers.windows;
-  if (CandidateKeysActive() && CandidatesOpen() && plain_arrow) {
-    TraceStage("menu_arrow", vk == VK_DOWN ? 1 : -1);
-    MoveCandidateSelection(vk == VK_DOWN ? 1 : -1);
+  const MenuKeyRoute route = DecideMenuKey(vk, key.event.modifiers,
+                                           CandidateKeysActive() && CandidatesOpen(),
+                                           candidate_selection_ >= 0);
+  if (route == MenuKeyRoute::kNavigateUp || route == MenuKeyRoute::kNavigateDown) {
+    TraceStage("menu_arrow", route == MenuKeyRoute::kNavigateDown ? 1 : -1);
+    MoveCandidateSelection(route == MenuKeyRoute::kNavigateDown ? 1 : -1);
     TraceStage("menu_arrow_selection", candidate_selection_);
     ++eaten_;
     return true;
   }
-  if (CandidateKeysActive() && CandidatesOpen() && vk == VK_RETURN &&
-      candidate_selection_ >= 0) {
+  if (route == MenuKeyRoute::kAcceptSelection) {
     const coordinator::CandidateSnapshot menu = coordinator_->candidate_snapshot();
     TraceStage("menu_enter_selection", candidate_selection_);
     TraceStage("menu_enter_in_flight", suggestion_in_flight_ ? 1 : 0);
@@ -563,7 +557,7 @@ bool ProductTextController::HandleKeyDown(WPARAM wparam, LPARAM lparam,
     ++eaten_;
     return true;
   }
-  if (CandidateKeysActive() && CandidatesOpen() && vk == VK_ESCAPE) {
+  if (route == MenuKeyRoute::kDismiss) {
     // Escape dismisses the cancelable enhancement. It never removes text the user typed.
     // The engine stream is reset below; if the user keeps typing, the continuation starts a
     // new suggestion token at the current caret (host_token_units_ restarts at zero).
@@ -1436,7 +1430,14 @@ void ProductTextController::UpdateCandidateUi() {
       return;
     }
   }
-  candidate_ui_->Update(snapshot, ui_context_, anchor_ptr, candidate_selection_);
+  // The presentation page always follows the explicit selection: navigating to an absolute
+  // row flips the page so the selected row is visible, and a fresh menu (no selection)
+  // shows page 0. Selection and submission keep using the absolute index.
+  const int page_view = candidate_selection_ >= 0
+      ? static_cast<int>(static_cast<std::size_t>(candidate_selection_) /
+                         coordinator::kCandidatePageSize)
+      : 0;
+  candidate_ui_->Update(snapshot, ui_context_, anchor_ptr, candidate_selection_, page_view);
 }
 
 void ProductTextController::OnUiSelectionChanged(

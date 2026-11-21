@@ -9,6 +9,7 @@
 namespace epocanva::tsf::product {
 struct HostContextSnapshot {
   bool valid = false;
+  bool protected_run = false;  // bounded host text contains technical markers; do not query it
   LONG caret_utf16 = -1;  // ACP in UTF-16 code units
   LONG token_start_utf16 = -1;
   std::string preceding_utf8;  // at most 512 UTF-16 code units converted strictly
