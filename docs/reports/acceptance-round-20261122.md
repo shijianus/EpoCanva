@@ -55,7 +55,13 @@ All engineering defects assigned to this round are implemented, reviewed, commit
 | acceptance-ci-provenance | six-layer CI at this exact SHA + protected runner authorization |
 | signing (public only) | final signing/timestamp evidence |
 
-## 5. Handover
+## 6. Remote integration and CI
+
+- The branch was pushed to origin after a full remote audit: every remote branch (`main`, `codex/go-refactor-20261117`, `feat/offline-multilingual-backend`, `feat/phase-e-*`) contained zero commits not already in the local HEAD, so the push was a pure fast-forward and overwrote nothing on either side.
+- The first push (`fe5be83`) failed the remote `windows-ci` **whitespace gate** (6 trailing-whitespace problems in the beta-scope proposal); `root-unit-tests` was skipped behind it. A forward fixup commit (`c99ff82`) stripped the hard-break spaces.
+- Remote CI at `c99ff82` (run 45048037830): **contract-gate success, canary success, root-unit-tests success.** These are genuine remote layers 1-2 evidence at this exact SHA; the four deeper layers remain disabled pending the protected runner with the hash-verified immutable input cache.
+
+## 7. Handover
 
 - Evidence for the tested candidate lives in `build/windows-product/` (`product-build-receipt.json`, `stage/EpoCanva-0.2.6-w3b`, `installer/`, `source-manifest.json`, `release-evidence.json` with five bound entries, `release-readiness-*.json`), `build/acceptance-20261122-backend/`, and `build/windows-product/english-acceptance/`.
 - Old candidates' evidence is not reusable: every prior receipt/MSI/archive was bound to older (dirty or pre-batch) SHAs.
