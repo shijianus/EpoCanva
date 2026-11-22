@@ -1,8 +1,8 @@
 # Windows Public Beta Scope Proposal
 
-**Status:** `proposed_not_approved`  
-**Scope ID:** `epocanva-windows-beta-v1`  
-**Candidate branch at proposal:** `feat/internal-acceptance-round`  
+**Status:** `proposed_not_approved`
+**Scope ID:** `epocanva-windows-beta-v1`
+**Candidate branch at proposal:** `feat/internal-acceptance-round`
 **Candidate commit at proposal:** `c567eb045a72c2b6787edbd3249c7ab7c220e6bc`
 
 This proposal makes no distribution or owner approval. The project currently authorizes internal unsigned acceptance only. Public beta distribution requires an artifact-bound scope decision, distribution approvals, a signed final installer, and every release-gate item in `docs/product/release-gate.md`.
