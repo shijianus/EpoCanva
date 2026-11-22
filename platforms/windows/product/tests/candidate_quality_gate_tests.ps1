@@ -52,8 +52,8 @@ function New-Policy([string]$AbsoluteDecision = 'approved') {
         $absolute['top1_min'] = $null; $absolute['top3_min'] = $null; $absolute['mrr_min'] = $null
     }
     return [pscustomobject]@{
-        format = 'epocanva-candidate-quality-policy-v2'
-        version = 2
+        format = 'epocanva-candidate-quality-policy-v3'
+        version = 3
         languages = $languages
         qualification = [pscustomobject]$qualification
         minimum_cases = [pscustomobject]$minimums
@@ -87,7 +87,8 @@ function New-Report($Bindings, $Policy) {
             'cross_process_determinism', 'in_process_repeat_determinism', 'empty_menu_rate_zero',
             'raw_contract', 'candidate_quality_metrics_recorded', 'latency_memory_recorded',
             'privacy_and_abi_status', 'wrong_language_observable', 'wrong_language_rate',
-            'tier_b_corpus', 'performance_regression', 'absolute_quality_thresholds')) {
+            'tier_b_corpus', 'performance_regression', 'absolute_quality_thresholds',
+            'measured_scheme_admission')) {
         $predicates[$name] = [pscustomobject]@{ status = 'passed' }
     }
     $perLanguage = [ordered]@{}

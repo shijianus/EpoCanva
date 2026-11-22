@@ -38,8 +38,8 @@ def _finite(value: Any, where: str, maximum: float | None = None) -> None:
 def validate_policy(policy: Any) -> dict[str, Any]:
     _keys(policy, {"format", "version", "languages", "qualification", "minimum_cases",
                    "thresholds", "regression", "invariants", "absolute_quality", "tier_b_lock"}, "policy")
-    if (policy["format"] != "epocanva-candidate-quality-policy-v2" or
-            type(policy["version"]) is not int or policy["version"] != 2):
+    if (policy["format"] != "epocanva-candidate-quality-policy-v3" or
+            type(policy["version"]) is not int or policy["version"] != 3):
         raise PolicyError("unsupported quality policy schema")
     languages = policy["languages"]
     if (not isinstance(languages, list) or not languages or

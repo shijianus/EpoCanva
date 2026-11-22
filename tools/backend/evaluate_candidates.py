@@ -806,6 +806,7 @@ GATE_PREDICATES = (
     "tier_b_corpus",
     "performance_regression",
     "absolute_quality_thresholds",
+    "measured_scheme_admission",
 )
 WRONG_LANGUAGE_REASON = "candidate language attribution must come from the observed internal candidate record"
 

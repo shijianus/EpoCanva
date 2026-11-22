@@ -263,10 +263,10 @@ function Get-CqRate($Object, [string]$Name, [double]$Minimum, [double]$Maximum) 
 function Test-CandidateQualityPolicy($Policy) {
     # This is a shape check of the one machine policy. It never supplies a
     # second threshold table: every comparison below reads these values.
-    if ((Get-CqProperty $Policy 'format') -cne 'epocanva-candidate-quality-policy-v2') {
+    if ((Get-CqProperty $Policy 'format') -cne 'epocanva-candidate-quality-policy-v3') {
         throw 'candidate-quality policy schema is unsupported.'
     }
-    if ((Get-CqProperty $Policy 'version') -isnot [int] -or (Get-CqProperty $Policy 'version') -ne 2) {
+    if ((Get-CqProperty $Policy 'version') -isnot [int] -or (Get-CqProperty $Policy 'version') -ne 3) {
         throw 'candidate-quality policy version is unsupported.'
     }
     $languages = @('en', 'zh', 'fr', 'ja', 'ko')
@@ -443,7 +443,8 @@ function Test-CandidateQualityEvidence {
         'cross_process_determinism', 'in_process_repeat_determinism', 'empty_menu_rate_zero',
         'raw_contract', 'candidate_quality_metrics_recorded', 'latency_memory_recorded',
         'privacy_and_abi_status', 'wrong_language_observable', 'wrong_language_rate',
-        'tier_b_corpus', 'performance_regression', 'absolute_quality_thresholds')
+        'tier_b_corpus', 'performance_regression', 'absolute_quality_thresholds',
+        'measured_scheme_admission')
     $predicates = Get-CqProperty $gate 'predicates'
     $observedNames = @($predicates.PSObject.Properties | ForEach-Object { $_.Name })
     if ($observedNames.Count -ne $expectedPredicates.Count -or
