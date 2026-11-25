@@ -326,7 +326,7 @@ int Finish() {
 }
 
 int FinishEnvironmentLimited() {
-  return g_failed == 0 ? kExitEnvironmentLimited : Finish();
+  return g_failed == 0 ? kExitCheckFailed : Finish();
 }
 
 // --- recording sink -----------------------------------------------------------------------
@@ -580,6 +580,19 @@ HWND TestThreadFocusWindow() {
   // on it is the Win32 thread-focus fact the production guard records as
   // "win32-thread-focus-revalidation". No TSF notification is synthesized.
   return FocusWindowOwner().window;
+}
+
+bool DestroyTestThreadFocusWindow() {
+  HWND& owned = FocusWindowOwner().window;
+  if (owned == nullptr) {
+    return true;
+  }
+  const HWND retired = owned;
+  if (::IsWindow(retired) && ::DestroyWindow(retired) == FALSE) {
+    return false;
+  }
+  owned = nullptr;
+  return ::IsWindow(retired) == FALSE;
 }
 
 bool EnsureTestThreadFocus(std::string* error) {

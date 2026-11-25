@@ -1285,6 +1285,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "model_sha256_by_profile": model_sha256_by_profile,
             "model_sha256_notes": model_sha256_notes,
             "harness_sha256": harness_sha256,
+            "rime_dll_sha256": args.rime_dll_sha256,
             **artifact_hashes(args),
         },
         "per_language": per_language,

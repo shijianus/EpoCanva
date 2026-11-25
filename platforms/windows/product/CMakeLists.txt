@@ -524,9 +524,11 @@ foreach(_receipt_mode normal can_fail)
       -DCASE=product-build-receipt-${_receipt_mode}
       -DEXPECTED_EXIT=${_receipt_exit} "-DMARKER=${_receipt_marker}"
       -DMARKER_POLICY=require "-DPASS_ARGS=${_receipt_args}"
-      -DTIMEOUT_SECONDS=120 -P ${_product_assert})
+      # Full source registration plus receipt mutation validation is an I/O
+      # contract suite, not a product latency benchmark (174 s measured locally).
+      -DTIMEOUT_SECONDS=600 -P ${_product_assert})
   set_tests_properties(product.build.receipt_${_receipt_mode}
-    PROPERTIES TIMEOUT 150 LABELS "windows;product;build;identity;tampering")
+    PROPERTIES TIMEOUT 630 LABELS "windows;product;build;identity;tampering")
 endforeach()
 
 add_test(NAME product.unit.extended_settings

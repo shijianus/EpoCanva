@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <exception>
 #include <utility>
 #include <vector>
 
@@ -85,6 +86,16 @@ const char* DescribeTargetBindingEvidence(TargetBindingEvidence evidence) {
 }
 
 namespace {
+
+class ScopedDepth {
+ public:
+  explicit ScopedDepth(unsigned& depth) : depth_(depth) { ++depth_; }
+  ~ScopedDepth() { --depth_; }
+  ScopedDepth(const ScopedDepth&) = delete;
+  ScopedDepth& operator=(const ScopedDepth&) = delete;
+ private:
+  unsigned& depth_;
+};
 
 std::string HrText(HRESULT hr) {
   char buffer[24] = {};
@@ -176,8 +187,14 @@ struct ContextObserver::State {
         own_client_id(own_client_id),
         policy(thread_focus_policy),
         text_ownership(text_ownership),
-        reader(new SelectionReader(own_client_id)) {}
+        reader(new SelectionReader(own_client_id)) {
+    counters.owner_thread_id = owner_thread_id;
+    APTTYPEQUALIFIER qualifier = APTTYPEQUALIFIER_NONE;
+    counters.apartment_query_hr = ::CoGetApartmentType(&counters.apartment_type, &qualifier);
+  }
 
+  const DWORD owner_thread_id = ::GetCurrentThreadId();
+  bool OnOwnerThread() const { return ::GetCurrentThreadId() == owner_thread_id; }
   ContextRegistry* registry = nullptr;
   TfClientId own_client_id = 0;
   // Explicit construction-time policy. StrictTsf never probes or accepts a Win32 window.
@@ -191,6 +208,8 @@ struct ContextObserver::State {
 
   bool subscribed = false;
   bool closed = false;
+  unsigned callback_depth = 0;
+  unsigned pump_depth = 0;
 
   ITfThreadMgr* thread_mgr = nullptr;  // held while subscribed
   ITfSource* thread_source = nullptr;  // held while advised
@@ -246,38 +265,46 @@ struct ContextObserver::State {
   }
 
   void ReleaseFocusedDocumentManager() {
-    if (focused_dm != nullptr) {
-      focused_dm->Release();
-      focused_dm = nullptr;
+    if (ITfDocumentMgr* retired = std::exchange(focused_dm, nullptr)) {
       ++counters.document_mgr_releases;
+      retired->Release();
     }
   }
 
   void ReleaseTopContext() {
-    if (top_context != nullptr) {
-      top_context->Release();
-      top_context = nullptr;
-      ++counters.context_releases;
-    }
+    ITfContext* retired = std::exchange(top_context, nullptr);
     context_id = 0;
     generation = 0;
     selection_retry_attempts = 0;
+    if (retired != nullptr) {
+      ++counters.context_releases;
+      retired->Release();
+    }
   }
 
   void ResetSelectionRead() {
-    reader->Abandon();
     selection_read_active = false;
+    reader->Abandon();
+  }
+
+  void Unadvise(ITfSource* source, DWORD& cookie, const char* trace_stage) {
+    const DWORD retired_cookie = std::exchange(cookie, TF_INVALID_COOKIE);
+    const HRESULT hr = source->UnadviseSink(retired_cookie);
+    counters.last_sink_unadvise_hr = hr;
+    TraceStage(trace_stage, hr);
+    if (FAILED(hr)) {
+      ++counters.sink_unadvise_failures;
+    }
   }
 
   void ReleaseTextSink() {
-    if (text_source != nullptr) {
+    ITfSource* source = std::exchange(text_source, nullptr);
+    if (source != nullptr) {
       if (text_cookie != TF_INVALID_COOKIE) {
-        text_source->UnadviseSink(text_cookie);
+        Unadvise(source, text_cookie, "observer_unadvise_text_hr");
         ++counters.sink_unadvises;
-        text_cookie = TF_INVALID_COOKIE;
       }
-      text_source->Release();
-      text_source = nullptr;
+      source->Release();
     }
   }
 
@@ -296,6 +323,9 @@ struct ContextObserver::State {
     DWORD cookie = TF_INVALID_COOKIE;
     const HRESULT advise_hr =
         source->AdviseSink(IID_ITfTextEditSink, sink_unknown, &cookie);
+    counters.text_sink_advise_hr = advise_hr;
+    TraceStage("observer_advise_text_hr", advise_hr);
+    TraceStage("observer_advise_text_cookie", cookie);
     if (FAILED(advise_hr) || cookie == TF_INVALID_COOKIE) {
       source->Release();
       ++counters.sink_advise_failures;
@@ -338,7 +368,8 @@ struct ContextObserver::State {
     }
 
     win32_thread_focus = false;
-    if (policy == ThreadFocusPolicy::kLabWin32Fallback) {
+    if (policy == ThreadFocusPolicy::kLabWin32Fallback &&
+        thread_focus_query_ok && !thread_focus_query_value) {
       ++counters.win32_thread_focus_checks;
       GUITHREADINFO info = {};
       info.cbSize = sizeof(info);
@@ -351,10 +382,10 @@ struct ContextObserver::State {
       }
     }
 
-    if (thread_focus_notice == ThreadFocusNotice::kSet) {
-      counters.last_thread_focus_evidence = ThreadFocusEvidence::kNotificationSet;
-    } else if (thread_focus_query_ok && thread_focus_query_value) {
-      counters.last_thread_focus_evidence = ThreadFocusEvidence::kQuerySet;
+    if (thread_focus_query_ok && thread_focus_query_value) {
+      counters.last_thread_focus_evidence = thread_focus_notice == ThreadFocusNotice::kSet
+                                                ? ThreadFocusEvidence::kNotificationSet
+                                                : ThreadFocusEvidence::kQuerySet;
     } else if (win32_thread_focus) {
       counters.last_thread_focus_evidence = ThreadFocusEvidence::kWin32ThreadFocus;
     } else if (thread_focus_notice == ThreadFocusNotice::kKill) {
@@ -370,6 +401,12 @@ struct ContextObserver::State {
                                       std::uint64_t expected_context_id,
                                       std::uint64_t expected_generation) {
     TargetRevalidation result;
+    if (::GetCurrentThreadId() != owner_thread_id) {
+      result.status = TargetRevalidationStatus::kQueryFailed;
+      result.failure_stage = TargetFailureStage::kInvalidRequest;
+      result.query_hr = RPC_E_WRONG_THREAD;
+      return result;
+    }
     if (closed || !subscribed || thread_mgr == nullptr || expected == nullptr ||
         expected_context_id == 0 || expected_generation == 0) {
       result.status = closed ? TargetRevalidationStatus::kClosed
@@ -377,10 +414,12 @@ struct ContextObserver::State {
       result.failure_stage = closed ? TargetFailureStage::kNone
                                     : TargetFailureStage::kInvalidRequest;
       result.query_hr = closed ? S_OK : E_INVALIDARG;
-      ++counters.target_revalidations;
-      ++counters.target_revalidation_failures;
-      counters.last_target_revalidation = result;
-      return result;
+      return RecordRevalidation(result);
+    }
+    if (!HasPublishedGeneration(expected_context_id, expected_generation) ||
+        !SameCanonicalContext(top_context, expected)) {
+      result.status = TargetRevalidationStatus::kGenerationMismatch;
+      return RecordRevalidation(result);
     }
 
     ReadThreadFocusFacts();
@@ -397,6 +436,8 @@ struct ContextObserver::State {
 
     ITfDocumentMgr* focus = nullptr;
     evidence.get_focus_hr = thread_mgr->GetFocus(&focus);
+    counters.last_get_focus_hr = evidence.get_focus_hr;
+    TraceStage("observer_guard_get_focus_hr", evidence.get_focus_hr);
     if (SUCCEEDED(evidence.get_focus_hr) && focus != nullptr) {
       evidence.has_document_manager = true;
       ITfContext* top = nullptr;
@@ -413,7 +454,7 @@ struct ContextObserver::State {
       focus->Release();
     }
 
-    if (registry != nullptr) {
+    if (!closed && registry != nullptr && evidence.top_context_matches) {
       ContextIdRecord record;
       evidence.registry_status = registry->Observe(expected, &record);
       evidence.registry_query_ok =
@@ -429,17 +470,31 @@ struct ContextObserver::State {
     }
 
     result = EvaluateTargetEvidence(evidence);
+    if (result.ok() && !HasPublishedGeneration(expected_context_id, expected_generation)) {
+      result.status = closed ? TargetRevalidationStatus::kClosed
+                             : TargetRevalidationStatus::kGenerationMismatch;
+    }
     if (result.ok() &&
         result.thread_focus_evidence == ThreadFocusEvidence::kWin32ThreadFocus) {
       ++counters.win32_thread_focus_accepts;
     }
+    counters.last_thread_focus_evidence = result.thread_focus_evidence;
+    return RecordRevalidation(result);
+  }
+
+  TargetRevalidation RecordRevalidation(const TargetRevalidation& result) {
     ++counters.target_revalidations;
     if (!result.ok()) {
       ++counters.target_revalidation_failures;
     }
     counters.last_target_revalidation = result;
-    counters.last_thread_focus_evidence = result.thread_focus_evidence;
+    TraceStage("observer_target_revalidation", static_cast<long long>(result.status));
     return result;
+  }
+
+  bool HasPublishedGeneration(std::uint64_t expected_id,
+                              std::uint64_t expected_generation) const {
+    return target_published && context_id == expected_id && generation == expected_generation;
   }
 
   // --- target publication ----------------------------------------------------------------
@@ -451,9 +506,12 @@ struct ContextObserver::State {
       return;
     }
     target_published = false;
+    TraceStage("observer_revoke_context", static_cast<long long>(context_id));
+    TraceStage("observer_revoke_generation", static_cast<long long>(generation));
     ++counters.target_drops;
     counters.last_target_lost_reason = reason;
     if (sink != nullptr) {
+      ScopedDepth callback(callback_depth);
       sink->OnTargetLost(reason);
     }
   }
@@ -464,6 +522,9 @@ struct ContextObserver::State {
     }
     ITfContext* top = nullptr;
     if (FAILED(focused_dm->GetTop(&top)) || top == nullptr) {
+      if (top != nullptr) {
+        top->Release();
+      }
       return false;
     }
     const bool same = SameCanonicalContext(top, context);
@@ -482,6 +543,11 @@ struct ContextObserver::State {
     if (top_context != nullptr && SameCanonicalContext(top_context, context)) {
       return false;
     }
+    // Revoke the old capability before any COM release/advice can reenter us.
+    DropPublished(reason);
+    if (closed) {
+      return true;
+    }
     ResetSelectionRead();
     ReleaseTextSink();
     ReleaseTopContext();
@@ -496,7 +562,6 @@ struct ContextObserver::State {
       bind_evidence = TargetBindingEvidence::kNone;
       return true;
     }
-    DropPublished(reason);
     need_bind = true;
     return true;
   }
@@ -509,10 +574,10 @@ struct ContextObserver::State {
       return;
     }
     if (focused_dm == nullptr) {
+      DropPublished(ContextDropReason::kNoFocusedDocument);
       ResetSelectionRead();
       ReleaseTextSink();
       ReleaseTopContext();
-      DropPublished(ContextDropReason::kNoFocusedDocument);
       need_bind = false;
       bind_evidence = TargetBindingEvidence::kNone;
       return;
@@ -520,10 +585,13 @@ struct ContextObserver::State {
     ITfContext* top = nullptr;
     const HRESULT top_hr = focused_dm->GetTop(&top);
     if (FAILED(top_hr) || top == nullptr) {
+      if (top != nullptr) {
+        top->Release();
+      }
+      DropPublished(ContextDropReason::kNoTopContext);
       ResetSelectionRead();
       ReleaseTextSink();
       ReleaseTopContext();
-      DropPublished(ContextDropReason::kNoTopContext);
       need_bind = false;
       bind_evidence = TargetBindingEvidence::kNone;
       return;
@@ -532,10 +600,10 @@ struct ContextObserver::State {
     const ContextRegistryStatus status = registry->Observe(top, &record);
     if (status != ContextRegistryStatus::kOk) {
       top->Release();
+      DropPublished(ContextDropReason::kRegistryCapacity);
       ResetSelectionRead();
       ReleaseTextSink();
       ReleaseTopContext();
-      DropPublished(ContextDropReason::kRegistryCapacity);
       need_bind = false;
       bind_evidence = TargetBindingEvidence::kNone;
       return;
@@ -547,7 +615,6 @@ struct ContextObserver::State {
   }
 
   void PublishTarget(LONG caret_utf16) {
-    TraceStage("observer_publish_attempt", caret_utf16);
     selection_retry_attempts = 0;
     if (sink == nullptr || top_context == nullptr) {
       // No listener to publish to; nothing is bound. SetSink() does not replay the target.
@@ -573,16 +640,18 @@ struct ContextObserver::State {
     generation = record.generation;
     published_caret_utf16 = caret_utf16;
     target_published = true;
-    TraceStage("observer_publish", caret_utf16);
+    TraceStage("observer_publish_context", static_cast<long long>(context_id));
+    TraceStage("observer_publish_generation", static_cast<long long>(generation));
     ++counters.target_binds;
     if (bind_evidence == TargetBindingEvidence::kNone) {
       bind_evidence = TargetBindingEvidence::kRevalidation;
     }
     last_bind_evidence = bind_evidence;
-    sink->OnTargetBound(
-        top_context, ObservedTarget{context_id, generation, caret_utf16, bind_evidence});
     bind_evidence = TargetBindingEvidence::kNone;
     need_bind = false;
+    ScopedDepth callback(callback_depth);
+    sink->OnTargetBound(
+        top_context, ObservedTarget{context_id, generation, caret_utf16, last_bind_evidence});
   }
 
   // --- notification handlers --------------------------------------------------------------
@@ -594,17 +663,19 @@ struct ContextObserver::State {
     ++counters.focus_notifications;
     if (focus == nullptr) {
       ++counters.focus_loss_notifications;
+      DropPublished(ContextDropReason::kNoFocusedDocument);
       ResetSelectionRead();
       ReleaseTextSink();
       ReleaseTopContext();
       ReleaseFocusedDocumentManager();
-      DropPublished(ContextDropReason::kNoFocusedDocument);
       need_bind = false;
       bind_evidence = TargetBindingEvidence::kNone;
       return;
     }
+    if (!SameDocumentManager(focused_dm, focus)) {
+      bind_evidence = TargetBindingEvidence::kDocumentFocusNotification;
+    }
     AdoptFocusedDocumentManager(focus);
-    SetBindEvidenceIfNone(TargetBindingEvidence::kDocumentFocusNotification);
     AdoptCurrentContext(ContextDropReason::kFocusMoved);
   }
 
@@ -653,8 +724,12 @@ struct ContextObserver::State {
     // reflects the removal, so the event itself is used for the immediate invalidation and
     // Pump re-reads GetTop once the notification has returned.
     if (top_context != nullptr && SameCanonicalContext(top_context, context)) {
-      DropPublished(ContextDropReason::kTopContextChanged);
+      ResetSelectionRead();
       need_bind = true;
+      DropPublished(ContextDropReason::kTopContextChanged);
+    }
+    if (closed) {
+      return;
     }
     SetBindEvidenceIfNone(TargetBindingEvidence::kTopContextNotification);
     top_recheck = true;
@@ -670,29 +745,32 @@ struct ContextObserver::State {
       ++counters.late_notifications_after_close;
       return;
     }
+    TraceStage(set ? "observer_thread_focus_set" : "observer_thread_focus_kill", 1);
     if (set) {
       ++counters.thread_focus_set_notifications;
       thread_focus_notice = ThreadFocusNotice::kSet;
       // Re-read the document focus; while the thread was unfocused the document stack may
       // have changed without a usable notification.
       top_recheck = true;
+      ResetSelectionRead();
+      need_bind = true;
+      SetBindEvidenceIfNone(TargetBindingEvidence::kThreadFocusNotification);
       if (target_published) {
         // The previous binding's focus facts are no longer known to be current. Force a
         // fresh generation instead of reusing the old one.
         DropPublished(ContextDropReason::kThreadFocusChanged);
       }
-      need_bind = true;
-      SetBindEvidenceIfNone(TargetBindingEvidence::kThreadFocusNotification);
       return;
     }
 
     ++counters.thread_focus_kill_notifications;
     thread_focus_notice = ThreadFocusNotice::kKill;
+    top_recheck = false;
+    DropPublished(ContextDropReason::kThreadFocusLost);
     ResetSelectionRead();
     ReleaseTextSink();
     ReleaseTopContext();
     ReleaseFocusedDocumentManager();
-    DropPublished(ContextDropReason::kThreadFocusLost);
     need_bind = false;
     bind_evidence = TargetBindingEvidence::kNone;
   }
@@ -707,6 +785,10 @@ struct ContextObserver::State {
         !SameDocumentManager(document_manager, focused_dm)) {
       return;
     }
+    DropPublished(ContextDropReason::kDocumentManagerUninitialized);
+    if (closed) {
+      return;
+    }
     ResetSelectionRead();
     ReleaseTextSink();
     if (top_context != nullptr) {
@@ -716,7 +798,6 @@ struct ContextObserver::State {
     ReleaseTopContext();
     ReleaseFocusedDocumentManager();
     top_recheck = false;
-    DropPublished(ContextDropReason::kDocumentManagerUninitialized);
     need_bind = false;
   }
 
@@ -793,6 +874,7 @@ struct ContextObserver::State {
       }
       if (selection.ok()) {
         if (sink != nullptr) {
+          ScopedDepth callback(callback_depth);
           sink->OnOwnEditCompleted(
               context, ObservedTarget{context_id, generation, published_caret_utf16},
               selection);
@@ -802,8 +884,8 @@ struct ContextObserver::State {
       // Our own write completed but the resulting selection is not a reliable insertion
       // point. Admission closes; a fresh read decides whether it can reopen.
       ResetSelectionRead();
-      DropPublished(ReasonForSelection(selection.status));
       need_bind = true;
+      DropPublished(ReasonForSelection(selection.status));
       return;
     }
 
@@ -816,6 +898,7 @@ struct ContextObserver::State {
       ++counters.host_edits_observed;
       published_caret_utf16 = selection.caret_utf16;
       if (sink != nullptr) {
+        ScopedDepth callback(callback_depth);
         sink->OnHostEditCompleted(
             context, ObservedTarget{context_id, generation, published_caret_utf16},
             selection);
@@ -825,10 +908,10 @@ struct ContextObserver::State {
     // An external change makes the old generation unusable immediately. No TSF session is
     // started here and nothing is written: the controller's OnTargetLost only releases.
     ResetSelectionRead();
+    need_bind = true;
     DropPublished(text_changed || record_read_failed
                       ? ContextDropReason::kExternalTextEdit
                       : ContextDropReason::kExternalSelectionEdit);
-    need_bind = true;
   }
 
   void RevalidateThreadFocus() {
@@ -838,15 +921,20 @@ struct ContextObserver::State {
     ++counters.focus_revalidations;
     ITfDocumentMgr* focus = nullptr;
     const HRESULT focus_hr = thread_mgr->GetFocus(&focus);
+    counters.last_get_focus_hr = focus_hr;
+    TraceStage("observer_poll_get_focus_hr", focus_hr);
     if (FAILED(focus_hr) || focus == nullptr) {
+      if (focus != nullptr) {
+        focus->Release();
+      }
       TraceStage("observer_focus_none", 1);
       if (focused_dm != nullptr) {
         ++counters.focus_revalidation_changes;
+        DropPublished(ContextDropReason::kNoFocusedDocument);
         ResetSelectionRead();
         ReleaseTextSink();
         ReleaseTopContext();
         ReleaseFocusedDocumentManager();
-        DropPublished(ContextDropReason::kNoFocusedDocument);
         need_bind = false;
         bind_evidence = TargetBindingEvidence::kNone;
       }
@@ -856,7 +944,7 @@ struct ContextObserver::State {
       ++counters.focus_revalidation_changes;
       AdoptFocusedDocumentManager(focus);
       focus->Release();
-      SetBindEvidenceIfNone(TargetBindingEvidence::kRevalidation);
+      bind_evidence = TargetBindingEvidence::kRevalidation;
       AdoptCurrentContext(ContextDropReason::kFocusMoved);
       return;
     }
@@ -874,6 +962,14 @@ struct ContextObserver::State {
   }
 
   void Pump() {
+    if (!OnOwnerThread()) {
+      return;
+    }
+    if (callback_depth != 0 || pump_depth != 0) {
+      ++counters.reentrant_pumps_refused;
+      return;
+    }
+    ScopedDepth pumping(pump_depth);
     ++counters.pumps;
     TraceStage("observer_pump", need_bind ? 1 : 0);
     if (closed || !subscribed) {
@@ -959,18 +1055,20 @@ struct ContextObserver::State {
     }
     closed = true;
     counters.closed = true;
+    need_bind = false;
+    top_recheck = false;
+    bind_evidence = TargetBindingEvidence::kNone;
+    DropPublished(ContextDropReason::kClosed);
     ResetSelectionRead();
     ReleaseTextSink();
     if (thread_source != nullptr) {
       if (thread_focus_cookie != TF_INVALID_COOKIE) {
-        thread_source->UnadviseSink(thread_focus_cookie);
-        thread_focus_cookie = TF_INVALID_COOKIE;
+        Unadvise(thread_source, thread_focus_cookie, "observer_unadvise_thread_focus_hr");
         ++counters.thread_focus_sink_unadvises;
       }
       if (thread_cookie != TF_INVALID_COOKIE) {
-        thread_source->UnadviseSink(thread_cookie);
+        Unadvise(thread_source, thread_cookie, "observer_unadvise_thread_events_hr");
         ++counters.sink_unadvises;
-        thread_cookie = TF_INVALID_COOKIE;
       }
       thread_source->Release();
       thread_source = nullptr;
@@ -989,6 +1087,21 @@ struct ContextObserver::State {
 
   bool Subscribe(ITfThreadMgr* thread_manager, ContextObserverSink* new_sink,
                  std::string* error) {
+    if (!OnOwnerThread()) {
+      if (error != nullptr) {
+        *error = "observer subscription requires its owning STA";
+      }
+      return false;
+    }
+    APTTYPEQUALIFIER qualifier = APTTYPEQUALIFIER_NONE;
+    counters.apartment_query_hr = ::CoGetApartmentType(&counters.apartment_type, &qualifier);
+    if (FAILED(counters.apartment_query_hr) ||
+        (counters.apartment_type != APTTYPE_STA && counters.apartment_type != APTTYPE_MAINSTA)) {
+      if (error != nullptr) {
+        *error = "observer subscription requires an initialized STA";
+      }
+      return false;
+    }
     if (closed) {
       if (error != nullptr) {
         *error = "observer is closed";
@@ -1023,6 +1136,9 @@ struct ContextObserver::State {
     }
     DWORD cookie = TF_INVALID_COOKIE;
     hr = source->AdviseSink(IID_ITfThreadMgrEventSink, sink_unknown, &cookie);
+    counters.thread_sink_advise_hr = hr;
+    TraceStage("observer_advise_thread_events_hr", hr);
+    TraceStage("observer_advise_thread_events_cookie", cookie);
     if (FAILED(hr) || cookie == TF_INVALID_COOKIE) {
       if (error != nullptr) {
         *error = "AdviseSink(IID_ITfThreadMgrEventSink) failed " + HrText(hr);
@@ -1040,6 +1156,9 @@ struct ContextObserver::State {
     DWORD focus_cookie = TF_INVALID_COOKIE;
     const HRESULT focus_hr =
         source->AdviseSink(IID_ITfThreadFocusSink, sink_unknown, &focus_cookie);
+    counters.thread_focus_sink_advise_hr = focus_hr;
+    TraceStage("observer_advise_thread_focus_hr", focus_hr);
+    TraceStage("observer_advise_thread_focus_cookie", focus_cookie);
     if (SUCCEEDED(focus_hr) && focus_cookie != TF_INVALID_COOKIE) {
       thread_focus_cookie = focus_cookie;
       ++counters.thread_focus_sink_advises;
@@ -1056,11 +1175,15 @@ struct ContextObserver::State {
     bind_evidence = TargetBindingEvidence::kInitialAdoption;
     ITfDocumentMgr* focus = nullptr;
     const HRESULT focus_get_hr = thread_mgr->GetFocus(&focus);
+    counters.last_get_focus_hr = focus_get_hr;
     if (SUCCEEDED(focus_get_hr) && focus != nullptr) {
       AdoptFocusedDocumentManager(focus);
       focus->Release();
       AdoptCurrentContext(ContextDropReason::kNone);
     } else {
+      if (focus != nullptr) {
+        focus->Release();
+      }
       AdoptCurrentContext(ContextDropReason::kNone);
     }
     if (top_context == nullptr) {
@@ -1112,48 +1235,61 @@ class ObserverComSink final : public ITfThreadMgrEventSink,
   }
 
   HRESULT STDMETHODCALLTYPE OnInitDocumentMgr(ITfDocumentMgr*) override {
-    return S_OK;
+    return state_->OnOwnerThread() ? S_OK : RPC_E_WRONG_THREAD;
   }
 
   HRESULT STDMETHODCALLTYPE OnUninitDocumentMgr(ITfDocumentMgr* document_manager)
       override {
-    state_->HandleUninitDocumentManager(document_manager);
-    return S_OK;
+    return Notify([&] { state_->HandleUninitDocumentManager(document_manager); });
   }
 
   HRESULT STDMETHODCALLTYPE OnSetFocus(ITfDocumentMgr* focus,
                                        ITfDocumentMgr*) override {
-    state_->HandleSetFocus(focus);
-    return S_OK;
+    return Notify([&] {
+      TraceStage("observer_document_focus_enter", focus != nullptr);
+      state_->HandleSetFocus(focus);
+      ++state_->counters.focus_notification_exits;
+      TraceStage("observer_document_focus_exit", focus != nullptr);
+    });
   }
 
   HRESULT STDMETHODCALLTYPE OnPushContext(ITfContext* context) override {
-    state_->HandlePushPop(context, true);
-    return S_OK;
+    return Notify([&] { state_->HandlePushPop(context, true); });
   }
 
   HRESULT STDMETHODCALLTYPE OnPopContext(ITfContext* context) override {
-    state_->HandlePushPop(context, false);
-    return S_OK;
+    return Notify([&] { state_->HandlePushPop(context, false); });
   }
 
   HRESULT STDMETHODCALLTYPE OnEndEdit(ITfContext* context, TfEditCookie read_only,
                                       ITfEditRecord* record) override {
-    state_->HandleEndEdit(context, read_only, record);
-    return S_OK;
+    return Notify([&] { state_->HandleEndEdit(context, read_only, record); });
   }
 
   HRESULT STDMETHODCALLTYPE OnSetThreadFocus() override {
-    state_->HandleThreadFocus(true);
-    return S_OK;
+    return Notify([&] { state_->HandleThreadFocus(true); });
   }
 
   HRESULT STDMETHODCALLTYPE OnKillThreadFocus() override {
-    state_->HandleThreadFocus(false);
-    return S_OK;
+    return Notify([&] { state_->HandleThreadFocus(false); });
   }
 
  private:
+  template <typename Callback>
+  HRESULT Notify(Callback callback) {
+    if (!state_->OnOwnerThread()) {
+      return RPC_E_WRONG_THREAD;
+    }
+    // Shutdown inside a listener can return both advice and observer references.
+    // Keep this callback adapter alive until its stack has fully unwound.
+    AddRef();
+    const auto release = [](ObserverComSink* self) { self->Release(); };
+    const std::unique_ptr<ObserverComSink, decltype(release)> lifetime(this, release);
+    ScopedDepth notifying(state_->callback_depth);
+    callback();
+    return S_OK;
+  }
+
   std::atomic<LONG> reference_count_{1};
   std::shared_ptr<ContextObserver::State> state_;
 };
@@ -1173,7 +1309,14 @@ ContextObserver::ContextObserver(ContextRegistry& registry, TfClientId own_clien
   sink_object_ = com_sink;
 }
 
-ContextObserver::~ContextObserver() { Shutdown(); }
+ContextObserver::~ContextObserver() {
+  // Destruction cannot be silently ignored: member destruction would release STA COM
+  // resources on the wrong thread. The owning host must schedule destruction on its STA.
+  if (!state_->OnOwnerThread()) {
+    std::terminate();
+  }
+  Shutdown();
+}
 
 bool ContextObserver::Subscribe(ITfThreadMgr* thread_manager, ContextObserverSink* sink,
                                 std::string* error) {
@@ -1181,13 +1324,13 @@ bool ContextObserver::Subscribe(ITfThreadMgr* thread_manager, ContextObserverSin
 }
 
 void ContextObserver::SetSink(ContextObserverSink* sink) {
-  if (!state_->closed) {
+  if (state_->OnOwnerThread() && !state_->closed) {
     state_->sink = sink;
   }
 }
 
 void ContextObserver::Shutdown() {
-  if (state_ == nullptr) {
+  if (state_ == nullptr || !state_->OnOwnerThread()) {
     return;
   }
   state_->Shutdown();
@@ -1197,19 +1340,19 @@ void ContextObserver::Shutdown() {
   }
 }
 
-bool ContextObserver::closed() const { return state_->closed; }
+bool ContextObserver::closed() const { return !state_->OnOwnerThread() || state_->closed; }
 
 void ContextObserver::Pump() { state_->Pump(); }
 
 HANDLE ContextObserver::PendingSelectionEvent() const {
-  if (state_->closed || !state_->selection_read_active) {
+  if (!state_->OnOwnerThread() || state_->closed || !state_->selection_read_active) {
     return nullptr;
   }
   return state_->reader->CompletionEvent();
 }
 
 void ContextObserver::RequestRebind() {
-  if (state_->closed || !state_->subscribed || state_->top_context == nullptr) {
+  if (!state_->OnOwnerThread() || state_->closed || !state_->subscribed || state_->top_context == nullptr) {
     return;
   }
   state_->need_bind = true;
@@ -1217,7 +1360,7 @@ void ContextObserver::RequestRebind() {
 }
 
 bool ContextObserver::has_current_context() const {
-  return !state_->closed && state_->subscribed && state_->top_context != nullptr;
+  return state_->OnOwnerThread() && !state_->closed && state_->subscribed && state_->top_context != nullptr;
 }
 
 TargetRevalidation ContextObserver::Revalidate(ITfContext* context,
@@ -1229,10 +1372,14 @@ TargetRevalidation ContextObserver::Revalidate(ITfContext* context,
 std::shared_ptr<TargetWriteGuard> ContextObserver::CreateWriteGuard() {
   // The callback runs later (possibly after Shutdown). A weak reference makes a destroyed
   // observer state answer "not current" instead of dereferencing a stale pointer.
-  std::weak_ptr<State> weak = state_;
+  const std::weak_ptr<State> weak = state_;
+  const DWORD owner_thread_id = state_->owner_thread_id;
   return MakeTargetWriteGuard(
-      [weak](ITfContext* context, std::uint64_t context_id,
-             std::uint64_t generation) {
+      [weak, owner_thread_id](ITfContext* context, std::uint64_t context_id,
+                              std::uint64_t generation) {
+        if (::GetCurrentThreadId() != owner_thread_id) {
+          return false;
+        }
         const std::shared_ptr<State> state = weak.lock();
         if (!state) {
           return false;
@@ -1242,13 +1389,25 @@ std::shared_ptr<TargetWriteGuard> ContextObserver::CreateWriteGuard() {
 }
 
 ContextObserverSnapshot ContextObserver::Snapshot() const {
+  if (!state_->OnOwnerThread()) {
+    ContextObserverSnapshot refused;
+    refused.access_hr = RPC_E_WRONG_THREAD;
+    refused.closed = true;
+    refused.owner_thread_id = state_->owner_thread_id;
+    return refused;
+  }
   ContextObserverSnapshot snapshot = state_->counters;
   snapshot.subscribed = state_->subscribed;
   snapshot.closed = state_->closed;
   snapshot.has_published_target = state_->target_published;
-  snapshot.target = ObservedTarget{state_->context_id, state_->generation,
-                                   state_->published_caret_utf16,
-                                   state_->last_bind_evidence};
+  if (state_->target_published) {
+    snapshot.target = ObservedTarget{state_->context_id, state_->generation,
+                                     state_->published_caret_utf16,
+                                     state_->last_bind_evidence};
+  }
+  snapshot.thread_sink_cookie = state_->thread_cookie;
+  snapshot.thread_focus_sink_cookie = state_->thread_focus_cookie;
+  snapshot.text_sink_cookie = state_->text_cookie;
   snapshot.text_sink_advised = state_->text_source != nullptr &&
                                state_->text_cookie != TF_INVALID_COOKIE;
   snapshot.thread_sink_advised =

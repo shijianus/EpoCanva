@@ -34,6 +34,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "windows-ci.yml"
+HOSTED = REPO_ROOT / "tools/ci/record_hosted_tests.ps1"
 
 ABSOLUTE_PREFIX = "[IO.Path]::GetFullPath"
 JUNIT_FLAG = "--output-junit"
@@ -52,7 +53,7 @@ def job_block(text: str, job: str) -> str:
 
 def ctest_invocations(block: str) -> list[str]:
     """The lines that actually run CTest, including continued arguments."""
-    return [line for line in block.splitlines() if "EPOCANVA_CTEST" in line]
+    return [line for line in block.splitlines() if JUNIT_FLAG in line and not line.lstrip().startswith('#')]
 
 
 def check_evidence_paths(block: str) -> list[str]:
@@ -65,8 +66,8 @@ def check_evidence_paths(block: str) -> list[str]:
         if JUNIT_FLAG not in line:
             continue
         # Everything after the flag up to the next option or redirect.
-        tail = line.split(JUNIT_FLAG, 1)[1].strip()
-        argument = tail.split()[0] if tail.split() else ""
+        tail = line.split(JUNIT_FLAG, 1)[1].lstrip("'\", ")
+        argument = tail.split()[0].rstrip(")") if tail.split() else ""
         if not argument:
             violations.append(f"empty --output-junit argument: {line.strip()}")
         elif not argument.startswith("$"):
@@ -95,7 +96,14 @@ def check_evidence_paths(block: str) -> list[str]:
 class WorkflowEvidencePathTests(unittest.TestCase):
     def setUp(self) -> None:
         self.text = WORKFLOW.read_text(encoding="utf-8")
-        self.block = job_block(self.text, "root-unit-tests")
+        self.block = HOSTED.read_text(encoding="utf-8")
+
+    def test_both_hosted_layers_call_the_checked_producer(self) -> None:
+        for layer in ("contract-gate", "root-unit-tests"):
+            block = job_block(self.text, layer)
+            self.assertIn(f'record_hosted_tests.ps1 -Layer {layer}', block)
+            self.assertIn('if: always()', block)
+            self.assertIn(f'collect_layer_artifact.ps1 -Layer {layer}', block)
 
     def test_real_workflow_uses_absolute_evidence_paths(self) -> None:
         self.assertEqual(check_evidence_paths(self.block), [])
@@ -111,7 +119,7 @@ class WorkflowEvidencePathTests(unittest.TestCase):
     def test_historical_relative_form_is_rejected(self) -> None:
         """The exact form that failed CI #14 must be caught by the checker."""
         mutated = self.block.replace(
-            "--output-junit $junit",
+            "'--output-junit', $junit",
             "--output-junit build/vs2022-x64-debug/ci/ctest.xml")
         self.assertNotEqual(mutated, self.block, "mutation did not apply")
         violations = check_evidence_paths(mutated)
@@ -137,7 +145,7 @@ class WorkflowEvidencePathTests(unittest.TestCase):
         self.assertTrue(check_evidence_paths(mutated))
 
     def test_removing_the_existence_guard_is_visible(self) -> None:
-        self.assertIn("root JUnit was not written at the absolute evidence path",
+        self.assertIn("Hosted JUnit was not written at the absolute evidence path",
                       self.block)
 
 
@@ -159,8 +167,9 @@ class CTestEvidencePathIntegrationTests(unittest.TestCase):
                 f'add_test(path.fixture "{python}" "-c" "assert 2 + 2 == 4")\n',
                 encoding="utf-8")
             registered = caller / "registered.json"
-            registered.write_text(json.dumps({"tests": [{"name": "path.fixture"}]}),
-                                  encoding="utf-8")
+            inventory = subprocess.run([ctest, "--test-dir", str(test_dir), "--show-only=json-v1"],
+                                       capture_output=True, check=True, timeout=30)
+            registered.write_bytes(inventory.stdout)
             verifier = REPO_ROOT / "tools" / "ci" / "verify_root_junit.py"
             relative = Path("build/fixture/ci/ctest.xml")
             expected = caller / relative

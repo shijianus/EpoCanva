@@ -135,7 +135,7 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_confirm_text(
     auto& session = *found->second;
     if (session.backend->owner != std::this_thread::get_id()) return EPOCANVA_WRONG_THREAD;
     const auto access = Access(confirmation->request.context, confirmation->request.learning_enabled);
-    status = Result(session.flow->Check(access));
+    status = session.CheckAccess(access);
     if (status == EPOCANVA_PRIVACY_DENIED) {
       const auto cleared = Result(session.flow->Reset(access));
       if (cleared != EPOCANVA_OK) return cleared;
@@ -158,6 +158,7 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_confirm_text(
     const bool advanced = !ids.empty();
     status = Result(session.flow->SetContext(std::move(ids), access, false, true));
     if (status != EPOCANVA_OK) return status;
+    session.DiscardFrenchCorrections();
     session.confirmed_event_token = confirmation->event_token;
     out->consumed = 1; out->context_advanced = advanced;
     session.raw.clear(); session.preedit.clear(); session.japanese.Cancel(); session.korean.Cancel();

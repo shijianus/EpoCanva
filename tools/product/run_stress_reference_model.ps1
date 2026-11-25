@@ -1,221 +1,274 @@
-# Formal stress-reference-model acceptance producer.
-#
-# Runs the controlled editor reference model (five fixed seeds x 100000 real TSF
-# operations against the independent oracle), verifies the measured report against the
-# release-gate contract, converts it into the hash-bound epocanva-stress-reference-model-v1
-# report with the current candidate identity, and writes the JUnit-bound test-run entry.
-# It executes no installed-host claim: the report states the controlled scope.
 [CmdletBinding()]
 param(
     [string]$RepoRoot = '',
     [string]$BuildDir = '',
     [string]$StageRoot = '',
     [string]$EvidencePath = '',
-    [string]$Harness = ''
+    [string]$Harness = '',
+    [switch]$Development
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Native nonzero results are checked explicitly, including expected negative
+# controls; do not inherit pwsh 7's preference from an invoking session.
+$PSNativeCommandUseErrorActionPreference = $false
 
-function Fail([string]$Message, [int]$Code = 1) {
-    Write-Host "FAILED: $Message" -ForegroundColor Red
-    exit $Code
-}
-function Get-Sha256([string]$Path) {
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+function Write-StressJson([string]$Path, $Document) {
+    [IO.File]::WriteAllText($Path, (($Document | ConvertTo-Json -Depth 14) + "`n"), $utf8)
 }
 
-if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
+function Write-StressNativeJUnit {
+    $settings = [Xml.XmlWriterSettings]::new()
+    $settings.Indent = $true
+    $settings.Encoding = $utf8
+    $writer = [Xml.XmlWriter]::Create($nativeJUnit, $settings)
+    try {
+        $writer.WriteStartDocument()
+        $writer.WriteStartElement('testsuite')
+        $writer.WriteAttributeString('name', 'editor-native-execution')
+        $writer.WriteAttributeString('tests', [string]$executions.Count)
+        $writer.WriteAttributeString('failures', [string]@($executions | Where-Object {
+            $_.timed_out -or $_.exit_code -ne $_.expected_exit_code
+        }).Count)
+        $writer.WriteAttributeString('errors', '0')
+        $writer.WriteAttributeString('skipped', '0')
+        foreach ($item in $executions) {
+            $writer.WriteStartElement('testcase')
+            $writer.WriteAttributeString('name', $item.mode)
+            $writer.WriteAttributeString('status', 'run')
+            $seconds = ([DateTimeOffset]::Parse($item.completed_utc) - [DateTimeOffset]::Parse($item.started_utc)).TotalSeconds
+            $writer.WriteAttributeString('time', $seconds.ToString('F7', [Globalization.CultureInfo]::InvariantCulture))
+            $writer.WriteStartElement('properties')
+            $properties = [ordered]@{
+                exit_code = [string]$item.exit_code; started_utc = $item.started_utc
+                completed_utc = $item.completed_utc; executable_sha256 = $harnessReference.sha256
+            }
+            foreach ($key in $properties.Keys) {
+                $writer.WriteStartElement('property')
+                $writer.WriteAttributeString('name', $key)
+                $writer.WriteAttributeString('value', $properties[$key])
+                $writer.WriteEndElement()
+            }
+            $writer.WriteEndElement()
+            if ($item.timed_out -or $item.exit_code -ne $item.expected_exit_code) {
+                $writer.WriteStartElement('failure')
+                $writer.WriteAttributeString('message', 'Native exit or timeout differs from protocol')
+                $writer.WriteEndElement()
+            }
+            $writer.WriteEndElement()
+        }
+        $writer.WriteEndElement()
+        $writer.WriteEndDocument()
+    } finally { $writer.Dispose() }
+}
+
+function Invoke-StressProcess([string]$Mode, [int]$ExpectedExit, [string[]]$Arguments) {
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo.FileName = $Harness
+    $process.StartInfo.WorkingDirectory = $outDir
+    $process.StartInfo.Arguments = $Arguments -join ' '
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.CreateNoWindow = $true
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    $started = [DateTimeOffset]::UtcNow.ToString('o')
+    try {
+        if (-not $process.Start()) { throw "Could not launch editor protocol: $Mode" }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $timedOut = -not $process.WaitForExit(1800000)
+        if ($timedOut) {
+            $process.Kill()
+            $process.WaitForExit()
+        }
+        $code = $process.ExitCode
+        $completed = [DateTimeOffset]::UtcNow.ToString('o')
+        $logPath = Join-Path $outDir ($Mode + '.log')
+        $nativeOutput = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
+        [IO.File]::WriteAllText($logPath, $nativeOutput, $utf8)
+    } finally {
+        $process.Dispose()
+    }
+    $executions.Add([ordered]@{
+        mode = $Mode; command = @($Harness) + $Arguments; exit_code = $code; timed_out = $timedOut
+        expected_exit_code = $ExpectedExit
+        started_utc = $started; completed_utc = $completed
+        log = if ($nativeOutput.Length -gt 0) { New-AcceptanceReference $logPath $RepoRoot }
+    })
+    $execution.executions = $executions.ToArray()
+    $execution.started_utc = $executions[0].started_utc
+    $execution.completed_utc = $completed
+    Write-StressNativeJUnit
+    $execution.native_junit = New-AcceptanceReference $nativeJUnit $RepoRoot
+    Write-StressJson $log $execution
+    if ($timedOut -or $code -ne $ExpectedExit) {
+        throw "Editor protocol $Mode failed: exit $code, timeout=$timedOut (expected exit $ExpectedExit). See $log"
+    }
+}
+
+if (-not $RepoRoot) { $RepoRoot = Join-Path $PSScriptRoot '..\..' }
 $RepoRoot = (Get-Item -LiteralPath $RepoRoot).FullName
-. (Join-Path $RepoRoot 'tools\product\acceptance_evidence.ps1')
-if (-not $BuildDir) { $BuildDir = Join-Path $RepoRoot 'build\windows-product' }
-$BuildDir = [IO.Path]::GetFullPath($BuildDir)
-$version = (Get-Content -LiteralPath (Join-Path $RepoRoot 'platforms\windows\product\VERSION') -Raw -Encoding UTF8).Trim()
-if (-not $StageRoot) { $StageRoot = Join-Path $BuildDir "stage\EpoCanva-$version" }
-$StageRoot = [IO.Path]::GetFullPath($StageRoot)
-if (-not $EvidencePath) { $EvidencePath = Join-Path $BuildDir 'release-evidence.json' }
-$identity = Get-AcceptanceIdentity -RepoRoot $RepoRoot -BuildDir $BuildDir -StageRoot $StageRoot
+. (Join-Path $PSScriptRoot 'acceptance_evidence.ps1')
+$utf8 = [Text.UTF8Encoding]::new($false)
+$python = (Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$verifier = Join-Path $PSScriptRoot 'verify_stress_reference_model.py'
+$buildBase = Join-Path $RepoRoot 'build'
+if (-not $BuildDir) { $BuildDir = Join-Path $buildBase 'windows-product' }
+$BuildDir = Assert-ProductPlainPath $BuildDir $RepoRoot
+if ((Split-Path -Parent $BuildDir) -ine $buildBase) { throw 'BuildDir must be <repo>/build/<preset>.' }
+
+if (-not $Development) {
+    $version = (Get-Content -LiteralPath (Join-Path $RepoRoot 'platforms/windows/product/VERSION') -Raw -Encoding UTF8).Trim()
+    if (-not $StageRoot) { $StageRoot = Join-Path $BuildDir "stage/EpoCanva-$version" }
+    if (-not $EvidencePath) { $EvidencePath = Join-Path $BuildDir 'release-evidence.json' }
+    $StageRoot = Assert-ProductPlainPath $StageRoot $BuildDir
+    $EvidencePath = Assert-ProductPlainPath $EvidencePath $BuildDir
+    $identity = Get-AcceptanceIdentity -RepoRoot $RepoRoot -BuildDir $BuildDir -StageRoot $StageRoot
+    if ($identity.commit -cnotmatch '^[0-9a-f]{40}$' -or $identity.receipt.source.dirty -ne $false) {
+        throw 'Formal stress requires a clean candidate SHA. Use -Development for local measurements.'
+    }
+}
 
 if (-not $Harness) {
-    $candidates = @(
-        (Join-Path $BuildDir 'editor_reference_model_tests\Release\epocanva_editor_reference_tests.exe'),
-        (Join-Path $BuildDir 'product\Release\epocanva_editor_reference_tests.exe'))
+    $candidates = @('editor_reference_model_tests/Release/epocanva_editor_reference_tests.exe',
+        'product/Release/epocanva_editor_reference_tests.exe')
+    if ($Development) { $candidates += 'tests/editor_reference_model/Release/epocanva_editor_reference_tests.exe' }
     foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $Harness = $candidate; break }
+        $probe = Join-Path $BuildDir $candidate
+        if (Test-Path -LiteralPath $probe -PathType Leaf) { $Harness = $probe; break }
     }
 }
-if (-not $Harness -or -not (Test-Path -LiteralPath $Harness -PathType Leaf)) {
-    Fail 'epocanva_editor_reference_tests.exe not found; build the product suite first' 3
+if (-not $Harness) { throw 'Editor reference harness missing. Build the Release target first.' }
+$Harness = (Get-Item -LiteralPath (Assert-ProductPlainPath $Harness $BuildDir)).FullName
+$harnessReference = New-AcceptanceReference $Harness $RepoRoot
+$source = Get-ProductSourceIdentity -RepoRoot $RepoRoot
+if (-not $Development) {
+    $tested = @($identity.receipt.test_binaries | Where-Object { $_.path -ieq $Harness })
+    if ($tested.Count -ne 1 -or $tested[0].sha256 -cne $harnessReference.sha256 -or
+            $tested[0].bytes -ne $harnessReference.bytes) { throw 'Editor harness differs from the tested binary.' }
 }
-$Harness = (Get-Item -LiteralPath $Harness).FullName
 
-$outDir = Join-Path $BuildDir 'stress-reference-model'
-if (Test-Path -LiteralPath $outDir) { Remove-Item -LiteralPath $outDir -Recurse -Force }
+$runName = 'run-' + [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [guid]::NewGuid().ToString('N')
+$outDir = Assert-ProductPlainPath (Join-Path $BuildDir "stress-reference-model/$runName") $RepoRoot
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+Write-Host "Editor stress evidence: $outDir"
+$hasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $machineHash = [BitConverter]::ToString($hasher.ComputeHash($utf8.GetBytes([Environment]::MachineName))).Replace('-', '').ToLowerInvariant()
+} finally { $hasher.Dispose() }
+$scope = 'controlled-real-tsf-edit-layer'
+$runner = [ordered]@{
+    machine_sha256 = $machineHash; os_version = [Environment]::OSVersion.Version.ToString()
+    kind = 'local'
+}
+if ($env:GITHUB_ACTIONS -ceq 'true') {
+    $runner.kind = 'github-actions'
+    $runner.run_id = $env:GITHUB_RUN_ID
+    $runner.run_attempt = $env:GITHUB_RUN_ATTEMPT
+    $runner.job = $env:GITHUB_JOB
+}
+$execution = [ordered]@{
+    format = 'epocanva-editor-stress-execution-v2'; scope = $scope; installed_host_acceptance = $false
+    runner_identity = $runner; harness = $harnessReference; working_directory = $outDir
+    source = $source; native_junit = $null
+    started_utc = $null; completed_utc = $null; executions = @()
+}
+$executions = [Collections.Generic.List[object]]::new()
+$log = Join-Path $outDir 'commands.json'
+$nativeJUnit = Join-Path $outDir 'native.junit.xml'
+Invoke-StressProcess 'stress' 0 @('--report', 'measurements.json')
+Invoke-StressProcess 'self-test' 0 @('--self-test', '--report', 'negative-control.json')
+Invoke-StressProcess 'replay-mutant' 1 @('--replay', 'negative-control.json.replay', '--report', 'mutant-replay.json')
+Invoke-StressProcess 'force-fail' 1 @('--force-fail')
 
-# Positive protocol: five fixed seeds x 100000 operations. The harness runs
-# synchronously with a cwd-relative report path -- Start-Process argument
-# joining mangles repo paths containing spaces. --report only: the harness
-# writes per-seed replays as measurements.json.seed-N.replay; passing --replay
-# would switch it into single-replay *input* mode.
-$positiveStart = [DateTimeOffset]::UtcNow
 $measureReport = Join-Path $outDir 'measurements.json'
-$pushed = $false
-try {
-    Push-Location $outDir
-    $pushed = $true
-    $output = & $Harness --report 'measurements.json' 2>&1
-    $positiveExit = $LASTEXITCODE
-} finally {
-    if ($pushed) { Pop-Location }
-}
-$positiveEnd = [DateTimeOffset]::UtcNow
-[IO.File]::WriteAllText((Join-Path $outDir 'positive-stdout.log'),
-    (($output | ForEach-Object { $_.ToString() }) -join "`r`n") + "`r`n",
-    (New-Object System.Text.UTF8Encoding($false)))
-if ($positiveExit -ne 0) { Fail "positive reference protocol failed with exit $positiveExit" 5 }
-
-$measurement = Get-Content -LiteralPath $measureReport -Raw -Encoding UTF8 | ConvertFrom-Json
-$expectedSeeds = @('0x5eed000000000001', '0x5eed000000000002', '0x5eed000000000003',
-    '0x5eed000000000004', '0x5eed000000000005')
-if ($measurement.result -cne 'passed') { Fail 'measurement reports failure' 5 }
-if (@($measurement.seeds).Count -ne 5) { Fail 'measurement does not cover five seeds' 5 }
-$totalOps = 0
-foreach ($expectedSeed in $expectedSeeds) {
-    $rows = @($measurement.seeds | Where-Object { $_.seed -ceq $expectedSeed })
-    if ($rows.Count -ne 1) { Fail "missing seed $expectedSeed" 5 }
-    if ($rows[0].operations -ne 100000 -or $rows[0].mismatches -ne 0) { Fail "seed $expectedSeed shortened or mismatched" 5 }
-    foreach ($operation in @('insert', 'delete', 'caret-utf16', 'selection-utf16', 'undo', 'invalid-state')) {
-        $count = $rows[0].operation_counts.$operation
-        if ($count -isnot [int] -or $count -lt 1) { Fail "seed $expectedSeed lacks $operation operations" 5 }
-    }
-    $totalOps += $rows[0].operations
-}
-if ($totalOps -ne 500000) { Fail "total operations $totalOps is not 500000" 5 }
-
-# Negative control: --self-test proves the harness detects the omitted-write
-# mutant, minimizes it to one operation and rejects malformed replays, then
-# writes a passing report marked replay_minimization_negative_control=true.
-# (--force-fail exits before writing any report, which cannot serve as evidence.)
-$negativeStart = [DateTimeOffset]::UtcNow
-$negativeReport = Join-Path $outDir 'negative-control.json'
-try {
-    Push-Location $outDir
-    $output = & $Harness --self-test --report 'negative-control.json' 2>&1
-    $negativeExit = $LASTEXITCODE
-} finally {
-    Pop-Location
-}
-$negativeEnd = [DateTimeOffset]::UtcNow
-[IO.File]::WriteAllText((Join-Path $outDir 'negative-stdout.log'),
-    (($output | ForEach-Object { $_.ToString() }) -join "`r`n") + "`r`n",
-    (New-Object System.Text.UTF8Encoding($false)))
-if ($negativeExit -ne 0) { Fail "negative control failed with exit $negativeExit" 5 }
-$negativeText = ($output | ForEach-Object { $_.ToString() }) -join "`r`n"
-if ($negativeText -notmatch 'RESULT PASS') {
-    Fail 'negative control did not complete its mutant detection protocol' 5
-}
-$negativeDoc = Get-Content -LiteralPath $negativeReport -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($negativeDoc.replay_minimization_negative_control -ne $true) {
-    Fail 'negative control report does not record the replay/minimization control' 5
-}
-
-# Per-seed resource samples, derived from the measurement (one row per seed).
-$samples = [Collections.Generic.List[object]]::new()
-$clock = $positiveStart
-foreach ($seed in $measurement.seeds) {
-    $samples.Add([ordered]@{
-        seed = $seed.seed
-        duration_ms = $seed.duration_ms
-        handles_before = $seed.handles_before
-        handles_after = $seed.handles_after
-        working_set_before_bytes = $seed.working_set_before_bytes
-        working_set_after_bytes = $seed.working_set_after_bytes
-    })
-}
-$samplesPath = Join-Path $outDir 'resource-samples.json'
-[IO.File]::WriteAllText($samplesPath, (($samples | ConvertTo-Json -Depth 6) + "`n"),
-    (New-Object System.Text.UTF8Encoding($false)))
-
-# The formal report, bound to the current candidate identity.
-$report = [ordered]@{
-    format = 'epocanva-stress-reference-model-v1'
-    version = $identity.version
-    commit = $identity.commit
-    source_sha256 = $identity.source_sha256
-    package_manifest_sha256 = $identity.package_manifest_sha256
-    language_policy_sha256 = $identity.language_policy_sha256
-    acceptance_profile = $identity.acceptance_profile
-    oracle = 'independent-editor-reference-model'
-    failure_reduction = 'replay-and-minimize'
-    installed_host_acceptance = $false
-    result = 'passed'
-    total_ops = 500000
-    seeds = $measurement.seeds
-    replay_log = $null
-    resource_samples = $null
-    negative_control = $null
-    started_utc = $positiveStart.ToUniversalTime().ToString('o')
-    completed_utc = $positiveEnd.ToUniversalTime().ToString('o')
-}
-function Set-ReportReference([string]$Name, [string]$Path) {
-    $full = [IO.Path]::GetFullPath($Path)
-    if (-not $full.StartsWith($RepoRoot.TrimEnd('\', '/') + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        Fail "reference $Name is outside the repository" 2
-    }
-    $file = Get-Item -LiteralPath $full
-    if ($file.Length -le 0) { Fail "reference $Name is empty" 2 }
-    $report.$Name = [ordered]@{
-        path = $full.Substring($RepoRoot.Length + 1).Replace('\', '/')
-        sha256 = Get-Sha256 $full
-        bytes = [long]$file.Length
-    }
-}
-$seedReplays = @(Get-ChildItem -LiteralPath $outDir -Filter 'measurements.json.seed-*.replay' -File |
-    Where-Object { $_.Name -cnotmatch 'seed-\d+\.replay$' -or $_.Name -cmatch 'seed-[1-5]\.replay$' } |
-    Sort-Object Name)
-if ($seedReplays.Count -ne 5) { Fail 'expected five per-seed replay files' 5 }
+$measurement = Read-ProductJson $measureReport
 $replayBundle = Join-Path $outDir 'replay-log.json'
-$replayRows = @($seedReplays | ForEach-Object {
-    [ordered]@{ path = $_.FullName.Substring($RepoRoot.Length + 1).Replace('\', '/');
-        sha256 = Get-Sha256 $_.FullName; bytes = [long]$_.Length } })
-[IO.File]::WriteAllText($replayBundle, (($replayRows | ConvertTo-Json -Depth 4) + "`n"),
-    (New-Object System.Text.UTF8Encoding($false)))
-Set-ReportReference 'replay_log' $replayBundle
-Set-ReportReference 'resource_samples' $samplesPath
-Set-ReportReference 'negative_control' $negativeReport
-$reportPath = Join-Path $outDir 'stress-reference-model.json'
-[IO.File]::WriteAllText($reportPath, (($report | ConvertTo-Json -Depth 10) + "`n"),
-    (New-Object System.Text.UTF8Encoding($false)))
-
-# JUnit with the mandatory identity bindings and the eight gate cases.
-$cases = @()
-foreach ($index in 1..5) {
-    $cases += [pscustomobject]@{ name = "stress-reference-model.seed-$index"; passed = $true;
-        detail = "seed ${index}: 100000 operations, zero mismatches"; seconds = 0.0 }
+Write-StressJson $replayBundle ([ordered]@{
+    format = 'epocanva-editor-stress-replay-v1'
+    seeds = @(1..5 | ForEach-Object { New-AcceptanceReference "$measureReport.seed-$_.replay" $RepoRoot })
+    original = New-AcceptanceReference (Join-Path $outDir 'negative-control.json.original.replay') $RepoRoot
+    minimal = New-AcceptanceReference (Join-Path $outDir 'negative-control.json.replay') $RepoRoot
+})
+$samplesPath = Join-Path $outDir 'resource-samples.json'
+Write-StressJson $samplesPath ([ordered]@{
+    format = 'epocanva-editor-stress-resources-v1'
+    seeds = @($measurement.seeds | ForEach-Object {
+        [ordered]@{ seed = $_.seed; samples = $_.resource_samples }
+    })
+})
+foreach ($file in @(@('measurements', 'measurements.json'), @('replay_log', 'replay-log.json'),
+        @('resource_samples', 'resource-samples.json'), @('negative_control', 'negative-control.json'),
+        @('mutant_replay_report', 'mutant-replay.json'))) {
+    $execution[$file[0]] = New-AcceptanceReference (Join-Path $outDir $file[1]) $RepoRoot
 }
-$cases += [pscustomobject]@{ name = 'stress-reference-model.negative-control'; passed = $true;
-    detail = 'omitted-write mutant detected, minimized and replayed; malformed replays rejected'; seconds = 0.0 }
-$cases += [pscustomobject]@{ name = 'stress-reference-model.replay-minimization'; passed = $true;
-    detail = 'per-seed replay files and minimized sequences verified'; seconds = 0.0 }
-$cases += [pscustomobject]@{ name = 'stress-reference-model.resource-growth'; passed = $true;
-    detail = 'per-seed handle and working-set samples recorded'; seconds = 0.0 }
-$junitPath = Join-Path $outDir 'stress-reference-model.junit.xml'
-Write-AcceptanceJUnit -Path $junitPath -SuiteName 'stress-reference-model' -Cases $cases -Identity $identity
+Write-StressJson $log $execution
 
-$command = @($Harness, '--report', $measureReport)
-# The evidence contract requires one hash-bound process log for the entry.
-$runLog = Join-Path $outDir 'run.log'
-[IO.File]::WriteAllText($runLog,
-    ('=== positive protocol | exit=' + $positiveExit + ' ===' + [Environment]::NewLine) +
-    ((Get-Content -LiteralPath (Join-Path $outDir 'positive-stdout.log') -Raw -Encoding UTF8)) +
-    ('=== negative control | exit=' + $negativeExit + ' ===' + [Environment]::NewLine) +
-    ((Get-Content -LiteralPath (Join-Path $outDir 'negative-stdout.log') -Raw -Encoding UTF8)),
-    (New-Object System.Text.UTF8Encoding($false)))
-Add-AcceptanceEvidenceEntry -EvidencePath $EvidencePath -Identity $identity `
-    -EntryId 'stress-reference-model' -RunnerPath $Harness `
-    -LogPath $runLog -JUnitPath $junitPath `
-    -StartedUtc $positiveStart -CompletedUtc $positiveEnd `
-    -ExitCode $positiveExit -Command $command -ReportPath $reportPath
-Write-Host "stress-reference-model: 500000 operations across five seeds; negative control detected the mutant."
-Write-Host "Entry bound to $EvidencePath"
+$sourceAfter = Get-ProductSourceIdentity -RepoRoot $RepoRoot
+foreach ($key in @('head', 'commit', 'source_sha256', 'repository_sha256', 'dirty', 'source_files')) {
+    if (-not [object]::Equals($source.$key, $sourceAfter.$key)) { throw "Source changed during editor stress: $key" }
+}
+
+$verifyArgs = @('-B', $verifier, '--repo', $RepoRoot, '--build-dir', $BuildDir, '--runner', $Harness, '--log', $log)
+$resourcePath = Join-Path $outDir 'resource-assessment.json'
+$global:LASTEXITCODE = $null
+& $python @verifyArgs --development --resource-assessment $resourcePath
+$rawExit = $LASTEXITCODE
+if ($rawExit -isnot [int]) { throw 'Editor stress verifier did not return an exit code.' }
+if ($rawExit -ne 0) { exit $rawExit }
+$resourceAssessment = Read-ProductJson $resourcePath
+if ($Development) {
+    Write-Host "Controlled editor stress verified in development mode. Formal resources: $($resourceAssessment.status)."
+    exit 0
+}
+
+$junitPath = Join-Path $outDir 'stress-reference-model.junit.xml'
+$cases = @(for ($ordinal = 0; $ordinal -lt 5; ++$ordinal) {
+    [pscustomobject]@{ name = "stress-reference-model.seed-$($ordinal + 1)"; passed = $true
+        detail = 'Independent editor oracle'; seconds = $measurement.seeds[$ordinal].duration_ms / 1000 }
+})
+foreach ($name in @('negative-control', 'replay-minimization', 'resource-growth')) {
+    $passed = $name -cne 'resource-growth' -or $resourceAssessment.status -ceq 'passed'
+    $cases += [pscustomobject]@{ name = "stress-reference-model.$name"; passed = $passed
+        detail = if ($passed) { '' } else { $resourceAssessment.blockers -join ',' }; seconds = 0.0 }
+}
+Write-AcceptanceJUnit -Path $junitPath -SuiteName 'stress-reference-model' -Cases $cases -Identity $identity
+$report = [ordered]@{
+    format = 'epocanva-stress-reference-model-v1'; result = $resourceAssessment.status
+    oracle = $measurement.oracle; failure_reduction = $measurement.failure_reduction
+    installed_host_acceptance = $false; total_ops = $measurement.total_ops; seeds = $measurement.seeds
+    started_utc = $execution.started_utc; completed_utc = $execution.completed_utc; runner_identity = $runner
+    executable = $harnessReference; execution_log = New-AcceptanceReference $log $RepoRoot
+    junit = New-AcceptanceReference $junitPath $RepoRoot
+    build_receipt = New-AcceptanceReference (Join-Path $BuildDir 'product-build-receipt.json') $RepoRoot
+    package_manifest = New-AcceptanceReference (Join-Path $StageRoot 'package.manifest') $RepoRoot
+    native_junit = $execution.native_junit; source = $execution.source
+    resource_assessment = New-AcceptanceReference $resourcePath $RepoRoot
+}
+foreach ($key in @('version', 'commit', 'source_sha256', 'build_receipt_sha256', 'package_manifest_sha256',
+        'language_policy_sha256', 'acceptance_profile')) { $report[$key] = $identity.$key }
+foreach ($key in @('measurements', 'replay_log', 'resource_samples', 'negative_control', 'mutant_replay_report')) {
+    $report[$key] = $execution[$key]
+}
+$reportPath = Join-Path $outDir 'stress-reference-model.json'
+Write-StressJson $reportPath $report
+if ($resourceAssessment.status -cne 'passed') {
+    Write-Host "EDITOR_STRESS_BLOCKED $($resourceAssessment.blockers -join ',')"
+    exit 1
+}
+$global:LASTEXITCODE = $null
+& $python @verifyArgs --stage-root $StageRoot --report $reportPath --junit $junitPath
+$reportExit = $LASTEXITCODE
+if ($null -eq $reportExit) { throw 'Editor stress verifier did not return an exit code.' }
+if ($reportExit -ne 0) { exit $reportExit }
+
+$current = Get-AcceptanceIdentity -RepoRoot $RepoRoot -BuildDir $BuildDir -StageRoot $StageRoot
+foreach ($key in @('commit', 'source_sha256', 'build_receipt_sha256', 'package_manifest_sha256', 'language_policy_sha256')) {
+    if ($identity.$key -cne $current.$key) { throw "Candidate changed during stress: $key" }
+}
+Add-AcceptanceEvidenceEntry -EvidencePath $EvidencePath -Identity $identity -EntryId 'stress-reference-model' `
+    -RunnerPath $Harness -LogPath $log -JUnitPath $junitPath -ReportPath $reportPath `
+    -StartedUtc ([DateTimeOffset]::Parse($execution.started_utc)) -CompletedUtc ([DateTimeOffset]::Parse($execution.completed_utc)) `
+    -ExitCode $executions[0].exit_code -Command @($Harness, '--report', 'measurements.json')
+Write-Host "Bound controlled editor stress to $EvidencePath"
 exit 0

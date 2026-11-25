@@ -122,10 +122,20 @@ class WhitespaceGateTests(unittest.TestCase):
                              after_sha=head, baseline_ref="origin/absent", repo_root=self.path)
         del baseline
 
+    def test_dispatch_checks_commits_against_reviewed_baseline(self) -> None:
+        base = self.repo.commit_file("source.txt", b"baseline\n", "baseline")
+        dirty = self.repo.commit_file("source.txt", b"trailing whitespace \n", "dirty candidate")
+        clean = self.repo.commit_file("source.txt", b"corrected\n", "corrected candidate")
+        for candidate, expected in ((dirty, 1), (clean, 0)):
+            with self.subTest(candidate=candidate):
+                result = cw.main(["--repo-root", str(self.path), "--event", "workflow_dispatch",
+                                  "--after-sha", candidate, "--baseline-ref", base])
+                self.assertEqual(result, expected)
+
     def test_unknown_event_fails_closed(self) -> None:
         head = self.repo.commit_file("a.txt", b"a\n", "a")
         with self.assertRaises(cw.GateError):
-            cw.resolve_range(event="workflow_dispatch", base_sha="", head_sha="",
+            cw.resolve_range(event="schedule", base_sha="", head_sha="",
                              before_sha="", after_sha=head, baseline_ref="origin/main",
                              repo_root=self.path)
 

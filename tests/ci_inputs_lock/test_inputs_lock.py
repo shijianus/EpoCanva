@@ -36,7 +36,7 @@ def canonical_bytes(payload: dict) -> bytes:
 
 def run_verifier(repo_root: Path, lock_path: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        [os.environ.get("EPOCANVA_TEST_POWERSHELL", "powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass",
          "-File", str(VERIFY), "-RepoRoot", str(repo_root), "-Lock", str(lock_path)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", errors="replace", timeout=180, check=False)
@@ -230,6 +230,72 @@ class CommittedLockTests(unittest.TestCase):
                      "the production verifier is a Windows PowerShell script")
 @unittest.skipUnless(shutil.which("git"), "git is required for the commit-entry fixture")
 class VerifierBehaviorTests(unittest.TestCase):
+    def test_ambiguous_json_and_unexpected_fields_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = write_lock(root, [file_entry("build/product-data/one.bin", "a" * 64, 10)])
+            valid = lock.read_text(encoding="utf-8")
+            invalid = [
+                valid.replace('"format": 1', '"format": 2, "format": 1'),
+                valid.replace('"format": 1', '"FORMAT": 2, "format": 1'),
+                valid.replace('"format": 1', '"for\\u006dat": 2, "format": 1'),
+                valid.replace('"format": 1', '"format": 1, "extra": NaN'),
+                valid.replace('"format": 1', '"format": 1, "extra": 1e999'),
+                valid.replace('"format": 1', '"format": 1, "extra": 0'),
+                valid.replace('"format": 1', '"format": 1, /* comment */'),
+                valid.replace('"size_bytes": 10', '"size_bytes": 10, "commit": "fake"'),
+                valid.replace('"owner": "epocanva-ci-tier2-inputs-lock-v1"', '"owner": "unreviewed"'),
+            ]
+            for raw in invalid:
+                with self.subTest(raw=raw):
+                    lock.write_text(raw, encoding="utf-8")
+                    completed = run_verifier(root, lock)
+                    self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+
+    def test_directory_cannot_satisfy_file_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._make_file_tree(root)
+            (root / 'build/product-data/directory').mkdir()
+            result = run_verifier(root, write_lock(root, [file_entry('build/product-data/directory', 'a' * 64, 1)]))
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn('NOT_A_FILE', result.stdout)
+
+    def test_exclusive_file_lock_fails(self) -> None:
+        import ctypes
+        import hashlib
+        from ctypes import wintypes
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = self._make_file_tree(root)
+            lock = write_lock(root, [file_entry('build/product-data/one.bin',
+                hashlib.sha256(files['one'].read_bytes()).hexdigest(), 10)])
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            kernel.CreateFileW.restype = wintypes.HANDLE
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel.CreateFileW(str(files['one']), 0x80000000, 0, None, 3, 0, None)
+            self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+            try:
+                result = run_verifier(root, lock)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('UNREADABLE', result.stdout)
+            finally:
+                kernel.CloseHandle(handle)
+
+    def test_hidden_git_index_flags_cannot_prove_clean_bytes(self) -> None:
+        for flag in ('--assume-unchanged', '--skip-worktree'):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                head = init_fixture_checkout(root, 'third_party/librime')
+                checkout = root / 'third_party/librime'
+                subprocess.run(['git', '-C', str(checkout), 'update-index', flag, 'placeholder.txt'], check=True)
+                (checkout / 'placeholder.txt').write_bytes(b'concealed source mutation\n')
+                result = run_verifier(root, write_lock(root, [commit_entry('third_party/librime', head)]))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('HIDDEN_INDEX_STATE', result.stdout)
+
     @staticmethod
     def _make_file_tree(root: Path) -> dict:
         # Fixture paths sit under a declared allowed root, exactly like the
@@ -351,6 +417,35 @@ class VerifierBehaviorTests(unittest.TestCase):
             completed = run_verifier(root, path)
             self.assertEqual(completed.returncode, 2, completed.stdout)
             self.assertIn("format must be 1", completed.stdout)
+
+    def test_header_and_paths_require_canonical_types(self) -> None:
+        valid = file_entry("build/product-data/one.bin", "a" * 64, 10)
+        for field, value in (("format", True), ("format", "1"), ("format", 1.0),
+                             ("owner", True), ("purpose", 42), ("entries", valid)):
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                lock = write_lock(root, [valid])
+                document = json.loads(lock.read_text(encoding="utf-8"))
+                document[field] = value
+                lock.write_bytes(canonical_bytes(document))
+                completed = run_verifier(root, lock)
+                self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+
+        for path in ("build/product-data/one.bin.", "build/product-data/one.bin:stream",
+                     "build/product-data/CON", "build/product-data/sub /file"):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                completed = run_verifier(root, write_lock(root, [file_entry(path, "a" * 64, 10)]))
+                self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+
+    def test_case_insensitive_alias_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = write_lock(root, [file_entry("build/product-data/One.bin", "a" * 64, 10),
+                                     file_entry("build/product-data/one.bin", "a" * 64, 10)])
+            completed = run_verifier(root, lock)
+            self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+            self.assertIn("duplicated", completed.stdout)
 
     def test_uppercase_digest_is_an_invalid_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -248,12 +248,17 @@ Menu Snapshot(Session& session) {
   }
   return menu;
 }
+epocanva_status QueryStatus(const Session& session, const epocanva_backend_request& request,
+                           std::uint32_t kind = EPOCANVA_BACKEND_COMPLETION,
+                           std::uint32_t maximum_candidates = 64) {
+  auto query = Init<epocanva_backend_query>();
+  query.context = request.context; query.learning_enabled = request.learning_enabled;
+  query.query_kind = kind; query.max_candidates = maximum_candidates; query.max_continuation_words = 1;
+  return epocanva_backend_query_candidates(session.handle, &query);
+}
 Menu Query(Session& session, std::uint32_t kind = EPOCANVA_BACKEND_COMPLETION,
            std::uint32_t maximum_candidates = 64) {
-  auto query = Init<epocanva_backend_query>();
-  query.context = session.request.context; query.learning_enabled = session.request.learning_enabled;
-  query.query_kind = kind; query.max_candidates = maximum_candidates; query.max_continuation_words = 1;
-  Need(epocanva_backend_query_candidates(session.handle, &query) == EPOCANVA_OK, "candidate query");
+  Need(QueryStatus(session, session.request, kind, maximum_candidates) == EPOCANVA_OK, "candidate query");
   auto menu = Snapshot(session);
   Check(menu.rows.size() <= maximum_candidates, "union respects caller candidate-record cap");
   return menu;
@@ -513,7 +518,7 @@ void CandidateLimits(Backend& backend) {
   }
 }
 
-void HunspellPenalty(const Fixture& fixture) {
+void HunspellCorrections(const Fixture& fixture) {
   Backend backend(fixture, true);
   Session session(backend, SessionOptions(EPOCANVA_BACKEND_FR, EPOCANVA_BACKEND_LATIN));
   Input(session, "bonjor");
@@ -523,6 +528,103 @@ void HunspellPenalty(const Fixture& fixture) {
        "real Hunspell fixture supplies attested correction");
   Near(corrected->candidate.score, -4.0 + fixture.model->Score({}, Id("fr", "bonjour")).log_probability,
        "Hunspell retains spelling penalty plus one model log probability");
+
+  Input(session, "bonjor");
+  const auto repeat = Query(session);
+  Need(repeat.rows.size() == menu.rows.size(), "repeated French candidate-record count");
+  Check(repeat.snapshot.snapshot_token != menu.snapshot.snapshot_token &&
+        repeat.snapshot.search_complete == menu.snapshot.search_complete &&
+        repeat.raw == menu.raw && repeat.preedit == menu.preedit,
+        "repeated French query preserves content with a fresh snapshot token");
+  for (std::size_t ordinal = 0; ordinal < repeat.rows.size(); ++ordinal) {
+    const auto& original = menu.rows[ordinal];
+    const auto& repeated = repeat.rows[ordinal];
+    Check(repeated.text == original.text && repeated.candidate.kind == original.candidate.kind &&
+          repeated.candidate.input_begin_utf8_byte == original.candidate.input_begin_utf8_byte &&
+          repeated.candidate.input_end_utf8_byte == original.candidate.input_end_utf8_byte &&
+          repeated.candidate.lexeme_count == original.candidate.lexeme_count &&
+          std::equal(std::begin(repeated.candidate.lexeme_ids), std::end(repeated.candidate.lexeme_ids),
+                     std::begin(original.candidate.lexeme_ids)) &&
+          repeated.candidate.score == original.candidate.score &&
+          repeated.candidate.candidate_token != original.candidate.candidate_token,
+          "repeated French query preserves order, score and lexical identity with fresh tokens");
+  }
+
+  const auto* repeated = Find(repeat, "bonjour");
+  Need(repeated != nullptr, "second French query contains the native correction");
+  auto denied = session.request;
+  for (const auto privacy : {EPOCANVA_PRIVACY_SENSITIVE, EPOCANVA_PRIVACY_UNKNOWN}) {
+    denied.context.privacy_class = privacy;
+    auto row = Init<epocanva_backend_candidate>();
+    Check(QueryStatus(session, denied) == EPOCANVA_PRIVACY_DENIED &&
+          epocanva_backend_read_candidate(session.handle, &denied, repeat.snapshot.snapshot_token, 0,
+                                          &row, nullptr, 0) == EPOCANVA_PRIVACY_DENIED &&
+          epocanva_backend_select(session.handle, &denied, repeat.snapshot.snapshot_token,
+                                  repeated->candidate.candidate_token) == EPOCANVA_PRIVACY_DENIED,
+          "non-normal French request cannot query, copy or select cached corrections");
+  }
+  auto stale = session.request;
+  ++stale.context.generation;
+  Check(QueryStatus(session, stale) == EPOCANVA_STALE_SNAPSHOT &&
+        epocanva_backend_select(session.handle, &stale, repeat.snapshot.snapshot_token,
+                                repeated->candidate.candidate_token) == EPOCANVA_STALE_SNAPSHOT,
+        "changed generation cannot query or select from the old French session");
+  stale = session.request;
+  ++stale.context.context_target;
+  Check(QueryStatus(session, stale) == EPOCANVA_STALE_SNAPSHOT,
+        "changed target cannot retrieve the old French session's corrections");
+  Check(Find(Query(session), "bonjour") != nullptr, "admitted request after denials supplies correction");
+
+  Context(session, "le");
+  const auto contextual = Query(session);
+  const auto* contextual_correction = Find(contextual, "bonjour");
+  Need(contextual_correction != nullptr, "French contextual query contains native correction");
+  Near(contextual_correction->candidate.score,
+       -4.0 + fixture.model->Score({Id("fr", "le")}, Id("fr", "bonjour")).log_probability,
+       "native correction gets a fresh contextual score");
+  const auto capped = Query(session, EPOCANVA_BACKEND_COMPLETION, 1);
+  Check(capped.rows.size() == 1 && capped.rows.front().candidate.kind == EPOCANVA_BACKEND_RAW,
+        "changed candidate-record cap preserves only original input");
+  Check(Find(Query(session), "bonjour") != nullptr, "restored larger record cap includes correction");
+  Input(session, "zzqvx");
+  Check(Find(Query(session), "bonjour") == nullptr, "composition edit cannot reuse previous correction");
+  Need(epocanva_backend_cancel(session.handle, &session.request) == EPOCANVA_OK, "cancel French composition");
+  Check(Snapshot(session).preedit.empty(), "cancel clears French preedit");
+
+  Input(session, "bonjor");
+  const auto after_cancel = Query(session);
+  const auto* fresh = Find(after_cancel, "bonjour");
+  Need(fresh != nullptr, "fresh composition after cancel supplies correction");
+  Check(epocanva_backend_select(session.handle, &session.request, repeat.snapshot.snapshot_token,
+                                repeated->candidate.candidate_token) == EPOCANVA_STALE_SNAPSHOT,
+        "prior French menu cannot select into the new composition");
+  auto replacement_options = SessionOptions(EPOCANVA_BACKEND_FR, EPOCANVA_BACKEND_LATIN);
+  ++replacement_options.context.generation;
+  Session replacement(backend, replacement_options);
+  Check(QueryStatus(replacement, session.request) == EPOCANVA_STALE_SNAPSHOT &&
+        Snapshot(replacement).preedit.empty(), "replacement session requires its own generation and input");
+  Input(replacement, "bonjor");
+  Check(Find(Query(replacement), "bonjour") != nullptr &&
+        epocanva_backend_select(replacement.handle, &replacement.request, after_cancel.snapshot.snapshot_token,
+                                fresh->candidate.candidate_token) == EPOCANVA_STALE_SNAPSHOT,
+        "same French input in a replacement session cannot revive old tokens");
+
+  Need(epocanva_backend_select(session.handle, &session.request, after_cancel.snapshot.snapshot_token,
+                               fresh->candidate.candidate_token) == EPOCANVA_OK, "select current French correction");
+  Check(QueryStatus(session, session.request) == EPOCANVA_BUSY, "pending French commit blocks queries");
+  auto commit = Init<epocanva_backend_commit>();
+  std::array<char, 16> text{};
+  Need(epocanva_backend_read_commit(session.handle, &session.request, &commit, text.data(), text.size()) == EPOCANVA_OK,
+       "read French correction commit");
+  auto ack = Init<epocanva_backend_ack_result>();
+  Check(epocanva_backend_ack_commit(session.handle, &session.request, commit.commit_token, 0, &ack) == EPOCANVA_OK &&
+        ack.consumed && !ack.learned && Snapshot(session).preedit.empty(),
+        "rejected French commit clears preedit without learning");
+  Input(session, "bonjor");
+  Check(Find(Query(session), "bonjour") != nullptr, "new input after acknowledgement supplies correction");
+  const auto confirmation = Confirmation(session, 1, "bonjour");
+  Check(epocanva_backend_confirm_text(session.handle, &confirmation, &ack) == EPOCANVA_OK &&
+        ack.consumed && Snapshot(session).preedit.empty(), "host confirmation clears French composition");
 }
 
 int Finish() {
@@ -557,7 +659,7 @@ int main(int argc, char** argv) {
       CopyAndNegativeAck(backend);
       CandidateLimits(backend);
     }
-    if (argc == 4) HunspellPenalty(fixture);
+    if (argc == 4) HunspellCorrections(fixture);
   } catch (...) { Check(false, "regression could not complete"); }
   return Finish();
 }

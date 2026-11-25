@@ -4,6 +4,7 @@ param([Parameter(Mandatory)][string]$RunRoot, [switch]$ForceFailure)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
+. (Join-Path $repo 'tools/product/build_identity.ps1')
 $RunRoot = [IO.Path]::GetFullPath($RunRoot).TrimEnd('\', '/')
 if ((Split-Path -Parent $RunRoot) -ne (Join-Path $repo 'build') -or
         (Split-Path -Leaf $RunRoot) -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$') { throw 'RunRoot must be <repo>/build/<preset>.' }
@@ -45,7 +46,7 @@ function Manifest([int]$Format = 2, [string]$Exception = 'none', [string]$Omit =
     foreach ($entry in $policy) {
         if ($entry.path -ceq $Omit) { continue }
         $file = Get-Item -LiteralPath (Join-Path $stage $entry.path)
-        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = Get-ProductIdentityFileSha256 $file.FullName
         $rows += "file`t$($entry.path)`t$hash`t$($file.Length)"
     }
     Write-Text (Join-Path $stage 'package.manifest') (($rows -join "`n") + "`n")
@@ -115,11 +116,9 @@ Manifest
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($checker,[ref]$tokens,[ref]$errors)
 Check ($errors.Count -eq 0) 'gate parses under the installed PowerShell'
-foreach ($name in @('Read-PassingJUnit', 'Assert-Execution', 'Test-HardAcceptanceReport')) {
-    $functionAst=$ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name },$true)
-    if ($functionAst.Count -ne 1) { throw "Missing production parser function $name" }
-    . ([scriptblock]::Create($functionAst[0].Extent.Text))
-}
+. (Join-Path $repo 'tools/product/evidence_contract.ps1')
+. (Join-Path $repo 'tools/product/release_verifiers/common.ps1')
+. (Join-Path $repo 'tools/product/release_verifiers/host_report.ps1')
 $valid=[pscustomobject]@{ exit_code=0; started_utc='2026-01-01T00:00:00Z'; completed_utc='2026-01-01T00:00:01Z'; command=@('unit-parser-only') }
 Assert-Execution $valid
 Check $true 'actual parser accepts typed integer exit code and ordered timestamps'
@@ -217,34 +216,20 @@ RejectReport 'host-soak' $soak 'nonfinite soak resource measurement rejected'
 $soak.samples[2].cpu_seconds=2.0
 $soak.activated=$false
 RejectReport 'host-soak' $soak 'unactivated host soak rejected'
+# The modern CI contract requires real referenced synthetic archives, JUnit,
+# runner authorization and execution logs. Reuse that independent positive and
+# mutation suite; the old self-declared six-job object is deliberately invalid.
 $ci=UnitReport 'acceptance-ci-provenance'
-$ci | Add-Member github_run (Join-Path $fixtureRoot 'UNIT-github-run.json')
-$ci | Add-Member github_jobs (Join-Path $fixtureRoot 'UNIT-github-jobs.json')
-$ci | Add-Member run_id 1
-$ci | Add-Member artifact_manifest 'UNIT-REFERENCE'
-$ci | Add-Member runner_authorization 'UNIT-REFERENCE'
-$run=[pscustomobject]@{ id=1; head_sha=$bindings.commit; repository=@{full_name='shijianus/EpoCanva'};
-    event='workflow_dispatch'; status='completed'; conclusion='success' }
-$jobs=[pscustomobject]@{ total_count=6; jobs=@('contract-gate','root-unit-tests','backend','windows-product',
-    'windows-integration-acceptance','full-quality-stress-acceptance' | ForEach-Object {
-        [pscustomobject]@{ name=$_; head_sha=$bindings.commit; status='completed'; conclusion='success'; runner_name='UNIT-RUNNER' }
-    }) }
-Write-Text $ci.github_run ($run | ConvertTo-Json -Depth 6)
-Write-Text $ci.github_jobs ($jobs | ConvertTo-Json -Depth 6)
-$null=Test-HardAcceptanceReport 'acceptance-ci-provenance' $ci $entry $bindings
-Check $true 'CI parser accepts complete synthetic exact-commit job snapshots'
-$run.head_sha='stale'
-Write-Text $ci.github_run ($run | ConvertTo-Json -Depth 6)
-RejectReport 'acceptance-ci-provenance' $ci 'historical successful CI commit rejected'
-$run.head_sha=$bindings.commit
-Write-Text $ci.github_run ($run | ConvertTo-Json -Depth 6)
-$jobs.jobs[5].conclusion='skipped'
-Write-Text $ci.github_jobs ($jobs | ConvertTo-Json -Depth 6)
-RejectReport 'acceptance-ci-provenance' $ci 'skipped full acceptance job rejected'
-$jobs.jobs=$jobs.jobs[0..1]
-$jobs.total_count=2
-Write-Text $ci.github_jobs ($jobs | ConvertTo-Json -Depth 6)
-RejectReport 'acceptance-ci-provenance' $ci 'contract-only CI cannot establish product acceptance'
+$ci | Add-Member github_run 'UNIT-REFERENCE'
+RejectReport 'acceptance-ci-provenance' $ci 'self-declared CI success without raw evidence rejected'
+$python=(Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$ciArgs=@('-B','-m','unittest','discover','-s',(Join-Path $repo 'tests/ci_gate'),'-p','test_ci_provenance.py','-v')
+$ErrorActionPreference='Continue'
+& $python @ciArgs 2>&1 | ForEach-Object { $_.ToString() } | Out-File -LiteralPath (Join-Path $fixtureRoot 'ci-provenance-contract.log') -Encoding UTF8
+$ciCode=$LASTEXITCODE
+$ErrorActionPreference='Stop'
+$records.Add([pscustomobject]@{case='ci-provenance-contract';command=(@($python)+$ciArgs);exit_code=$ciCode})
+Check ($ciCode -is [int] -and $ciCode -eq 0) 'complete CI positive chain and stale/skipped/rehash mutations pass independent tests'
 $badOutput=Join-Path $RunRoot 'invalid-nested-build'
 $arguments=@('-NoProfile','-NonInteractive','-File',$checker,'-RepoRoot',$repo,'-BuildDir',$badOutput)
 $ErrorActionPreference='Continue'

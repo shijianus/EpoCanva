@@ -37,10 +37,6 @@ constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
 constexpr int kExitCheckFailed = 5;
 constexpr int kExitSelfCheckFailed = 14;
-// A real-focus case that the environment cannot exercise: reported as SKIPPED by CTest,
-// never as PASS.
-constexpr int kExitEnvironmentLimited = 77;
-
 extern int g_total;
 extern int g_failed;
 
@@ -196,6 +192,8 @@ bool CreateVisibleTestWindow(HWND* window, std::string* error);
 bool EnsureTestThreadFocus(std::string* error);
 void ClearTestThreadFocus();
 HWND TestThreadFocusWindow();
+// Explicitly destroys the reusable HWND on its creating thread; idempotent.
+bool DestroyTestThreadFocusWindow();
 
 // Associates a document manager with a window using ITfThreadMgr::AssociateFocus. Per the
 // documented contract the manager does NOT AddRef pdim_new; *previous receives the

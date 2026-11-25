@@ -102,7 +102,7 @@ function Assert-SourceStageOwnedOutputs([string]$Archive, [string]$Manifest) {
             -not (Test-Path -LiteralPath $Manifest -PathType Leaf)) {
         throw 'Refusing replacement: both producer-owned output files must already exist.'
     }
-    $document = Get-Content -LiteralPath $Manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $document = Read-ProductJson $Manifest
     $fields = @('format', 'version', 'commit', 'source_sha256', 'package_manifest_sha256',
         'build_receipt_sha256', 'package_policy_sha256', 'archive', 'files')
     if ($document.format -ne 1 -or $document.files -isnot [array] -or $document.files.Count -eq 0 -or
@@ -165,7 +165,7 @@ try {
     if ($source.commit -cnotmatch '^[0-9a-f]{40}(?:\+dirty\.[0-9a-f]{12})?$' -or
             $source.source_sha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Invalid current product source identity.' }
     $receipt = Assert-ProductBuildReceipt -RepoRoot $RepoRoot -BuildDir $BuildDir -RimeDll $RimeDll
-    $engine = Assert-ProductEngineReceipt -RepoRoot $RepoRoot -RimeDll $RimeDll
+    $engine = Assert-ProductBuildEngineBinding $RepoRoot $RimeDll $receipt
     if ($receipt.source.commit -cne $source.commit -or $receipt.source.source_sha256 -cne $source.source_sha256 -or
             $receipt.engine_source_sha256 -cne $engine.source_sha256) { throw 'Product and engine source receipts do not agree.' }
     $payload = Read-SourceStagePackage $packagePath $version $source.commit

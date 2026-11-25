@@ -1,0 +1,12 @@
+{
+  "format": "epocanva-editor-resource-policy-v1",
+  "scope": "controlled-real-tsf-edit-layer",
+  "decision": "pending_product_owner",
+  "approval": null,
+  "limits": {
+    "peak_working_set_bytes": null,
+    "peak_private_bytes": null,
+    "working_set_growth_bytes": null,
+    "private_growth_bytes": null
+  }
+}

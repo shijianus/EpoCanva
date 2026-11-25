@@ -1,18 +1,15 @@
-# Record the verified MSI as the release evidence installer reference.
-#
-# The gate reads evidence.installer as {path, sha256, bytes} and checks it
-# against the current candidate. This script only binds an MSI that was built
-# from this exact staged package manifest; it never installs or signs anything.
 [CmdletBinding()]
 param(
     [string]$RepoRoot = '',
     [string]$BuildDir = '',
     [string]$StageRoot = '',
     [string]$EvidencePath = '',
-    [string]$InstallerManifest = ''
+    [string]$InstallerManifest = '',
+    [string]$BootstrapperManifest = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installer_contract.ps1')
 
 function Fail([string]$Message, [int]$Code = 1) {
     Write-Host "FAILED: $Message" -ForegroundColor Red
@@ -20,28 +17,25 @@ function Fail([string]$Message, [int]$Code = 1) {
 }
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 $RepoRoot = (Get-Item -LiteralPath $RepoRoot).FullName
-$buildBase = [IO.Path]::GetFullPath((Join-Path $RepoRoot 'build'))
-if (-not $BuildDir) { $BuildDir = Join-Path $buildBase 'windows-product' }
-$BuildDir = [IO.Path]::GetFullPath($BuildDir).TrimEnd('\', '/')
+$BuildDir = Get-InstallerBuildDirectory $RepoRoot $BuildDir 'windows-product'
+$installerDir = Assert-InstallerBuildPath (Join-Path $BuildDir 'installer') $BuildDir
 $version = (Get-Content -LiteralPath (Join-Path $RepoRoot 'platforms\windows\product\VERSION') -Raw -Encoding UTF8).Trim()
 if (-not $StageRoot) { $StageRoot = Join-Path $BuildDir "stage\EpoCanva-$version" }
-$StageRoot = [IO.Path]::GetFullPath($StageRoot).TrimEnd('\', '/')
+$StageRoot = Assert-InstallerBuildPath $StageRoot $BuildDir
 if (-not $EvidencePath) { $EvidencePath = Join-Path $BuildDir 'release-evidence.json' }
-$EvidencePath = [IO.Path]::GetFullPath($EvidencePath)
-if (-not $InstallerManifest) { $InstallerManifest = Join-Path $BuildDir 'installer\installer-manifest.json' }
-$InstallerManifest = [IO.Path]::GetFullPath($InstallerManifest)
+$EvidencePath = Assert-InstallerBuildPath $EvidencePath $BuildDir
+if (-not $BootstrapperManifest) { $BootstrapperManifest = Join-Path $installerDir 'bootstrapper-manifest.json' }
+$BootstrapperManifest = Assert-InstallerBuildPath $BootstrapperManifest $installerDir
 
 . (Join-Path $PSScriptRoot '..\product\acceptance_evidence.ps1')
 $identity = Get-AcceptanceIdentity -RepoRoot $RepoRoot -BuildDir $BuildDir -StageRoot $StageRoot
-if (-not (Test-Path -LiteralPath $InstallerManifest -PathType Leaf)) {
-    Fail 'installer-manifest.json is missing; run tools/installer/build_msi.ps1' 3
-}
-$manifest = Get-Content -LiteralPath $InstallerManifest -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($manifest.format -ne 2) { Fail 'Unsupported installer manifest format; rebuild with the current build_msi.ps1' 4 }
-if ($manifest.package_manifest_sha256 -cne $identity.package_manifest_sha256) {
-    Fail 'The installer was built from a different package manifest' 4
-}
-if ($manifest.package_manifest_bytes -ne (Get-Item -LiteralPath (Join-Path $StageRoot 'package.manifest')).Length) {
+$bootstrapper = Read-ProductJson $BootstrapperManifest
+$package = Assert-EpoCanvaInstallerPackage -BuildDir $BuildDir -ExePath $bootstrapper.bootstrapper.path `
+    -ExpectedCommit $identity.commit -ExpectedPackageSha256 $identity.package_manifest_sha256 `
+    -InstallerManifest $InstallerManifest -BootstrapperManifest $BootstrapperManifest
+$manifest = $package.msi.manifest
+if (-not (Test-InstallerInteger $manifest.package_manifest_bytes) -or
+    $manifest.package_manifest_bytes -ne (Get-Item -LiteralPath (Join-Path $StageRoot 'package.manifest')).Length) {
     Fail 'The installer package manifest byte count differs from the staged package' 4
 }
 if ($manifest.destination_commit -cne $identity.commit -or
@@ -49,17 +43,11 @@ if ($manifest.destination_commit -cne $identity.commit -or
         $manifest.distribution_policy -cne $identity.distribution_policy) {
     Fail 'The installer manifest identity differs from the current candidate' 4
 }
-if ($manifest.extraction.verified -ne $true -or $manifest.installer.helper_included -ne $true -or
-        $manifest.installer.manifest_included -ne $true) {
-    Fail 'The installer manifest lacks a verified extraction, the package manifest or the TSF helper' 4
-}
-if ($manifest.install_directory -cne 'ProgramFiles64Folder/EpoCanva' -or
-        $manifest.installer.scope -cne 'per-machine' -or
-        $manifest.installer.architecture -cne 'x64') {
-    Fail 'The installer manifest does not record the approved per-machine x64 layout' 4
-}
-$helperReceipt = Get-Content -LiteralPath (Join-Path $RepoRoot 'build\installer-tools\helper-build.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($helperReceipt.format -ne 2 -or $helperReceipt.status -ne 'verified' -or
+$helperPath = $manifest.helper.receipt_path
+$helperReceipt = (Assert-InstallerHelperReceipt $RepoRoot $helperPath $manifest.helper.binary_path).receipt
+if ($helperReceipt.format -ne 4 -or $helperReceipt.status -ne 'verified' -or
+        (Get-InstallerFileIdentity $helperPath).sha256 -cne $manifest.helper.receipt_sha256 -or
+        $manifest.helper.sha256 -cne $helperReceipt.binary.sha256 -or $manifest.helper.bytes -ne $helperReceipt.binary.bytes -or
         $manifest.helper.source_sha256 -cne $helperReceipt.source_sha256 -or
         $manifest.helper.toolchain_sha256 -cne $helperReceipt.toolchain_sha256 -or
         $manifest.helper.configuration_sha256 -cne $helperReceipt.configuration_sha256) {
@@ -67,24 +55,10 @@ if ($helperReceipt.format -ne 2 -or $helperReceipt.status -ne 'verified' -or
 }
 $payloadCount = @(Get-Content -LiteralPath (Join-Path $StageRoot 'package.manifest') -Encoding UTF8 |
     Where-Object { $_ -cmatch '^file\t' }).Count
-if ([int]$manifest.installer.payload_files -ne $payloadCount) {
+if (-not (Test-InstallerInteger $manifest.installer.payload_files) -or $manifest.installer.payload_files -ne $payloadCount) {
     Fail 'The installer payload file count differs from the staged package manifest' 4
 }
-$installerPath = [IO.Path]::GetFullPath([string]$manifest.installer.path)
-if ((Split-Path -Parent $installerPath) -ne (Join-Path $BuildDir 'installer')) {
-    Fail 'The installer must be the build-directory installer output' 4
-}
-$installerFile = Get-Item -LiteralPath $installerPath -Force
-$installerHash = Get-AcceptanceSha256 $installerPath
-if ($installerHash -cne [string]$manifest.installer.sha256 -or
-        $installerFile.Length -ne [long]$manifest.installer.bytes) {
-    Fail 'The installer artifact changed after its manifest was written' 4
-}
-if ([IO.Path]::GetExtension($installerPath) -notin @('.exe', '.msi', '.msix', '.msixbundle')) {
-    Fail 'Unsupported installer artifact type' 4
-}
-
-$document = Get-Content -LiteralPath $EvidencePath -Raw -Encoding UTF8 | ConvertFrom-Json
+$document = Read-ProductJson $EvidencePath
 $bindings = @{
     version = $identity.version
     commit = $identity.commit
@@ -103,12 +77,16 @@ foreach ($key in $bindings.Keys) {
     }
 }
 $document | Add-Member -NotePropertyName installer -NotePropertyValue ([pscustomobject]@{
-    path = $installerPath.Substring($RepoRoot.Length + 1).Replace('\', '/')
-    sha256 = $installerHash
-    bytes = [long]$installerFile.Length
+    path = $package.bootstrapper.path.Substring($RepoRoot.Length + 1).Replace('\', '/')
+    sha256 = $package.bootstrapper.sha256
+    bytes = $package.bootstrapper.bytes
 }) -Force
-[IO.File]::WriteAllText($EvidencePath, (($document | ConvertTo-Json -Depth 12) + "`n"),
-    (New-Object System.Text.UTF8Encoding($false)))
-Write-Host "Recorded installer $installerPath"
-Write-Host "SHA-256: $installerHash ($($installerFile.Length) bytes)"
+$document | Add-Member -NotePropertyName bootstrapper_manifest -NotePropertyValue ([pscustomobject]@{
+    path = $package.bootstrapper_manifest.path.Substring($RepoRoot.Length + 1).Replace('\', '/')
+    sha256 = $package.bootstrapper_manifest.sha256
+    bytes = $package.bootstrapper_manifest.bytes
+}) -Force
+Write-InstallerJson $EvidencePath $document
+Write-Host "Recorded installer $($package.bootstrapper.path)"
+Write-Host "SHA-256: $($package.bootstrapper.sha256) ($($package.bootstrapper.bytes) bytes)"
 exit 0

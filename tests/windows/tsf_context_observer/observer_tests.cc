@@ -5,14 +5,17 @@
 // sink method directly. The one deliberately non-notification path (Pump's defensive
 // GetFocus revalidation) is reported as such and never counted as real focus coverage.
 //
-// EXIT CODES: 0 pass; 5 a check failed; 14 the falsifiability control; 77 the real-focus
-// case could not be exercised by this environment (CTest reports it as SKIPPED).
+// EXIT CODES: 0 pass; 5 a check or prerequisite failed; 14 the falsifiability control.
 #include <windows.h>
 #include <msctf.h>
+#include <wrl/client.h>
 
+#include <array>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "observer_test_support.h"
@@ -558,230 +561,584 @@ int RunOwnEdit() {
   return Finish();
 }
 
-// --- 8. real focus: notification or environment-limited ---------------------------------
+using Microsoft::WRL::ComPtr;
+
+bool SameManager(ITfDocumentMgr* left, ITfDocumentMgr* right) {
+  if (left == right) {
+    return true;
+  }
+  ComPtr<IUnknown> left_identity;
+  ComPtr<IUnknown> right_identity;
+  return left != nullptr && right != nullptr &&
+         SUCCEEDED(left->QueryInterface(IID_PPV_ARGS(&left_identity))) &&
+         SUCCEEDED(right->QueryInterface(IID_PPV_ARGS(&right_identity))) &&
+         left_identity != nullptr && left_identity.Get() == right_identity.Get();
+}
+
+template <typename Predicate>
+bool WaitOnSta(TestHost& host, DWORD timeout_ms, Predicate ready) {
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+  for (;;) {
+    host.DispatchQueuedMessages();
+    if (ready()) {
+      return true;
+    }
+    const ULONGLONG now = ::GetTickCount64();
+    if (now >= deadline ||
+        ::MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(deadline - now),
+                                      QS_ALLINPUT, MWMO_INPUTAVAILABLE) != WAIT_OBJECT_0) {
+      return false;
+    }
+  }
+}
+
+class FocusWindows {
+ public:
+  explicit FocusWindows(ITfThreadMgr* manager) : manager_(manager) {}
+  ~FocusWindows() { Close(); }
+  FocusWindows(const FocusWindows&) = delete;
+  FocusWindows& operator=(const FocusWindows&) = delete;
+
+  bool Create(std::string* error) {
+    const HINSTANCE instance = ::GetModuleHandleW(nullptr);
+    root_ = ::CreateWindowExW(0, L"STATIC", L"EpoCanva TSF focus test", WS_OVERLAPPEDWINDOW,
+                              120, 120, 460, 180, nullptr, nullptr, instance, nullptr);
+    if (root_ != nullptr) {
+      ::SetWindowLongPtrW(root_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+      original_proc_ = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(
+          root_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&FocusWindows::WindowProc)));
+      start_ = ::CreateWindowExW(0, L"BUTTON", L"Start focus verification",
+          WS_CHILD | WS_TABSTOP, 12, 82, 260, 32, root_,
+          reinterpret_cast<HMENU>(1000), instance, nullptr);
+      const wchar_t* const labels[] = {L"A", L"B", L"Empty document"};
+      for (std::size_t slot = 0; slot < windows_.size(); ++slot) {
+        windows_[slot].handle = ::CreateWindowExW(
+            0, L"BUTTON", labels[slot], WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            12 + static_cast<int>(slot) * 138, 24, 130, 40, root_, nullptr, instance, nullptr);
+        if (windows_[slot].handle == nullptr) {
+          break;
+        }
+      }
+      if (windows_.back().handle != nullptr && start_ != nullptr && original_proc_ != nullptr) {
+        return true;
+      }
+    }
+    *error = "CreateWindowExW failed: " + std::to_string(::GetLastError());
+    return false;
+  }
+
+  bool AcquireForeground(TestHost& host) {
+    ::ShowWindow(root_, SW_SHOWNORMAL);
+    const BOOL requested = ::SetForegroundWindow(root_);
+    wchar_t interactive[2] = {};
+    const bool wait_for_user = ::GetEnvironmentVariableW(
+        L"EPOCANVA_TSF_FOCUS_WAIT_FOR_USER", interactive, 2) == 1 && interactive[0] == L'1';
+    if (wait_for_user && ::GetForegroundWindow() != root_) {
+      std::printf("Activate the EpoCanva TSF focus test window by its title bar.\n");
+      std::fflush(stdout);
+    }
+    const bool acquired = WaitOnSta(host, wait_for_user ? 45000 : 2000,
+                                    [&] { return ::GetForegroundWindow() == root_; });
+    std::printf("WIN32_FOREGROUND|requested=%d|acquired=%d|manual_wait_enabled=%d\n",
+                requested != FALSE, acquired, wait_for_user);
+    if (!acquired || !wait_for_user) return acquired;
+    // External window activation may still send focus/input messages after it
+    // first makes this root foreground. Start the matrix only after a genuine
+    // button release, so those messages cannot race the first A -> B assertion.
+    ::ShowWindow(start_, SW_SHOW);
+    std::printf("Click Start focus verification after activating the test window.\n");
+    std::fflush(stdout);
+    const bool ready = WaitOnSta(host, 120000, [&] { return start_requested_; });
+    ::ShowWindow(start_, SW_HIDE);
+    std::printf("WIN32_START|button_clicked=%d|foreground=%d\n",
+                ready, ::GetForegroundWindow() == root_);
+    return ready && ::GetForegroundWindow() == root_;
+  }
+
+  bool Associate(std::size_t slot, ITfDocumentMgr* next, ITfDocumentMgr* expected_previous) {
+    Window& window = windows_[slot];
+    ComPtr<ITfDocumentMgr> next_owner(next);
+    ComPtr<ITfDocumentMgr> previous;
+    const HRESULT hr = manager_->AssociateFocus(window.handle, next, &previous);
+    const bool matched = SameManager(previous.Get(), expected_previous);
+    std::printf("FOCUS_ASSOCIATION|slot=%zu|hr=%08lX|new=%d|previous=%d|matches=%d\n",
+                slot, static_cast<unsigned long>(hr), next != nullptr, previous != nullptr, matched);
+    if (SUCCEEDED(hr)) {
+      if (!window.associated) {
+        window.original = previous;
+        window.associated = true;
+      }
+      window.current = std::move(next_owner);
+    }
+    return SUCCEEDED(hr) && matched;
+  }
+
+  bool Focus(std::size_t slot) const {
+    const HWND requested = windows_[slot].handle;
+    const HWND previous = ::GetFocus();
+    ::SetLastError(ERROR_SUCCESS);
+    ::SetFocus(requested);
+    const DWORD error = ::GetLastError();
+    const HWND actual = ::GetFocus();
+    std::printf("WIN32_FOCUS|slot=%zu|changed=%d|match=%d|foreground=%d|thread=%lu|error=%lu\n",
+                slot, previous != actual, actual == requested, ::GetForegroundWindow() == root_,
+                actual == nullptr ? 0 : ::GetWindowThreadProcessId(actual, nullptr), error);
+    return previous != actual && actual == requested && ::GetForegroundWindow() == root_;
+  }
+
+  bool Close() {
+    bool ok = true;
+    for (std::size_t slot = 0; slot < windows_.size(); ++slot) {
+      Window& window = windows_[slot];
+      if (window.associated) {
+        ok = Associate(slot, window.original.Get(), window.current.Get()) && ok;
+        window.associated = false;
+      }
+    }
+    if (root_ != nullptr) {
+      ok = ::DestroyWindow(root_) != FALSE && !::IsWindow(root_) && ok;
+      root_ = nullptr;
+    }
+    for (Window& window : windows_) {
+      ok = (window.handle == nullptr || !::IsWindow(window.handle)) && ok;
+      window = {};
+    }
+    manager_.Reset();
+    return ok;
+  }
+
+ private:
+  static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* self = reinterpret_cast<FocusWindows*>(::GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (self != nullptr && message == WM_COMMAND && LOWORD(wparam) == 1000 &&
+        HIWORD(wparam) == BN_CLICKED && reinterpret_cast<HWND>(lparam) == self->start_) {
+      self->start_requested_ = true;
+      return 0;
+    }
+    return self != nullptr && self->original_proc_ != nullptr
+        ? ::CallWindowProcW(self->original_proc_, window, message, wparam, lparam)
+        : ::DefWindowProcW(window, message, wparam, lparam);
+  }
+  struct Window {
+    HWND handle = nullptr;
+    bool associated = false;
+    ComPtr<ITfDocumentMgr> original;
+    ComPtr<ITfDocumentMgr> current;
+  };
+  ComPtr<ITfThreadMgr> manager_;
+  HWND root_ = nullptr;
+  HWND start_ = nullptr;
+  WNDPROC original_proc_ = nullptr;
+  bool start_requested_ = false;
+  std::array<Window, 3> windows_;
+};
+
+bool TraceFocusState(CaseEnv& env, const char* stage, ITfDocumentMgr* expected) {
+  const auto snapshot = env.observer->Snapshot();
+  auto* manager = env.host->thread_manager_for_test();
+  ComPtr<ITfDocumentMgr> actual;
+  const HRESULT focus_hr = manager->GetFocus(&actual);
+  ComPtr<ITfContext> top;
+  const HRESULT top_hr = actual == nullptr ? S_FALSE : actual->GetTop(&top);
+  BOOL thread_focused = FALSE;
+  const HRESULT thread_hr = manager->IsThreadFocus(&thread_focused);
+  const bool matched = SUCCEEDED(focus_hr) && SameManager(actual.Get(), expected);
+  std::printf("FOCUS_TRACE|stage=%s|thread=%lu|apartment_hr=%08lX|apartment=%d|activated=%d"
+              "|get_focus_hr=%08lX|manager=%d|manager_matches=%d|top_hr=%08lX|top=%d|thread_focus_hr=%08lX"
+              "|thread_focus=%d|doc_enter=%llu|doc_exit=%llu|thread_set=%llu|thread_kill=%llu"
+              "|doc_losses=%llu|poll_changes=%llu|drops=%llu|published=%d|id=%llu|generation=%llu\n",
+              stage, snapshot.owner_thread_id, static_cast<unsigned long>(snapshot.apartment_query_hr),
+              snapshot.apartment_type, env.host->cleanup_report().thread_manager_activated,
+              static_cast<unsigned long>(focus_hr), actual != nullptr, matched,
+              static_cast<unsigned long>(top_hr), top != nullptr, static_cast<unsigned long>(thread_hr),
+              thread_focused,
+              static_cast<unsigned long long>(snapshot.focus_notifications),
+              static_cast<unsigned long long>(snapshot.focus_notification_exits),
+              static_cast<unsigned long long>(snapshot.thread_focus_set_notifications),
+              static_cast<unsigned long long>(snapshot.thread_focus_kill_notifications),
+              static_cast<unsigned long long>(snapshot.focus_loss_notifications),
+              static_cast<unsigned long long>(snapshot.focus_revalidation_changes),
+              static_cast<unsigned long long>(snapshot.target_drops), snapshot.has_published_target,
+              static_cast<unsigned long long>(snapshot.target.context_id),
+              static_cast<unsigned long long>(snapshot.target.generation));
+  std::printf("FOCUS_ADVICE|stage=%s|doc_iid=aa80e80e-2021-11d2-93e0-0060b067b86e"
+              "|doc_hr=%08lX|doc_cookie=%lu|thread_iid=c0f1db0c-3a20-405c-a303-96b6010a885f"
+              "|thread_hr=%08lX|thread_cookie=%lu|text_iid=8127d409-ccd3-4683-967a-b43d5b482bf7"
+              "|text_hr=%08lX|text_cookie=%lu|unadvise_hr=%08lX|unadvise_failures=%llu\n",
+              stage, static_cast<unsigned long>(snapshot.thread_sink_advise_hr), snapshot.thread_sink_cookie,
+              static_cast<unsigned long>(snapshot.thread_focus_sink_advise_hr), snapshot.thread_focus_sink_cookie,
+              static_cast<unsigned long>(snapshot.text_sink_advise_hr), snapshot.text_sink_cookie,
+              static_cast<unsigned long>(snapshot.last_sink_unadvise_hr),
+              static_cast<unsigned long long>(snapshot.sink_unadvise_failures));
+  const HWND window = ::GetFocus();
+  std::printf("FOCUS_LIFETIME|stage=%s|hwnd=%p|hwnd_thread=%lu|deactivated=%d"
+              "|manager_refs=%llu/%llu|document_refs=%llu/%llu|context_refs=%llu/%llu"
+              "|late_notifications=%llu|reentrant_pumps_refused=%llu\n",
+              stage, static_cast<void*>(window),
+              window == nullptr ? 0 : ::GetWindowThreadProcessId(window, nullptr),
+              env.host->cleanup_report().thread_manager_deactivated,
+              static_cast<unsigned long long>(snapshot.thread_mgr_addrefs),
+              static_cast<unsigned long long>(snapshot.thread_mgr_releases),
+              static_cast<unsigned long long>(snapshot.document_mgr_addrefs),
+              static_cast<unsigned long long>(snapshot.document_mgr_releases),
+              static_cast<unsigned long long>(snapshot.context_addrefs),
+              static_cast<unsigned long long>(snapshot.context_releases),
+              static_cast<unsigned long long>(snapshot.late_notifications_after_close),
+              static_cast<unsigned long long>(snapshot.reentrant_pumps_refused));
+  return matched;
+}
 
 int RunRealFocus() {
   CaseEnv env;
-  if (!CreateHostAndDocument(&env, TestDocumentOptions{L"abcdef", 2, 2}, "real-focus")) {
+  const TestDocumentOptions options{L"abcdef", 2, 2};
+  if (!CreateHostAndDocument(&env, options, "real-focus")) {
     return Finish();
   }
-  TestDocument* doc_b =
-      env.host->CreateDocument(TestDocumentOptions{L"abcdef", 2, 2}, &env.error);
+  auto* doc_b = env.host->CreateDocument(options, &env.error);
   Check(doc_b != nullptr, "real-focus: document B created", env.error);
   if (doc_b == nullptr) {
     return Finish();
   }
-  // Reset any desktop-level TSF focus left by a previous process before binding A. A fresh
-  // host can otherwise inherit the same document-manager focus and AssociateFocus will not
-  // produce a real OnSetFocus transition for the visible window.
-  const HRESULT reset_focus_hr =
-      env.host->thread_manager_for_test()->SetFocus(nullptr);
-  Check(SUCCEEDED(reset_focus_hr),
-        "real-focus: cleared stale TSF focus before binding A",
-        "hr=0x" + std::to_string(static_cast<unsigned long>(reset_focus_hr)));
-  PumpMessagesFor(*env.host, 100);
-  if (!SubscribeAndBind(&env, env.doc_a, "real-focus")) {
+  auto* manager = env.host->thread_manager_for_test();
+  ComPtr<ITfDocumentMgr> empty;
+  const HRESULT empty_hr = manager->CreateDocumentMgr(&empty);
+  Check(SUCCEEDED(empty_hr) && empty != nullptr, "real-focus: empty document manager created", "");
+  FocusWindows windows(manager);
+  const bool created = windows.Create(&env.error);
+  Check(created, "real-focus: test windows created on the same STA", env.error);
+  if (!created || empty == nullptr) {
     return Finish();
   }
-  const std::uint64_t focus_before = env.observer->Snapshot().focus_notifications;
-  FocusCallResult focus;
-  const bool set_ok = SetThreadFocus(*env.host, doc_b, &focus, &env.error);
-  Check(set_ok, "real-focus: ITfThreadMgr::SetFocus(B) succeeded", env.error);
-  // Give TSF a chance to deliver OnSetFocus, without calling observer.Pump() (which would
-  // revalidate GetFocus and manufacture the same drop without a notification).
-  PumpMessagesFor(*env.host, 400);
-  const ContextObserverSnapshot after_focus = env.observer->Snapshot();
-  const bool notification_delivered =
-      after_focus.focus_notifications > focus_before;
-  const bool notification_dropped =
-      notification_delivered && !after_focus.has_published_target &&
-      after_focus.last_target_lost_reason == ContextDropReason::kFocusMoved;
+  auto* manager_a = env.doc_a->document_manager_for_test();
+  auto* manager_b = doc_b->document_manager_for_test();
+  Check(windows.Associate(0, manager_a, nullptr) && windows.Associate(1, manager_b, nullptr) &&
+            windows.Associate(2, empty.Get(), nullptr),
+        "real-focus: initial associations installed", "");
+  env.registry = std::make_unique<ContextRegistry>(8);
+  env.observer = std::make_unique<ContextObserver>(
+      *env.registry, env.host->client_id(), ThreadFocusPolicy::kStrictTsf);
+  const bool subscribed = env.observer->Subscribe(manager, &env.sink, &env.error);
+  Check(subscribed, "real-focus: observer subscribed", env.error);
+  if (!subscribed) {
+    return Finish();
+  }
+  TraceFocusState(env, "subscribed", nullptr);
+  const bool foreground = windows.AcquireForeground(*env.host);
+  Check(foreground, "real-focus: test window obtains genuine foreground focus", "");
+  if (!foreground) {
+    TraceFocusState(env, "foreground-refused", nullptr);
+    return Finish();
+  }
+  Check(windows.Focus(0), "real-focus: A gains Win32 keyboard focus", "");
+  env.host->DispatchQueuedMessages();
+  Check(IsDocumentFocused(*env.host, env.doc_a), "real-focus: focusing A selected its document", "");
+  const auto initial = PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(initial.settled && initial.final_state.has_published_target &&
+            initial.final_state.thread_sink_advised && initial.final_state.thread_focus_sink_advised,
+        "real-focus: initial target published with both real focus interfaces advised",
+        DescribeObserverSnapshot(initial.final_state));
+  TraceFocusState(env, "initial-A", manager_a);
 
-  std::printf(
-      "[observer-win] evidence real-focus: set_focus=%s get_focus=%d "
-      "focus_notifications=%llu->%llu target_published=%d notification_dropped=%d "
-      "last_lost=%s\n",
-      set_ok ? "S_OK" : "FAILED", focus.get_focus_ok ? 1 : 0,
-      static_cast<unsigned long long>(focus_before),
-      static_cast<unsigned long long>(after_focus.focus_notifications),
-      after_focus.has_published_target ? 1 : 0, notification_dropped ? 1 : 0,
-      DescribeContextDropReason(after_focus.last_target_lost_reason));
-
-  // Real visible-window focus. AssociateFocus with a top-level window is the documented
-  // TSF application path and a real OnSetFocus source; the programmatic SetFocus above is
-  // kept as evidence that this environment does not notify for that path alone. The test
-  // still owns no observer callback: every state change below arrives from TSF.
-  HWND window = nullptr;
-  std::string window_error;
-  bool window_on_set_focus = false;
-  bool window_bound_b = false;
-  bool window_cleared = false;
-  if (CreateVisibleTestWindow(&window, &window_error)) {
-    const auto activate_visible_window = [window]() {
-      const DWORD current_thread = ::GetCurrentThreadId();
-      const HWND foreground = ::GetForegroundWindow();
-      const DWORD foreground_thread = foreground == nullptr
-                                         ? 0
-                                         : ::GetWindowThreadProcessId(foreground, nullptr);
-      const bool attached = foreground_thread != 0 && foreground_thread != current_thread &&
-                            ::AttachThreadInput(foreground_thread, current_thread, TRUE) != FALSE;
-      ::ShowWindow(window, SW_SHOWNORMAL);
-      ::BringWindowToTop(window);
-      ::SetForegroundWindow(window);
-      ::SetActiveWindow(window);
-      ::SetFocus(window);
-      if (attached) {
-        ::AttachThreadInput(foreground_thread, current_thread, FALSE);
+  auto transition = [&](std::size_t slot, ITfDocumentMgr* expected, TestDocument* document,
+                        const char* stage) {
+    const auto before = env.observer->Snapshot();
+    Check(windows.Focus(slot), std::string(stage) + ": actual Win32 keyboard focus changed", "");
+    const bool notified = WaitOnSta(*env.host, 2000, [&] {
+      return env.observer->Snapshot().focus_notifications > before.focus_notifications;
+    });
+    const auto after = env.observer->Snapshot();
+    const bool matched = TraceFocusState(env, stage, expected);
+    Check(notified && after.focus_notification_exits > before.focus_notification_exits &&
+              after.focus_revalidations == before.focus_revalidations,
+          std::string(stage) + ": real OnSetFocus completed before observer Pump", "");
+    Check(!after.has_published_target && !env.sink.has_target() &&
+              (!before.has_published_target || after.target_drops > before.target_drops),
+          std::string(stage) + ": old target withdrawn synchronously", DescribeObserverSnapshot(after));
+    Check(matched, std::string(stage) + ": GetFocus names the associated manager", "");
+    const auto settled = PumpUntilSettled(*env.observer, *env.host, 20000);
+    if (document != nullptr) {
+      Check(settled.settled && settled.final_state.has_published_target &&
+                settled.final_state.target.context_id == ObserveRecord(*env.registry, document).context_id &&
+                settled.final_state.target.evidence == TargetBindingEvidence::kDocumentFocusNotification,
+            std::string(stage) + ": published the expected context with notification evidence",
+            DescribeObserverSnapshot(settled.final_state));
+    } else {
+      Check(settled.settled && !settled.final_state.has_published_target &&
+                !env.sink.has_target(),
+            std::string(stage) + ": no writable target for the empty or absent document",
+            DescribeObserverSnapshot(settled.final_state));
+      if (expected == nullptr) {
+        Check(after.focus_loss_notifications > before.focus_loss_notifications &&
+                  !settled.final_state.has_top_context,
+              std::string(stage) + ": null document callback and no remaining context", "");
       }
-      return ::GetFocus() == window;
-    };
+    }
+    return settled.final_state.target;
+  };
 
-    // Restore document A before the visible-window transition. The earlier programmatic
-    // SetFocus(B) deliberately exercises the no-notification path. A real visible-window
-    // transition must still cross from A to B so TSF has a focus change to report, even
-    // when this case follows another TSF test in the same desktop session.
-    FocusCallResult restore_focus;
-    const bool restored = SetThreadFocus(*env.host, env.doc_a, &restore_focus,
-                                         &env.error);
-    Check(restored,
-          "real-focus: restored document A before visible-window transition",
-          env.error);
-    if (!restored) {
-      ::DestroyWindow(window);
+  const auto old_b = transition(1, manager_b, doc_b, "A-to-B");
+  transition(0, manager_a, env.doc_a, "B-to-A");
+  const auto guard = env.observer->CreateWriteGuard();
+  Check(old_b.valid() && !guard->StillCurrent(doc_b->context(), old_b.context_id, old_b.generation),
+        "real-focus: late B work refused while A is focused", "");
+  const auto new_b = transition(1, manager_b, doc_b, "A-to-B-again");
+  Check(new_b.context_id == old_b.context_id && new_b.generation > old_b.generation &&
+            !guard->StillCurrent(doc_b->context(), old_b.context_id, old_b.generation),
+        "real-focus: return to B uses a new generation and refuses old work", "");
+  transition(2, empty.Get(), nullptr, "B-to-empty");
+  Check(!guard->StillCurrent(doc_b->context(), new_b.context_id, new_b.generation),
+        "real-focus: empty document transition rejects late work for B", "");
+  transition(1, manager_b, doc_b, "empty-to-B");
+
+  Check(windows.Associate(1, nullptr, manager_b), "real-focus: clear B association returns B", "");
+  TraceFocusState(env, "B-association-cleared", manager_b);
+  const auto cleared = PumpUntilSettled(*env.observer, *env.host, 20000);
+  const bool publishes_b = cleared.final_state.has_published_target &&
+                           cleared.final_state.target.context_id == old_b.context_id;
+  Check(cleared.settled && (IsDocumentFocused(*env.host, doc_b)
+                              ? publishes_b : !cleared.final_state.has_published_target),
+        "real-focus: compare B publication with live document focus after unassociation",
+        DescribeObserverSnapshot(cleared.final_state));
+  transition(0, manager_a, env.doc_a, "cleared-B-to-A");
+  transition(1, nullptr, nullptr, "A-to-unassociated-B");
+  transition(0, manager_a, env.doc_a, "unassociated-B-to-A");
+  Check(windows.Associate(1, manager_b, nullptr), "real-focus: restore B association while A has focus", "");
+  transition(1, manager_b, doc_b, "A-to-restored-B");
+
+  env.observer->Shutdown();
+  const auto closed = env.observer->Snapshot();
+  TraceFocusState(env, "observer-shutdown", manager_b);
+  Check(!closed.has_published_target && closed.sink_advises == closed.sink_unadvises &&
+            closed.thread_focus_sink_advises == closed.thread_focus_sink_unadvises &&
+            closed.sink_unadvise_failures == 0,
+        "real-focus: close withdraws target and successfully unadvises each sink", "");
+  Check(windows.Close(), "real-focus: original associations restored and all HWNDs destroyed", "");
+  empty.Reset();
+  env.host->Shutdown();
+  Check(env.host->cleanup_report().thread_manager_deactivated,
+        "real-focus: host deactivated the thread manager", "");
+  return Finish();
+}
+
+int RunAssociationContract() {
+  CaseEnv env;
+  const TestDocumentOptions options{L"abcdef", 2, 2};
+  if (!CreateHostAndDocument(&env, options, "association")) {
+    return Finish();
+  }
+  auto* doc_b = env.host->CreateDocument(options, &env.error);
+  Check(doc_b != nullptr, "association: document B created", env.error);
+  if (doc_b == nullptr) {
+    return Finish();
+  }
+  auto* manager_a = env.doc_a->document_manager_for_test();
+  auto* manager_b = doc_b->document_manager_for_test();
+  for (int cycle = 0; cycle < 12; ++cycle) {
+    FocusWindows windows(env.host->thread_manager_for_test());
+    const bool created = windows.Create(&env.error);
+    Check(created, "association: owned windows created", env.error);
+    if (!created) {
       return Finish();
     }
-    // Put the visible window on the STA first. AssociateFocus on an already-focused
-    // window is the documented path that forces TSF to publish the newly associated manager.
-    Check(activate_visible_window(),
-          "real-focus: the test window has Win32 keyboard focus before association", "");
-    PumpMessagesFor(*env.host, 100);
-    const std::uint64_t before_associate =
-        env.observer->Snapshot().focus_notifications;
-    ITfDocumentMgr* previous = nullptr;
-    const HRESULT associate_hr = AssociateDocumentFocus(
-        env.host->thread_manager_for_test(), window,
-        doc_b->document_manager_for_test(), &previous);
-    Check(SUCCEEDED(associate_hr),
-          "real-focus: AssociateFocus(window, B) succeeded",
-          "hr=0x" + std::to_string(static_cast<unsigned long>(associate_hr)));
-    // The manager does not AddRef pdim_new; the pointer returned in ppdimPrev belongs to
-    // the caller and is released here whether or not the association succeeded.
-    ReleaseAssociatedDocumentManager(previous);
-
-    // Reassert the real Win32 focus after the association. This does not synthesize a TSF
-    // callback. It only lets the OS deliver any transition that AssociateFocus requires.
-    Check(activate_visible_window(),
-          "real-focus: the associated test window has Win32 keyboard focus", "");
-    // TSF can defer the association's focus transition while another desktop window owns the
-    // input queue. Retry by toggling the actual Win32 focus a few times. Every attempt still
-    // depends on a real OnSetFocus callback and remains bounded.
-    for (int attempt = 0; attempt < 4; ++attempt) {
-      if (attempt > 0 &&
-          env.observer->Snapshot().focus_notifications <= before_associate) {
-        ::SetFocus(nullptr);
-        PumpMessagesFor(*env.host, 100);
-        activate_visible_window();
-      }
-      PumpMessagesFor(*env.host, 400);
-      if (env.observer->Snapshot().focus_notifications > before_associate) {
-        break;
-      }
-    }
-
-    const ObserverDriveResult associated =
-        PumpUntilSettled(*env.observer, *env.host, 20000);
-    const ContextObserverSnapshot after_associate = env.observer->Snapshot();
-    window_on_set_focus = after_associate.focus_notifications > before_associate;
-    Check(window_on_set_focus,
-          "real-focus: AssociateFocus on a visible window delivered OnSetFocus",
-          DescribeObserverSnapshot(after_associate));
-    const ContextIdRecord record_b = ObserveRecord(*env.registry, doc_b);
-    window_bound_b = window_on_set_focus && associated.settled &&
-                     after_associate.has_published_target &&
-                     env.sink.last_target().context_id == record_b.context_id;
-    Check(window_bound_b,
-          "real-focus: the OnSetFocus path bound document B",
-          DescribeObserverSnapshot(associated.final_state));
-    std::printf(
-        "[observer-win] evidence associate-focus: notifications=%llu->%llu "
-        "bound_b=%d generation=%llu target_published=%d\n",
-        static_cast<unsigned long long>(before_associate),
-        static_cast<unsigned long long>(after_associate.focus_notifications),
-        window_bound_b ? 1 : 0,
-        static_cast<unsigned long long>(env.sink.last_target().generation),
-        after_associate.has_published_target ? 1 : 0);
-
-    ITfDocumentMgr* cleared = nullptr;
-    const HRESULT clear_hr = AssociateDocumentFocus(
-        env.host->thread_manager_for_test(), window, nullptr, &cleared);
-    Check(SUCCEEDED(clear_hr) && cleared != nullptr,
-          "real-focus: clearing the association returns the old manager",
-          "hr=0x" + std::to_string(static_cast<unsigned long>(clear_hr)));
-    if (cleared != nullptr) {
-      IUnknown* cleared_unknown = nullptr;
-      IUnknown* expected_unknown = nullptr;
-      cleared->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&cleared_unknown));
-      doc_b->document_manager_for_test()->QueryInterface(
-          IID_IUnknown, reinterpret_cast<void**>(&expected_unknown));
-      Check(cleared_unknown != nullptr && expected_unknown != nullptr &&
-                cleared_unknown == expected_unknown,
-            "real-focus: the returned association is the manager we associated", "");
-      if (cleared_unknown != nullptr) cleared_unknown->Release();
-      if (expected_unknown != nullptr) expected_unknown->Release();
-      cleared->Release();
-    }
-    ::SetFocus(nullptr);
-    PumpMessagesFor(*env.host, 400);
-    const ObserverDriveResult cleared_state =
-        PumpUntilSettled(*env.observer, *env.host, 20000);
-    const ContextObserverSnapshot after_clear = env.observer->Snapshot();
-    window_cleared = cleared_state.settled &&
-                     (!after_clear.has_published_target ||
-                      env.sink.last_target().context_id != record_b.context_id);
-    Check(window_cleared,
-          "real-focus: clearing the association removes the document B target",
-          DescribeObserverSnapshot(after_clear));
-    std::printf(
-        "[observer-win] evidence association-cleared: target_published=%d "
-        "last_lost=%s\n",
-        after_clear.has_published_target ? 1 : 0,
-        DescribeContextDropReason(after_clear.last_target_lost_reason));
-    ::DestroyWindow(window);
-  } else {
-    std::printf(
-        "[observer-win] evidence associate-focus: visible window unavailable (%s) "
-        "-> environmental limitation\n",
-        window_error.c_str());
+    Check(windows.Associate(0, manager_a, nullptr), "association: A installed", "");
+    Check(windows.Associate(0, manager_b, manager_a), "association: replacement returns A", "");
+    Check(windows.Associate(0, manager_a, manager_b), "association: restoration returns B", "");
+    Check(windows.Associate(0, nullptr, manager_a), "association: unassociation returns A", "");
+    Check(windows.Associate(0, manager_a, nullptr), "association: unassociated mapping was empty", "");
+    Check(windows.Close(), "association: original mapping restored before window destruction", "");
   }
+  return Finish();
+}
 
-  if (window_on_set_focus && window_bound_b && window_cleared) {
-    std::printf("[observer-win] RESULT PASS real focus notification delivered\n");
+int RunRevokedTargetGuard() {
+  CaseEnv env;
+  if (!CreateHostAndDocument(&env, TestDocumentOptions{L"abcdef", 2, 2}, "revoked-guard")) {
     return Finish();
   }
-
-  // The notification path was not exercised. Prove the fallback separately, and report
-  // the case as environment-limited rather than green. When the visible-window path did
-  // run, clearing the association is expected to change focus again, so only the
-  // no-window case may assert that GetFocus still finds B.
-  const ObserverDriveResult fallback =
-      PumpUntilSettled(*env.observer, *env.host, 20000);
-  std::printf(
-      "[observer-win] evidence focus-revalidation (not a notification): "
-      "revalidation_changes=%llu bound=%d\n",
-      static_cast<unsigned long long>(
-          fallback.final_state.focus_revalidation_changes),
-      fallback.final_state.has_published_target ? 1 : 0);
-  if (window == nullptr) {
-    Check(fallback.settled && fallback.final_state.has_published_target,
-          "real-focus: Pump's GetFocus revalidation still finds B", "");
+  const bool window_focused = EnsureTestThreadFocus(&env.error);
+  Check(window_focused, "revoked-guard: real lab Win32 focus", env.error);
+  FocusCallResult focus;
+  const bool document_focused = SetThreadFocus(*env.host, env.doc_a, &focus, &env.error);
+  Check(document_focused, "revoked-guard: document A focused", env.error);
+  if (!window_focused || !document_focused) {
+    return Finish();
   }
-  std::printf(
-      "[observer-win] RESULT ENV-LIMITED real focus notification not delivered: "
-      "SetFocus changed GetFocus but TSF sent no OnSetFocus to this thread's sink\n");
-  return FinishEnvironmentLimited();
+  env.registry = std::make_unique<ContextRegistry>(8);
+  env.observer = std::make_unique<ContextObserver>(
+      *env.registry, env.host->client_id(), ThreadFocusPolicy::kLabWin32Fallback);
+  const bool subscribed =
+      env.observer->Subscribe(env.host->thread_manager_for_test(), &env.sink, &env.error);
+  Check(subscribed, "revoked-guard: subscribed to real TSF", env.error);
+  if (!subscribed) {
+    return Finish();
+  }
+  const auto advice = env.observer->Snapshot();
+  Check(!env.observer->Subscribe(env.host->thread_manager_for_test(), &env.sink, &env.error) &&
+            env.observer->Snapshot().sink_advises == advice.sink_advises &&
+            env.observer->Snapshot().thread_focus_sink_advises == advice.thread_focus_sink_advises,
+        "revoked-guard: duplicate subscribe cannot create more advice cookies", "");
+  const auto initial = PumpUntilSettled(*env.observer, *env.host, 20000);
+  Check(initial.settled && initial.final_state.has_published_target,
+        "revoked-guard: initial target published", DescribeObserverSnapshot(initial.final_state));
+  if (!initial.final_state.has_published_target) {
+    return Finish();
+  }
+  const ObservedTarget original = initial.final_state.target;
+  const auto guard = env.observer->CreateWriteGuard();
+  Check(guard->StillCurrent(env.doc_a->context(), original.context_id, original.generation),
+        "revoked-guard: live target accepted before revocation", "");
+
+  ExternalEditResult edit;
+  const bool edited = RunExternalEdit(*env.host, env.doc_a, env.external,
+                                     ExternalEditMode::kSetCollapsedSelection, 3, 3, L"",
+                                     &edit, &env.error);
+  Check(edited, "revoked-guard: another real TSF client moved selection", env.error);
+  const auto dropped = env.observer->Snapshot();
+  Check(!dropped.has_published_target && !env.sink.has_target() &&
+            dropped.last_target_lost_reason == ContextDropReason::kExternalSelectionEdit,
+        "revoked-guard: OnEndEdit withdrew the published target before Pump",
+        DescribeObserverSnapshot(dropped));
+  Check(IsDocumentFocused(*env.host, env.doc_a) &&
+            ObserveRecord(*env.registry, env.doc_a).generation == original.generation,
+        "revoked-guard: live document and registry generation have not changed", "");
+  Check(!guard->StillCurrent(env.doc_a->context(), original.context_id, original.generation),
+        "revoked-guard: late edit refused before a replacement exists", "");
+
+  const auto driven = PumpUntilSettled(*env.observer, *env.host, 20000);
+  const ObservedTarget replacement = driven.final_state.target;
+  Check(driven.settled && driven.final_state.has_published_target &&
+            replacement.context_id == original.context_id &&
+            replacement.generation > original.generation,
+        "revoked-guard: replacement has a new generation", DescribeObserverSnapshot(driven.final_state));
+  Check(!guard->StillCurrent(env.doc_a->context(), original.context_id, original.generation) &&
+            guard->StillCurrent(env.doc_a->context(), replacement.context_id, replacement.generation),
+        "revoked-guard: only the replacement capability works", "");
+  const auto losses_before_shutdown = env.observer->Snapshot().target_drops;
+  env.observer->Shutdown();
+  env.observer->Shutdown();
+  const auto closed = env.observer->Snapshot();
+  Check(closed.closed && !closed.has_published_target && !env.sink.has_target() &&
+            closed.target_drops == losses_before_shutdown + 1 &&
+            closed.last_target_lost_reason == ContextDropReason::kClosed,
+        "revoked-guard: shutdown withdraws the listener's target exactly once",
+        DescribeObserverSnapshot(closed));
+  Check(!guard->StillCurrent(env.doc_a->context(), replacement.context_id, replacement.generation),
+        "revoked-guard: closed observer refuses late work", "");
+  env.observer.reset();
+  Check(!guard->StillCurrent(env.doc_a->context(), replacement.context_id, replacement.generation),
+        "revoked-guard: destroyed observer refuses late work", "");
+  return Finish();
 }
 
 // --- 9. shutting down with a deferred real read -----------------------------------------
+
+class ReentrantSink final : public ContextObserverSink {
+ public:
+  std::function<void()> on_lost;
+  void OnTargetLost(ContextDropReason) override { if (on_lost) on_lost(); }
+  void OnTargetBound(ITfContext*, const ObservedTarget&) override {}
+  void OnOwnEditCompleted(ITfContext*, const ObservedTarget&,
+                          const SelectionSnapshot&) override {}
+};
+
+int RunReentrantShutdown() {
+  ReentrantSink sink;  // outlives the observer, including early returns
+  CaseEnv env;
+  if (!CreateHostAndDocument(&env, TestDocumentOptions{L"abcdef", 2, 2}, "reentrant") ||
+      !SubscribeAndBind(&env, env.doc_a, "reentrant")) {
+    return Finish();
+  }
+  env.observer->SetSink(&sink);
+  bool called = false;
+  sink.on_lost = [&] {
+    called = true;
+    const auto before = env.observer->Snapshot();
+    env.observer->RequestRebind();
+    env.observer->Pump();
+    const auto after = env.observer->Snapshot();
+    Check(after.focus_revalidations == before.focus_revalidations &&
+              after.selection_reads_begun == before.selection_reads_begun,
+          "reentrant: Pump from OnTargetLost issues no query or edit session", "");
+    env.observer->Shutdown();
+  };
+  ExternalEditResult edit;
+  Check(RunExternalEdit(*env.host, env.doc_a, env.external,
+                        ExternalEditMode::kSetCollapsedSelection, 3, 3, L"",
+                        &edit, &env.error),
+        "reentrant: real external edit delivered OnEndEdit", env.error);
+  const auto closed = env.observer->Snapshot();
+  Check(called && closed.closed && !closed.awaiting_bind && !closed.selection_read_pending &&
+            !closed.has_published_target && !closed.has_top_context,
+        "reentrant: shutdown inside callback stays terminal after callback returns",
+        DescribeObserverSnapshot(closed));
+  Check(closed.sink_advises == closed.sink_unadvises &&
+            closed.thread_focus_sink_advises == closed.thread_focus_sink_unadvises &&
+            closed.sink_unadvise_failures == 0 &&
+            closed.context_addrefs == closed.context_releases,
+        "reentrant: callback shutdown releases all subscriptions and contexts", "");
+  return Finish();
+}
+
+int RunThreadOwnership() {
+  CaseEnv env;
+  if (!CreateHostAndDocument(&env, TestDocumentOptions{L"abcdef", 2, 2}, "owner") ||
+      !SubscribeAndBind(&env, env.doc_a, "owner")) {
+    return Finish();
+  }
+  const auto before = env.observer->Snapshot();
+  auto* context = env.doc_a->context();  // never dereferenced on the foreign thread
+  auto* manager = env.host->thread_manager_for_test();
+  const auto guard = env.observer->CreateWriteGuard();
+  bool refused = false;
+  std::thread foreign([&] {
+    std::string error;
+    const bool subscribed = env.observer->Subscribe(manager, &env.sink, &error);
+    env.observer->SetSink(nullptr);
+    env.observer->RequestRebind();
+    env.observer->Pump();
+    env.observer->Shutdown();
+    const auto result = env.observer->Revalidate(context, before.target.context_id,
+                                                before.target.generation);
+    const auto snapshot = env.observer->Snapshot();
+    refused = !subscribed && !error.empty() && result.query_hr == RPC_E_WRONG_THREAD &&
+              !guard->StillCurrent(context, before.target.context_id, before.target.generation) &&
+              snapshot.access_hr == RPC_E_WRONG_THREAD && !snapshot.has_published_target &&
+              env.observer->closed() && !env.observer->has_current_context() &&
+              env.observer->PendingSelectionEvent() == nullptr;
+  });
+  foreign.join();
+  const auto after = env.observer->Snapshot();
+  Check(refused, "owner: all foreign-thread entry points refuse without exposing state", "");
+  Check(!after.closed && after.subscribed && after.has_published_target &&
+            after.target.context_id == before.target.context_id &&
+            after.target.generation == before.target.generation &&
+            after.pumps == before.pumps && after.target_revalidations == before.target_revalidations &&
+            after.sink_advises == before.sink_advises && after.sink_unadvises == before.sink_unadvises,
+        "owner: foreign calls did not change subscriptions, target or query counters", "");
+  env.observer->Shutdown();
+  Check(!env.sink.has_target() && env.observer->Snapshot().closed,
+        "owner: owner STA still owns and completes shutdown", "");
+
+  bool mta_refused = false;
+  std::thread mta([&] {
+    const HRESULT hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (SUCCEEDED(hr)) {
+      {
+        ContextRegistry registry;
+        ContextObserver observer(registry, 0, ThreadFocusPolicy::kStrictTsf);
+        RecordingSink sink;
+        std::string error;
+        mta_refused = !observer.Subscribe(nullptr, &sink, &error) &&
+                      error == "observer subscription requires an initialized STA" &&
+                      observer.Snapshot().thread_mgr_addrefs == 0;
+      }
+      ::CoUninitialize();
+    }
+  });
+  mta.join();
+  Check(mta_refused, "owner: MTA cannot acquire STA resources", "");
+  return Finish();
+}
 
 int RunShutdownLateRead() {
   CaseEnv env;
@@ -898,6 +1255,8 @@ int RunResourceBalance() {
           "balance: sink advises and unadvises match",
           std::to_string(snapshot.sink_advises) + "/" +
               std::to_string(snapshot.sink_unadvises));
+    Check(snapshot.sink_unadvise_failures == 0,
+          "balance: the real UnadviseSink calls all succeeded", "");
     Check(!snapshot.thread_focus_sink_advised &&
               snapshot.thread_focus_sink_unadvises ==
                   snapshot.thread_focus_sink_advises &&
@@ -945,6 +1304,13 @@ int RunResourceBalance() {
   }
   Check(reused_window, "balance: repeated focus setup reuses one owned HWND",
         focus_error);
+  Check(DestroyTestThreadFocusWindow() && TestThreadFocusWindow() == nullptr &&
+            !::IsWindow(focus_window) && DestroyTestThreadFocusWindow(),
+        "balance: owner explicitly destroys the reused HWND exactly once", "");
+  for (int cycle = 0; cycle < 12; ++cycle) {
+    Check(EnsureTestThreadFocus(&focus_error) && DestroyTestThreadFocusWindow(),
+          "balance: helper window can be recreated and destroyed on its STA", focus_error);
+  }
   return Finish();
 }
 
@@ -1048,8 +1414,12 @@ int RunTargetEvidencePure() {
 
   evidence.thread_focus_notification_set = true;
   result = EvaluateTargetEvidence(evidence);
+  Check(result.thread_focus_evidence == ThreadFocusEvidence::kWin32ThreadFocus,
+        "target-evidence: a stale notification does not relabel the lab query", "");
+  evidence.thread_focus = true;
+  result = EvaluateTargetEvidence(evidence);
   Check(result.thread_focus_evidence == ThreadFocusEvidence::kNotificationSet,
-        "target-evidence: a set notification is reported as a notification",
+        "target-evidence: a set notification with a matching live query keeps its source",
         DescribeThreadFocusEvidence(result.thread_focus_evidence));
   return Finish();
 }
@@ -1236,21 +1606,25 @@ int RunTargetPolicyPure() {
   Check(result.evidence.thread_focus_query_hr == E_ACCESSDENIED,
         "target-policy: the failed query is preserved under a kill", "");
 
-  // A positive TSF notification can confirm focus while a redundant query failed. The
-  // result is Ok, the source is the notification, and the failed call stays in evidence.
   evidence = good();
   evidence.thread_focus_query_ok = false;
   evidence.thread_focus = false;
   evidence.thread_focus_query_hr = E_ACCESSDENIED;
   evidence.thread_focus_notification_set = true;
   result = EvaluateTargetEvidence(evidence);
-  Check(current(result) &&
-            result.thread_focus_evidence == ThreadFocusEvidence::kNotificationSet,
-        "target-policy: a set notification is TSF evidence even after a failed query",
-        DescribeThreadFocusEvidence(result.thread_focus_evidence));
-  Check(!result.evidence.thread_focus_query_ok &&
-            result.evidence.thread_focus_query_hr == E_ACCESSDENIED,
-        "target-policy: the overridden query failure is not rewritten to S_OK", "");
+  Check(result.status == TargetRevalidationStatus::kQueryFailed &&
+            result.failure_stage == TargetFailureStage::kThreadFocusQuery &&
+            result.query_hr == E_ACCESSDENIED &&
+            result.thread_focus_evidence == ThreadFocusEvidence::kNone,
+        "target-policy: a cached set notification cannot override a failed live query",
+        DescribeTargetRevalidationStatus(result.status));
+  evidence.thread_focus_query_ok = true;
+  evidence.thread_focus_query_hr = S_FALSE;
+  result = EvaluateTargetEvidence(evidence);
+  Check(result.status == TargetRevalidationStatus::kThreadFocusUnconfirmed &&
+            result.thread_focus_evidence == ThreadFocusEvidence::kNone,
+        "target-policy: a cached set notification cannot override a live FALSE",
+        DescribeTargetRevalidationStatus(result.status));
   return Finish();
 }
 
@@ -1268,7 +1642,11 @@ int RunObserverCase(const std::string& case_name) {
   if (case_name == "document-uninit") return RunDocumentUninit();
   if (case_name == "own-edit") return RunOwnEdit();
   if (case_name == "real-focus") return RunRealFocus();
+  if (case_name == "association-contract") return RunAssociationContract();
+  if (case_name == "revoked-target-guard") return RunRevokedTargetGuard();
   if (case_name == "shutdown-late-read") return RunShutdownLateRead();
+  if (case_name == "reentrant-shutdown") return RunReentrantShutdown();
+  if (case_name == "thread-ownership") return RunThreadOwnership();
   if (case_name == "target-evidence") return RunTargetEvidencePure();
   if (case_name == "target-policy") return RunTargetPolicyPure();
   if (case_name == "resource-balance") return RunResourceBalance();

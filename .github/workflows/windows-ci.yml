@@ -7,11 +7,8 @@
 # evaluator tests, the CI-gate tooling tests, and the Python staging unit tests
 # all run from the committed source tree alone.
 #
-# The backend, windows-product and nightly-stress jobs from the design document
-# are deliberately NOT enabled here. They require the self-hosted runner with the
-# hash-verified immutable input cache (docs/ci/windows-ci.md section 2); enabling
-# them without that cache would produce false failures or, worse, tempt an
-# unverified-input workaround. Enabling them is a separate reviewed change.
+# The four acceptance jobs require a protected dispatch and an authorized runner
+# group. See docs/ci/windows-ci.md for the independent runner and cache controls.
 #
 # Privacy: every test here uses synthetic fixtures and committed project data.
 # Nothing in this workflow downloads models, dictionaries or telemetry; the
@@ -31,7 +28,7 @@ name: windows-ci
 on:
   pull_request:
   push:
-    branches: [main, "feat/**"]
+    branches: [main, "feat/**", "codex/**"]
   workflow_dispatch:
 
 permissions:
@@ -101,13 +98,16 @@ jobs:
 
       - name: Configure root preset
         run: |
-          & $env:EPOCANVA_CMAKE --preset vs2022-x64-debug
+          New-Item -ItemType Directory -Force build/vs2022-x64-debug/ci | Out-Null
+          & $env:EPOCANVA_CMAKE --preset vs2022-x64-debug *> build/vs2022-x64-debug/ci/configure.log
+          "configure exit=$LASTEXITCODE" | Add-Content build/vs2022-x64-debug/ci/commands.log
           if ($LASTEXITCODE -ne 0) { throw "configure failed with exit $LASTEXITCODE" }
 
       - name: Build the contract-gate aggregate target
         run: |
           & $env:EPOCANVA_CMAKE --build build/vs2022-x64-debug --config Debug `
-            --target epocanva_contract_gate_tests --parallel 4
+            --target epocanva_contract_gate_tests --parallel 4 *> build/vs2022-x64-debug/ci/build.log
+          "build exit=$LASTEXITCODE" | Add-Content build/vs2022-x64-debug/ci/commands.log
           if ($LASTEXITCODE -ne 0) { throw "build failed with exit $LASTEXITCODE" }
 
       - name: Contract inventory must match the committed set exactly
@@ -118,11 +118,8 @@ jobs:
             --expected tools/ci/contract-tests.json
           if ($LASTEXITCODE -ne 0) { throw "contract inventory failed with exit $LASTEXITCODE" }
 
-      - name: Contract CTests by the verified label
-        run: |
-          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug `
-            -L contract-gate --no-tests=error --output-on-failure
-          if ($LASTEXITCODE -ne 0) { throw "contract ctest failed with exit $LASTEXITCODE" }
+      - name: Contract CTests with exact inventory and retained JUnit
+        run: ./tools/ci/record_hosted_tests.ps1 -Layer contract-gate -CTest $env:EPOCANVA_CTEST -BuildDir build/vs2022-x64-debug
 
       - name: Regenerate the backend binding manifest and compare bytes
         run: |
@@ -147,15 +144,16 @@ jobs:
           $status = git status --porcelain --untracked-files=all
           if ($status) { $status; throw "source tree changed during the gate" }
 
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # actions/upload-artifact v7.0.2
+      - name: Collect contract evidence
+        if: always()
+        run: ./tools/ci/collect_layer_artifact.ps1 -Layer contract-gate
+      - name: Preserve contract execution evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: contract-gate-logs-${{ github.run_attempt }}
-          path: |
-            build/vs2022-x64-debug/Testing/Temporary/LastTest.log
-            build/vs2022-x64-debug/Testing/Temporary/LastTestsFailed.log
-          if-no-files-found: ignore
+          name: contract-gate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ci-acceptance-${{ github.run_id }}-${{ github.run_attempt }}/contract-gate/artifact/
+          if-no-files-found: error
 
   # Safe hosted layer only. Product/installed-host acceptance still needs an
   # approved immutable cache and isolated trusted runner; this job does not.
@@ -199,40 +197,110 @@ jobs:
           "build exit=$code" | Add-Content build/vs2022-x64-debug/ci/commands.log
           if ($code -ne 0) { throw "root build failed: $code" }
       - name: Execute complete root inventory with zero skips
-        run: |
-          # CTest resolves a relative --output-junit against its own --test-dir,
-          # not against the caller's working directory (verified with CMake
-          # 3.31.6: "--output-junit build/x/ci/ctest.xml" plus
-          # "--test-dir build/x" writes build/x/build/x/ci/ctest.xml). Every
-          # evidence path below is therefore absolute, and the JUnit file is
-          # proven to exist at the absolute path before it is verified, so a
-          # misplaced report can never be reported as an absent-evidence error.
-          $ci = [IO.Path]::GetFullPath((Join-Path $PWD 'build/vs2022-x64-debug/ci'))
-          $registered = Join-Path $ci 'registered.json'
-          $junit = Join-Path $ci 'ctest.xml'
-          $log = Join-Path $ci 'ctest.log'
-          if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit -Force }
-          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug --show-only=json-v1 | Set-Content $registered -Encoding utf8
-          if ($LASTEXITCODE -ne 0) { throw "root inventory failed" }
-          & $env:EPOCANVA_CTEST --test-dir build/vs2022-x64-debug -C Debug --no-tests=error --output-on-failure --output-junit $junit *> $log
-          $code=$LASTEXITCODE
-          "ctest exit=$code" | Add-Content (Join-Path $ci 'commands.log')
-          if ($code -ne 0) { throw "root CTest failed: $code" }
-          if (-not (Test-Path -LiteralPath $junit -PathType Leaf)) {
-            throw "root JUnit was not written at the absolute evidence path: $junit"
-          }
-          if ((Get-Item -LiteralPath $junit).Length -eq 0) {
-            throw "root JUnit is empty: $junit"
-          }
-          python -B tools/ci/verify_root_junit.py --registered $registered --junit $junit
-          if ($LASTEXITCODE -ne 0) { throw "root JUnit/inventory verification failed" }
-          if (git status --porcelain --untracked-files=all) { throw "root suite changed source files" }
+        run: ./tools/ci/record_hosted_tests.ps1 -Layer root-unit-tests -CTest $env:EPOCANVA_CTEST -BuildDir build/vs2022-x64-debug
+      - name: Collect root evidence
+        if: always()
+        run: ./tools/ci/collect_layer_artifact.ps1 -Layer root-unit-tests
       - name: Preserve root execution evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: root-unit-tests-${{ github.sha }}-${{ github.run_attempt }}
-          path: build/vs2022-x64-debug/ci/
+          name: root-unit-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ci-acceptance-${{ github.run_id }}-${{ github.run_attempt }}/root-unit-tests/artifact/
+          if-no-files-found: error
+
+  backend:
+    if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref_protected && github.repository == 'shijianus/EpoCanva' && vars.EPOCANVA_ACCEPTANCE_RUNNER_GROUP != '' && vars.EPOCANVA_ACCEPTANCE_RUNNER_LABEL != ''
+    needs: root-unit-tests
+    runs-on:
+      group: ${{ vars.EPOCANVA_ACCEPTANCE_RUNNER_GROUP }}
+      labels: [self-hosted, Windows, X64, epocanva-acceptance-x64, "${{ vars.EPOCANVA_ACCEPTANCE_RUNNER_LABEL }}"]
+    environment: epocanva-acceptance
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          clean: false
+      - name: Execute full backend Release inventory
+        shell: pwsh
+        run: ./tools/ci/run_acceptance_layer.ps1 -Layer backend
+      - name: Collect bound layer evidence
+        if: always()
+        shell: pwsh
+        run: ./tools/ci/collect_layer_artifact.ps1 -Layer backend
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: backend-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ci-acceptance-${{ github.run_id }}-${{ github.run_attempt }}/backend/artifact/
+          if-no-files-found: error
+
+  windows-product:
+    needs: backend
+    runs-on:
+      group: ${{ vars.EPOCANVA_ACCEPTANCE_RUNNER_GROUP }}
+      labels: [self-hosted, Windows, X64, epocanva-acceptance-x64, "${{ vars.EPOCANVA_ACCEPTANCE_RUNNER_LABEL }}"]
+    environment: epocanva-acceptance
+    timeout-minutes: 75
+    steps:
+      - name: Build, test and stage the frozen candidate
+        shell: pwsh
+        run: ./tools/ci/run_acceptance_layer.ps1 -Layer windows-product
+      - name: Collect bound layer evidence
+        if: always()
+        shell: pwsh
+        run: ./tools/ci/collect_layer_artifact.ps1 -Layer windows-product
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: windows-product-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ci-acceptance-${{ github.run_id }}-${{ github.run_attempt }}/windows-product/artifact/
+          if-no-files-found: error
+
+  windows-integration-acceptance:
+    needs: windows-product
+    runs-on:
+      group: ${{ vars.EPOCANVA_ACCEPTANCE_RUNNER_GROUP }}
+      labels: [self-hosted, Windows, X64, epocanva-acceptance-x64, "${{ vars.EPOCANVA_ACCEPTANCE_RUNNER_LABEL }}"]
+    environment: epocanva-acceptance
+    timeout-minutes: 120
+    steps:
+      - name: Execute authorized installed-host acceptance
+        shell: pwsh
+        run: ./tools/ci/run_acceptance_layer.ps1 -Layer windows-integration-acceptance
+      - name: Collect bound layer evidence
+        if: always()
+        shell: pwsh
+        run: ./tools/ci/collect_layer_artifact.ps1 -Layer windows-integration-acceptance
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: windows-integration-acceptance-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ci-acceptance-${{ github.run_id }}-${{ github.run_attempt }}/windows-integration-acceptance/artifact/
+          if-no-files-found: error
+
+  full-quality-stress-acceptance:
+    needs: windows-integration-acceptance
+    runs-on:
+      group: ${{ vars.EPOCANVA_ACCEPTANCE_RUNNER_GROUP }}
+      labels: [self-hosted, Windows, X64, epocanva-acceptance-x64, "${{ vars.EPOCANVA_ACCEPTANCE_RUNNER_LABEL }}"]
+    environment: epocanva-acceptance
+    timeout-minutes: 120
+    steps:
+      - name: Execute approved quality and controlled stress protocols
+        shell: pwsh
+        run: ./tools/ci/run_acceptance_layer.ps1 -Layer full-quality-stress-acceptance
+      - name: Collect bound layer evidence
+        if: always()
+        shell: pwsh
+        run: ./tools/ci/collect_layer_artifact.ps1 -Layer full-quality-stress-acceptance
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: full-quality-stress-acceptance-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ci-acceptance-${{ github.run_id }}-${{ github.run_attempt }}/full-quality-stress-acceptance/artifact/
           if-no-files-found: error
 
   # Canary for runner-image drift, not a gate: windows-latest may roll to a

@@ -1,7 +1,6 @@
 # Negative and positive unit tests for the candidate-quality gate.
 #
-# These exercise the production validation function extracted from
-# tools/product/check_release.ps1. Fixtures are synthetic objects under
+# These exercise the production validators. Fixtures are synthetic objects under
 # build/; they never authorize a release and never claim an evaluator ran.
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$RunRoot, [switch]$ForceFailure)
@@ -36,12 +35,32 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($checker, [ref]$tokens, [ref]$errors)
 Check ($errors.Count -eq 0) 'production gate parses under the installed PowerShell'
-foreach ($name in @('Get-CqProperty', 'Get-CqNumber', 'Get-CqRate', 'Test-CandidateQualityPolicy',
-        'Test-CandidateTierBApproval', 'Test-CandidateQualityEvidence', 'Read-PassingJUnit', 'Assert-Execution')) {
-    $functionAst = $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
-    if ($functionAst.Count -ne 1) { throw "Missing production validator $name" }
-    . ([scriptblock]::Create($functionAst[0].Extent.Text))
+. (Join-Path $repo 'tools/product/evidence_contract.ps1')
+. (Join-Path $repo 'tools/product/release_verifiers/common.ps1')
+. (Join-Path $repo 'tools/product/release_verifiers/candidate_quality.ps1')
+. (Join-Path $repo 'tools/product/build_identity.ps1')
+. (Join-Path $repo 'tools/product/release_verifiers/quality_binary.ps1')
+$unitHarness = Join-Path $fixtureRoot 'candidate_evaluation_tests/Release/epocanva_candidate_eval_cli.exe'
+$null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $unitHarness)
+$unitRime = Join-Path $fixtureRoot 'rime.dll'
+[IO.File]::WriteAllText($unitHarness, 'SYNTHETIC EVALUATOR')
+[IO.File]::WriteAllText($unitRime, 'SYNTHETIC ENGINE')
+$unitReceipt = [pscustomobject]@{
+    test_binaries = @(New-ProductBinaryRecord 'epocanva_candidate_eval_cli.exe' $unitHarness)
+    binaries = @(New-ProductBinaryRecord 'rime' $unitRime)
 }
+Expect-Accept { Assert-ProductQualityBinaryBindings $unitReceipt $fixtureRoot $unitHarness $unitRime } 'candidate-bound evaluator and engine accepted'
+$unitReceipt.test_binaries += $unitReceipt.test_binaries[0]
+Expect-Reject { Assert-ProductQualityBinaryBindings $unitReceipt $fixtureRoot $unitHarness $unitRime } 'duplicate evaluator receipt rejected'
+$unitReceipt.test_binaries = @($unitReceipt.test_binaries[0])
+$foreignHarness = Join-Path $fixtureRoot 'old-evaluator.exe'
+[IO.File]::WriteAllText($foreignHarness, 'SYNTHETIC EVALUATOR')
+Expect-Reject { Assert-ProductQualityBinaryBindings $unitReceipt $fixtureRoot $foreignHarness $unitRime } 'another build evaluator rejected even with identical bytes'
+[IO.File]::WriteAllText($unitHarness, 'REPLACED EVALUATOR')
+Expect-Reject { Assert-ProductQualityBinaryBindings $unitReceipt $fixtureRoot $unitHarness $unitRime } 'replaced evaluator rejected by candidate receipt'
+[IO.File]::WriteAllText($unitHarness, 'SYNTHETIC EVALUATOR')
+[IO.File]::WriteAllText($unitRime, 'REPLACED ENGINE')
+Expect-Reject { Assert-ProductQualityBinaryBindings $unitReceipt $fixtureRoot $unitHarness $unitRime } 'replaced engine rejected by candidate receipt'
 
 $languages = @('en', 'zh', 'fr', 'ja', 'ko')
 function New-Policy([string]$AbsoluteDecision = 'approved') {
@@ -63,6 +82,10 @@ function New-Policy([string]$AbsoluteDecision = 'approved') {
             not_observable_is_failure = $true
         }
         absolute_quality = [pscustomobject]$absolute
+        regression = [pscustomobject]@{
+            warm_p95_ms = [pscustomobject]@{ relative_increment_max = 0.2; absolute_increment_max = 5.0 }
+            peak_working_set_bytes = [pscustomobject]@{ relative_increment_max = 0.2; absolute_increment_max = 100 }
+        }
         tier_b_lock = 'tier-b.lock.json'
     }
 }
@@ -72,7 +95,7 @@ function New-Bindings {
             'package_policy_sha256', 'language_policy_sha256', 'acceptance_profile',
             'quality_policy_sha256', 'corpus_manifest_sha256', 'source_archive_sha256',
             'evaluator_sha256', 'evaluator_support_sha256', 'runner_sha256',
-            'harness_sha256', 'backend_manifest_sha256', 'tier_b_lock_sha256')) {
+            'harness_sha256', 'rime_dll_sha256', 'backend_manifest_sha256', 'tier_b_lock_sha256')) {
         $values[$name] = if ($name -eq 'version') { '0.0.0-unit' }
             elseif ($name -eq 'acceptance_profile') { 'internal-unsigned' }
             else { ('a' * 64) }
@@ -103,18 +126,27 @@ function New-Report($Bindings, $Policy) {
             raw_present_rate = 1.0; raw_first_rate = 1.0
             empty_menu_rate = 0.0; wrong_language_rate = 0.0
             wrong_language_observability = [pscustomobject]@{ status = 'observable' }
-            latency_ms = [pscustomobject]@{ cold = 1.0; warm = [pscustomobject]@{ p50 = 1.0; p95 = 2.0; p99 = 3.0 } }
+            latency_ms = [pscustomobject]@{ cold = 1.0; warmup_queries = 20; warm = [pscustomobject]@{ p50 = 1.0; p95 = 2.0; p99 = 3.0 } }
             peak_working_set_bytes = 1000; resource_load_ms = 1.0
+        }
+    }
+    $regressionRows = [ordered]@{}
+    foreach ($language in $languages) {
+        $regressionRows[$language] = [pscustomobject]@{
+            warm_p95_ms = [pscustomobject]@{ baseline = 2.0; current = 2.0; allowed_increment = 5.0; delta = 0.0; passed = $true }
+            peak_working_set_bytes = [pscustomobject]@{ baseline = 1000; current = 1000; allowed_increment = 200.0; delta = 0; passed = $true }
         }
     }
     return [pscustomobject]@{
         format = 'epocanva-candidate-eval-v3'
+        regression = [pscustomobject]@{ status = 'passed'; per_language = [pscustomobject]$regressionRows }
         identity = [pscustomobject]@{
             mode = 'qualification'; repo_commit = $Bindings['commit']; source_tree_clean = $true
             quality_policy_sha256 = $Bindings['quality_policy_sha256']
             manifest_sha256 = $Bindings['corpus_manifest_sha256']
             backend_manifest_sha256 = $Bindings['backend_manifest_sha256']
             harness_sha256 = $Bindings['harness_sha256']
+            rime_dll_sha256 = $Bindings['rime_dll_sha256']
             package_manifest_sha256 = $Bindings['package_manifest_sha256']
             package_policy_sha256 = $Bindings['package_policy_sha256']
             language_policy_sha256 = $Bindings['language_policy_sha256']
@@ -243,12 +275,22 @@ Expect-Reject { Test-CandidateQualityEvidence -Report $short -JUnitCases $cases 
 $nondet = New-Report $bindings $policy
 $nondet.per_language.fr.deterministic_case_rate = 0.999
 Expect-Reject { Test-CandidateQualityEvidence -Report $nondet -JUnitCases $cases -Execution $execution -Bindings $bindings -Policy $policy -CommitTimeUtc $commitTime } 'sub-unit determinism accepted (must reject)'
+foreach ($mutation in @(
+        { param($r) $r.per_language.fr.latency_ms.warmup_queries = 1 },
+        { param($r) $r.per_language.fr.latency_ms.warm.p50 = 3.0 },
+        { param($r) $r.regression.per_language.fr.warm_p95_ms.current = 1.0 },
+        { param($r) $r.regression.per_language.fr.warm_p95_ms.allowed_increment = 500.0 },
+        { param($r) $r.regression.per_language.fr.peak_working_set_bytes.delta = -1 },
+        { param($r) $r.regression.status = 'not-comparable' })) {
+    $badPerformance = New-Report $bindings $policy
+    & $mutation $badPerformance
+    Expect-Reject { Test-CandidateQualityEvidence -Report $badPerformance -JUnitCases $cases -Execution $execution -Bindings $bindings -Policy $policy -CommitTimeUtc $commitTime } 'forged performance predicate cannot bypass measured protocol and recomputation'
+}
 $missingCase = New-JUnit $bindings @('candidate-quality.qualification', 'candidate-quality.coverage',
     'candidate-quality.determinism', 'candidate-quality.contracts')
 Expect-Reject { Test-CandidateQualityEvidence -Report $report -JUnitCases $missingCase -Execution $execution -Bindings $bindings -Policy $policy -CommitTimeUtc $commitTime } 'missing mandatory JUnit case rejected'
-$duplicateCase = New-JUnit $bindings @('candidate-quality.qualification', 'candidate-quality.qualification',
-    'candidate-quality.coverage', 'candidate-quality.determinism', 'candidate-quality.contracts', 'candidate-quality.identity-binding')
-Expect-Reject { Test-CandidateQualityEvidence -Report $report -JUnitCases $duplicateCase -Execution $execution -Bindings $bindings -Policy $policy -CommitTimeUtc $commitTime } 'duplicate JUnit case rejected'
+Expect-Reject { New-JUnit $bindings @('candidate-quality.qualification', 'candidate-quality.qualification',
+    'candidate-quality.coverage', 'candidate-quality.determinism', 'candidate-quality.contracts', 'candidate-quality.identity-binding') } 'duplicate JUnit case rejected'
 $changedRunner = New-Bindings
 $changedRunner['runner_sha256'] = ('f' * 64)
 Expect-Reject { Test-CandidateQualityEvidence -Report $report -JUnitCases $cases -Execution $execution -Bindings $changedRunner -Policy $policy -CommitTimeUtc $commitTime } 'runner hash change rejected'

@@ -80,13 +80,8 @@ TargetRevalidation EvaluateTargetEvidence(const TargetEvidence& evidence) {
   TargetRevalidation result;
   result.evidence = evidence;
 
-  // Thread focus. A notification that was superseded by a successful live query is reported
-  // as a revalidation; a kill notification is never renamed as a query result. The Win32
-  // window is consulted only under the explicitly requested lab policy AND only when the
-  // TSF query itself succeeded with FALSE. A failed query is never turned into permission
-  // by the fallback.
-  const bool notification_confirms = evidence.thread_focus_notification_set;
   const bool query_confirms = evidence.thread_focus_query_ok && evidence.thread_focus;
+  const bool notification_confirms = query_confirms && evidence.thread_focus_notification_set;
   const bool fallback_confirms =
       evidence.policy == ThreadFocusPolicy::kLabWin32Fallback &&
       evidence.thread_focus_query_ok && !evidence.thread_focus &&
@@ -102,7 +97,7 @@ TargetRevalidation EvaluateTargetEvidence(const TargetEvidence& evidence) {
     result.thread_focus_evidence = ThreadFocusEvidence::kNotificationKill;
   }
 
-  if (!notification_confirms && !query_confirms && !fallback_confirms) {
+  if (!query_confirms && !fallback_confirms) {
     if (evidence.thread_focus_notification_kill) {
       // The kill notification is the deciding fact. A coincident query failure stays in
       // evidence; it is not the reason the target was refused.

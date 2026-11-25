@@ -31,7 +31,10 @@ function Write-Bytes([string]$Path, [byte[]]$Bytes) {
     [IO.File]::WriteAllBytes($Path, $Bytes)
 }
 function Get-Hash([string]$Path) {
-    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stream = [IO.File]::OpenRead($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose(); $stream.Dispose() }
 }
 function New-Fixture([string]$Name) {
     $root = Join-Path $fixtureRoot $Name
@@ -45,7 +48,9 @@ function New-Fixture([string]$Name) {
     $scriptDir = Join-Path $root 'tools/product'
     $null = New-Item -ItemType Directory -Force -Path $scriptDir
     Copy-Item -LiteralPath (Join-Path $repo 'tools/product/stage_product.ps1') -Destination (Join-Path $scriptDir 'stage_product.ps1')
-    Write-Text (Join-Path $scriptDir 'build_identity.ps1') @'
+    Copy-Item -LiteralPath (Join-Path $repo 'tools/product/evidence_contract.ps1') -Destination (Join-Path $scriptDir 'evidence_contract.ps1')
+    Copy-Item -LiteralPath (Join-Path $repo 'tools/product/test_inventory_contract.ps1') -Destination (Join-Path $scriptDir 'test_inventory_contract.ps1')
+    Write-Text (Join-Path $scriptDir 'build_identity.ps1') (([IO.File]::ReadAllText((Join-Path $repo 'tools/product/build_identity.ps1'))) + "`n" + @'
 # SYNTHETIC TEST COLLABORATORS; never real product build evidence.
 function Assert-ProductBuildReceipt {
     param([string]$RepoRoot, [string]$BuildDir, [string]$RimeDll)
@@ -55,7 +60,13 @@ function Assert-ProductEngineReceipt {
     param([string]$RepoRoot, [string]$RimeDll)
     [pscustomobject]@{ source_sha256 = ('c' * 64) }
 }
-'@
+function Assert-ProductBuildEngineBinding {
+    param([string]$RepoRoot, [string]$RimeDll, $Receipt)
+    $engine = Assert-ProductEngineReceipt -RepoRoot $RepoRoot -RimeDll $RimeDll
+    if ($Receipt.engine_source_sha256 -cne $engine.source_sha256) { throw 'Synthetic engine binding mismatch.' }
+    return $engine
+}
+'@)
     Write-Text (Join-Path $root 'platforms/windows/product/VERSION') "1.2.3-unit`n"
     Write-Bytes (Join-Path $product 'product/bin/EpoCanva.exe') ([Text.Encoding]::ASCII.GetBytes('UNIT-EXE'))
     Write-Bytes (Join-Path $product 'product/bin/epocanva_tsf.dll') ([Text.Encoding]::ASCII.GetBytes('UNIT-TSF'))

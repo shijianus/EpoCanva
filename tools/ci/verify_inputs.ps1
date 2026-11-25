@@ -53,9 +53,12 @@ if (-not (Test-Path -LiteralPath $RepoRoot -PathType Container)) {
 }
 $RepoRoot = (Get-Item -LiteralPath $RepoRoot).FullName
 
-$raw = Get-Content -LiteralPath $Lock -Raw -Encoding UTF8
 try {
-  $lockDocument = $raw | ConvertFrom-Json
+  # Reuse the repository wire-format parser; do not let ConvertFrom-Json
+  # silently discard duplicate members or accept shell-specific JSON syntax.
+  . (Join-Path $PSScriptRoot '../product/evidence_contract.ps1')
+  $lockDocument = Read-ProductJson $Lock
+  Assert-ProductObjectFields $lockDocument @('format', 'owner', 'purpose', 'entries')
 } catch {
   Exit-Usage "inputs lock file is not valid JSON: $($_.Exception.Message)"
 }
@@ -79,33 +82,37 @@ $allowed_roots = @(
 )
 
 $properties = @($lockDocument.PSObject.Properties.Name)
-if (-not ($properties -contains 'format') -or $lockDocument.format -ne 1) {
+if ('format' -cnotin $properties -or
+    ($lockDocument.format -isnot [int] -and $lockDocument.format -isnot [long]) -or $lockDocument.format -ne 1) {
   Exit-Usage "inputs lock file format must be 1"
 }
-if (-not ($properties -contains 'owner') -or "$($lockDocument.owner)" -eq "") {
-  Exit-Usage "inputs lock file has no owner"
+if ('owner' -cnotin $properties -or $lockDocument.owner -isnot [string] -or
+    $lockDocument.owner -cne 'epocanva-ci-tier2-inputs-lock-v1') {
+  Exit-Usage "inputs lock file has an invalid owner"
 }
-if (-not ($properties -contains 'purpose') -or "$($lockDocument.purpose).Trim()" -eq "") {
+if ('purpose' -cnotin $properties -or $lockDocument.purpose -isnot [string] -or
+    [string]::IsNullOrWhiteSpace($lockDocument.purpose)) {
   Exit-Usage "inputs lock file has no purpose"
 }
-if (-not ($properties -contains 'entries')) {
+if ('entries' -cnotin $properties -or $lockDocument.entries -isnot [array]) {
   Exit-Usage "inputs lock file has no entries array"
 }
-# PowerShell 5.1 deserializes a one-element JSON array as a scalar; @() makes the
-# count and iteration correct for every entry count including zero and one.
 $entries = @($lockDocument.entries)
 if ($entries.Count -lt 1) {
   Exit-Usage "inputs lock file has no entries"
 }
 
-$seen_paths = New-Object 'System.Collections.Generic.HashSet[string]'
+$seen_paths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach ($entry in $entries) {
+  try {
+    Assert-ProductObjectFields $entry @('kind', 'path', 'pin_provenance', 'role') @('sha256', 'size_bytes', 'commit')
+  } catch { Exit-Usage 'inputs lock entry has missing or unexpected fields' }
   $kind = $entry.kind
   $path = $entry.path
-  if ($null -eq $kind -or $null -eq $path -or "$path" -eq "") {
+  if ($kind -isnot [string] -or $path -isnot [string] -or [string]::IsNullOrWhiteSpace($path)) {
     Exit-Usage "inputs lock entry is missing 'kind' or 'path'"
   }
-  if ($kind -ne "file" -and $kind -ne "commit") {
+  if ($kind -cne "file" -and $kind -cne "commit") {
     Exit-Usage "$path unknown entry kind '$kind' (invalid lock)"
   }
   if ("$path".Contains('\')) {
@@ -117,8 +124,9 @@ foreach ($entry in $entries) {
   }
   $segments = @("$path" -split '/')
   foreach ($segment in $segments) {
-    if ($segment -eq "" -or $segment -eq "." -or $segment -eq "..") {
-      Exit-Usage "$path must not contain empty, '.' or '..' path segments (invalid lock)"
+    if ($segment -eq "" -or $segment -match '[. ]$|[\x00-\x1f<>:"\\|?*]' -or
+        $segment -match '^(?i:CON|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(?:\.|$)') {
+      Exit-Usage "$path contains a noncanonical Windows path segment (invalid lock)"
     }
   }
   if (-not $seen_paths.Add("$path")) {
@@ -126,18 +134,21 @@ foreach ($entry in $entries) {
   }
   $within_allowed_root = $false
   foreach ($root in $allowed_roots) {
-    if ("$path".StartsWith($root)) { $within_allowed_root = $true; break }
+    if ($path.StartsWith($root, [StringComparison]::Ordinal)) { $within_allowed_root = $true; break }
   }
   if (-not $within_allowed_root) {
     Exit-Usage "$path is outside the declared allowed roots for pinned inputs (invalid lock)"
   }
-  if ("$($entry.pin_provenance)".Trim() -eq "" -or "$($entry.role)".Trim() -eq "") {
+  if ($entry.pin_provenance -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.pin_provenance) -or
+      $entry.role -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.role)) {
     Exit-Usage "$path is missing pin_provenance or role (invalid lock)"
   }
   if ($kind -eq "file") {
+    try { Assert-ProductObjectFields $entry @('kind', 'path', 'pin_provenance', 'role', 'sha256', 'size_bytes') }
+    catch { Exit-Usage "$path file entry schema is invalid" }
     # -cmatch/-notmatch: case-sensitive on purpose, so an uppercase digest is
     # rejected as an invalid lock (PowerShell's -match would accept it).
-    if ("$($entry.sha256)" -cnotmatch $sha256_pattern) {
+    if ($entry.sha256 -isnot [string] -or $entry.sha256 -cnotmatch $sha256_pattern) {
       Exit-Usage "$path sha256 is not a lowercase 64-hex digest (invalid lock)"
     }
     $size = $entry.size_bytes
@@ -146,7 +157,9 @@ foreach ($entry in $entries) {
       Exit-Usage "$path size_bytes must be a positive integer (invalid lock)"
     }
   } else {
-    if ("$($entry.commit)" -cnotmatch $commit_pattern) {
+    try { Assert-ProductObjectFields $entry @('kind', 'path', 'pin_provenance', 'role', 'commit') }
+    catch { Exit-Usage "$path commit entry schema is invalid" }
+    if ($entry.commit -isnot [string] -or $entry.commit -cnotmatch $commit_pattern) {
       Exit-Usage "$path commit is not a lowercase 40-hex SHA-1 (invalid lock)"
     }
   }
@@ -265,11 +278,20 @@ foreach ($entry in $entries) {
     }
     $absolute = Join-Path $RepoRoot ("$path" -replace '/', '\')
     $item = Get-Item -LiteralPath $absolute -Force
+    if ($item.PSIsContainer) {
+      $failures.Add("FAIL file $path NOT_A_FILE")
+      continue
+    }
     if ($item.Length -ne [long]$entry.size_bytes) {
       $failures.Add("FAIL file $path SIZE_MISMATCH expected=$($entry.size_bytes) actual=$($item.Length)")
       continue
     }
-    $actual = Get-Sha256Lowercase $absolute
+    try {
+      $actual = Get-Sha256Lowercase $absolute
+    } catch {
+      $failures.Add("FAIL file $path UNREADABLE")
+      continue
+    }
     if ($actual -ne "$($entry.sha256)") {
       $failures.Add("FAIL file $path HASH_MISMATCH expected=$($entry.sha256) actual=$actual")
     } else {
@@ -291,6 +313,11 @@ foreach ($entry in $entries) {
       continue
     }
     $checkout = Join-Path $RepoRoot ("$path" -replace '/', '\')
+    $top = & git -C $checkout rev-parse --show-toplevel 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $top -or [IO.Path]::GetFullPath("$top") -ine $checkout) {
+      $failures.Add("FAIL commit $path NOT_A_GIT_CHECKOUT")
+      continue
+    }
     $head = (& git -C $checkout rev-parse HEAD 2>$null)
     if ($LASTEXITCODE -ne 0 -or -not $head) {
       $failures.Add("FAIL commit $path NOT_A_GIT_CHECKOUT")
@@ -301,10 +328,17 @@ foreach ($entry in $entries) {
       $failures.Add("FAIL commit $path COMMIT_MISMATCH expected=$($entry.commit) actual=$head")
       continue
     }
+    # git status deliberately ignores assume-unchanged/skip-worktree entries.
+    # Such an index cannot prove the upstream bytes are clean.
+    $indexFlags = @(& git -C $checkout ls-files -v 2>$null)
+    if ($LASTEXITCODE -ne 0 -or @($indexFlags | Where-Object { $_ -cmatch '^[a-zS] ' }).Count -ne 0) {
+      $failures.Add("FAIL commit $path HIDDEN_INDEX_STATE")
+      continue
+    }
     # Byte-cleanliness of the checkout: tracked modifications, staged changes,
     # untracked files and submodule states in one porcelain call. The output
     # is counted, never printed: it names checkout-internal paths only.
-    $status = (& git -C $checkout status --porcelain=v1 -uall 2>$null)
+    $status = (& git -c core.fsmonitor=false -C $checkout status --porcelain=v1 -uall --ignore-submodules=none 2>$null)
     if ($LASTEXITCODE -ne 0) {
       $failures.Add("FAIL commit $path STATUS_UNREADABLE")
       continue

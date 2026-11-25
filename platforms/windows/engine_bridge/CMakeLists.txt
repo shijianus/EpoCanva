@@ -301,6 +301,9 @@ if(EPOCANVA_BUILD_PRODUCT)
   add_subdirectory(
     "${CMAKE_CURRENT_SOURCE_DIR}/../product"
     "${CMAKE_CURRENT_BINARY_DIR}/product")
+  # Qualification must use an evaluator built and tested with this candidate.
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/candidate_evaluation"
+                   "${CMAKE_CURRENT_BINARY_DIR}/candidate_evaluation_tests")
 endif()
 
 enable_testing()

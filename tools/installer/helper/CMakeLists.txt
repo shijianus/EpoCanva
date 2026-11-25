@@ -18,6 +18,10 @@ target_include_directories(epocanva_tip_profile_helper PRIVATE
 target_compile_definitions(epocanva_tip_profile_helper PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 if(MSVC)
+  # The registration helper runs before any optional VC redistributable could
+  # be provisioned. Match the product's static CRT, with no hidden /MD runtime.
+  set_property(TARGET epocanva_tip_profile_helper PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   target_compile_options(epocanva_tip_profile_helper PRIVATE
     /utf-8 /permissive- /Zc:__cplusplus /W4 /EHsc)
 endif()
@@ -25,3 +29,11 @@ target_link_libraries(epocanva_tip_profile_helper PRIVATE
   ole32 oleaut32 uuid advapi32 shell32)
 set_target_properties(epocanva_tip_profile_helper PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# These tests exercise the shared policy through an in-memory fake. They never
+# execute the registration helper or call a Windows registration API.
+include(CTest)
+if(BUILD_TESTING)
+  add_subdirectory("${EPOCANVA_INSTALLER_ROOT}/tests/helper"
+    "${CMAKE_BINARY_DIR}/helper_policy_tests")
+endif()

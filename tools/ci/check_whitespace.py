@@ -71,10 +71,10 @@ def resolve_range(*, event: str, base_sha: str, head_sha: str, before_sha: str,
         if not merge_base:
             raise GateError("pull_request merge-base is empty; failing closed")
         return merge_base, head_sha
-    if event == "push":
+    if event in ("push", "workflow_dispatch"):
         if not after_sha or not is_commit(repo_root, after_sha):
-            raise GateError("push event without a resolvable after SHA; failing closed")
-        if before_sha and before_sha != ZERO_SHA and is_commit(repo_root, before_sha):
+            raise GateError(f"{event} event without a resolvable after SHA; failing closed")
+        if event == "push" and before_sha and before_sha != ZERO_SHA and is_commit(repo_root, before_sha):
             try:
                 git(repo_root, "merge-base", "--is-ancestor", before_sha, after_sha)
                 return before_sha, after_sha
@@ -87,7 +87,7 @@ def resolve_range(*, event: str, base_sha: str, head_sha: str, before_sha: str,
             merge_base = git(repo_root, "merge-base", baseline_ref, after_sha).strip()
             if merge_base:
                 return merge_base, after_sha
-        raise GateError("push event did not provide a usable before SHA and no baseline "
+        raise GateError(f"{event} event did not provide a usable before SHA and no baseline "
                         "ref resolves; failing closed")
     raise GateError(f"event {event!r} has no defined comparison range; failing closed")
 
@@ -116,7 +116,7 @@ def check_range(repo_root: Path, start: str, end: str) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event", required=True,
-                        help="CI event name (pull_request or push)")
+                        help="CI event name (pull_request, push or workflow_dispatch)")
     parser.add_argument("--base-sha", default="", help="pull_request base SHA")
     parser.add_argument("--head-sha", default="", help="pull_request head SHA")
     parser.add_argument("--before-sha", default="", help="push event before SHA")
