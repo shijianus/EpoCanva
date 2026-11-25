@@ -4,8 +4,8 @@
 // current TSF input target of THIS thread?" It is deliberately more than a non-null
 // GetFocus check:
 //
-//   1. thread input focus, from ITfThreadFocusSink notifications when they arrive and from
-//      the real ITfThreadMgr::IsThreadFocus query otherwise. A Win32 thread-focus window is
+//   1. thread input focus, from the live ITfThreadMgr::IsThreadFocus query. A matching
+//      ITfThreadFocusSink notification supplies provenance. A Win32 thread-focus window is
 //      accepted only when the observer was constructed with the explicit
 //      ThreadFocusPolicy::kLabWin32Fallback (the integration lab, whose non-registered
 //      process reports S_FALSE) and only after the TSF query succeeded with FALSE. It is
@@ -52,12 +52,12 @@ namespace context {
 enum class TargetRevalidationStatus : std::uint8_t {
   kOk = 0,
   kClosed,                 // the observer no longer answers
-  kThreadFocusUnconfirmed, // neither a notification nor a real query confirms focus
+  kThreadFocusUnconfirmed, // live evidence does not confirm thread focus
   kThreadFocusLost,        // the last thread-focus notification was OnKillThreadFocus
   kNoDocumentManager,      // GetFocus succeeded with no document manager
   kNoTopContext,           // the focused document manager has no top context
   kContextMismatch,        // the top context is not the bound context (canonical identity)
-  kGenerationMismatch,     // same context, but the registry generation moved on
+  kGenerationMismatch,     // missing, revoked or superseded published generation
   kQueryFailed,            // a required query failed; the failure is in query_hr
 };
 
@@ -65,7 +65,7 @@ const char* DescribeTargetRevalidationStatus(TargetRevalidationStatus status);
 
 enum class ThreadFocusEvidence : std::uint8_t {
   kNone = 0,
-  kNotificationSet,    // ITfThreadFocusSink::OnSetThreadFocus was the last notification
+  kNotificationSet,    // last notification was Set and the live query agrees
   kNotificationKill,   // ITfThreadFocusSink::OnKillThreadFocus was the last notification
   kQuerySet,           // ITfThreadMgr::IsThreadFocus answered TRUE
   kWin32ThreadFocus,   // GetGUIThreadInfo(hwndFocus) is owned by this thread
@@ -78,7 +78,7 @@ const char* DescribeThreadFocusEvidence(ThreadFocusEvidence evidence);
 // is the product default; only the lab and test configurations that declare the lab
 // environment may enable the Win32 fallback.
 enum class ThreadFocusPolicy : std::uint8_t {
-  kStrictTsf = 0,        // only a TSF notification or a successful IsThreadFocus TRUE
+  kStrictTsf = 0,        // requires a successful IsThreadFocus TRUE
   kLabWin32Fallback = 1, // the above, plus a real Win32 focus window when IsThreadFocus
                          // itself succeeded with FALSE (never after a failed query)
 };
@@ -100,9 +100,7 @@ enum class TargetFailureStage : std::uint8_t {
 const char* DescribeTargetFailureStage(TargetFailureStage stage);
 
 // The raw facts. This struct is COM-free and pure, so the decision can be unit-tested and
-// logged without a live TSF manager. Each HRESULT is the real answer of that specific call;
-// a later evidence source may still confirm focus (for example a notification), in which
-// case the failed call stays in the evidence instead of being rewritten to S_OK.
+// logged without a live TSF manager. Each HRESULT is the real answer of that specific call.
 struct TargetEvidence {
   ThreadFocusPolicy policy = ThreadFocusPolicy::kStrictTsf;
   bool thread_focus_query_ok = false;
@@ -130,8 +128,7 @@ struct TargetRevalidation {
   // The HRESULT that decided this result: the failing call for kQueryFailed, E_INVALIDARG
   // for a structurally invalid request, E_FAIL for a registry that answered with a non-Ok
   // status (that API returns a status enum, not an HRESULT), and S_OK for every logical
-  // mismatch or empty-result refusal. Per-call answers, including a failed focus query
-  // overridden by a notification, remain verbatim in evidence.
+  // mismatch or empty-result refusal. Per-call answers remain verbatim in evidence.
   HRESULT query_hr = S_OK;
   TargetFailureStage failure_stage = TargetFailureStage::kNone;
   TargetEvidence evidence;

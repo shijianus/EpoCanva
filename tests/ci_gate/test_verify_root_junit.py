@@ -17,7 +17,8 @@ class RootJUnitTests(unittest.TestCase):
             directory = Path(temporary)
             registered = directory / "registered.json"
             junit = directory / "ctest.xml"
-            registered.write_text(json.dumps({"tests": [{"name": "unit.a"}]}), encoding="utf-8")
+            inventory = {"kind": "ctestInfo", "version": {"major": 1, "minor": 0}, "tests": [{"name": "unit.a"}]}
+            registered.write_text(json.dumps(inventory), encoding="utf-8")
             passing = '<testsuite tests="1" failures="0"><testcase name="unit.a" status="run"/></testsuite>'
             junit.write_text(passing, encoding="utf-8")
             self.assertEqual(module.verify(registered, junit), 1)
@@ -27,11 +28,28 @@ class RootJUnitTests(unittest.TestCase):
                 '<testsuite tests="1"><testcase name="unit.b"/></testsuite>',
                 '<testsuite tests="2"><testcase name="unit.a"/></testsuite>',
                 '<testsuite tests="1"><testcase name="unit.a" status="notrun"/></testsuite>',
+                '<testsuite tests="1"><testcase name="unit.a" result="failed"/></testsuite>',
+                '<testsuite tests="+1"><testcase name="unit.a"/></testsuite>',
+                '<testcase name="unit.a"/>',
+                '<testsuites><testcase name="unit.a"/></testsuites>',
                 '<!DOCTYPE testsuite><testsuite tests="1"><testcase name="unit.a"/></testsuite>',
                 '<testsuite tests="2"><testcase name="unit.a"/><testcase name="unit.a"/></testsuite>',
             ):
                 with self.subTest(text=text):
                     junit.write_text(text, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        module.verify(registered, junit)
+            junit.write_text(passing, encoding="utf-8")
+            for bad in (
+                json.dumps({**inventory, "version": {"major": True, "minor": 0}}),
+                json.dumps({**inventory, "version": {"major": 1.0, "minor": 0}}),
+                json.dumps({**inventory, "tests": {"name": "unit.a"}}),
+                json.dumps({**inventory, "tests": [{"name": None}]}),
+                json.dumps(inventory).replace('"name":', '"NAME": "unit.a", "name":'),
+                json.dumps(inventory).replace('"minor": 0', '"minor": 1e9000'),
+            ):
+                with self.subTest(inventory=bad):
+                    registered.write_text(bad, encoding="utf-8")
                     with self.assertRaises(ValueError):
                         module.verify(registered, junit)
 

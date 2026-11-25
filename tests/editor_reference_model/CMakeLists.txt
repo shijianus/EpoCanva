@@ -32,6 +32,12 @@ add_test(NAME editor.reference_model.stress COMMAND epocanva_editor_reference_te
   --report "${CMAKE_CURRENT_BINARY_DIR}/editor-report.json")
 add_test(NAME editor.reference_model.replay_minimization COMMAND epocanva_editor_reference_tests
   --self-test --report "${CMAKE_CURRENT_BINARY_DIR}/negative-control.json")
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME editor.reference_model.evidence_contract
+  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_LIST_DIR}/test_stress_contract.py" -v)
+set_tests_properties(editor.reference_model.evidence_contract PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}" TIMEOUT 120
+  LABELS "windows;editor;negative;reference-model")
 foreach(_editor_case IN ITEMS can_fail report_unwritable)
   if(_editor_case STREQUAL "can_fail")
     set(_editor_args -DPROBE_ARG1=--force-fail -DEXPECTED_EXIT=1)

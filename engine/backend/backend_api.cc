@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <stdexcept>
 #include <thread>
@@ -185,6 +186,36 @@ struct Session {
   // only from the input pipeline's script routing below — never a script guess
   // on candidate text, never persisted, never sent anywhere.
   rk::AdaptiveRanker detection;
+#ifdef EPOCANVA_BACKEND_FRENCH
+  struct FrenchCorrections {
+    std::uint32_t record_cap;
+    std::vector<std::string> ordered_utf8;
+  };
+  std::optional<FrenchCorrections> french_corrections;
+
+  const std::vector<std::string>* FrenchSuggestions(std::uint32_t record_cap) {
+    if (!french_corrections || french_corrections->record_cap != record_cap) {
+      french_corrections.reset();
+      auto result = resource->french->Suggest(preedit, record_cap);
+      if (result.status != epocanva::french_dictionary::Status::kOk) return nullptr;
+      french_corrections.emplace(FrenchCorrections{record_cap, std::move(result.values_utf8)});
+    }
+    return &french_corrections->ordered_utf8;
+  }
+#endif
+
+  void DiscardFrenchCorrections() noexcept {
+#ifdef EPOCANVA_BACKEND_FRENCH
+    french_corrections.reset();
+#endif
+  }
+
+  epocanva_status CheckAccess(const learn::Access& access) {
+    const auto status = Result(flow->Check(access));
+    if (status == EPOCANVA_PRIVACY_DENIED || status == EPOCANVA_STALE_SNAPSHOT)
+      DiscardFrenchCorrections();
+    return status;
+  }
 };
 struct Registry {
   std::mutex mutex;
@@ -213,7 +244,7 @@ template<class F> epocanva_status With(std::uint64_t handle, const epocanva_back
   if (found == registry.sessions.end()) return EPOCANVA_INVALID_HANDLE;
   Session& session = *found->second;
   auto access = Access(request->context, request->learning_enabled);
-  status = Result(session.flow->Check(access));
+  status = session.CheckAccess(access);
   if (status != EPOCANVA_OK) return status;
   return fn(session, access);
 }
@@ -271,7 +302,7 @@ std::string JapaneseReading(Session& session) {
   auto composer = session.japanese;
   return KanaScript(session.mode == EPOCANVA_BACKEND_KANA ? session.raw : composer.CommitUtf8(), false);
 }
-epocanva_status Compose(Session& session, const std::string& raw, const learn::Access& access) {
+epocanva_status Compose(Session& session, std::string raw, const learn::Access& access) {
   flow::Commit pending;
   if (session.flow->ReadCommit(access, &pending) == flow::Status::kOk) return EPOCANVA_BUSY;
   std::string preedit = raw;
@@ -328,7 +359,11 @@ epocanva_status Compose(Session& session, const std::string& raw, const learn::A
   }
   auto status = Result(session.flow->SetInput(raw, preedit, access));
   if (status != EPOCANVA_OK) return status;
-  session.raw = raw; session.preedit = std::move(preedit);
+#ifdef EPOCANVA_BACKEND_FRENCH
+  if (session.french_corrections && (session.raw != raw || session.preedit != preedit))
+    session.DiscardFrenchCorrections();
+#endif
+  session.raw = std::move(raw); session.preedit = std::move(preedit);
   return EPOCANVA_OK;
 }
 std::string Join(const std::vector<std::string>& tokens, std::uint32_t language) {
@@ -767,7 +802,7 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_backspace(
   return Guard([&] { return With(handle, request, [&](Session& session, const learn::Access& access) {
     auto raw = session.raw;
     if (!raw.empty()) { auto begin_utf8_byte = raw.size()-1; while (begin_utf8_byte && (static_cast<unsigned char>(raw[begin_utf8_byte])&0xc0)==0x80) --begin_utf8_byte; raw.resize(begin_utf8_byte); }
-    return Compose(session, raw, access);
+    return Compose(session, std::move(raw), access);
   }); });
 }
 extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_cancel(
@@ -778,7 +813,9 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_cancel(
     auto found = registry.sessions.find(handle); if (found == registry.sessions.end()) return EPOCANVA_INVALID_HANDLE;
     auto& session = *found->second;
     status = Result(session.flow->Reset(Access(request->context, request->learning_enabled)));
+    if (status == EPOCANVA_STALE_SNAPSHOT) session.DiscardFrenchCorrections();
     if (status != EPOCANVA_OK) return status;
+    session.DiscardFrenchCorrections();
     session.raw.clear(); session.preedit.clear(); session.japanese.Cancel(); session.korean.Cancel();
     // An explicit cancel clears the detection latch with the rest of the
     // input state: a stale latch must not leak into the next composition.
@@ -1024,9 +1061,10 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_query_candidate
           }
         }
 #ifdef EPOCANVA_BACKEND_FRENCH
-        if (session.resource->french && !session.preedit.empty()) {
-          const auto corrected = session.resource->french->Suggest(session.preedit, query->max_candidates);
-          for (const auto& text : corrected.values_utf8) {
+        const auto* corrected = session.resource->french && !session.preedit.empty()
+            ? session.FrenchSuggestions(query->max_candidates) : nullptr;
+        if (corrected) {
+          for (const auto& text : *corrected) {
             flow::Candidate candidate; candidate.kind=EPOCANVA_BACKEND_SPELLING; candidate.text_utf8=text;
             candidate.input_end_utf8_byte=session.raw.size();
             const auto id=session.resource->lexical->FindExact("fr",text);
@@ -1155,7 +1193,11 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_select(
     epocanva_backend_session_handle handle,const epocanva_backend_request* request,
     std::uint64_t snapshot_token,std::uint64_t candidate_token) noexcept {
   return Guard([&]{return With(handle,request,[&](Session& session,const learn::Access& access)->epocanva_status{
-    if (!session.rime || session.rime_ordinals.empty()) return Result(session.flow->Select(snapshot_token,candidate_token,{},access));
+    if (!session.rime || session.rime_ordinals.empty()) {
+      const auto status = Result(session.flow->Select(snapshot_token, candidate_token, {}, access));
+      if (status == EPOCANVA_OK) session.DiscardFrenchCorrections();
+      return status;
+    }
     flow::Snapshot shown;
     auto status=Result(session.flow->ReadSnapshot(access,&shown));
     if(status!=EPOCANVA_OK)return status;
@@ -1218,13 +1260,15 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_ack_commit(
     auto& registry=State();std::lock_guard<std::mutex> lock(registry.mutex);
     auto found=registry.sessions.find(handle);if(found==registry.sessions.end())return EPOCANVA_INVALID_HANDLE;
     auto& session=*found->second;auto access=Access(request->context,request->learning_enabled);
+    const bool access_allowed = session.CheckAccess(access) == EPOCANVA_OK;
     flow::Persist persist;
     if(session.backend->repository)persist=[&session](const learn::Selection& selected,const flow::PrivacyCallback& permission){
       return session.backend->repository->Record(session.flow->catalog(),selected,permission);
     };
-    const auto prior_context = session.flow->Context(access);
+    const auto prior_context = access_allowed ? session.flow->Context(access) : std::vector<pred::LexemeId>{};
     flow::Commit committed;
-    const bool has_commit = session.flow->ReadCommit(access, &committed) == flow::Status::kOk && committed.token == token;
+    const bool has_commit = access_allowed && session.flow->ReadCommit(access, &committed) == flow::Status::kOk &&
+        committed.token == token;
     const auto result=session.flow->Acknowledge(token,applied!=0,[access]{return access;},persist);
     out->consumed=result.consumed;out->learned=result.learned;out->context_advanced=result.context_advanced;
     if (has_commit && result.status == flow::Status::kOk && result.consumed && applied &&
@@ -1236,6 +1280,7 @@ extern "C" epocanva_status EPOCANVA_ENGINE_CALL epocanva_backend_ack_commit(
     }
     out->persistence_status=static_cast<std::uint32_t>(result.persistence_status);
     if(result.consumed){
+      session.DiscardFrenchCorrections();
       flow::Snapshot after;
       if(session.flow->ReadSnapshot(access,&after)==flow::Status::kOk){session.raw=after.raw_utf8;session.preedit=after.preedit_utf8;}
       else{session.raw.clear();session.preedit.clear();}

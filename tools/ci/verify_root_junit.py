@@ -4,33 +4,75 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
+import re
 import xml.etree.ElementTree as ET
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    folded: set[str] = set()
+    result: dict[str, object] = {}
+    for name, value in pairs:
+        if name.casefold() in folded:
+            raise ValueError("duplicate or case-aliased CTest inventory member")
+        folded.add(name.casefold())
+        result[name] = value
+    return result
+
+
+def _finite_number(token: str) -> float:
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError("nonfinite CTest inventory number")
+    return value
+
+
 def verify(registered_path: Path, junit_path: Path) -> int:
-    registered = [row["name"] for row in json.loads(registered_path.read_text(encoding="utf-8-sig"))["tests"]]
-    raw = junit_path.read_bytes()
-    if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+    inventory = json.loads(registered_path.read_text(encoding="utf-8-sig"),
+                           object_pairs_hook=_unique_object, parse_float=_finite_number,
+                           parse_constant=_finite_number)
+    if (type(inventory) is not dict or inventory.get("kind") != "ctestInfo"
+            or type(inventory.get("version")) is not dict or type(inventory.get("tests")) is not list):
+        raise ValueError("invalid CTest inventory schema")
+    version = inventory["version"]
+    if (type(version.get("major")) is not int or version["major"] != 1
+            or type(version.get("minor")) is not int or version["minor"] < 0):
+        raise ValueError("unsupported CTest inventory version")
+    registered = []
+    for row in inventory["tests"]:
+        if type(row) is not dict or type(row.get("name")) is not str or not row["name"].strip():
+            raise ValueError("invalid registered testcase name")
+        registered.append(row["name"])
+    raw = junit_path.read_text(encoding="utf-8-sig")
+    if "\x00" in raw or "<!DOCTYPE" in raw.upper() or "<!ENTITY" in raw.upper():
         raise ValueError("DTD and entity declarations are not accepted")
     root = ET.fromstring(raw)
+    if root.tag not in ("testsuite", "testsuites") or any("}" in node.tag for node in root.iter()):
+        raise ValueError("unsupported JUnit schema")
     cases = list(root.iter("testcase"))
     executed = [case.get("name") for case in cases]
     if not registered or len(registered) != len(set(registered)):
         raise ValueError("registered tests absent or duplicated")
-    if len(executed) != len(set(executed)) or sorted(executed) != sorted(registered):
+    if len(executed) != len(set(executed)) or set(executed) != set(registered):
         raise ValueError("executed tests differ from the exact registered inventory")
+    if any(child.tag == "testcase" and parent.tag != "testsuite" for parent in root.iter() for child in parent):
+        raise ValueError("misplaced JUnit testcase")
     if any(list(root.iter(tag)) for tag in ("failure", "error", "skipped")):
         raise ValueError("failed, errored or skipped test execution")
     for case in cases:
         if case.get("status", "run") not in ("run", "passed"):
             raise ValueError("unexecuted testcase status")
+        if case.get("result", "completed") not in ("completed", "passed"):
+            raise ValueError("nonpassing testcase result")
     for suite in list(root.iter("testsuite")) + list(root.iter("testsuites")):
         for name in ("failures", "errors", "skipped", "disabled"):
-            if int(suite.get(name, "0")) != 0:
+            if not re.fullmatch(r"0+", suite.get(name, "0")):
                 raise ValueError("nonzero JUnit summary")
-        if "tests" in suite.attrib and int(suite.attrib["tests"]) != len(list(suite.iter("testcase"))):
-            raise ValueError("JUnit summary count mismatch")
+        if "tests" in suite.attrib:
+            count = suite.attrib["tests"]
+            if not re.fullmatch(r"[0-9]+", count) or int(count) != len(list(suite.iter("testcase"))):
+                raise ValueError("JUnit summary count mismatch")
     return len(cases)
 
 

@@ -28,13 +28,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'acceptance_evidence.ps1')
 
 function Fail([string]$Message, [int]$Code = 2) {
     Write-Host "FAILED: $Message" -ForegroundColor Red
     exit $Code
 }
 function Get-Sha256([string]$Path) {
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return Get-ProductIdentityFileSha256 $Path
 }
 function Assert-Leaf([string]$Path, [string]$Label) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { Fail "$Label is missing" 2 }
@@ -141,6 +142,11 @@ if ($LASTEXITCODE -ne 0 -or -not $pythonVersion) {
 }
 
 . (Join-Path $PSScriptRoot 'build_identity.ps1')
+$testedIdentity = Get-AcceptanceIdentity -RepoRoot $script:repoRoot -BuildDir $BuildDir `
+    -StageRoot (Split-Path -Parent $PackageManifest)
+if ($testedIdentity.acceptance_profile -cne $AcceptanceProfile) { Fail 'qualification profile differs from the tested package' 2 }
+. (Join-Path $PSScriptRoot 'release_verifiers/quality_binary.ps1')
+$qualityBinaries = Assert-ProductQualityBinaryBindings $testedIdentity.receipt $BuildDir $Harness $RimeDll
 $source = Get-ProductSourceIdentity -RepoRoot $script:repoRoot
 if ($source.dirty) { Fail 'qualification requires a clean source tree' 1 }
 $head = $source.head
@@ -160,7 +166,7 @@ $licenseDecisionPath = Join-Path $script:repoRoot 'data\manifests\license-decisi
 $evaluatorPath = Join-Path $script:repoRoot 'tools\backend\evaluate_candidates.py'
 $supportPath = Join-Path $script:repoRoot 'tools\backend\candidate_quality_policy.py'
 $runnerPath = (Get-Item -LiteralPath $PSCommandPath -Force).FullName
-$policy = Get-Content -LiteralPath $qualityPolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$policy = Read-ProductJson $qualityPolicyPath
 $tierBLockPath = Join-Path (Split-Path -Parent $qualityPolicyPath) ([string]$policy.tier_b_lock)
 Assert-Leaf $tierBLockPath 'Tier B lock'
 
@@ -233,7 +239,7 @@ $logText = (@('evaluator_command=' + ($commandLine -join ' ')) +
 
 $report = $null
 if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
-    try { $report = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    try { $report = Read-ProductJson $reportPath }
     catch { $report = $null }
 }
 $bindings = [ordered]@{
@@ -251,6 +257,7 @@ $bindings = [ordered]@{
     evaluator_support_sha256 = (Get-Sha256 $supportPath)
     runner_sha256 = (Get-Sha256 $runnerPath)
     harness_sha256 = (Get-Sha256 $Harness)
+    rime_dll_sha256 = $qualityBinaries.rime.sha256
     backend_manifest_sha256 = (Get-Sha256 $backendManifestPath)
     tier_b_lock_sha256 = (Get-Sha256 $tierBLockPath)
 }
@@ -323,6 +330,15 @@ if ($contractsOk) {
 $qualificationOk = $identityOk -and ($evaluatorExit -eq 0) -and
     ((Get-Prop $gate 'status') -eq 'passed') -and ((Get-Prop $gate 'met') -eq $true)
 
+# Independently reopen the current receipt and inputs before recording success.
+# A report's own predicates do not establish an immutable execution interval.
+$afterIdentity = Get-AcceptanceIdentity -RepoRoot $script:repoRoot -BuildDir $BuildDir `
+    -StageRoot (Split-Path -Parent $PackageManifest)
+foreach ($field in @('commit', 'source_sha256', 'package_manifest_sha256', 'build_receipt_sha256',
+        'package_policy_sha256', 'language_policy_sha256', 'license_decision_sha256')) {
+    if ($testedIdentity.$field -cne $afterIdentity.$field) { Fail 'candidate changed during qualification' 2 }
+}
+
 $caseResults = [ordered]@{
     'candidate-quality.qualification' = @($qualificationOk, 'evaluator-not-passing')
     'candidate-quality.coverage' = @($coverageOk, 'sample-or-coverage-failure')
@@ -369,6 +385,31 @@ try {
 } finally { $writer.Dispose() }
 
 $allPassed = (@($caseResults.Values | Where-Object { -not $_[0] }).Count -eq 0)
+if ($allPassed -and $evaluatorExit -eq 0) {
+    . (Join-Path $PSScriptRoot 'release_verifiers/common.ps1')
+    . (Join-Path $PSScriptRoot 'release_verifiers/candidate_quality.ps1')
+    try {
+        $execution = [pscustomobject]@{ exit_code = $evaluatorExit; started_utc = $started;
+            completed_utc = $completed; command = $commandLine }
+        $null = Test-CandidateQualityEvidence -Report (Read-ProductJson $reportPath) `
+            -JUnitCases (Read-PassingJUnit $junitPath) -Execution $execution -Bindings $bindings `
+            -Policy (Read-ProductJson $qualityPolicyPath) -TierBLock (Read-ProductJson $tierBLockPath) `
+            -CorpusManifest (Read-ProductJson $Manifest) -CommitTimeUtc ([DateTimeOffset]::Parse($commitTimeText))
+    } catch {
+        $allPassed = $false
+        $caseResults['candidate-quality.qualification'][0] = $false
+        # Keep a failing artifact if independent validation rejects the report.
+        # The bounded producer generated this XML; no external XML is executed.
+        $xml = New-Object Xml.XmlDocument
+        $xml.XmlResolver = $null
+        $xml.Load($junitPath)
+        $xml.DocumentElement.SetAttribute('failures', '1')
+        $failure = $xml.CreateElement('failure')
+        $failure.SetAttribute('message', 'strict-evidence-validation-failed')
+        $null = $xml.SelectSingleNode('//testcase[@name="candidate-quality.qualification"]').AppendChild($failure)
+        $xml.Save($junitPath)
+    }
+}
 $entryExit = if ($allPassed -and $evaluatorExit -eq 0) { 0 } else { 1 }
 $runnerCommand = @($runnerPath, '-RepoRoot', $script:repoRoot, '-BuildDir', $BuildDir,
     '-PackageManifest', ([IO.Path]::GetFullPath($PackageManifest)), '-CasesDir', $CasesDir, '-Manifest', $Manifest,
@@ -386,6 +427,7 @@ $entry = [ordered]@{
     runner = New-Reference $runnerPath
     evaluator = New-Reference $evaluatorPath
     harness = New-Reference ([IO.Path]::GetFullPath($Harness))
+    rime = New-Reference ([IO.Path]::GetFullPath($RimeDll))
     log = New-Reference $logPath
     junit = New-Reference $junitPath
 }
@@ -393,7 +435,7 @@ if ($null -ne $report) { $entry['report'] = New-Reference $reportPath }
 
 $document = $null
 if (Test-Path -LiteralPath $EvidencePath -PathType Leaf) {
-    $document = Get-Content -LiteralPath $EvidencePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $document = Read-ProductJson $EvidencePath
     if ((Get-Prop $document 'format') -ne 2 -or
             (Get-Prop $document 'commit') -ne $source.commit -or
             (Get-Prop $document 'source_sha256') -ne $source.source_sha256 -or
@@ -422,8 +464,10 @@ $newDocument = [ordered]@{
 if ($null -ne $document -and $null -ne (Get-Prop $document 'source_manifest')) {
     $newDocument['source_manifest'] = Get-Prop $document 'source_manifest'
 }
-[IO.File]::WriteAllText($EvidencePath, ($newDocument | ConvertTo-Json -Depth 10) + "`n",
-    (New-Object Text.UTF8Encoding($false)))
+if ($null -ne $document -and $null -ne (Get-Prop $document 'installer')) {
+    $newDocument['installer'] = Get-Prop $document 'installer'
+}
+Write-ProductJson $EvidencePath $newDocument
 Write-Host "candidate-quality evidence written to $EvidencePath"
 Write-Host "evaluator exit=$evaluatorExit; cases passed=$(@($caseResults.Values | Where-Object { $_[0] }).Count)/5"
 exit $entryExit

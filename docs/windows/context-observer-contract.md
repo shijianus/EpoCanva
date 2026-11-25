@@ -1,5 +1,58 @@
 # EpoCanva P3.10 — TSF context observer contract
 
+## Current contract update — 2026-11-25
+
+The dated P3.10 measurements below are historical evidence, not current acceptance.
+In particular, the former exit-77/skip arrangement in sections 9–11 is superseded:
+`real_focus` now fails with exit 5 when a prerequisite or assertion fails; CTest
+must report failure, never skip. Current results and inherited-versus-new changes
+are recorded in `docs/reports/go-audit-tsf-20261125.md`.
+
+`AssociateFocus(hwnd, nullptr, &previous)` changes the window association. It is
+not a request for an immediate null document-focus notification. Microsoft documents
+automatic `SetFocus` when the associated window **receives** focus, and documents
+`SetFocus`'s argument as non-null. The SDK's nullable annotation does not establish
+a stronger behavioural guarantee. The real-focus test owns three real child HWNDs,
+their original/current document-manager references, and a foreground root window.
+It independently checks association replacement/restoration/unassociation, then
+drives actual Win32 focus changes A → B → A → empty document and an unassociated
+window. Notification counters must advance before observer `Pump`; poll changes
+cannot satisfy notification assertions. Foreground refusal remains a failing test.
+
+All observer state and COM resources belong to the construction STA. Subscribe
+checks the current apartment before acquiring any COM reference. Foreign-thread
+methods refuse without accessing mutable state or COM; a foreign Snapshot has
+`access_hr=RPC_E_WRONG_THREAD` and withholds mutable facts. A foreign Shutdown is
+refused and must be retried on the owner. Destruction on another thread terminates
+the process instead of releasing STA resources there; callers must obey this
+ownership contract. It does not make the observer a cross-thread object.
+
+TSF notifications and listener callbacks run under a nesting guard. `Pump` refuses
+reentry from either, and from an already-running Pump. COM callback adapters keep
+an extra self-reference until return, so listener-triggered Shutdown can return the
+advice and observer references safely. Target revocation precedes old-context
+release during replacement; held document/context members are detached before
+Release. A listener may call Shutdown: no caller may subsequently restore its
+pending-bind state. Reentrant destruction of the observer/listener itself is not
+an ownership contract; they must outlive their active public call/callback.
+
+Publication describes the observed document/selection, not authority to write.
+Even a published target must pass the live IsThreadFocus/GetFocus/GetTop and
+published-id/generation checks at admission and again in the granted edit session.
+The unregistered controlled host can deliver real document notifications while
+IsThreadFocus is FALSE; strict product admission still refuses that state.
+
+Diagnostics are text-free and the production debug trace remains compile-time
+disabled by default. Test traces distinguish association, real document/thread
+notifications, poll changes, publication/revocation, HRESULT/cookie pairs and
+reference accounting. They contain no keystrokes, host text or window titles.
+
+Official references: [AssociateFocus](https://learn.microsoft.com/en-us/windows/win32/api/msctf/nf-msctf-itfthreadmgr-associatefocus),
+[SetFocus](https://learn.microsoft.com/en-us/windows/win32/api/msctf/nf-msctf-itfthreadmgr-setfocus),
+[OnSetFocus](https://learn.microsoft.com/en-us/windows/win32/api/msctf/nf-msctf-itfthreadmgreventsink-onsetfocus).
+
+## Historical P3.10 record
+
 This document records what `platforms/windows/tsf_context/context_registry`,
 `selection_reader`, `context_observer`, and the coordinator-side
 `ObservedBindingController` actually are, what was verified against the real TSF manager on

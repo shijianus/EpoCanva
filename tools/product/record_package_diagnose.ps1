@@ -16,13 +16,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'acceptance_evidence.ps1')
 
 function Fail([string]$Message, [int]$Code = 1) {
     Write-Host "FAILED: $Message" -ForegroundColor Red
     exit $Code
 }
 function Get-Sha256([string]$Path) {
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return Get-ProductIdentityFileSha256 $Path
 }
 function New-Reference([string]$Path, [string]$Boundary) {
     $full = [System.IO.Path]::GetFullPath($Path)
@@ -30,6 +31,7 @@ function New-Reference([string]$Path, [string]$Boundary) {
                               [System.StringComparison]::OrdinalIgnoreCase)) {
         Fail "evidence file is outside the build directory: $full" 2
     }
+    $full = Assert-ProductPlainPath $full $Boundary
     $file = Get-Item -LiteralPath $full -Force
     if ($file.PSIsContainer -or $file.Length -eq 0) { Fail "evidence file is empty: $full" 2 }
     $relative = $full.Substring($script:repoRoot.Length + 1).Replace('\', '/')
@@ -64,11 +66,10 @@ if (-not $EvidencePath) { $EvidencePath = Join-Path $BuildDir 'release-evidence.
 $EvidencePath = [System.IO.Path]::GetFullPath($EvidencePath)
 if ((Split-Path -Parent $EvidencePath) -ne $BuildDir) { Fail 'EvidencePath must be inside BuildDir' 2 }
 
-. (Join-Path $PSScriptRoot 'build_identity.ps1')
 $receiptPath = Join-Path $BuildDir 'product-build-receipt.json'
 if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { Fail 'product-build-receipt.json is missing; run build_product.ps1 with tests' 3 }
-$receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($receipt.format -ne 1 -or $receipt.status -ne 'verified') { Fail 'the build receipt is not a verified non-trace Release build' 3 }
+$identity = Get-AcceptanceIdentity -RepoRoot $script:repoRoot -BuildDir $BuildDir -StageRoot $StageRoot
+$receipt = $identity.receipt
 $current = Get-ProductSourceIdentity -RepoRoot $script:repoRoot
 if ($receipt.source.commit -cne $current.commit -or
         $receipt.source.source_sha256 -cne $current.source_sha256 -or
@@ -85,11 +86,17 @@ $metadata = Read-PackageMetadata $stageManifest
 if ($metadata['commit'] -cne $current.commit) { Fail 'the staged commit differs from the current tested source' 4 }
 
 $version = (Get-Content -LiteralPath (Join-Path $script:repoRoot 'platforms\windows\product\VERSION') -Raw -Encoding UTF8).Trim()
-$reportPath = Join-Path $BuildDir 'package-diagnose.txt'
-$userRoot = Join-Path $BuildDir 'diagnose-user'
-if (Test-Path -LiteralPath $userRoot) {
-    # The isolated root is owned by this script and contains only diagnosis state.
-    Remove-Item -LiteralPath $userRoot -Recurse -Force
+$reportPath = Assert-ProductPlainPath (Join-Path $BuildDir 'package-diagnose.txt') $BuildDir
+$userRoot = Assert-ProductPlainPath (Join-Path $BuildDir 'diagnose-user') $BuildDir
+$EvidencePath = Assert-ProductPlainPath $EvidencePath $BuildDir
+$history = Assert-ProductPlainPath (Join-Path $BuildDir ('diagnose-history-' + [guid]::NewGuid().ToString('N'))) $BuildDir
+foreach ($name in @('diagnose-user', 'package-diagnose.txt', 'diagnose-stdout.log', 'diagnose-stderr.log')) {
+    $previous = Assert-ProductPlainPath (Join-Path $BuildDir $name) $BuildDir
+    if (Test-Path -LiteralPath $previous) {
+        $null = New-Item -ItemType Directory -Path $history -Force
+        $destination = Assert-ProductPlainPath (Join-Path $history $name) $BuildDir
+        Move-Item -LiteralPath $previous -Destination $destination -ErrorAction Stop
+    }
 }
 New-Item -ItemType Directory -Path $userRoot -Force | Out-Null
 
@@ -98,20 +105,20 @@ $started = [DateTimeOffset]::UtcNow
 # the report would be hashed mid-write. Start-Process -Wait is required.
 $diagnose = Start-Process -FilePath $stageExe `
     -ArgumentList @('--diagnose', ('"' + $reportPath + '"'), '--user-data-root', ('"' + $userRoot + '"')) `
-    -Wait -PassThru -NoNewWindow `
+    -Wait -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $BuildDir 'diagnose-stdout.log') `
     -RedirectStandardError (Join-Path $BuildDir 'diagnose-stderr.log')
 $exitCode = $diagnose.ExitCode
 $completed = [DateTimeOffset]::UtcNow
-if ($exitCode -ne 0) { Fail "the diagnosis failed with exit $exitCode" 5 }
+if ($exitCode -isnot [int] -or $exitCode -ne 0) { Fail "the diagnosis failed with exit $exitCode" 5 }
 if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) { Fail 'the diagnosis wrote no report' 5 }
 
 $entry = [ordered]@{
     id = 'package-diagnose'
     kind = 'diagnose'
     exit_code = [int]$exitCode
-    started_utc = $started
-    completed_utc = $completed
+    started_utc = $started.ToString('o')
+    completed_utc = $completed.ToString('o')
     command = @($stageExe, '--diagnose', $reportPath, '--user-data-root', $userRoot)
     report = New-Reference $reportPath $BuildDir
 }
@@ -137,26 +144,29 @@ $sourceManifestPath = Join-Path $BuildDir 'source-manifest.json'
 if (-not (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf)) {
     Fail 'source-manifest.json is missing; run tools/product/stage_source.ps1 before recording release evidence' 5
 }
-$sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($sourceManifest.format -ne 1 -or $sourceManifest.commit -cne $current.commit -or
+$sourceManifest = Read-ProductJson (Assert-ProductPlainPath $sourceManifestPath $BuildDir)
+if (-not (Test-ProductJsonInteger $sourceManifest.format) -or $sourceManifest.format -ne 1 -or $sourceManifest.commit -cne $current.commit -or
         $sourceManifest.source_sha256 -cne $current.source_sha256 -or
         $sourceManifest.package_manifest_sha256 -cne (Get-Sha256 $stageManifest)) {
     Fail 'source-manifest.json belongs to a different source or package' 5
 }
-$archiveRelative = [string]$sourceManifest.archive.path
-if (-not $archiveRelative -or $archiveRelative.Contains('..') -or
-        $archiveRelative.StartsWith('/') -or $archiveRelative -match '^[A-Za-z]:') {
-    Fail 'source-manifest.json archive path is not repository-relative' 5
-}
-$archivePath = Join-Path $script:repoRoot $archiveRelative.Replace('/', '\')
+$archiveRelative = $sourceManifest.archive.path
+if ($archiveRelative -isnot [string]) { Fail 'source archive path is not a string' 5 }
+Assert-ProductRelativePath $archiveRelative
+$archivePath = Assert-ProductPlainPath (Join-Path $script:repoRoot $archiveRelative) $BuildDir
 if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) { Fail 'the corresponding source archive is missing' 5 }
-if ((Get-Sha256 $archivePath) -cne [string]$sourceManifest.archive.sha256 -or
+if (-not (Test-ProductSha256 $sourceManifest.archive.sha256) -or
+        -not (Test-ProductJsonInteger $sourceManifest.archive.bytes) -or
+        (Get-Sha256 $archivePath) -cne $sourceManifest.archive.sha256 -or
         (Get-Item -LiteralPath $archivePath -Force).Length -ne [long]$sourceManifest.archive.bytes) {
     Fail 'the corresponding source archive differs from its manifest' 5
 }
 $document['source_manifest'] = New-Reference $sourceManifestPath $BuildDir
-[System.IO.File]::WriteAllText($EvidencePath, ($document | ConvertTo-Json -Depth 8) + "`n",
-    (New-Object System.Text.UTF8Encoding($false)))
+$after = Get-AcceptanceIdentity -RepoRoot $script:repoRoot -BuildDir $BuildDir -StageRoot $StageRoot
+foreach ($field in @('commit', 'source_sha256', 'package_manifest_sha256', 'build_receipt_sha256')) {
+    if ($identity.$field -cne $after.$field) { Fail 'Candidate changed during package diagnosis' 5 }
+}
+Write-ProductJson $EvidencePath $document
 Write-Host "wrote $EvidencePath"
 Write-Host "package diagnosis: exit 0; report $reportPath"
 exit 0

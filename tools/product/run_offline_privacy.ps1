@@ -33,7 +33,7 @@ function Fail([string]$Message, [int]$Code = 1) {
     exit $Code
 }
 function Get-Sha256([string]$Path) {
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return Get-ProductIdentityFileSha256 $Path
 }
 function Find-Dumpbin {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -299,7 +299,7 @@ if (-not (Test-Path -LiteralPath $dependencyManifest -PathType Leaf)) {
     $dependencyReviewPassed = $false
     $importDetails.Add('product-dependencies.json is missing')
 } else {
-    $dependencyDocument = Get-Content -LiteralPath $dependencyManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $dependencyDocument = Read-ProductJson $dependencyManifest
     if ($dependencyDocument.policy_semantics -notmatch 'No unlisted package file') {
         $dependencyReviewPassed = $false
         $importDetails.Add('dependency manifest policy section is malformed')

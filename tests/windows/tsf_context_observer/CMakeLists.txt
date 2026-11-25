@@ -9,9 +9,7 @@
 # REAL msctf.dll sinks and the REAL selection path; the only external edits are real
 # read/write edit sessions issued with a distinct real TfClientId.
 #
-# real-focus is registered with SKIP_RETURN_CODE 77: if this environment cannot deliver an
-# OnSetFocus notification (no OS input focus), the case prints RESULT ENV-LIMITED and CTest
-# reports it as SKIPPED, never as passed. The interactive mode is not a CTest case:
+# Real focus coverage requires OnSetFocus delivery. The interactive mode is separate:
 #   tsf_context_observer_tests.exe --interactive-focus
 if(NOT TARGET epocanva_tsf_context)
   message(FATAL_ERROR
@@ -93,15 +91,24 @@ epocanva_add_observer_case(
 epocanva_add_observer_case(
   windows.tsf_context_observer.own_edit own-edit)
 
-# 9. Real OnSetFocus delivery. SKIPPED (exit 77) when the environment cannot produce it.
+# 9. Required real OnSetFocus delivery and independent association ownership coverage.
 add_test(
   NAME windows.tsf_context_observer.real_focus
   COMMAND $<TARGET_FILE:tsf_context_observer_tests> --case real-focus)
 set_tests_properties(
   windows.tsf_context_observer.real_focus
   PROPERTIES TIMEOUT 180
-             SKIP_RETURN_CODE 77
-             LABELS "windows;tsf;context;observer;focus;real;environment-limited")
+             RUN_SERIAL TRUE
+             LABELS "windows;tsf;context;observer;focus;real")
+
+epocanva_add_observer_case(
+  windows.tsf_context_observer.association_contract association-contract)
+epocanva_add_observer_case(
+  windows.tsf_context_observer.revoked_target_guard revoked-target-guard)
+epocanva_add_observer_case(
+  windows.tsf_context_observer.reentrant_shutdown reentrant-shutdown)
+epocanva_add_observer_case(
+  windows.tsf_context_observer.thread_ownership thread-ownership)
 
 add_test(NAME windows.tsf_context_observer.environment_failure
   COMMAND ${CMAKE_COMMAND}
@@ -157,6 +164,3 @@ set_tests_properties(
   windows.tsf_context_observer.can_fail
   PROPERTIES TIMEOUT 180
              LABELS "windows;tsf;context;observer;identity;selection;real")
-
-message(STATUS
-  "  tsf_context_observer cases: 13 (12 behavioural + can_fail; real_focus skippable)")

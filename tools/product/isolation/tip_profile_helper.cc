@@ -8,8 +8,8 @@
 //   deactivate  DeactivateProfile (session disable)
 //   status      read-only report: COM registration, profile presence, active profile
 //
-// WHAT IT DOES NOT DO. It never writes the CLSID/InprocServer32/category keys (that is
-// register_tip.ps1), never changes another input method, never selects a keyboard layout for
+// It invokes the product DLL exports for CLSID/InprocServer32/category registration.
+// It never changes another input method, never selects a keyboard layout for
 // the user, and never claims that a successful profile registration means the TIP is active
 // in an application. Every command prints the HRESULT it observed and then re-reads the
 // state to verify the claim; a verification mismatch exits non-zero.
@@ -29,9 +29,12 @@
 
 #include <cstdio>
 #include <cwchar>
+#include <exception>
+#include <vector>
 #include <string>
 
 #include "identifiers.h"
+#include "tip_profile_policy.h"
 
 namespace {
 
@@ -51,47 +54,85 @@ bool SameGuid(const GUID& left, const GUID& right) {
   return ::IsEqualGUID(left, right) != FALSE;
 }
 std::wstring ReadInprocServer32(HKEY root);
-bool RegistrationOwnerMatches(const std::wstring& dll_path) {
-  if (dll_path.empty()) return false;
-  for (HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
-    const std::wstring base = std::wstring(L"Software\\Classes\\CLSID\\") + kProductClsidText;
-    HKEY key = nullptr;
-    const LONG opened = ::RegOpenKeyExW(root, base.c_str(), 0, KEY_READ, &key);
-    if (opened == ERROR_FILE_NOT_FOUND || opened == ERROR_PATH_NOT_FOUND) continue;
-    if (opened != ERROR_SUCCESS) return false;
-    wchar_t marker[64] = {};
-    DWORD marker_bytes = sizeof(marker);
-    DWORD marker_type = 0;
-    const LONG marker_status = ::RegQueryValueExW(key, L"EpoCanvaProduct", nullptr,
-        &marker_type, reinterpret_cast<BYTE*>(marker), &marker_bytes);
-    ::RegCloseKey(key);
-    const std::wstring server = ReadInprocServer32(root);
-    if (marker_status != ERROR_SUCCESS || marker_type != REG_SZ ||
-        std::wstring(marker) != L"epocanva_tsf" || server.empty() ||
-        ::CompareStringOrdinal(server.c_str(), -1, dll_path.c_str(), -1, TRUE) != CSTR_EQUAL) return false;
-    return true;
+using epocanva::tip_profile::Owner;
+using epocanva::tip_profile::Mutation;
+using epocanva::tip_profile::State;
+
+struct RegistryKey {
+  HKEY value = nullptr;
+  RegistryKey() = default;
+  RegistryKey(const RegistryKey&) = delete;
+  RegistryKey& operator=(const RegistryKey&) = delete;
+  ~RegistryKey() { if (value) ::RegCloseKey(value); }
+};
+
+bool ReadRegistryString(HKEY key, const wchar_t* name, std::wstring* text) {
+  // RegQueryValueExW does not promise a terminator for malformed REG_SZ data.
+  // All capacities/counts here are UTF-16 code units or bytes as named.
+  std::vector<wchar_t> value_utf16(32768);
+  DWORD value_bytes = static_cast<DWORD>(value_utf16.size() * sizeof(wchar_t));
+  DWORD type = 0;
+  const LONG status = ::RegQueryValueExW(key, name, nullptr, &type,
+      reinterpret_cast<BYTE*>(value_utf16.data()), &value_bytes);
+  if (status != ERROR_SUCCESS || type != REG_SZ || value_bytes < sizeof(wchar_t) ||
+      value_bytes % sizeof(wchar_t) != 0 ||
+      value_bytes > value_utf16.size() * sizeof(wchar_t)) return false;
+  const std::size_t code_units = value_bytes / sizeof(wchar_t);
+  if (value_utf16[code_units - 1] != L'\0') return false;
+  for (std::size_t utf16_index = 0; utf16_index + 1 < code_units; ++utf16_index) {
+    if (value_utf16[utf16_index] == L'\0') return false;
   }
-  return false;
+  text->assign(value_utf16.data(), code_units - 1);
+  return true;
+}
+
+Owner ReadScopeOwner(HKEY root, const std::wstring& dll_path) {
+  const std::wstring base = std::wstring(L"Software\\Classes\\CLSID\\") + kProductClsidText;
+  RegistryKey key;
+  const LONG opened = ::RegOpenKeyExW(root, base.c_str(), 0,
+                                    KEY_READ | KEY_WOW64_64KEY, &key.value);
+  if (opened == ERROR_FILE_NOT_FOUND || opened == ERROR_PATH_NOT_FOUND) return Owner::kAbsent;
+  if (opened != ERROR_SUCCESS) return Owner::kBlocked;
+  std::wstring marker;
+  const bool marker_ok = ReadRegistryString(key.value, L"EpoCanvaProduct", &marker);
+  RegistryKey server_key;
+  const LONG server_opened = ::RegOpenKeyExW(key.value, L"InprocServer32", 0,
+                                           KEY_READ | KEY_WOW64_64KEY, &server_key.value);
+  if (server_opened != ERROR_SUCCESS) return Owner::kBlocked;
+  std::wstring server, threading;
+  const bool server_ok = ReadRegistryString(server_key.value, nullptr, &server);
+  const bool threading_ok = ReadRegistryString(server_key.value, L"ThreadingModel", &threading);
+  if (!marker_ok || marker != L"epocanva_tsf" || !server_ok || !threading_ok ||
+      threading != L"Apartment" || dll_path.empty() ||
+      ::CompareStringOrdinal(server.c_str(), -1, dll_path.c_str(), -1, TRUE) != CSTR_EQUAL) {
+    return Owner::kBlocked;
+  }
+  return root == HKEY_CURRENT_USER ? Owner::kUser : Owner::kMachine;
+}
+
+Owner ReadRegistrationOwner(const std::wstring& dll_path) {
+  if (dll_path.empty()) return Owner::kBlocked;
+  // Always inspect both scopes: DllUnregisterServer visits both, not only HKCR's
+  // effective registration. A matching HKCU must not hide a foreign HKLM.
+  return epocanva::tip_profile::CombineOwners(
+      ReadScopeOwner(HKEY_CURRENT_USER, dll_path),
+      ReadScopeOwner(HKEY_LOCAL_MACHINE, dll_path));
+}
+
+bool RegistrationOwnerMatches(const std::wstring& dll_path) {
+  return epocanva::tip_profile::Owned(ReadRegistrationOwner(dll_path));
 }
 
 std::wstring ReadInprocServer32(HKEY root) {
-  HKEY key = nullptr;
+  RegistryKey key;
   const std::wstring path = std::wstring(L"Software\\Classes\\CLSID\\") +
                             kProductClsidText + L"\\InprocServer32";
-  if (::RegOpenKeyExW(root, path.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
+  if (::RegOpenKeyExW(root, path.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &key.value) != ERROR_SUCCESS) {
     return std::wstring();
   }
-  wchar_t value[1024] = {};
-  DWORD bytes = sizeof(value);
-  DWORD type = 0;
-  const LONG status =
-      ::RegQueryValueExW(key, nullptr, nullptr, &type, reinterpret_cast<BYTE*>(value),
-                         &bytes);
-  ::RegCloseKey(key);
-  if (status != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) {
-    return std::wstring();
-  }
-  return std::wstring(value);
+  std::wstring value;
+  const bool read = ReadRegistryString(key.value, nullptr, &value);
+  return read ? value : std::wstring();
 }
 
 void PrintComRegistration() {
@@ -179,126 +220,205 @@ int Status(const std::wstring& dll_path) {
   return 0;
 }
 
-int InvokeComRegistration(const std::wstring& dll_path, bool install) {
-  if (dll_path.empty()) return 2;
-  HMODULE module = ::LoadLibraryW(dll_path.c_str());
-  if (module == nullptr) {
-    std::fwprintf(stderr, L"LoadLibrary failed error=%lu\n", ::GetLastError());
-    return 1;
-  }
-  using RegistrationFn = HRESULT(STDAPICALLTYPE*)(void);
-  const auto entry = reinterpret_cast<RegistrationFn>(::GetProcAddress(
-      module, install ? "DllRegisterServer" : "DllUnregisterServer"));
-  if (entry == nullptr) {
-    ::FreeLibrary(module);
-    std::fwprintf(stderr, L"registration entry point is missing\n");
-    return 1;
-  }
-  const HRESULT result = entry();
-  PrintHr(install ? L"DllRegisterServer" : L"DllUnregisterServer", result);
-  ::FreeLibrary(module);
-  return SUCCEEDED(result) ? 0 : 1;
-}
+template <class T>
+class ComPtr {
+ public:
+  ~ComPtr() { if (value) value->Release(); }
+  ComPtr() = default;
+  ComPtr(const ComPtr&) = delete;
+  ComPtr& operator=(const ComPtr&) = delete;
+  T* value = nullptr;
+};
 
-int Register(const std::wstring& dll_path) {
-  if (InvokeComRegistration(dll_path, true) != 0) return 1;
-  ITfInputProcessorProfiles* profiles = Profiles();
-  if (profiles == nullptr) {
-    (void)InvokeComRegistration(dll_path, false);
-    return 1;
+class RegistrationModule {
+ public:
+  using Entry = HRESULT(STDAPICALLTYPE*)(void);
+  ~RegistrationModule() { if (module_) ::FreeLibrary(module_); }
+  RegistrationModule() = default;
+  RegistrationModule(const RegistrationModule&) = delete;
+  RegistrationModule& operator=(const RegistrationModule&) = delete;
+  bool Open(const std::wstring& path) {
+    module_ = ::LoadLibraryExW(path.c_str(), nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module_) {
+      std::fwprintf(stderr, L"LoadLibraryExW failed error=%lu\n", ::GetLastError());
+      return false;
+    }
+    register_ = reinterpret_cast<Entry>(::GetProcAddress(module_, "DllRegisterServer"));
+    unregister_ = reinterpret_cast<Entry>(::GetProcAddress(module_, "DllUnregisterServer"));
+    wchar_t loaded_utf16[32768] = {};
+    const DWORD code_units = ::GetModuleFileNameW(module_, loaded_utf16, 32768);
+    if (!register_ || !unregister_ || code_units == 0 || code_units >= 32768 ||
+        ::CompareStringOrdinal(path.c_str(), -1, loaded_utf16, -1, TRUE) != CSTR_EQUAL) {
+      std::fwprintf(stderr, L"registration exports or loaded module identity invalid\n");
+      return false;
+    }
+    return true;
   }
-  ITfInputProcessorProfileMgr* manager = ProfileManager();
-  if (manager == nullptr) {
-    profiles->Release();
-    (void)InvokeComRegistration(dll_path, false);
-    return 1;
+  bool Change(bool install) {
+    const HRESULT hr = (install ? register_ : unregister_)();
+    PrintHr(install ? L"DllRegisterServer" : L"DllUnregisterServer", hr);
+    return hr == S_OK;
   }
-  ProfileState before = ReadState(manager);
-  manager->Release();
-  if (before.present) {
-    PrintState(before);
-    profiles->Release();
-    return 0;
-  }
+ private:
+  HMODULE module_ = nullptr;
+  Entry register_ = nullptr;
+  Entry unregister_ = nullptr;
+};
 
-  HRESULT hr = profiles->Register(Clsid());
-  PrintHr(L"Register CLSID profile", hr);
-  if (FAILED(hr)) {
-    profiles->Release();
-    (void)InvokeComRegistration(dll_path, false);
-    return 1;
-  }
-  hr = profiles->AddLanguageProfile(
-      Clsid(), kEnglishUs, ProfileGuid(), kDescription,
-      static_cast<ULONG>(std::wcslen(kDescription)), nullptr, 0, 0);
-  PrintHr(L"AddLanguageProfile en-US", hr);
-  if (FAILED(hr)) {
-    const HRESULT rollback = profiles->Unregister(Clsid());
-    PrintHr(L"Rollback Unregister CLSID profile", rollback);
-    profiles->Release();
-    (void)InvokeComRegistration(dll_path, false);
-    return 1;
-  }
-  profiles->Release();
-
-  manager = ProfileManager();
-  if (manager == nullptr) {
-    (void)InvokeComRegistration(dll_path, false);
-    return 1;
-  }
-  const ProfileState state = ReadState(manager);
-  PrintState(state);
-  manager->Release();
-  if (!state.present) {
-    std::fwprintf(stderr, L"verification failed: the profile is still absent\n");
-    (void)InvokeComRegistration(dll_path, false);
-    return 3;
-  }
-  return 0;
-}
-
-int Unregister(const std::wstring& dll_path) {
-  ITfInputProcessorProfileMgr* manager = ProfileManager();
-  if (manager == nullptr) return 1;
-  const ProfileState before = ReadState(manager);
-  manager->Release();
-  if (!before.present) return InvokeComRegistration(dll_path, false);
-  ITfInputProcessorProfiles* profiles = Profiles();
-  if (profiles == nullptr) return 1;
-
-  HRESULT removed = profiles->RemoveLanguageProfile(Clsid(), kEnglishUs, ProfileGuid());
-  PrintHr(L"RemoveLanguageProfile", removed);
-  const HRESULT unregistered = SUCCEEDED(removed) ? profiles->Unregister(Clsid()) : removed;
-  if (SUCCEEDED(removed)) PrintHr(L"Unregister CLSID profile", unregistered);
-  if (FAILED(removed) || FAILED(unregistered)) {
-    ITfInputProcessorProfileMgr* rollback_manager = ProfileManager();
-    const ProfileState after_failure = rollback_manager == nullptr ? ProfileState{} : ReadState(rollback_manager);
-    if (rollback_manager != nullptr) rollback_manager->Release();
-    if (!after_failure.present) {
-      const HRESULT rollback = profiles->Register(Clsid());
-      PrintHr(L"Rollback Register CLSID profile", rollback);
-      if (SUCCEEDED(rollback)) {
-        const HRESULT add = profiles->AddLanguageProfile(
-            Clsid(), kEnglishUs, ProfileGuid(), kDescription,
-            static_cast<ULONG>(std::wcslen(kDescription)), nullptr, 0, 0);
-        PrintHr(L"Rollback AddLanguageProfile", add);
+// All objects are created, used and released synchronously on wmain's STA.
+class ProfileOperations {
+ public:
+  ProfileOperations(const std::wstring& path, ITfInputProcessorProfiles* profiles,
+                    RegistrationModule* module)
+      : path_(path), profiles_(profiles), module_(module) {}
+  Owner ReadOwner() { return ReadRegistrationOwner(path_); }
+  bool Read(State* state) {
+    *state = State{};
+    state->owner = ReadOwner();
+    if (state->owner == Owner::kBlocked) return false;
+    ComPtr<IEnumGUID> processors;
+    HRESULT hr = profiles_->EnumInputProcessorInfo(&processors.value);
+    PrintHr(L"EnumInputProcessorInfo", hr);
+    if (hr != S_OK || !processors.value) return false;
+    for (;;) {
+      GUID clsid{};
+      ULONG fetched = 0;  // Number of GUID records, not a text offset.
+      hr = processors.value->Next(1, &clsid, &fetched);
+      if (hr == S_FALSE && fetched == 0) break;
+      if (hr != S_OK || fetched != 1) {
+        PrintHr(L"EnumInputProcessorInfo.Next", hr);
+        return false;
+      }
+      if (SameGuid(clsid, Clsid())) state->processor = true;
+    }
+    LANGID* language_ids = nullptr;
+    ULONG language_count = 0;  // Number of LANGID records.
+    hr = profiles_->GetLanguageList(&language_ids, &language_count);
+    PrintHr(L"GetLanguageList", hr);
+    struct LanguageList {
+      LANGID* value;
+      ~LanguageList() { ::CoTaskMemFree(value); }
+    } language_list{language_ids};
+    if (hr != S_OK || (language_count != 0 && !language_ids) ||
+        language_count > 65536) return false;
+    // Always inspect our language, including when it is not the current language.
+    std::vector<LANGID> languages{kEnglishUs};
+    for (ULONG record = 0; record < language_count; ++record) {
+      if (language_ids[record] != kEnglishUs) languages.push_back(language_ids[record]);
+    }
+    for (LANGID language : languages) {
+      ComPtr<IEnumTfLanguageProfiles> profiles;
+      hr = profiles_->EnumLanguageProfiles(language, &profiles.value);
+      PrintHr(L"EnumLanguageProfiles", hr);
+      if (hr != S_OK || !profiles.value) return false;
+      for (;;) {
+        TF_LANGUAGEPROFILE profile{};
+        ULONG fetched = 0;  // Number of profile records.
+        hr = profiles.value->Next(1, &profile, &fetched);
+        if (hr == S_FALSE && fetched == 0) break;
+        if (hr != S_OK || fetched != 1) {
+          PrintHr(L"EnumLanguageProfiles.Next", hr);
+          return false;
+        }
+        if (!SameGuid(profile.clsid, Clsid())) continue;
+        if (profile.langid == kEnglishUs && SameGuid(profile.guidProfile, ProfileGuid())) {
+          state->target = true;
+        } else {
+          state->other_profiles = true;
+        }
       }
     }
-    profiles->Release();
-    return 1;
+    // Do not let a scope/owner change during enumeration bless the old snapshot.
+    if (state->owner != ReadOwner()) return false;
+    observed_owner_ = state->owner;
+    std::wprintf(L"observed_registration    owner=%d processor=%d target=%d other=%d\n",
+                 static_cast<int>(state->owner), state->processor ? 1 : 0,
+                 state->target ? 1 : 0, state->other_profiles ? 1 : 0);
+    return true;
   }
-  profiles->Release();
+  bool Change(Mutation mutation) {
+    const Owner owner = ReadOwner();
+    if (owner != observed_owner_) return false;
+    if (mutation == Mutation::kRegisterCom) {
+      if (owner != Owner::kAbsent && !epocanva::tip_profile::Owned(owner)) return false;
+      return module_->Change(true);
+    }
+    if (!epocanva::tip_profile::Owned(owner)) return false;
+    HRESULT hr = E_FAIL;
+    const wchar_t* operation = L"unknown mutation";
+    switch (mutation) {
+      case Mutation::kRegisterProcessor:
+        hr = profiles_->Register(Clsid()); operation = L"Register CLSID profile"; break;
+      case Mutation::kAddTarget:
+        // AddLanguageProfile's description count is UTF-16 code units, excluding NUL.
+        hr = profiles_->AddLanguageProfile(Clsid(), kEnglishUs, ProfileGuid(), kDescription,
+            static_cast<ULONG>(std::wcslen(kDescription)), nullptr, 0, 0);
+        operation = L"AddLanguageProfile en-US"; break;
+      case Mutation::kRemoveTarget:
+        hr = profiles_->RemoveLanguageProfile(Clsid(), kEnglishUs, ProfileGuid());
+        operation = L"RemoveLanguageProfile"; break;
+      case Mutation::kUnregisterProcessor:
+        hr = profiles_->Unregister(Clsid()); operation = L"Unregister CLSID profile"; break;
+      case Mutation::kUnregisterCom:
+        return module_->Change(false);
+      default: return false;
+    }
+    PrintHr(operation, hr);
+    return hr == S_OK;
+  }
+ private:
+  const std::wstring& path_;
+  ITfInputProcessorProfiles* profiles_;  // Borrowed from the surrounding STA scope.
+  RegistrationModule* module_;          // Outlives all mutations and compensation.
+  Owner observed_owner_ = Owner::kBlocked;
+};
 
-  manager = ProfileManager();
-  if (manager == nullptr) return 1;
-  const ProfileState state = ReadState(manager);
-  PrintState(state);
-  manager->Release();
-  if (state.present) {
-    std::fwprintf(stderr, L"verification failed: the profile is still present\n");
-    return 3;
+int InvokeComRegistration(const std::wstring& dll_path, bool install) {
+  const Owner before = ReadRegistrationOwner(dll_path);
+  if (before == Owner::kBlocked) return 4;
+  if (!install && before == Owner::kAbsent) return 0;
+  RegistrationModule module;
+  if (!module.Open(dll_path)) return 1;
+  if (ReadRegistrationOwner(dll_path) != before) return 4;
+  if (!module.Change(install)) return 1;
+  const Owner after = ReadRegistrationOwner(dll_path);
+  return (install ? epocanva::tip_profile::Owned(after) : after == Owner::kAbsent) ? 0 : 3;
+}
+
+int ChangeRegistration(const std::wstring& dll_path, bool install) {
+  if (ReadRegistrationOwner(dll_path) == Owner::kBlocked) return 4;
+  // Resolve both exports before touching TSF: missing DLL/export must not leave
+  // a removed profile behind. Hold the module through the entire operation.
+  RegistrationModule module;
+  if (!module.Open(dll_path)) return 1;
+  ComPtr<ITfInputProcessorProfiles> profiles;
+  profiles.value = Profiles();
+  if (!profiles.value) return 1;
+  ProfileOperations ops(dll_path, profiles.value, &module);
+  const int result = install ? epocanva::tip_profile::Register(ops)
+                             : epocanva::tip_profile::Unregister(ops);
+  std::wprintf(L"registration_result      %d\n", result);
+  if (result == 5) {
+    std::fwprintf(stderr, L"compensation incomplete; retained state requires inspection\n");
   }
-  return InvokeComRegistration(dll_path, false);
+  return result;
+}
+
+int Register(const std::wstring& dll_path) { return ChangeRegistration(dll_path, true); }
+int Unregister(const std::wstring& dll_path) { return ChangeRegistration(dll_path, false); }
+
+bool NormalizeDllPath(const wchar_t* input, std::wstring* normalized) {
+  const std::wstring path(input);
+  const bool drive_absolute = path.size() >= 3 && path[1] == L':' &&
+                             (path[2] == L'\\' || path[2] == L'/');
+  const bool unc_absolute = path.size() >= 3 && path[0] == L'\\' && path[1] == L'\\';
+  if (!drive_absolute && !unc_absolute) return false;
+  wchar_t path_utf16[32768] = {};
+  const DWORD code_units = ::GetFullPathNameW(input, 32768, path_utf16, nullptr);
+  if (code_units == 0 || code_units >= 32768) return false;
+  normalized->assign(path_utf16, code_units);
+  return true;
 }
 
 
@@ -347,20 +467,29 @@ int wmain(int argc, wchar_t** argv) {
     return 1;
   }
   int result = 2;
-  const std::wstring command = argv[1];
-  const std::wstring dll_path = argc > 2 ? argv[2] : L"";
-  if (command == L"register") {
-    result = Register(dll_path);
-  } else if (command == L"unregister") {
-    result = Unregister(dll_path);
-  } else if (command == L"register-com") {
-    result = InvokeComRegistration(dll_path, true);
-  } else if (command == L"unregister-com") {
-    result = InvokeComRegistration(dll_path, false);
-  } else if (command == L"status") {
-    result = Status(dll_path);
-  } else {
-    std::fwprintf(stderr, L"unknown command: %ls\n", argv[1]);
+  try {
+    const std::wstring command = argv[1];
+    std::wstring dll_path;
+    if (argc > 3 || (argc == 3 && !NormalizeDllPath(argv[2], &dll_path)) ||
+        (argc < 3 && command != L"status")) {
+      std::fwprintf(stderr, L"registration requires one absolute DLL path\n");
+    } else if (command == L"register") {
+      result = Register(dll_path);
+    } else if (command == L"unregister") {
+      result = Unregister(dll_path);
+    } else if (command == L"register-com") {
+      result = InvokeComRegistration(dll_path, true);
+    } else if (command == L"unregister-com") {
+      result = InvokeComRegistration(dll_path, false);
+    } else if (command == L"status") {
+      result = Status(dll_path);
+    } else {
+      std::fwprintf(stderr, L"unknown command: %ls\n", argv[1]);
+    }
+  } catch (const std::exception&) {
+    // Exceptions cannot turn incomplete registration/compensation into success.
+    std::fwprintf(stderr, L"registration aborted; state requires inspection\n");
+    result = 5;
   }
   ::CoUninitialize();
   return result;

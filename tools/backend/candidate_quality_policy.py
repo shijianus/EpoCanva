@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,29 @@ POLICY_PATH = Path(__file__).resolve().parents[2] / "data/eval/candidate-v1/qual
 
 class PolicyError(ValueError):
     pass
+
+
+def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    members: set[str] = set()
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key.casefold() in members:
+            raise PolicyError("duplicate or case-aliased evidence member")
+        members.add(key.casefold())
+        result[key] = value
+    return result
+
+
+def _json_number(token: str) -> float:
+    number = float(token)
+    if not math.isfinite(number):
+        raise PolicyError("nonfinite evidence number")
+    return number
+
+
+def _read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_json_object,
+                      parse_float=_json_number, parse_constant=_json_number)
 
 
 def _keys(value: Any, expected: set[str], where: str) -> None:
@@ -30,7 +54,8 @@ def _positive_int(value: Any, where: str) -> None:
 
 
 def _finite(value: Any, where: str, maximum: float | None = None) -> None:
-    if (type(value) not in (int, float) or not math.isfinite(value) or value < 0 or
+    if (type(value) not in (int, float) or value < 0 or value > sys.float_info.max or
+            not math.isfinite(value) or
             (maximum is not None and value > maximum)):
         raise PolicyError(f"{where} must be a finite nonnegative number in range")
 
@@ -87,14 +112,14 @@ def validate_policy(policy: Any) -> dict[str, Any]:
     else:
         raise PolicyError("unknown absolute quality decision status")
     lock = policy["tier_b_lock"]
-    if not isinstance(lock, str) or Path(lock).name != lock or not lock.endswith(".json"):
+    if not isinstance(lock, str) or not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.json", lock):
         raise PolicyError("tier_b_lock must name a sibling JSON file")
     return policy
 
 
 def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
     try:
-        policy = json.loads(path.read_text(encoding="utf-8"))
+        policy = _read_json(path)
     except (OSError, ValueError) as exc:
         raise PolicyError("quality policy is unreadable") from exc
     return validate_policy(policy)
@@ -110,7 +135,7 @@ def validate_tier_b_lock(path: Path, *, policy: dict[str, Any], cases_dir: Path,
     The lock also pins the manifest bytes. Pending decisions never qualify.
     """
     try:
-        lock = json.loads(path.read_text(encoding="utf-8"))
+        lock = _read_json(path)
     except (OSError, ValueError) as exc:
         raise PolicyError("Tier B lock is unreadable") from exc
     _keys(lock, {"format", "version", "status", "languages"}, "Tier B lock")

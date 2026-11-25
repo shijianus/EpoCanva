@@ -739,7 +739,7 @@ class HelperTests(unittest.TestCase):
         for forbidden in (
                 REPO_ROOT / "docs" / "report.json",                 # source tree, not build/
                 REPO_ROOT / "build" / ".." / "docs" / "evil.json",  # .. traversal
-                Path(tempfile.gettempdir()) / "report.json",        # outside the repository
+                REPO_ROOT.parent / "report.json",                 # outside the repository
                 REPO_ROOT / "buildx" / "report.json",               # prefix lookalike
         ):
             with self.subTest(path=str(forbidden)):

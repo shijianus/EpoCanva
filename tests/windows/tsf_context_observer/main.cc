@@ -1,7 +1,6 @@
 // EpoCanva P3.10 -- entry point of the context-observer verification program.
 //
-// EXIT CODES: 0 pass; 2 usage; 5 a check failed; 14 the falsifiability control; 77 the
-// real-focus case could not be exercised in this environment (CTest reports SKIPPED).
+// EXIT CODES: 0 pass; 2 usage; 5 a check or prerequisite failed; 14 the falsifiability control.
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -27,7 +26,9 @@ int main(int argc, char** argv) {
         "       tsf_context_observer_tests --interactive-focus\n"
         "cases: registry-identity initial-binding push-pop-top external-selection\n"
         "       external-text noncollapsed-selection document-uninit own-edit real-focus\n"
-        "       shutdown-late-read target-evidence target-policy resource-balance can-fail\n");
+        "       association-contract revoked-target-guard reentrant-shutdown thread-ownership\n"
+        "       shutdown-late-read target-evidence target-policy resource-balance\n"
+        "       environment-failure can-fail\n");
     return epocanva::tsf::context::test::kExitUsage;
   }
   const int code = epocanva::tsf::context::test::RunObserverCase(case_name);

@@ -54,7 +54,7 @@ function Assert-FixedFile([string]$Path, $Entry) {
     Assert-NoReparsePoint $Path
     if ($Entry.Source) {
         $file = Get-Item -LiteralPath $Path
-        $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = Get-ProductIdentityFileSha256 $Path
         if ($hash -cne $Entry.Sha256 -or $file.Length -ne $Entry.Bytes) {
             Fail "required content differs from product policy: $($Entry.Path)" 5
         }
@@ -96,7 +96,7 @@ if (-not (Test-Path -LiteralPath $identityHelper -PathType Leaf)) {
 }
 . $identityHelper
 $receipt = Assert-ProductBuildReceipt -RepoRoot $RepoRoot -BuildDir $BuildDir -RimeDll $RimeDll
-$engineReceipt = Assert-ProductEngineReceipt -RepoRoot $RepoRoot -RimeDll $RimeDll
+$engineReceipt = Assert-ProductBuildEngineBinding $RepoRoot $RimeDll $receipt
 if ($receipt.engine_source_sha256 -ne $engineReceipt.source_sha256) {
     Fail 'product and English engine source receipts do not agree' 5
 }
@@ -133,7 +133,7 @@ if ($BackendResourcesRoot) {
     if (-not (Test-Path -LiteralPath $stagingManifest -PathType Leaf)) {
         Fail 'backend staging-manifest.json is missing; the resource set is not verified' 3
     }
-    $staging = Get-Content -LiteralPath $stagingManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $staging = Read-ProductJson $stagingManifest
     if (-not $staging.files -or $staging.files.Count -lt 1) {
         Fail 'backend staging manifest lists no runtime files' 3
     }
@@ -307,7 +307,7 @@ foreach ($file in ($payload | Sort-Object {
     $_.FullName.Substring($stageFull.Length + 1).Replace('\', '/')
 })) {
     $relative = $file.FullName.Substring($stageFull.Length + 1).Replace('\', '/')
-    $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-ProductIdentityFileSha256 $file.FullName
     $totalBytes += $file.Length
     $manifestLines += ("file`t{0}`t{1}`t{2}" -f $relative, $hash, $file.Length)
 }

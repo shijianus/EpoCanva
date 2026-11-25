@@ -157,30 +157,36 @@ class HostWrite final : public ITfEditSession {
 
 struct Operation { unsigned kind, a, b, value; };
 struct HostSnapshot { std::wstring text; LONG start_utf16, end_utf16; };
+struct ResourceSample {
+  std::size_t completed_operations;
+  std::uint64_t elapsed_ms;
+  DWORD handles;
+  SIZE_T working_set_bytes, private_bytes, peak_working_set_bytes;
+};
 struct RunResult {
   std::string mismatch;
   std::size_t operations = 0;
   std::array<std::size_t, 6> counts{};
   std::uint64_t elapsed_ms = 0;
-  DWORD handles_before = 0, handles_after = 0;
-  SIZE_T working_set_before = 0, working_set_after = 0;
+  std::vector<ResourceSample> resource_samples;
+  std::uint64_t stores_alive_after_shutdown = 0, store_sinks_alive_after_shutdown = 0;
 };
-SIZE_T WorkingSet() {
-  PROCESS_MEMORY_COUNTERS counters{};
-  Require(GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)) != FALSE,
-          "resource observation failed");
-  return counters.WorkingSetSize;
-}
-DWORD Handles() {
-  DWORD count = 0;
-  Require(GetProcessHandleCount(GetCurrentProcess(), &count) != FALSE, "handle observation failed");
-  return count;
+ResourceSample Sample(std::size_t completed_operations, ULONGLONG started_ms) {
+  PROCESS_MEMORY_COUNTERS_EX counters{};
+  DWORD handles = 0;
+  Require(GetProcessMemoryInfo(GetCurrentProcess(),
+              reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters), sizeof(counters)) != FALSE,
+          "memory observation failed");
+  Require(GetProcessHandleCount(GetCurrentProcess(), &handles) != FALSE, "handle observation failed");
+  return {completed_operations, GetTickCount64() - started_ms, handles,
+          counters.WorkingSetSize, counters.PrivateUsage, counters.PeakWorkingSetSize};
 }
 
 RunResult Run(const std::vector<Operation>& operations) {
   RunResult result;
-  result.handles_before = Handles(); result.working_set_before = WorkingSet();
+  result.resource_samples.reserve(12);
   const ULONGLONG started_ms = GetTickCount64();
+  result.resource_samples.push_back(Sample(0, started_ms));
   {
     std::string error;
     auto host = TestHost::Create(&error);
@@ -234,8 +240,19 @@ RunResult Run(const std::vector<Operation>& operations) {
         if (model.start_utf16 != model.end_utf16) {
           // Product contract currently refuses selection replacement; prove the
           // refusal leaves both document and selection intact, never collapse it.
-          Require(!EditPlan::BuildBegin(session.identity(), Encode8(text),
-                      model.start_utf16, model.end_utf16).ok(), "noncollapsed insertion accepted");
+          const auto begin = EditPlan::BuildBegin(session.identity(), Encode8(text),
+                                                  model.start_utf16, model.end_utf16);
+          const auto commit = EditPlan::BuildCommit(session.identity(), Encode8(text),
+                                                    model.start_utf16, model.end_utf16);
+          Require(begin.status == EditPlanStatus::kSelectionNotCollapsed &&
+                      commit.status == EditPlanStatus::kSelectionNotCollapsed, "noncollapsed insertion accepted");
+          // A once-collapsed plan must not write over a selection that changed
+          // in the host. Exercise the executor as well as the plan constructor.
+          auto stale_selection = EditPlan::BuildCommit(session.identity(), Encode8(text),
+                                                       model.start_utf16, model.start_utf16);
+          Require(stale_selection.ok(), "collapsed selection fixture failed");
+          Require(session.ApplySync(*stale_selection.plan).status == EditStatus::kRejected,
+                  "host noncollapsed selection was overwritten");
         } else {
           Capture();
           const bool composing = model.composition_start_utf16 >= 0;
@@ -291,8 +308,12 @@ RunResult Run(const std::vector<Operation>& operations) {
         Require(plan.ok(), "invalid-state fixture failed");
         const unsigned mode = operation.a % 5;
         if (mode == 0) {
-          Require(!EditPlan::BuildCommit(session.identity(), std::string("\xc0\xaf", 2), 0, 0).ok(),
-                  "malformed UTF-8 accepted");
+          // Overlong, truncated, isolated continuation, encoded surrogate and
+          // beyond-U+10FFFF inputs must be refused without repairing raw bytes.
+          for (const auto* invalid_utf8 : {"\xc0\xaf", "\xe2\x82", "\x80", "\xed\xa0\x80", "\xf4\x90\x80\x80"}) {
+            Require(EditPlan::BuildCommit(session.identity(), invalid_utf8, 0, 0).status ==
+                        EditPlanStatus::kInvalidUtf8, "malformed UTF-8 accepted");
+          }
         } else if (mode == 1) {
           session.SetInputPermission(InputPermission::kUnknown);
           const auto rejected = session.ApplySync(*plan.plan);
@@ -335,6 +356,8 @@ RunResult Run(const std::vector<Operation>& operations) {
           if (mode == 2) {
             Require(session.Bind(document->context(), document->context_id(),
                                  session.identity().generation + 1), "rebind failed");
+            Require(session.ApplySync(*plan.plan).status == EditStatus::kStale,
+                    "old generation accepted after rebind");
           }
           session.SetInputPermission(InputPermission::kAllowed);
         }
@@ -343,15 +366,25 @@ RunResult Run(const std::vector<Operation>& operations) {
       else if (document->selection_start_utf16() != model.start_utf16 ||
                document->selection_end_utf16() != model.end_utf16) result.mismatch = "selection";
       else if (session.active_composition() != (model.composition_start_utf16 >= 0)) result.mismatch = "composition";
+      else if (model.composition_start_utf16 >= 0) {
+        const auto observed = session.Snapshot();
+        if (observed.composition_start_utf16 != model.composition_start_utf16 ||
+            observed.composition_length_utf16 != model.composition_extent_utf16)
+          result.mismatch = "composition-range-utf16";
+      }
+      if (result.operations % 10000 == 0)
+        result.resource_samples.push_back(Sample(result.operations, started_ms));
       if (!result.mismatch.empty()) break;
     }
     session.Close(); host->Shutdown();
     const auto cleanup = host->cleanup_report();
+    result.stores_alive_after_shutdown = cleanup.store_instances_alive;
+    result.store_sinks_alive_after_shutdown = cleanup.advised_store_sinks_alive;
     Require(cleanup.store_instances_alive == 0 && cleanup.advised_store_sinks_alive == 0,
             "TSF host resource leak");
   }
-  result.elapsed_ms = GetTickCount64() - started_ms;
-  result.handles_after = Handles(); result.working_set_after = WorkingSet();
+  result.resource_samples.push_back(Sample(result.operations, started_ms));
+  result.elapsed_ms = result.resource_samples.back().elapsed_ms;
   return result;
 }
 
@@ -374,6 +407,7 @@ void WriteOperations(const std::string& path, const std::vector<Operation>& oper
   for (const auto& operation : operations)
     output << operation.kind << ' ' << operation.a << ' ' << operation.b << ' ' << operation.value << '\n';
   output.flush(); Require(static_cast<bool>(output), "replay write failed");
+  output.close(); Require(!output.fail(), "replay close failed");
 }
 std::vector<Operation> ReadOperations(const std::string& path) {
   std::ifstream input(path, std::ios::binary);
@@ -382,6 +416,7 @@ std::vector<Operation> ReadOperations(const std::string& path) {
   std::string line;
   while (std::getline(input, line)) {
     Operation operation{};
+    Require(line.find_first_not_of("0123456789 \t\r") == std::string::npos, "invalid replay characters");
     std::istringstream row(line);
     Require(bool(row >> operation.kind >> operation.a >> operation.b >> operation.value), "truncated replay row");
     row >> std::ws;
@@ -389,7 +424,7 @@ std::vector<Operation> ReadOperations(const std::string& path) {
     Require(operation.kind < 7 && result.size() < 100000, "invalid replay operands");
     result.push_back(operation);
   }
-  Require(input.eof() && !result.empty(), "empty or malformed replay");
+  Require(input.eof() && !input.bad() && !result.empty(), "empty or malformed replay");
   return result;
 }
 
@@ -422,15 +457,18 @@ std::vector<Operation> Minimize(std::vector<Operation> sequence, const std::stri
 }
 
 void WriteReport(const std::string& path, const std::vector<RunResult>& results,
-                 const std::vector<std::uint64_t>& seeds, bool self_test) {
+                 const std::vector<std::uint64_t>& seeds, const char* mode,
+                 unsigned malformed_replays_rejected) {
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
   Require(static_cast<bool>(output), "report open failed");
-  output << "{\n\"format\":\"epocanva-editor-reference-measurements-v1\",\n"
+  output << "{\n\"format\":\"epocanva-editor-reference-measurements-v2\",\n"
             "\"oracle\":\"independent-editor-reference-model\",\n"
             "\"scope\":\"controlled-real-tsf-edit-layer\",\n"
             "\"failure_reduction\":\"replay-and-minimize\",\n"
             "\"host_undo\":\"controlled-application-edit-session\",\n"
-            "\"installed_host_acceptance\":false,\n\"seeds\":[\n";
+            "\"selection_replacement\":\"unsupported-rejected\",\n"
+            "\"composition_observation\":\"session-range-utf16\",\n"
+            "\"installed_host_acceptance\":false,\n\"mode\":\"" << mode << "\",\n\"seeds\":[\n";
   std::size_t total_operations = 0;
   bool passed = true;
   for (std::size_t seed_count = 0; seed_count < results.size(); ++seed_count) {
@@ -439,19 +477,32 @@ void WriteReport(const std::string& path, const std::vector<RunResult>& results,
     if (seed_count) output << ",\n";
     output << "{\"seed\":\"0x" << std::hex << seeds[seed_count] << std::dec
            << "\",\"operations\":" << result.operations << ",\"mismatches\":"
-           << (result.mismatch.empty() ? 0 : 1) << ",\"operation_counts\":{";
+           << (result.mismatch.empty() ? 0 : 1) << ",\"mismatch\":\"" << result.mismatch
+           << "\",\"operation_counts\":{";
     for (unsigned category = 0; category < 6; ++category) {
       if (category) output << ',';
       output << '"' << kNames[category] << "\":" << result.counts[category];
     }
     output << "},\"duration_ms\":" << result.elapsed_ms
-           << ",\"handles_before\":" << result.handles_before << ",\"handles_after\":" << result.handles_after
-           << ",\"working_set_before_bytes\":" << result.working_set_before
-           << ",\"working_set_after_bytes\":" << result.working_set_after << '}';
+           << ",\"stores_alive_after_shutdown\":" << result.stores_alive_after_shutdown
+           << ",\"store_sinks_alive_after_shutdown\":" << result.store_sinks_alive_after_shutdown
+           << ",\"resource_samples\":[";
+    bool first_sample = true;
+    for (const auto& sample : result.resource_samples) {
+      if (!first_sample) output << ',';
+      first_sample = false;
+      output << "{\"completed_operations\":" << sample.completed_operations
+             << ",\"elapsed_ms\":" << sample.elapsed_ms << ",\"handles\":" << sample.handles
+             << ",\"working_set_bytes\":" << sample.working_set_bytes
+             << ",\"private_bytes\":" << sample.private_bytes
+             << ",\"peak_working_set_bytes\":" << sample.peak_working_set_bytes << '}';
+    }
+    output << "]}";
   }
   output << "\n],\"total_ops\":" << total_operations << ",\"result\":\""
          << (passed ? "passed" : "failed") << "\",\"replay_minimization_negative_control\":"
-         << (self_test ? "true" : "false") << "}\n";
+         << (std::string(mode) == "self-test" ? "true" : "false")
+         << ",\"malformed_replays_rejected\":" << malformed_replays_rejected << "}\n";
   output.flush(); Require(static_cast<bool>(output), "report flush failed");
   output.close(); Require(!output.fail(), "report close failed");
 }
@@ -468,11 +519,13 @@ int main(int argc, char** argv) {
     else if (argument == "--self-test") self_test = true;
     else return 2;
   }
+  if ((self_test && force_fail) || ((self_test || force_fail) && !replay.empty())) return 2;
   try {
     // Probe report output before any expensive protocol work.
     if (!report.empty()) { std::ofstream probe(report, std::ios::binary); Require(bool(probe), "report open failed"); }
     std::vector<RunResult> results;
     std::vector<std::uint64_t> seeds;
+    unsigned malformed_replays_rejected = 0;
     if (self_test || force_fail) {
       auto operations = Generate(kSeeds[0], 12);
       operations.push_back({2, 0, 0, 0});
@@ -483,14 +536,21 @@ int main(int argc, char** argv) {
       auto minimal = Minimize(operations, negative.mismatch);
       Require(minimal.size() == 1 && minimal.front().kind == 6, "failure sequence was not one-minimal");
       if (!report.empty()) {
+        WriteOperations(report + ".original.replay", operations);
         WriteOperations(report + ".replay", minimal);
         Require(Run(ReadOperations(report + ".replay")).mismatch == negative.mismatch, "replay did not fail identically");
         const std::string malformed = report + ".malformed.replay";
-        for (const auto& row : {"0 0 0\n", "0 0 0 0 extra\n", "7 0 0 0\n", ""}) {
-          { std::ofstream output(malformed); output << row; }
+        for (const auto& row : {"0 0 0\n", "0 0 0 0 extra\n", "7 0 0 0\n", "",
+                                "0 -1 0 0\n", "0 4294967296 0 0\n"}) {
+          {
+            std::ofstream output(malformed, std::ios::binary);
+            output << row;
+            output.close(); Require(!output.fail(), "malformed fixture write failed");
+          }
           bool rejected = false;
           try { ReadOperations(malformed); } catch (const std::exception&) { rejected = true; }
           Require(rejected, "malformed replay accepted");
+          ++malformed_replays_rejected;
         }
       }
       // The same operation without the mutant must succeed.
@@ -500,24 +560,36 @@ int main(int argc, char** argv) {
       results.push_back(Run(ReadOperations(replay))); seeds.push_back(kSeeds[0]);
     } else {
       // Warm up COM/TSF once so before/after resource samples exclude first-load effects.
-      Require(Run({}).mismatch.empty(), "warmup failed");
+      Require(Run(Generate(kSeeds[0], 2000)).mismatch.empty(), "warmup failed");
       for (const auto seed : kSeeds) {
         auto operations = Generate(seed, 100000);
+        // Preserve the exact failing input even if infrastructure or an
+        // invariant assertion throws before a RunResult can be returned.
+        if (!report.empty()) WriteOperations(report + ".seed-" + std::to_string(seeds.size() + 1) + ".replay", operations);
         const auto measured = Run(operations);
         results.push_back(measured); seeds.push_back(seed);
         std::printf("seed=0x%llx operations=%zu mismatch=%s ms=%llu handles=%lu->%lu\n",
             static_cast<unsigned long long>(seed), measured.operations,
             measured.mismatch.empty() ? "none" : measured.mismatch.c_str(),
-            static_cast<unsigned long long>(measured.elapsed_ms), measured.handles_before, measured.handles_after);
-        if (!report.empty()) WriteOperations(report + ".seed-" + std::to_string(seeds.size()) + ".replay", operations);
+            static_cast<unsigned long long>(measured.elapsed_ms), measured.resource_samples.front().handles,
+            measured.resource_samples.back().handles);
         if (!measured.mismatch.empty()) {
-          if (!report.empty()) WriteOperations(report + ".minimal.replay", Minimize(operations, measured.mismatch));
+          if (!report.empty()) {
+            WriteReport(report, results, seeds, "stress", 0);
+            WriteOperations(report + ".minimal.replay", Minimize(operations, measured.mismatch));
+          }
           break;
         }
       }
     }
-    if (!report.empty()) WriteReport(report, results, seeds, self_test);
-    for (const auto& result : results) if (!result.mismatch.empty()) return 1;
+    if (!report.empty()) WriteReport(report, results, seeds,
+        self_test ? "self-test" : replay.empty() ? "stress" : "replay", malformed_replays_rejected);
+    for (const auto& result : results) {
+      if (!result.mismatch.empty()) {
+        std::printf("RESULT FAIL %s\n", result.mismatch.c_str());
+        return 1;
+      }
+    }
     std::puts("RESULT PASS"); return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "EDITOR PROTOCOL BLOCKED: %s\n", error.what()); return 2;

@@ -158,6 +158,7 @@ class ContextObserverSink {
 
 // Value-only diagnostics for assertions and text-free logging.
 struct ContextObserverSnapshot {
+  HRESULT access_hr = S_OK;  // RPC_E_WRONG_THREAD: all other mutable facts are withheld
   bool subscribed = false;
   bool closed = false;
   bool has_published_target = false;
@@ -168,6 +169,18 @@ struct ContextObserverSnapshot {
   // manager event sink; this one is the thread input-focus notification sink.
   bool thread_focus_sink_advised = false;
   bool thread_focus_sink_advise_failed = false;
+  DWORD owner_thread_id = 0;
+  APTTYPE apartment_type = APTTYPE_CURRENT;
+  HRESULT apartment_query_hr = E_UNEXPECTED;
+  HRESULT thread_sink_advise_hr = E_UNEXPECTED;
+  HRESULT thread_focus_sink_advise_hr = E_UNEXPECTED;
+  HRESULT text_sink_advise_hr = E_UNEXPECTED;
+  HRESULT last_sink_unadvise_hr = E_UNEXPECTED;
+  DWORD thread_sink_cookie = TF_INVALID_COOKIE;
+  DWORD thread_focus_sink_cookie = TF_INVALID_COOKIE;
+  DWORD text_sink_cookie = TF_INVALID_COOKIE;
+  HRESULT last_get_focus_hr = E_UNEXPECTED;
+  std::uint64_t sink_unadvise_failures = 0;
   bool has_top_context = false;
   TargetBindingEvidence last_bind_evidence = TargetBindingEvidence::kNone;
   ThreadFocusPolicy thread_focus_policy = ThreadFocusPolicy::kStrictTsf;
@@ -187,6 +200,7 @@ struct ContextObserverSnapshot {
   // republished without changing identity/generation).
   std::uint64_t host_edits_observed = 0;
   std::uint64_t focus_notifications = 0;
+  std::uint64_t focus_notification_exits = 0;
   std::uint64_t focus_loss_notifications = 0;
   std::uint64_t push_notifications = 0;
   std::uint64_t pop_notifications = 0;
@@ -216,6 +230,7 @@ struct ContextObserverSnapshot {
   std::uint64_t target_drops = 0;
   std::uint64_t target_binds = 0;
   std::uint64_t pumps = 0;
+  std::uint64_t reentrant_pumps_refused = 0;
   std::uint64_t selection_reads_begun = 0;
   std::uint64_t selection_reads_completed = 0;
   std::uint64_t selection_refusals = 0;
@@ -247,6 +262,9 @@ class ObserverComSink;
 
 class ContextObserver : public TargetRevalidator {
  public:
+  // Non-copyable STA owner. Construct, subscribe and destroy on the same initialized STA.
+  // Foreign-thread operations refuse without touching COM or mutable state; foreign
+  // destruction is a fatal ownership violation. Shutdown must be retried on the owner.
   // `registry` must outlive the observer and is used only on this STA thread. The client id
   // is the TIP's real TfClientId: it is used for the read-only selection sessions and as
   // the InWriteSession identity that distinguishes our writes from other clients'. The
@@ -272,14 +290,15 @@ class ContextObserver : public TargetRevalidator {
   // needs to bind.
   void SetSink(ContextObserverSink* sink);
 
-  // Terminal, idempotent. Unadvises every sink, abandons a pending selection read and
-  // releases every held COM reference. Never issues a TSF text operation.
+  // Terminal, idempotent. Revokes the published target before abandoning pending reads,
+  // unadvising sinks and releasing held COM references. Never issues a TSF text operation.
   void Shutdown();
   bool closed() const;
 
   // Non-blocking. Revalidates the real thread focus, advances a pending selection read, and
   // publishes OnTargetBound when a fresh collapsed selection exists. Never waits, never
   // pumps messages, never starts an edit session from inside a TSF notification.
+  // Reentrant calls from a notification/listener or another Pump are refused.
   void Pump();
 
   // The completion fact Pump is waiting on for a deferred selection read; the host

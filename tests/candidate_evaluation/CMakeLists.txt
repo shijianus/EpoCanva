@@ -56,6 +56,21 @@ if(TARGET epocanva_backend)
     "EPOCANVA_EVAL_REPO_ROOT=\"${_eval_repo}\"")
   target_compile_options(epocanva_candidate_eval_cli PRIVATE /utf-8 /permissive- /W4 /EHsc)
   set_target_properties(epocanva_candidate_eval_cli PROPERTIES CXX_EXTENSIONS OFF)
+  if(EPOCANVA_BUILD_PRODUCT)
+    add_test(NAME candidate_evaluation.native_en
+      COMMAND epocanva_candidate_eval_cli
+        --resources "${EPOCANVA_PRODUCT_BACKEND_ROOT}"
+        --cases "${_eval_repo}/data/eval/candidate-v1/cases/en.jsonl"
+        --language en --output "${CMAKE_CURRENT_BINARY_DIR}/native-en.jsonl"
+        --warmup-queries 0 --repeat 1)
+    set_tests_properties(candidate_evaluation.native_en PROPERTIES TIMEOUT 180)
+    add_test(NAME candidate_evaluation.native_invalid_argument
+      COMMAND "${CMAKE_COMMAND}"
+        "-DEXE=$<TARGET_FILE:epocanva_candidate_eval_cli>" -DEXPECTED_EXIT=2
+        -DCASE=candidate-evaluator-invalid -DMARKER=usage: -DMARKER_POLICY=require
+        -DPASS_ARGS=--unknown
+        -P "${_eval_repo}/tests/english_completion/assert_exit.cmake")
+  endif()
 endif()
 
 add_test(NAME candidate_evaluation.contract

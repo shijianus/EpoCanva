@@ -28,7 +28,12 @@ function Write-Fixture([string]$Path, [string]$Text) {
     $null = New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force
     [IO.File]::WriteAllText($Path, $Text, $utf8)
 }
-function Get-TestHash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Get-TestHash([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose(); $stream.Dispose() }
+}
 function Assert-Test([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function New-Fixture([string]$Name, [string]$Mode = 'normal') {
     $root = Join-Path $run $Name
@@ -36,6 +41,7 @@ function New-Fixture([string]$Name, [string]$Mode = 'normal') {
     $null = New-Item -ItemType Directory -Path $bin -Force
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'tools/product/stage_source.ps1') -Destination (Join-Path $bin 'stage_source.ps1')
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'tools/product/source_contract.ps1') -Destination (Join-Path $bin 'source_contract.ps1')
+    Copy-Item -LiteralPath (Join-Path $RepoRoot 'tools/product/evidence_contract.ps1') -Destination (Join-Path $bin 'evidence_contract.ps1')
     $identity = @'
 # SYNTHETIC TEST COLLABORATORS; never real product evidence.
 $script:fixtureMode = '__MODE__'
@@ -56,6 +62,12 @@ function Assert-ProductEngineReceipt {
     param([string]$RepoRoot, [string]$RimeDll)
     if ($script:fixtureMode -eq 'engine-failure') { throw 'Synthetic invalid engine receipt.' }
     [pscustomobject]@{ source_sha256 = ('c' * 64) }
+}
+function Assert-ProductBuildEngineBinding {
+    param([string]$RepoRoot, [string]$RimeDll, $Receipt)
+    $engine = Assert-ProductEngineReceipt -RepoRoot $RepoRoot -RimeDll $RimeDll
+    if ($Receipt.engine_source_sha256 -cne $engine.source_sha256) { throw 'Synthetic engine binding mismatch.' }
+    return $engine
 }
 '@
     Write-Fixture (Join-Path $bin 'build_identity.ps1') $identity.Replace('__MODE__', $Mode)

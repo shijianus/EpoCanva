@@ -1,0 +1,215 @@
+{
+  "architecture": "x64",
+  "build_kind": "incremental refresh after identity/contract changes; not a clean-build reproducibility claim",
+  "configuration": "Release",
+  "engine_source_sha256": "7f2630e875cae74d92c196154dcc54f0d5abba50cf935bf74e17f45d99ed4e42",
+  "exports": {
+    "baseline_names_identical": true,
+    "count": 571
+  },
+  "format": "epocanva-engine-input-provenance-v1",
+  "imports": [
+    "KERNEL32.dll",
+    "USER32.dll"
+  ],
+  "previous_input_lock_sha256": "49e4ec45e89932422bf232e97520c9949a5bf9eb13292914fc41ca7ecf091ed4",
+  "previous_provenance_sha256": "81586e4312b033f6e51b76beef67d47e8cbf33e575f4796ca038566b04e09bf3",
+  "previous_rime_sha256": "0e202bb871bd7d7b272feb461ef7db0f501187a51ca4f70dc8b8ce8967eecd2f",
+  "public_distribution_authorized": false,
+  "reason": "Rebuilt from the current fingerprinted engine inputs after source/identity corrections; independent receipt, dependency, PE/export review and 39-case English integration execution. Subsequent identity/registration-contract changes were rebuilt and reviewed; DLL bytes remained identical, so the DLL lock is unchanged. Prior 39-case native English results remain applicable to the identical DLL; final product suite is recorded separately.",
+  "references": [
+    {
+      "bytes": 2833920,
+      "path": "build/librime-english/rime/install/lib/rime.dll",
+      "sha256": "fcd61cc5005517a6a57b893e9e73c8ca8ec38f08dd02ab5d41536ed8687437a9"
+    },
+    {
+      "bytes": 312,
+      "path": "build/librime-english/engine-build-receipt.json",
+      "sha256": "1008d637c0642b8d14155402f835b29f7594d202394f75954c637ba26e7e25b0"
+    },
+    {
+      "bytes": 57236,
+      "path": "build/ci-input-provenance/english-engine-20261125/baseline-exports.log",
+      "sha256": "597c11450c11d682eaf443aa8ad5c29e35aeae55d0d83298b2ea1abaf6bdd26c"
+    },
+    {
+      "bytes": 499,
+      "path": "build/ci-input-provenance/english-engine-20261125/build.command.json",
+      "sha256": "b62e10f4b54e99e5214b93478f70f3faa4d6724d97892f6d1f40dcaa6245c426"
+    },
+    {
+      "bytes": 16740,
+      "path": "build/ci-input-provenance/english-engine-20261125/build.log",
+      "sha256": "b21a26669356d1a26ce3d757de1a0797ccf6dfdc6b8215fd3e780b22e2f228c9"
+    },
+    {
+      "bytes": 22675,
+      "path": "build/ci-input-provenance/english-engine-20261125/CMakeCache.txt",
+      "sha256": "0fef2d3fa2db8de214be2b3f332d7496f2f0baf6f61d018d7216d37466836428"
+    },
+    {
+      "bytes": 6436,
+      "path": "build/ci-input-provenance/english-engine-20261125/CMakeCXXCompiler.cmake",
+      "sha256": "2754630ebdd5816ad95800f30539b42209474721335c841f0510232a34c956a5"
+    },
+    {
+      "bytes": 585,
+      "path": "build/ci-input-provenance/english-engine-20261125/dependency-commits.json",
+      "sha256": "309b47677900fdb65c18c6e538871d654fa925c3bd88f84b535ee43454392036"
+    },
+    {
+      "bytes": 884,
+      "path": "build/ci-input-provenance/english-engine-20261125/dependency-libraries.json",
+      "sha256": "e6341ded48409ec25699fd6ce2a03ecf059a1ace5cfeabaf2bf51cd77bfb1ba4"
+    },
+    {
+      "bytes": 445,
+      "path": "build/ci-input-provenance/english-engine-20261125/dependents.log",
+      "sha256": "2b6ccf625323b6bc51b19c666d9698b436bf494d975347bcf86079f8776a2f38"
+    },
+    {
+      "bytes": 13185,
+      "path": "build/ci-input-provenance/english-engine-20261125/engine-identity.json",
+      "sha256": "9b71b718c06de2c7853a99f7749faa4868f0cfbec901e76f42b26076ccca7c08"
+    },
+    {
+      "bytes": 401021,
+      "path": "build/ci-input-provenance/english-engine-20261125/engine-sources.zip",
+      "sha256": "16513ecbf65571a5caa1932e99c5a23fa814c04550bfe5b9b6a92c9b28cff423"
+    },
+    {
+      "bytes": 7121,
+      "path": "build/ci-input-provenance/english-engine-20261125/english-ctest.log",
+      "sha256": "005b5abc809ed1ad61c1b53049ba4173739037c26c0d83f86d8927c3d949d93e"
+    },
+    {
+      "bytes": 68855,
+      "path": "build/ci-input-provenance/english-engine-20261125/english-inventory.log",
+      "sha256": "970017152989a4c5d66ba6b93edcf6f2781c1403fd5f7dfb744d0d3c0554541d"
+    },
+    {
+      "bytes": 81,
+      "path": "build/ci-input-provenance/english-engine-20261125/english-junit.log",
+      "sha256": "bce09e5c89152df3c91b753e7f6f5ec9e00f5fec3a83f9456791c3459e120385"
+    },
+    {
+      "bytes": 57232,
+      "path": "build/ci-input-provenance/english-engine-20261125/english-tests.xml",
+      "sha256": "cd9ff21b1cbdabaefc1339e567419a636b25cd98c25ed7df0f1a5f2bed271b66"
+    },
+    {
+      "bytes": 57235,
+      "path": "build/ci-input-provenance/english-engine-20261125/exports.log",
+      "sha256": "61c9542bf156d3428df377a9c09b348a86264c4b0a5bb41a72f70c0be4c65f88"
+    },
+    {
+      "bytes": 6329,
+      "path": "build/ci-input-provenance/english-engine-20261125/headers.log",
+      "sha256": "953af5901936f7d8db74b1190e1be6315ca067f68f7c6455370b080cda711329"
+    },
+    {
+      "bytes": 326,
+      "path": "build/ci-input-provenance/english-engine-20261125/native-logs/01-toolchain.cmake-version.log",
+      "sha256": "e3c9d578914fa63222008adb63227129a595a81c486ad50327d582fee2f568be"
+    },
+    {
+      "bytes": 326,
+      "path": "build/ci-input-provenance/english-engine-20261125/native-logs/02-toolchain.ctest-version.log",
+      "sha256": "00aeafb1602f04c2a2a4c770308e1b0b58f59d13ce657d8a5961d347ab6bca65"
+    },
+    {
+      "bytes": 4457,
+      "path": "build/ci-input-provenance/english-engine-20261125/native-logs/03-rime.configure.log",
+      "sha256": "0bedeb113cd586942dac7aa57cb1185c4f0b98ff01d7d60133590054524edf98"
+    },
+    {
+      "bytes": 1214,
+      "path": "build/ci-input-provenance/english-engine-20261125/native-logs/04-rime.build.log",
+      "sha256": "fda3c3ec4d61236eddd0434900ec07927b354e914150411231fafcb1453d9c0a"
+    },
+    {
+      "bytes": 1182,
+      "path": "build/ci-input-provenance/english-engine-20261125/native-logs/05-rime.install.log",
+      "sha256": "5a5df6fee65ba80a21ae34286e7a54c876f03c98472efa80ff75df359c4b42d5"
+    },
+    {
+      "bytes": 6603,
+      "path": "build/ci-input-provenance/english-engine-20261125/native-logs/06-verify.dumpbin-headers.log",
+      "sha256": "5085f42c04e1e38cb0ed4514fbbf1fcb56c07c7df2608277bbcf1e3343f7a4c7"
+    },
+    {
+      "bytes": 725,
+      "path": "build/ci-input-provenance/english-engine-20261125/native-logs/07-verify.dumpbin-dependents.log",
+      "sha256": "d682c4cb58f4143526e7f1f0d202871faf93bea1fc54ff843719fce6b72f1b24"
+    },
+    {
+      "bytes": 57511,
+      "path": "build/ci-input-provenance/english-engine-20261125/native-logs/08-verify.exports-component.log",
+      "sha256": "b9a16db9a1b6e38cbb602bcaac07c39e18987f4e2add5547160ae8c28cde7ce9"
+    },
+    {
+      "bytes": 57512,
+      "path": "build/ci-input-provenance/english-engine-20261125/native-logs/09-verify.exports-baseline.log",
+      "sha256": "7c22964cfb0bdeb847e212c7e699c12161bac442f37673161f85c6e1d13d6335"
+    },
+    {
+      "bytes": 1016,
+      "path": "build/ci-input-provenance/english-engine-20261125/refresh-commands.json",
+      "sha256": "dcc0c5bad68ff39a5ca88507cd2687eae97404b05b62270dff6bac8b8101b96d"
+    },
+    {
+      "bytes": 3315,
+      "path": "build/ci-input-provenance/english-engine-20261125/review-commands.json",
+      "sha256": "a47af74288509a1959c475e3da3be14fc41fb12e1b54bfd02abe5b6253531057"
+    },
+    {
+      "bytes": 1429,
+      "path": "build/ci-input-provenance/english-engine-20261125/toolchain.json",
+      "sha256": "5c486a5bcec4fff8ce2bc63a82192f3ff5887d60194d6cf4f61f0296afd93c56"
+    },
+    {
+      "bytes": 310,
+      "path": "build/ci-input-provenance/english-engine-20261125/verified-receipt.json",
+      "sha256": "a75fae82df22cd45259b5fc644c50d002ab6d9c74690564a5dd43805b0883715"
+    }
+  ],
+  "rime_sha256": "fcd61cc5005517a6a57b893e9e73c8ca8ec38f08dd02ab5d41536ed8687437a9",
+  "runner_authorized": false,
+  "scope": "reviewed-local-input-recovery",
+  "source_git_head_at_review": "3401bf40c8701032fcf08cb8b886f2d17b50a71e",
+  "source_worktree_clean": false,
+  "toolchain": {
+    "cmake": "3.31.6-msvc6",
+    "crt": "static MT",
+    "msvc": "19.44.35209.0",
+    "tools": [
+      {
+        "bytes": 13132376,
+        "name": "cmake.exe",
+        "sha256": "b540efece9172930877dff0c9fedda7a69b0dd82446e0e8bba13372aac6c8ac8"
+      },
+      {
+        "bytes": 14191192,
+        "name": "ctest.exe",
+        "sha256": "1fe268c79c868a70e6d725ee8f1ad46ec8e21dc3915a74cff8d4d049bf79a0f0"
+      },
+      {
+        "bytes": 678520,
+        "name": "cl.exe",
+        "sha256": "4999ba1bb8573833e93e66103ea7c6e4eccc69f91a39bf9ef905be9e5cab1ee0"
+      },
+      {
+        "bytes": 3246664,
+        "name": "link.exe",
+        "sha256": "f5d0dee4d99c7c14c63466febf9e68503b071ff2743c871ed8f4bdc5d26ed2ac"
+      },
+      {
+        "bytes": 23608,
+        "name": "dumpbin.exe",
+        "sha256": "41ed2c0ddb28dd762bdac9fb2c3977d2eab75e57c4b6c8faf919fccac8d2e864"
+      }
+    ],
+    "windows_sdk": "10.0.26100.0"
+  }
+}

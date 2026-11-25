@@ -155,9 +155,9 @@
     {
       "kind": "file",
       "path": "build/librime-english/rime/install/lib/rime.dll",
-      "pin_provenance": "build/librime-english/engine-build-receipt.json rime_sha256; re-verified at configure time by tests/backend/CMakeLists.txt file(SHA256)",
+      "pin_provenance": "tools/ci/provenance/english-engine-20261125.json; independently reviewed source/receipt/dependencies/toolchain/exports and 39-case English integration; local recovery only, no runner or release authorization",
       "role": "project-built librime runtime used by backend/product tests and the internal package",
-      "sha256": "0e202bb871bd7d7b272feb461ef7db0f501187a51ca4f70dc8b8ce8967eecd2f",
+      "sha256": "fcd61cc5005517a6a57b893e9e73c8ca8ec38f08dd02ab5d41536ed8687437a9",
       "size_bytes": 2833920
     },
     {

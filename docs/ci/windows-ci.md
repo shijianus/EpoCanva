@@ -1,508 +1,212 @@
-# Minimal Windows CI — design and executable workflow
+# Windows CI: candidate, execution and input evidence
 
-**Status**: contract gate and serial hosted `root-unit-tests` are implemented;
-backend, product, installed-host acceptance and full quality/stress acceptance
-remain design-only/BLOCKED. At branch HEAD `80cb0bb`, windows-ci #14
-([run 43570509740](https://github.com/shijianus/EpoCanva/actions/runs/43570509740))
-failed in `root-unit-tests`: all 103 CTest cases passed (CTest exit 0), but the
-verifier exited 1 because the relative JUnit path was resolved under the test
-directory twice. The working-tree repair uses an absolute evidence directory,
-removes stale JUnit, and requires a nonempty new report before validation.
-`tests/ci_gate/test_workflow_evidence_paths.py` reproduces the old failure with
-real CTest and verifies the corrected path, including a path containing spaces.
-There is no new clean candidate SHA or remote success for this repair yet.
-Raw API snapshots, job log and artifact are under the local audit evidence
-directory `build/acceptance-audit-20261116/`; historical successes cannot replace
-current-candidate execution. `.github/workflows/windows-ci.yml` uses the official
-`windows-2022` image and a non-gating `windows-latest` canary. It registers only
-jobs that need no external Tier 2 build inputs. The section 3.2–3.4 jobs require
-the self-hosted runner with the hash-pinned immutable input cache from section 2;
-they are still not enabled, and enabling them is a separate reviewed change.
+Status (2026-11-25): all six required jobs are defined in the working tree. This
+is an implementation, **not a successful remote acceptance run**. The repository
+runner API snapshot obtained for this audit returned `total_count: 0`. There is
+no authorized isolated runner or six-layer successful candidate to claim.
+Historical hosted runs and local parser fixtures cannot satisfy acceptance.
 
-Deviations of the enabled workflow from the original design text, recorded so
-this document stays the single description of what runs:
+## Job graph and trust boundary
 
-- The contract gate runs on the GitHub-hosted runner instead of a
-  self-hosted `epocanva-contract` labelled runner; section 3.1 already allowed
-  "hosted or self-hosted". The official gate pins `windows-2022` — the image
-  family the toolchain was verified against — and a `windows-latest` canary
-  job (continue-on-error) watches for image drift without becoming evidence.
-- The contract CTest selection is no longer a regex over a pattern: every
-  contract test carries the `contract-gate` label, the build tree's real
-  inventory (from `ctest --show-only=json-v1`) must equal the version-
-  controlled `tools/ci/contract-tests.json` exactly (missing, duplicate or
-  unregistered names all fail), and only then does `ctest -L contract-gate`
-  execute the suite. The build step compiles the aggregate target
-  `epocanva_contract_gate_tests` instead of a hand-maintained target list.
-- The whitespace gate is no longer the bare `git diff --check` (which examined
-  a clean checkout's working tree and could not fail): it is
-  `tools/ci/check_whitespace.py`, event-aware — `pull_request` compares
-  merge-base(base, head)..head, `push` compares before..after, branch
-  creation falls back to the default-branch merge-base, and any range that
-  cannot be determined fails closed. Checkout uses `fetch-depth: 0` so the
-  comparison objects always exist.
-- Workflow hardening: `actions/checkout` v7.0.1, `actions/setup-python`
-  v7.1.0 and `actions/upload-artifact` v7.0.2 are pinned by full commit SHA;
-  checkout sets `persist-credentials: false`; Python is pinned to 3.14; the
-  job logs CMake/CTest/MSVC/PowerShell/git versions; `permissions`,
-  `timeout-minutes` and same-branch `concurrency` stay minimal.
-- The manifest regeneration of section 3.1 step 4 runs explicitly through the
-  built locale probe (`--manifest build/ci/manifest/backend-bindings.json`)
-  plus `git diff --no-index --exit-code`; the `locale_registry.manifest` CTest
-  byte-comparison still runs inside the CTest step as before.
-- There is no `schedule` trigger: the only scheduled job in the design is the
-  self-hosted nightly stress, which is not enabled.
-- The hosted runner sets `core.autocrlf=false`/`core.eol=lf` before checkout;
-  `.gitattributes` `eol=lf` already forces LF, so this is defensive.
+The required serial graph is:
 
-The hosted root job runs after `contract-gate`, configures/builds every root
-Debug target, exports the actual CTest registration, executes the complete suite
-serially, and checks the exact registered/executed name set with zero failures,
-errors or skipped cases using `tools/ci/verify_root_junit.py`. Logs, commit,
-runner/image/tool versions, process exit codes and JUnit are uploaded even on
-failure. This is a root-unit layer, not backend/product/installed-host acceptance.
-No untrusted pull request is sent to a privileged self-hosted runner.
+`contract-gate -> root-unit-tests -> backend -> windows-product -> windows-integration-acceptance -> full-quality-stress-acceptance`.
 
-The aggregate release gate now requires `acceptance-ci-provenance` for the exact
-candidate with all six layers/jobs (`contract-gate`, `root-unit-tests`, `backend`,
-`windows-product`, `windows-integration-acceptance`,
-`full-quality-stress-acceptance`). Missing infrastructure or jobs remain BLOCKED;
-the new hosted job does not waive or fabricate any of them.
+The first two jobs run on `windows-2022`. PR and push execution stays in these
+hosted layers. The separate `windows-latest` canary uses continue-on-error and
+is never required acceptance evidence. The four acceptance layers require a
+`workflow_dispatch` on a protected branch of `shijianus/EpoCanva`, a configured
+runner group and a designated unique runner label, and the protected environment
+`epocanva-acceptance`. The group must restrict workflow/repository access; the
+environment must require an authorized reviewer. YAML cannot create those controls
+or certify their configuration.
 
-## 1. Constraints that shape the pipeline
+Every acceptance job selects all labels `self-hosted`, `Windows`, `X64`,
+`epocanva-acceptance-x64`, and the unique
+`vars.EPOCANVA_ACCEPTANCE_RUNNER_LABEL`, in
+`vars.EPOCANVA_ACCEPTANCE_RUNNER_GROUP`. GitHub routes a job to any eligible
+runner; serial `needs` alone does not pin a machine. Provision the unique label
+on exactly one authorized runner. The script also checks `RUNNER_NAME` against
+independently provisioned `EPOCANVA_CI_RUNNER_NAME`. A different runner fails
+closed because it lacks the same run/attempt predecessor evidence.
 
-1. **No network I/O at runtime.** CI may fetch the repository and pinned CI
-   tooling, but the product and tests never download models, dictionaries or
-   telemetry. A job that cannot run without network is a failed job, not a
-   skipped one.
-2. **Untracked, pinned inputs are required.** The backend and product suites
-   read ignored build inputs (`third_party/librime` built DLLs, the five
-   production models, Chinese schemas/Terra dictionary, French `.aff/.dic`,
-   Japanese `lexicon.bin`, the product English lexicon). A clean checkout does
-   not contain them. The design uses a **self-hosted Windows runner with an
-   immutable, hash-pinned input cache**; a stock GitHub-hosted runner cannot
-   assemble these inputs offline and is therefore not a supported backend/
-   product target.
-3. **Privacy.** Every CI test uses synthetic fixtures. Uploaded logs must never
-   contain candidate text, preedit, committed text, keystrokes, field names or
-   user paths from a real profile. The diagnostics added in this round print
-   only status names, aggregate counts, stages and Win32 codes.
-4. **No parallel full-suite evidence.** Contract gate, backend and product are a
-   serial chain (`needs:`), not three concurrent jobs. Nightly stress repeats
-   one case at a time on the same runner. Parallel full suites previously
-   produced one unexplained `learning.repository.persistence` `io-error`; the
-   pipeline must not reproduce that noise as its primary evidence.
-5. **Build hygiene.** All outputs stay under `build/<preset>/` in the checkout.
-   The source tree must be byte-identical before and after the job.
+Sources: GitHub official [runner selection](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)
+and [labels and groups](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow), checked 2026-11-25.
 
-## 2. Runner and input cache
+The acceptance runner needs a restorable isolated interactive Windows session,
+operator authorization and the real host applications. Do not give an untrusted
+PR access to this machine. No current local run authorizes installation or TSF
+registration. CI checkout/upload may use network; runtime code remains offline.
+Windows ordinary TSF DLL isolation from network is an architectural guarantee,
+not an OS sandbox. Android's separate product must omit INTERNET permission for
+platform enforcement; this CI does not certify Android.
 
-| Item | Requirement |
-| --- | --- |
-| OS | Windows Server 2022 or Windows 11 x64 |
-| Toolchain | Visual Studio 2022 Professional/Build Tools, MSVC 14.44, Windows SDK 10.0.26100 |
-| CMake | 3.31.6-msvc6 (VS-bundled) or newer; do not put a machine path in the repo |
-| Python | 3.11+ (standard library only for the staging tests) |
-| Git | 2.52+ with `core.autocrlf=false` (the repository pins LF) |
-| Cache root | `D:\epocanva-inputs\<sources-lock-sha256>` on a local NTFS volume, **not** a synced folder |
+## Inputs and recovery
 
-The cache root mirrors the checkout: repo-relative paths below live under
-`<cache>\build\...` or `<cache>\third_party\...`. The cache contains exactly the
-ignored inputs the suites pin:
+`tools/ci/inputs.lock.json` format 1 pins 21 files and one clean upstream Git
+checkout. `verify_inputs.ps1` verifies exact bytes, canonical paths, actual Git
+roots, HEAD, dirty/submodule state and rejects assume-unchanged/skip-worktree
+index flags. The shared strict JSON parser rejects duplicate/case-aliased keys,
+nonfinite numbers, comments, wrong types and unexpected fields. The verifier
+never downloads or changes an input. Uninitialized optional upstream submodules
+are accepted by this existing lock contract; the separately verified engine
+provenance requires the four dependencies actually used by its build.
+
+The 2026-11-25 English input update is documented in
+`tools/ci/provenance/english-engine-20261125.json`. It binds the built receipt,
+current engine source inventory and source ZIP, real build commands/logs,
+compiler/tool hashes, dependency libraries, actual PE headers/imports/exports,
+and the 39-case independent English integration run with inventory and JUnit.
+The final engine build was incremental and recompiled zero objects. This update
+is not a from-zero reproducibility claim, runner authorization, data approval or
+public release authorization. The other 21 lock entries retain their prior pins.
+
+`verify_engine_provenance.ps1 -RepoRoot <checkout> -InputRoot <cache>` additionally
+compares current engine inputs, receipt, DLL and all provenance references.
+Both workspace and immutable-cache copies are checked before acceptance. The
+cache must be outside the workflow checkout, preprovisioned by an authorized
+maintainer, and protected against concurrent writes. The workflow does not copy
+or bless arbitrary cache contents. Local content-addressed recovery and read-only
+file attributes are useful integrity controls, not proof of an administratively
+protected remote cache.
+
+Local recovery produced
+`build/go-input-cache-3d089a3c0b7fffce4e102e23d0e0373b4df736cda63810f1bb79471905be67c3/`.
+Its directory suffix is the exact updated lock SHA-256. Both it and the current
+workspace independently passed all 22 lock entries. The old cache is retained.
+To provision a runner, copy this reviewed snapshot to an unused external cache
+path with the same lock identity; provision its mirrored inputs and provenance
+files into a fresh checkout; rerun both verifiers before any build. Backend and
+product also need their documented toolchains/dependency build inputs: the 22
+entry lock alone does not constitute a complete toolchain cache.
+
+Runner settings are independently provisioned:
+
+- `EPOCANVA_CI_RUNNER_NAME`: exact designated runner name.
+- `EPOCANVA_CI_INPUT_CACHE`: external protected input snapshot.
+- `EPOCANVA_CI_CMAKE_SHA256`, `EPOCANVA_CI_CTEST_SHA256`: reviewed tool binaries.
+- `EPOCANVA_CI_PLAN_PATH`, `EPOCANVA_CI_PLAN_SHA256`: independently reviewed
+  acceptance plan outside the checkout. This must implement the required real
+  host, installer, approved quality and interaction protocols; no substitute
+  plan or approval is generated here.
+
+## Producers, artifacts and consumers
+
+`record_hosted_tests.ps1` captures each hosted layer's actual selected CTest
+inventory, serial test execution, absolute JUnit path and real native exit
+codes. `verify_root_junit.py` requires exact registered/executed names and zero
+failures/errors/skips. The existing historical relative-JUnit regression remains
+an executable real-CTest test, now also checking the shared hosted producer.
+
+`run_acceptance_layer.ps1` builds the backend, then the product and installer,
+then executes the authorized integration and quality plans serially. The full
+product build producer supplies its own complete registered suite and verified
+receipt. Each layer checks current source/inputs, actual predecessor files,
+frozen product hashes and the appropriate release-checker gates. A partial
+release-check result may exit 1 while that layer's required checks pass; its
+immutable snapshot is parsed again by the consumer. The final release checker
+still requires **all** technical gates. Missing approvals are never waived.
+
+Layer summaries use `format: epocanva-windows-ci-layer-v2`:
+
+- full `source_commit`, string `run_id` and `run_attempt` (GitHub environment wire
+  representation), `layer`, `runner_name`, workflow and input-lock SHA-256;
+- UTC start/end, `status`, integer top-level `exit_code`, and an `exit_codes`
+  object of observed native process exits; absent/null/bool/float exits fail;
+- `outputs` references `{path, sha256, bytes}` for original inventory, JUnit,
+  logs, immutable release-check snapshots and predecessors;
+- for product/host/quality, actual package/receipt/source archive/installer and
+  executable/DLL references, plus matching `product` digests.
+
+`collect_layer_artifact.ps1` copies only hash-bound files (including referenced
+predecessors) into an unused artifact directory and verifies the copies.
+Every required job uploads with `if: always()` and `if-no-files-found: error`.
+Artifact names are `<layer>-<candidate SHA>-<run ID>-<attempt>`. The artifact
+contains `summary.json` plus `payload/<repo-relative reference path>`; restore
+payload files at their recorded relative paths for offline inspection. Nothing
+in a summary turns a failed GitHub job into a success.
+
+## Final CI provenance contract
+
+The CI branch of `release_verifiers/host_report.ps1` calls the independently
+exercised `tools/ci/ci_provenance.ps1`. Required GitHub run/jobs/artifact API
+snapshots must be retrieved through a trusted operator path, including all
+pagination and the exact run attempt. The consumer performs no network I/O.
+It rejects string/float/bool numeric API IDs, incomplete counts, duplicate job
+IDs, old candidate/run/attempt, non-dispatch runs, wrong workflow, any missing,
+failed, skipped or cancelled required job/step, and wrong runner IDs/groups/labels.
+The non-gating canary cannot substitute for a required name.
+
+`artifact_manifest` references a JSON object with:
+
+- `format: epocanva-ci-artifacts-v1`, `repository`, integer `run_id` and
+  `run_attempt`, `source_commit`;
+- `github_artifacts`: reference to the complete API artifact snapshot;
+- exactly six `entries`: `job`, integer `job_id` and `artifact_id`, `archive`
+  reference, `summary` reference and `summary_archive_path`.
+
+Each archive must match the GitHub artifact digest and byte count, exact
+candidate/run/attempt name and workflow-run linkage, and be unexpired. The
+consumer reads the ZIP without extraction, rejects unsafe/duplicate/link paths,
+and checks that the referenced summary is exactly the member in that archive.
+It reopens all bound files, compares inventory to JUnit, checks actual process
+exits and required gate snapshots, and binds all product layers to the same
+package and installer under acceptance. Rehashing an outer report cannot bless
+a replaced inner file or a mismatched API artifact digest.
+
+`runner_authorization` references `epocanva-ci-runner-authorization-v1` with the
+same repository/candidate/integer run ID/attempt, `decision:
+approved-isolated-acceptance`, `owner`, `record_id`, actual integer `runner_id`
+and `runner_group_id`, exact `runner_name` and unique `runner_label`,
+`environment_id`, `snapshot_restore_policy`, and a hashed independent `record`.
+These fields are checked for consistency, **not authenticated by their presence**.
+A fabricated authorization and fabricated API snapshots remain fabricated even
+if their internal hashes agree. Owner review of record authority and trusted
+retrieval is still required; tests explicitly label all fixtures synthetic.
+
+## Completion and handoff
+
+A clean candidate SHA, protected authorized runner, reviewed cache/toolchain,
+real approved test plan and successful same-attempt six-layer run are still
+required. The current dirty working-tree local evidence cannot close that gate.
+After source/line-ending freeze, the main agent creates the candidate, performs
+serial complete root/backend/product regression, and alone pushes/dispatches.
+Retrieve run, attempt jobs, artifacts and authority records; reconstruct and
+verify the archive payload; run the actual internal release checker. Public
+release and full Windows/Android product GO remain distinct decisions.
+
+## Native Git configuration transport (local CTest regression)
+
+On the installed CTest 3.31.6-msvc6, sequential tests with ENVIRONMENT properties
+lose inherited empty environment entries after the first test. The minimal
+three-test reproduction is preserved in the audit evidence. This is not fixed
+by deleting `GIT_CONFIG_COUNT`, removing credential-helper resets, or guessing a
+missing value in a later child process.
+
+Start CTest from an intact parent using:
 
 ```text
-third_party/librime/                       (checkout at the locked commit)
-build/librime-english/rime/install/lib/rime.dll
-build/librime-baseline/rime/install/lib/rime.dll
-build/backend-training-budget/{en,zh,fr,ja,ko}/model.tsv
-build/backend-chinese-ranked/shared/{default.yaml,epocanva_backend_pinyin.schema.yaml,
-  epocanva_backend_terra.dict.yaml,epocanva_backend_zhuyin.schema.yaml,zhuyin.yaml}
-build/backend-data-acquire/zh-fr/upstream/french/fr_FR/{fr.aff,fr.dic}
-build/backend-japanese-data/lexicon.bin
-build/product-data/epocanva_en_alpha.tsv
+python -B tools/ci/preserve_git_environment.py -- <ctest.exe> <original arguments>
 ```
 
-A `resources` job (not shown as a per-PR job) builds or refreshes this cache
-from the pinned sources, verifies every file against the SHA-256 values already
-recorded in the test sources/manifests, and publishes `inputs.sha256`. Every
-downstream job must run the existing `tools/ci/verify_inputs.ps1` against
-`tools/ci/inputs.lock.json`
-and fails before building when a hash differs. A cache refresh is an explicit
-maintainer action, never an automatic download during a test job.
+The wrapper carries the complete indexed Git configuration into the nonempty
+`GIT_CONFIG_PARAMETERS` transport, preserving empty values, exact quoting and
+order. Indexed entries precede existing PARAMETERS, as verified against
+Git-for-Windows v2.52.0.windows.1 `config.c:711-766`. It sets the indexed count to
+zero only in the child transport, leaving those entries and the parent untouched;
+all effective settings remain present. Configuration values are never logged,
+persisted or placed in argv. Already missing entries fail rather than being
+recreated. Real Git comparisons and three sequential CTests exercise the result,
+and a child exit 8 remains exit 8. The workflow's hosted/backend CTest and product
+script launches use this wrapper. Final local complete suites must also use it.
 
-If a future change makes these inputs reproducible from committed sources alone,
-the self-hosted requirement can be removed; until then, claiming a from-zero
-clean-checkout backend/product build would be false.
-
-## 3. Job graph
+The product job additionally runs the artifact-dependent installer contract
+suite after package creation:
 
 ```text
-contract-gate  ──needs──>  backend  ──needs──>  windows-product
-                                                    │
-nightly-stress (schedule, independent, own runner)  ┘
+python -B tests/installer/test_static_contract.py --build-dir <candidate> --junit <evidence>/installer-contract.junit.xml -v
 ```
 
-### 3.1 Contract gate (hosted or self-hosted, ~5 minutes)
-
-Checks, in order:
-
-1. `git diff --check` — no whitespace errors.
-2. Configure the root preset and build only the two target groups.
-3. `ctest -R "^(locale_registry|candidate_contract)\."` — 5 locale tests
-   (including the deterministic manifest comparison and the falsifiable stale
-   rejection) and 3 candidate tests (including the ABI-mirror checks).
-4. Regenerate the manifest into `build/ci/manifest/` and byte-compare with
-   `data/locale/backend-bindings.json`; the CTest does this, and the explicit
-   copy makes the artefact reviewable.
-5. `python -B -m unittest discover -s tests/backend_resource_staging -p 'test_*.py'`
-   — manifest-only staging, drift/duplicate/absent/wrong-digest negatives.
-   The real-resource test is excluded here and runs in the `backend` job after
-   the input cache is verified.
-6. `git status --porcelain --untracked-files=all` must be empty. Build outputs
-   live under the ignored `/build/` tree; a manifest or staging output in the
-   source tree fails the gate.
-7. `git diff --exit-code -- data/locale/backend-bindings.json` after the
-   regeneration step; a stale committed manifest is a failure, not a warning.
-
-The gate does not need the external input cache.
-
-### 3.2 Backend (self-hosted, ~10 minutes)
-
-1. Verify `D:\epocanva-inputs\<sha>\inputs.sha256`.
-2. Link or copy the cache into `build/` with `robocopy` (copy, not move; the
-   cache stays immutable).
-3. Configure `tools/backend` with `EPOCANVA_BACKEND_WITH_FRENCH_DICTIONARY=ON`,
-   build Release, run the full 58-test suite serially.
-4. Run `EPOCANVA_STAGING_REAL_TESTS=1 python -B -m unittest ...` — the real
-   five-language staging test compares deterministic manifests and every output
-   hash, then corrupts an output and requires rejection.
-5. `git status --porcelain` must be empty.
-
-### 3.3 Windows Product (self-hosted, ~20 minutes)
-
-1. Same input verification and copy.
-2. Configure `platforms/windows/engine_bridge` with
-   `EPOCANVA_BUILD_PRODUCT=ON`, the backend resource root, the product lexicon,
-   the English Rime DLL and `EPOCANVA_PRODUCT_WITH_FRENCH_DICTIONARY=ON`.
-3. Build Release and run the complete current registered suite serially. Compare
-   executed names to the exported inventory; historical test counts are not a
-   completeness check. Formal acceptance requires zero failures and zero skips.
-   Missing symlink privileges or real focus coverage block acceptance. An
-   environment-limited return must never conceal an already failed assertion.
-4. Upload `build/windows-product/product-build-receipt.json` on success.
-5. `git status --porcelain` must be empty.
-
-### 3.4 Nightly stress (self-hosted, scheduled, ~60 minutes)
-
-Repeat one case at a time, serial, with a bounded per-run timeout:
-
-| Case | Repetitions | Purpose |
-| --- | ---: | --- |
-| `backend.profiles.real_acceptance` | 10 | historical flake; real five-language slice |
-| `learning.repository.persistence` | 50 | v1→v3 migration and atomic replacement |
-| `learning.repository.corruption` | 20 | quarantine and recovery |
-| `product.integration.sink_settings_timing` | 20 | shared readiness deadline |
-| `product.integration.sink_lease_lock` | 20 | shared engine lease and release |
-
-After the ten serial profile runs, run the same binary 4×4 concurrently **as a
-stress diagnostic, not as release evidence**. A failure there is a finding; a
-pass does not upgrade the serial result.
-
-On failure, upload only:
-
-- `build/**/Testing/Temporary/LastTest.log`
-- `build/**/Testing/Temporary/LastTestsFailed.log`
-- `build/ci-logs/*.log` written by the loop wrapper (stdout/stderr of the test)
-
-Do not upload `%APPDATA%`, `%LOCALAPPDATA%`, real user profiles, clipboard data or
-any captured input. The stress wrapper must not add logging that prints candidate
-text; the existing diagnostics are text-free by construction.
-
-## 4. Executable workflow
-
-The contract-gate job is now committed as `.github/workflows/windows-ci.yml`
-(see the status note above for its deviations from the text below). The full
-workflow text below remains the design for the complete pipeline; the backend,
-product and nightly-stress jobs are **not** in the committed file.
-`EPOCANVA_INPUT_CACHE` is a runner-level variable, not a repository secret.
-
-```yaml
-name: windows-ci
-
-on:
-  pull_request:
-  push:
-    branches: [main, "feat/**"]
-  schedule:
-    - cron: "0 18 * * *"   # 02:00 Asia/Taipei, nightly
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: windows-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  contract-gate:
-    runs-on: [self-hosted, windows, x64, epocanva-contract]
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-      - name: Locate VS CMake
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $cmake = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -find Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
-          if (-not $cmake) { throw "VS CMake not found" }
-          "EPOCANVA_CMAKE=$cmake" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Whitespace gate
-        shell: pwsh
-        run: git diff --check
-      - name: Configure
-        shell: pwsh
-        run: |
-          & $env:EPOCANVA_CMAKE --preset vs2022-x64-debug
-      - name: Build contract targets
-        shell: pwsh
-        run: |
-          & $env:EPOCANVA_CMAKE --build build/vs2022-x64-debug --config Debug `
-            --target epocanva_locale_registry_tests epocanva_candidate_contract_tests `
-            --parallel 4
-      - name: Contract CTests
-        shell: pwsh
-        run: |
-          & (Join-Path (Split-Path $env:EPOCANVA_CMAKE) "ctest.exe") `
-            --test-dir build/vs2022-x64-debug -C Debug `
-            -R "^(locale_registry|candidate_contract)\." --output-on-failure
-      - name: Python staging unit tests
-        shell: pwsh
-        run: python -B -m unittest discover -s tests/backend_resource_staging -p "test_*.py"
-      - name: Source tree must stay clean
-        shell: pwsh
-        run: |
-          $status = git status --porcelain --untracked-files=all
-          if ($status) { $status; throw "source tree changed during the gate" }
-
-  backend:
-    needs: contract-gate
-    runs-on: [self-hosted, windows, x64, epocanva-inputs]
-    timeout-minutes: 30
-    env:
-      EPOCANVA_INPUT_CACHE: ${{ vars.EPOCANVA_INPUT_CACHE }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify and copy pinned inputs
-        shell: pwsh
-        run: |
-          if (-not $env:EPOCANVA_INPUT_CACHE) { throw "input cache is not configured" }
-          & "$env:EPOCANVA_INPUT_CACHE\verify_inputs.ps1"
-          robocopy "$env:EPOCANVA_INPUT_CACHE\build" build /E /XD inputs /NFL /NDL /NJH /NJS
-          robocopy "$env:EPOCANVA_INPUT_CACHE\third_party" third_party /E /NFL /NDL /NJH /NJS
-          if ($LASTEXITCODE -ge 8) { throw "input copy failed: $LASTEXITCODE" }
-      - name: Configure backend
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $cmake = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -find Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
-          "EPOCANVA_CMAKE=$cmake" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          & $cmake -S tools/backend -B build/backend-service -G "Visual Studio 17 2022" -A x64 `
-            -DEPOCANVA_BACKEND_WITH_FRENCH_DICTIONARY=ON
-      - name: Build
-        shell: pwsh
-        run: |
-          & $env:EPOCANVA_CMAKE --build build/backend-service --config Release --parallel 8
-      - name: Backend CTests
-        shell: pwsh
-        run: |
-          & (Join-Path (Split-Path $env:EPOCANVA_CMAKE) "ctest.exe") `
-            --test-dir build/backend-service -C Release --no-tests=error --output-on-failure
-      - name: Real staging test
-        shell: pwsh
-        run: |
-          $env:EPOCANVA_STAGING_REAL_TESTS = "1"
-          python -B -m unittest discover -s tests/backend_resource_staging -p "test_*.py"
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-logs-${{ github.run_attempt }}
-          path: |
-            build/backend-service/Testing/Temporary/LastTest.log
-            build/backend-service/Testing/Temporary/LastTestsFailed.log
-          if-no-files-found: ignore
-
-  windows-product:
-    needs: backend
-    runs-on: [self-hosted, windows, x64, epocanva-inputs]
-    timeout-minutes: 45
-    env:
-      EPOCANVA_INPUT_CACHE: ${{ vars.EPOCANVA_INPUT_CACHE }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify and copy pinned inputs
-        shell: pwsh
-        run: |
-          & "$env:EPOCANVA_INPUT_CACHE\verify_inputs.ps1"
-          robocopy "$env:EPOCANVA_INPUT_CACHE\build" build /E /XD inputs /NFL /NDL /NJH /NJS
-          robocopy "$env:EPOCANVA_INPUT_CACHE\third_party" third_party /E /NFL /NDL /NJH /NJS
-          if ($LASTEXITCODE -ge 8) { throw "input copy failed: $LASTEXITCODE" }
-      - name: Stage backend resources
-        shell: pwsh
-        run: |
-          python -B tools/backend/stage_resources.py `
-            --product-root build/product-resources/product --oov error
-      - name: Configure product
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $cmake = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -find Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
-          "EPOCANVA_CMAKE=$cmake" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          & $cmake -S platforms/windows/engine_bridge -B build/windows-product `
-            -G "Visual Studio 17 2022" -A x64 `
-            -DEPOCANVA_BUILD_PRODUCT=ON `
-            -DEPOCANVA_PRODUCT_BACKEND_ROOT="$PWD/build/product-resources/product" `
-            -DEPOCANVA_PRODUCT_LEXICON="$PWD/build/product-data/epocanva_en_alpha.tsv" `
-            -DEPOCANVA_RIME_DLL="$PWD/build/librime-english/rime/install/lib/rime.dll" `
-            -DEPOCANVA_BASELINE_RIME_DLL="$PWD/build/librime-baseline/rime/install/lib/rime.dll" `
-            -DEPOCANVA_PRODUCT_WITH_FRENCH_DICTIONARY=ON
-      - name: Build
-        shell: pwsh
-        run: |
-          & $env:EPOCANVA_CMAKE --build build/windows-product --config Release --parallel 8
-      - name: Product CTests
-        shell: pwsh
-        run: |
-          & (Join-Path (Split-Path $env:EPOCANVA_CMAKE) "ctest.exe") `
-            --test-dir build/windows-product -C Release --no-tests=error --output-on-failure
-      - name: Upload receipt
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: product-build-receipt-${{ github.run_attempt }}
-          path: build/windows-product/product-build-receipt.json
-          if-no-files-found: error
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: product-logs-${{ github.run_attempt }}
-          path: |
-            build/windows-product/Testing/Temporary/LastTest.log
-            build/windows-product/Testing/Temporary/LastTestsFailed.log
-          if-no-files-found: ignore
-
-  nightly-stress:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, windows, x64, epocanva-stress]
-    timeout-minutes: 120
-    env:
-      EPOCANVA_INPUT_CACHE: ${{ vars.EPOCANVA_INPUT_CACHE }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify and copy pinned inputs
-        shell: pwsh
-        run: |
-          & "$env:EPOCANVA_INPUT_CACHE\verify_inputs.ps1"
-          robocopy "$env:EPOCANVA_INPUT_CACHE\build" build /E /XD inputs /NFL /NDL /NJH /NJS
-          robocopy "$env:EPOCANVA_INPUT_CACHE\third_party" third_party /E /NFL /NDL /NJH /NJS
-          if ($LASTEXITCODE -ge 8) { throw "input copy failed: $LASTEXITCODE" }
-      - name: Build all three trees once
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $cmake = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -find Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
-          if (-not $cmake) { throw "VS CMake not found" }
-          "EPOCANVA_CMAKE=$cmake" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "EPOCANVA_CTEST=$(Join-Path (Split-Path $cmake) 'ctest.exe')" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          & $cmake --preset vs2022-x64-debug
-          & $cmake --build build/vs2022-x64-debug --config Debug `
-            --target epocanva_learning_repository_tests --parallel 8
-          & $cmake -S tools/backend -B build/backend-service -G "Visual Studio 17 2022" -A x64 `
-            -DEPOCANVA_BACKEND_WITH_FRENCH_DICTIONARY=ON
-          & $cmake --build build/backend-service --config Release --parallel 8
-          python -B tools/backend/stage_resources.py `
-            --product-root build/product-resources/product --oov error
-          & $cmake -S platforms/windows/engine_bridge -B build/windows-product `
-            -G "Visual Studio 17 2022" -A x64 `
-            -DEPOCANVA_BUILD_PRODUCT=ON `
-            -DEPOCANVA_PRODUCT_BACKEND_ROOT="$PWD/build/product-resources/product" `
-            -DEPOCANVA_PRODUCT_LEXICON="$PWD/build/product-data/epocanva_en_alpha.tsv" `
-            -DEPOCANVA_RIME_DLL="$PWD/build/librime-english/rime/install/lib/rime.dll" `
-            -DEPOCANVA_BASELINE_RIME_DLL="$PWD/build/librime-baseline/rime/install/lib/rime.dll" `
-            -DEPOCANVA_PRODUCT_WITH_FRENCH_DICTIONARY=ON
-          & $cmake --build build/windows-product --config Release --parallel 8
-      - name: Repeat stress cases
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force build/ci-logs | Out-Null
-          $ctest = $env:EPOCANVA_CTEST
-          function Repeat([string]$Dir, [string]$Config, [string]$Name, [int]$Count) {
-            for ($i = 1; $i -le $Count; $i++) {
-              & $ctest --test-dir $Dir -C $Config --no-tests=error `
-                -R "^$Name$" --output-on-failure `
-                2>&1 | Tee-Object -FilePath "build/ci-logs/$Name-$i.log"
-              if ($LASTEXITCODE -ne 0) { throw "$Name failed on iteration $i" }
-            }
-          }
-          Repeat "build/backend-service" "Release" "backend.profiles.real_acceptance" 10
-          Repeat "build/vs2022-x64-debug" "Debug" "learning.repository.persistence" 50
-          Repeat "build/vs2022-x64-debug" "Debug" "learning.repository.corruption" 20
-          Repeat "build/windows-product" "Release" "product.integration.sink_settings_timing" 20
-          Repeat "build/windows-product" "Release" "product.integration.sink_lease_lock" 20
-      - name: Upload stress logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: stress-logs-${{ github.run_attempt }}
-          path: |
-            build/ci-logs/*.log
-            build/backend-service/Testing/Temporary/LastTest.log
-            build/windows-product/Testing/Temporary/LastTest.log
-          if-no-files-found: ignore
-```
-
-## 5. Workflow notes
-
-- `shell: pwsh` on GitHub Actions fails a step when the **last** native command
-  exits non-zero. Multi-command steps above rely on that; when enabling the
-  workflow, add `$PSNativeCommandUseErrorActionPreference = $true` (PowerShell
-  7.3+) to the top of each step, or check `$LASTEXITCODE` explicitly after every
-  `cmake`, `ctest`, `git` and `python` invocation. Do not let a failed build be
-  masked by a later successful command.
-- `robocopy` treats exit codes 0–7 as success and 8+ as failure; the copy steps
-  check exactly that.
-- `EPOCANVA_INPUT_CACHE` is a runner-level repository variable, not a secret and
-  not a path committed to the repository.
-- The workflow is inactive until `.github/workflows/windows-ci.yml` is added in a
-  reviewed change. This document alone does not create CI.
-
-## 6. What this pipeline does not claim
-
-- It does not make a clean checkout self-sufficient for backend/product; the
-  pinned input cache is still an external, hash-verified prerequisite.
-- It does not run a real registered TSF host or Android. Those remain separate
-  acceptance jobs with their own evidence rules.
-- It does not convert a skipped test into a pass. `ctest` exit code 0 with skips
-  is reported with the skip count; release evidence requires the specific cases
-  to execute.
-- It does not add retries. A flaky case is reported with its text-free
-  diagnostics and must be diagnosed, not retried into green.
-
-## 7. Rollback
-
-Deleting `.github/workflows/windows-ci.yml` disables the pipeline; no product
-code depends on it. The `tools/ci/verify_inputs.ps1` helper is additive and can
-remain for manual clean-worktree verification.
+Its actual exit and passing JUnit are mandatory product-layer evidence. It is
+not discovered in the hosted root suite, which lacks installer build inputs;
+no assertion or required package test is skipped by this separation.

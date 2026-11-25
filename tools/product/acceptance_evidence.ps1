@@ -9,9 +9,10 @@ param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'build_identity.ps1')
 
 function Get-AcceptanceSha256([string]$Path) {
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return Get-ProductIdentityFileSha256 $Path
 }
 
 function Get-AcceptanceFullPath([string]$Path) {
@@ -21,10 +22,7 @@ function Get-AcceptanceFullPath([string]$Path) {
 function New-AcceptanceReference([string]$Path, [string]$RepoRoot) {
     $full = Get-AcceptanceFullPath $Path
     $repo = (Get-AcceptanceFullPath $RepoRoot).TrimEnd('\', '/')
-    if (-not $full.StartsWith($repo + [IO.Path]::DirectorySeparatorChar,
-            [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Evidence reference is outside the repository: $full"
-    }
+    $full = Assert-ProductPlainPath $full $repo
     $file = Get-Item -LiteralPath $full -Force
     if ($file.PSIsContainer -or $file.Length -eq 0) { throw "Evidence reference is empty: $full" }
     return [pscustomobject]@{
@@ -52,25 +50,28 @@ function Get-AcceptanceIdentity {
         [Parameter(Mandatory=$true)][string]$StageRoot
     )
     $repo = Get-AcceptanceFullPath $RepoRoot
-    . (Join-Path $repo 'tools\product\build_identity.ps1')
-    $receiptPath = Join-Path $BuildDir 'product-build-receipt.json'
+    $buildBase = Join-Path $repo 'build'
+    $BuildDir = Assert-ProductPlainPath $BuildDir $buildBase
+    $StageRoot = Assert-ProductPlainPath $StageRoot $buildBase
+    $receiptPath = Assert-ProductPlainPath (Join-Path $BuildDir 'product-build-receipt.json') $buildBase
     if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
         throw 'product-build-receipt.json is missing; run build_product.ps1 with tests'
     }
-    $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($receipt.format -ne 1 -or $receipt.status -ne 'verified') {
-        throw 'The product build receipt is not a verified test-executed build'
+    $receiptHash = Get-AcceptanceSha256 $receiptPath
+    $receipt = Read-ProductJson $receiptPath
+    $engines = @($receipt.binaries | Where-Object { [object]::Equals($_.name, 'rime') })
+    if ($engines.Count -ne 1 -or $engines[0].path -isnot [string] -or -not [IO.Path]::IsPathRooted($engines[0].path)) {
+        throw 'Build receipt lacks a unique tested English engine path.'
     }
-    $current = Get-ProductSourceIdentity -RepoRoot $repo
-    if ($receipt.source.commit -cne $current.commit -or
-            $receipt.source.source_sha256 -cne $current.source_sha256 -or
-            $receipt.source.head -cne $current.head) {
-        throw 'The current source differs from the tested build receipt; rebuild and retest'
-    }
-    $manifestPath = Join-Path $StageRoot 'package.manifest'
+    $receipt = Assert-ProductBuildReceipt -RepoRoot $repo -BuildDir $BuildDir -RimeDll $engines[0].path
+    $null = Assert-ProductBuildEngineBinding $repo $engines[0].path $receipt
+    if ((Get-AcceptanceSha256 $receiptPath) -cne $receiptHash) { throw 'Product build receipt changed during verification.' }
+    $current = $receipt.source
+    $manifestPath = Assert-ProductPlainPath (Join-Path $StageRoot 'package.manifest') $StageRoot
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw 'The staged package.manifest is missing; run stage_product.ps1'
     }
+    $manifestHash = Get-AcceptanceSha256 $manifestPath
     $metadata = Read-PackageMetadata $manifestPath
     if ($metadata['commit'] -cne $current.commit) {
         throw 'The staged package commit differs from the current tested source'
@@ -80,6 +81,12 @@ function Get-AcceptanceIdentity {
     $policyPath = Join-Path $repo 'data\manifests\product-package-files.inc'
     $languagePath = Join-Path $repo 'data\manifests\language-readiness.json'
     $licensePath = Join-Path $repo 'data\manifests\license-decision.json'
+    foreach ($file in @(@('exe', 'EpoCanva.exe'), @('tsf', 'epocanva_tsf.dll'), @('rime', 'rime.dll'))) {
+        $binding = @($receipt.binaries | Where-Object { $_.name -ceq $file[0] })[0]
+        $path = Assert-ProductPlainPath (Join-Path $StageRoot $file[1]) $StageRoot
+        if ((Get-AcceptanceSha256 $path) -cne $binding.sha256) { throw "Staged $($file[1]) differs from the tested binary." }
+    }
+    if ((Get-AcceptanceSha256 $manifestPath) -cne $manifestHash) { throw 'Package manifest changed during verification.' }
     return [pscustomobject]@{
         repo = $repo
         build_dir = (Get-AcceptanceFullPath $BuildDir)
@@ -87,8 +94,8 @@ function Get-AcceptanceIdentity {
         version = $version
         commit = $current.commit
         source_sha256 = $current.source_sha256
-        package_manifest_sha256 = Get-AcceptanceSha256 $manifestPath
-        build_receipt_sha256 = Get-AcceptanceSha256 $receiptPath
+        package_manifest_sha256 = $manifestHash
+        build_receipt_sha256 = $receiptHash
         package_policy_sha256 = Get-AcceptanceSha256 $policyPath
         language_policy_sha256 = Get-AcceptanceSha256 $languagePath
         license_decision_sha256 = Get-AcceptanceSha256 $licensePath
@@ -177,8 +184,10 @@ function Add-AcceptanceEvidenceEntry {
     if (-not (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) {
         throw 'release-evidence.json is missing; run record_package_diagnose.ps1 first'
     }
-    $document = Get-Content -LiteralPath $EvidencePath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($document.format -ne 2 -or $null -eq $document.entries) {
+    $EvidencePath = Assert-ProductPlainPath $EvidencePath (Join-Path $Identity.repo 'build')
+    $evidenceHash = Get-AcceptanceSha256 $EvidencePath
+    $document = Read-ProductJson $EvidencePath
+    if (-not (Test-ProductJsonInteger $document.format) -or $document.format -ne 2 -or $document.entries -isnot [array]) {
         throw 'release-evidence.json is not format 2 with an entries array'
     }
     $bindings = @{
@@ -194,13 +203,21 @@ function Add-AcceptanceEvidenceEntry {
         language_policy_sha256 = $Identity.language_policy_sha256
     }
     foreach ($key in $bindings.Keys) {
-        if ([string]$document.$key -cne [string]$bindings[$key]) {
+        if (-not [object]::Equals($document.$key, $bindings[$key])) {
             throw "release-evidence.json identity mismatch: $key"
         }
     }
     $runnerFull = Get-AcceptanceFullPath $RunnerPath
     if ($Command.Count -lt 1 -or $Command[0] -cne $runnerFull) {
         throw 'The recorded command must begin with the exact runner path'
+    }
+    if ($ExitCode -ne 0 -or $CompletedUtc -lt $StartedUtc -or $CompletedUtc -gt [DateTimeOffset]::UtcNow.AddMinutes(5)) {
+        throw 'Evidence entry requires a successful process and ordered execution timestamps.'
+    }
+    $null = Read-ProductPassingJUnit (Assert-ProductPlainPath $JUnitPath $Identity.repo)
+    if ((Get-AcceptanceSha256 (Join-Path $Identity.build_dir 'product-build-receipt.json')) -cne $Identity.build_receipt_sha256 -or
+            (Get-AcceptanceSha256 (Join-Path $Identity.stage_root 'package.manifest')) -cne $Identity.package_manifest_sha256) {
+        throw 'Build or package changed during the acceptance run.'
     }
     $entry = [pscustomobject][ordered]@{
         id = $EntryId
@@ -219,8 +236,8 @@ function Add-AcceptanceEvidenceEntry {
     $entries = @($document.entries | Where-Object { $_.id -cne $EntryId })
     $entries += $entry
     $document.entries = $entries
-    $json = $document | ConvertTo-Json -Depth 12
-    [IO.File]::WriteAllText($EvidencePath, $json + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    if ((Get-AcceptanceSha256 $EvidencePath) -cne $evidenceHash) { throw 'Release evidence changed during entry generation.' }
+    Write-ProductJson $EvidencePath $document
 }
 
 function Invoke-AcceptanceCase {

@@ -1,6 +1,7 @@
 # Shared, read-only Corresponding Source inventory. The producer and checker must
 # use this function, not maintain separate dependency/file enumerators.
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'evidence_contract.ps1')
 
 function Assert-ProductSourceRelativePath {
     param([Parameter(Mandatory)][string]$Path)
@@ -145,7 +146,7 @@ function Get-ProductCorrespondingSourceFiles {
             throw "Required project source tree is empty: $directory"
         }
     }
-    $lock = Get-Content -LiteralPath (Join-Path $root 'third_party/sources.lock.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $lock = Read-ProductJson (Join-Path $root 'third_party/sources.lock.json')
     $rime = @($lock.packages | Where-Object { $_.name -ceq 'librime' })
     if ($rime.Count -ne 1 -or $rime[0].local_path -cne 'third_party/librime') { throw 'Unsupported librime source lock.' }
     $rime = $rime[0]
@@ -195,7 +196,7 @@ function Get-ProductCorrespondingSourceFiles {
             } else { Add-SourcePath $full.Substring($root.Length + 1).Replace('\', '/') }
         }
     }
-    $dataLock = Get-Content -LiteralPath (Join-Path $root 'data/manifests/english-pilot.sources.lock.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $dataLock = Read-ProductJson (Join-Path $root 'data/manifests/english-pilot.sources.lock.json')
     $dataRoot = 'build/third-party-fetch/esdb'
     if ($dataLock.checkout_verification.default_cache_dir -cne $dataRoot) { throw 'Unexpected word-list source location.' }
     Assert-ProductSourceCheckout $root $dataRoot $dataLock.pinned_commit
@@ -247,7 +248,7 @@ function Get-ProductCorrespondingSourceFiles {
     # third_party/) reconstruct the exact patched library. The manifest is the
     # single hash authority; the archive is never edited in place.
     $frManifestPath = Join-Path $root 'data/manifests/backend-hunspell.sources.json'
-    $frManifest = Get-Content -LiteralPath $frManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $frManifest = Read-ProductJson $frManifestPath
     $frRevision = [string]$frManifest.hunspell.revision
     $frRoot = "build/backend-french-dependency/$([string]$frManifest.hunspell.archive_root)"
     if ($frRevision -cnotmatch '^[0-9a-f]{40}$' -or -not $frManifest.hunspell.patch.path) {

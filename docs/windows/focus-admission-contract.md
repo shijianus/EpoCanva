@@ -25,8 +25,9 @@ Every ordinary admission (new key, candidate acceptance, edit plan) checks, in t
      "TSF input focus", not as global foreground state.
    - The Win32 thread-focus window is **not** part of the default policy. The observer is
      constructed with an explicit `ThreadFocusPolicy`:
-     `StrictTsf` (product default) accepts only a TSF notification or a successful
-     `IsThreadFocus` TRUE; `LabWin32Fallback` additionally accepts a real
+     `StrictTsf` (product default) requires a successful live `IsThreadFocus` TRUE;
+     a matching set notification supplies provenance, not independent permission.
+     `LabWin32Fallback` additionally accepts a real
      `GetGUIThreadInfo(GetCurrentThreadId())` focus window owned by this thread. The lab and
      the declared test harnesses request the fallback explicitly because the non-registered
      lab process reports `S_FALSE`.
@@ -46,6 +47,8 @@ Every ordinary admission (new key, candidate acceptance, edit plan) checks, in t
 4. **The identity generation.** `ContextRegistry` must still report the same
    `context_id`/`generation` that the binding was created with. A newer `BeginBinding`
    generation refuses the old binding even if the TSF focus bytes are unchanged.
+   The observer must also still publish that exact context/generation: a revoked
+   target is rejected even before the registry allocates its replacement generation.
 
 5. **Real input permission.** The coordinator resolves this separately from the real
    context metadata (`GetStatus`, `KEYBOARD_DISABLED`/`EMPTYCONTEXT` compartments and the
@@ -74,8 +77,9 @@ that decided a refusal and that stage's HRESULT. Empty results are not errors.
 | real generation mismatch | `GenerationMismatch` | `none` | `S_OK` |
 | thread-focus kill notification | `ThreadFocusLost` | `none` | `S_OK` |
 
-A positive TSF notification may confirm focus even if a redundant live query failed; the
-failed call remains verbatim in `TargetEvidence` and is not rewritten to `S_OK`. The final
+A cached positive TSF notification cannot override a failed live query or a successful
+FALSE answer. The failed call remains verbatim in `TargetEvidence` and is not rewritten
+to `S_OK`. The final
 refusal snapshot is a copy taken at decision time, so later live refreshes cannot change it.
 
 ## 2. Evidence sources are not renamed
@@ -84,7 +88,7 @@ refusal snapshot is a copy taken at decision time, so later live refreshes canno
 
 | Evidence | Meaning |
 | --- | --- |
-| `thread-focus-notification` | the last thread-focus notification was `OnSetThreadFocus` |
+| `thread-focus-notification` | the last notification was `OnSetThreadFocus` and the live query agrees |
 | `thread-focus-kill-notification` | the last thread-focus notification was `OnKillThreadFocus` |
 | `query-revalidation` | `IsThreadFocus` answered TRUE |
 | `win32-thread-focus-revalidation` | the calling thread owns a real Win32 focus window (lab policy only) |
