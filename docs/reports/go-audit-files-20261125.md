@@ -2,7 +2,7 @@
 
 All paths below are delivered changes relative to `3401bf40c8701032fcf08cb8b886f2d17b50a71e`.
 Inherited edits were preserved before development. Per-file current SHA-256 and
-source bodies are in `build/go-audit-20261125/changed-files.json` and
+source bodies are in `build/go-audit-20261125-r2/changed-files.json` and
 `source-snapshot/`; the final candidate commit is in `final-result.json`.
 Generated build evidence is intentionally not committed as product source.
 

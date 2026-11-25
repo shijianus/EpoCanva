@@ -3,11 +3,11 @@
 Pre-freeze state: `BLOCKED_NOT_COMPLETE`; all three GO scopes are NO-GO;
 `acceptance_ready=false`, `technical_ready=false`, `release_ready=false`.
 The final authoritative run is the actual `check_release.ps1` JSON referenced by
-`build/go-audit-20261125/final-result.json`. This document cannot waive a gate.
+`build/go-audit-20261125-r2/final-result.json`. This document cannot waive a gate.
 
 | Blocker ID | Kind | Current evidence | Next step and completion condition |
 | --- | --- | --- | --- |
-| FINAL-CANDIDATE | Engineering | Dirty integrated worktree; targeted fixes pass; final serial runs forthcoming. | Commit reviewed source, execute complete root/backend/product inventories with zero failure/error/skip, stage exact binaries/source. |
+| FINAL-CANDIDATE | Engineering | Candidate 67fd529 completed 108/61/267 local suites, but its MSI producer rejected the new tested helper receipt. The corrected producer requires a replacement freeze and complete verification. | Commit reviewed source, execute complete root/backend/product inventories with zero failure/error/skip, stage exact binaries/source. |
 | CI-SIX | Environment / authorization | GitHub runners API returned total_count0. Workflow has six mandatory layers and independent canary. | Authorized protected dispatch, runner identity/group/label, immutable cache and external plan; same-SHA six jobs success and verified artifacts. |
 | QUALITY-TIERB | External owner/data + measurement | Tier A15; Tier B not_approved; absolute policy pending. | Approve real licensed corpus and actual thresholds, commit before freeze, qualify exact current harness/package. |
 | STRESS-RESOURCE | External policy + final measurement | Four resource limits and approval are null. | Reviewed real limits/owner record, formal current-candidate producer; no synthetic approval accepted. |

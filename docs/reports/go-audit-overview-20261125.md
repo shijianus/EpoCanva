@@ -5,7 +5,20 @@ Windows public release and full cross-platform product remain **NO-GO**.
 This is a pre-freeze engineering record, not a successful release approval.
 The subsequent actual candidate SHA, complete regressions, remote run URLs,
 artifacts and checker output are recorded in
-`build/go-audit-20261125/final-result.json` and its referenced raw files.
+`build/go-audit-20261125-r2/final-result.json` and its referenced raw files.
+
+The first clean candidate `67fd52955427915daadef9958b6f79014fff91fd`
+completed all local suites: root 108/108, backend 61/61, product Release 267/267,
+zero failures/skips, all CTest exits 0. Its actual package chain then exposed a
+stale MSI producer check requiring helper receipt format 3 after the shared
+consumer had already verified format 4; the MSI command stopped with exit 4.
+That failed delivery and its original evidence remain under
+`build/go-audit-20261125/`. The source correction uses the shared verifier as
+the schema authority and retains independent byte snapshot checks. A real MSI
+producer regression now covers this integration path, including legacy and
+missing/failed test-exit rejection. The new candidate and its full revalidation
+are recorded separately under `build/go-audit-20261125-r2/`; the first
+candidate's passing suites are not relabeled with the replacement SHA.
 
 ## Baseline and preservation
 

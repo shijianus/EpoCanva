@@ -195,6 +195,9 @@ try {
         $receipt = Read-ProductJson (Join-Path $windowsProduct 'product-build-receipt.json')
         if ($receipt.status -cne 'verified') { throw 'Product build receipt is not verified.' }
         Test-Inventory (Join-Path $receipt.evidence 'ctest-list.json') (Join-Path $receipt.evidence 'ctest.xml')
+        # Passing JUnit system-out is truncated by CTest. Retain the original
+        # complete native event trace as a separately hashed artifact output.
+        $summary.outputs['native_ctest_log'] = New-Reference (Join-Path $windowsProduct 'Testing/Temporary/LastTest.log')
         Invoke-Script 'stage-product' 'tools/product/stage_product.ps1' @('-StrictPaths')
         Invoke-Script 'stage-source' 'tools/product/stage_source.ps1'
         Invoke-Script 'build-helper' 'tools/installer/build_helper.ps1'

@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 
 REPO = Path(__file__).resolve().parents[2]
 CONTRACT = REPO / 'tools/installer/installer_contract.ps1'
+BUILD_MSI = REPO / 'tools/installer/build_msi.ps1'
 BUILD_BOOTSTRAPPER = REPO / 'tools/installer/build_bootstrapper.ps1'
 
 
@@ -210,6 +211,9 @@ class InstallerContractTests(unittest.TestCase):
             ('linker', lambda x: x['toolchain']['linker_file'].update(bytes=0)),
             ('configure exit', lambda x: x.update(configure_exit=None)),
             ('build exit', lambda x: x.update(build_exit='0')),
+            ('legacy untested format', lambda x: x.update(format=3)),
+            ('missing test exit', lambda x: x.update(test_exit=None)),
+            ('failed test exit', lambda x: x.update(test_exit=8)),
             ('boolean format', lambda x: x.update(format=True)),
             ('in progress', lambda x: x.update(status='in_progress')),
             ('configuration', lambda x: x.update(configuration='Debug')),
@@ -223,6 +227,31 @@ class InstallerContractTests(unittest.TestCase):
                 self.run_contract('Assert-InstallerHelperReceipt $env:EPO_INSTALLER_TEST_REPO '
                                   '$env:EPO_INSTALLER_TEST_RECEIPT $env:EPO_INSTALLER_TEST_HELPER | Out-Null',
                                   1, REPO=REPO, RECEIPT=path, HELPER=original['binary']['path'])
+
+    def test_real_msi_producer_accepts_current_tested_helper(self):
+        # Exercise the producer as well as its consumer: an obsolete duplicate
+        # format check used to reject the helper after the shared verifier passed.
+        # The isolated output is directly under build/, as the producer requires.
+        with tempfile.TemporaryDirectory(prefix='installer-producer-', dir=REPO / 'build') as temporary:
+            build = Path(temporary)
+            version = self.msi_manifest['product_version']
+            stage = build / 'stage' / ('EpoCanva-' + version)
+            shutil.copytree(self.build_dir / 'stage' / ('EpoCanva-' + version), stage)
+            helper_dir = Path(self.msi_manifest['helper']['receipt_path']).parent
+            result = subprocess.run([
+                self.powershell, '-NoProfile', '-NonInteractive', '-File', str(BUILD_MSI),
+                '-RepoRoot', str(REPO), '-BuildDir', str(build), '-StageRoot', str(stage),
+                '-HelperBuildDir', str(helper_dir), '-WixPath', str(REPO / 'build/_local/wix-tool/wix.exe')],
+                cwd=REPO, capture_output=True, text=True, errors='replace', timeout=600,
+                env=dict(os.environ, TEMP=str(self.run_dir), TMP=str(self.run_dir)))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            manifest_path = build / 'installer/installer-manifest.json'
+            document = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
+            self.assertEqual(document['destination_commit'], self.msi_manifest['destination_commit'])
+            self.assertEqual(document['package_manifest_sha256'], self.msi_manifest['package_manifest_sha256'])
+            self.run_contract('Assert-InstallerMsiManifest $env:EPO_INSTALLER_TEST_MANIFEST '
+                              '$env:EPO_INSTALLER_TEST_MSI | Out-Null', 0,
+                              MANIFEST=manifest_path, MSI=document['installer']['path'])
 
     def test_wix_cache_poisoning_rejected(self):
         cache = self.run_dir / 'wix-cache'

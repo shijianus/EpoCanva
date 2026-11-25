@@ -36,3 +36,10 @@ Windows/Android portability stops at Unicode scalar/UTF-16 selection contracts,
 candidate identity/ranking, session generation/revocation and offline resources.
 Windows COM/HWND types must remain inside Windows adapters. Android remains an
 unimplemented deliverable, not a Windows acceptance result.
+
+Installer helper receipt schema validation has one shared authority. The MSI
+producer separately checks stable receipt/binary snapshots after that validation;
+it no longer maintains a competing legacy format version. Its regression runs
+the actual MSI producer and independent consumer against isolated build outputs.
+CI retains the complete native CTest log separately because passing-case JUnit
+output is truncated and cannot carry the full focus/lifetime event trace.

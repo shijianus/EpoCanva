@@ -166,10 +166,11 @@ $helperReceipt = $verifiedHelper.receipt
 $helperReceiptSha = Get-Sha256 $helperReceiptPath
 $helperSha = Get-Sha256 $helper
 $helperBytes = (Get-Item -LiteralPath $helper).Length
-if ($helperReceipt.format -ne 3 -or $helperReceipt.status -ne 'verified' -or
-    -not (Test-InstallerInteger $helperReceipt.build_exit) -or $helperReceipt.build_exit -ne 0 -or
-    $helperReceipt.binary.sha256 -cne $helperSha -or -not (Test-InstallerInteger $helperReceipt.binary.bytes) -or
-    $helperReceipt.binary.bytes -ne $helperBytes) {
+# The shared verifier owns the versioned source/build/test receipt contract.
+# Recheck only the byte snapshots here; duplicating its schema version caused
+# the real MSI producer to reject a successfully verified format-4 helper.
+if ($verifiedHelper.reference.sha256 -cne $helperReceiptSha -or
+    $verifiedHelper.binary.sha256 -cne $helperSha -or $verifiedHelper.binary.bytes -ne $helperBytes) {
     Fail 'The installer helper does not match its verified source/build receipt' 4
 }
 
