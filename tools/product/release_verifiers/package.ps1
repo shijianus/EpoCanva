@@ -191,4 +191,3 @@ Add-Gate 'language-readiness' {
     }
     'Five language implementations, exact source references and fixed data payloads present; executed acceptance is checked separately.'
 }
-

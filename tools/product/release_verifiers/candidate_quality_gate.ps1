@@ -88,5 +88,3 @@ Add-Gate 'candidate-quality' {
         -CorpusManifest $corpusManifestDocument -CommitTimeUtc $commitTime
     'Qualification exited 0, its report passed every recomputed gate, and samples/contracts/determinism bind this candidate.'
 }
-
-

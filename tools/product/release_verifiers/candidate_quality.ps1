@@ -347,4 +347,3 @@ function Test-CandidateQualityEvidence {
     }
     return $true
 }
-

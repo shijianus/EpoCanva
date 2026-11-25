@@ -17,4 +17,3 @@ Add-Gate 'installer-toolchain' {
     if (-not $builder) { throw 'No WiX/Inno Setup/NSIS builder found on PATH. Probe: Get-Command wix.exe,candle.exe,light.exe,ISCC.exe,makensis.exe,msixmgr.exe -CommandType Application. msixmgr alone is a deployment tool, not a builder.' }
     'An installer builder is available; lifecycle testing remains a separate mandatory gate.'
 }
-

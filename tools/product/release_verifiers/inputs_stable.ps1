@@ -32,4 +32,3 @@ Add-Gate 'inputs-stable' {
     }
     'Source, tested binaries, receipt, policy, evidence and package identities remained stable during this check.'
 }
-
